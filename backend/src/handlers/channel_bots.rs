@@ -193,6 +193,8 @@ pub struct ChannelBotItem {
     pub label: String,
     pub platform_bot_username: String,
     pub webhook_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_state: Option<String>,
     pub status: String,
     pub is_active: bool,
     pub created_at: String,
@@ -227,6 +229,8 @@ pub struct ChannelBotDetailResponse {
     pub platform_bot_id: String,
     pub platform_bot_username: String,
     pub webhook_registered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gateway_state: Option<String>,
     pub status: String,
     pub is_active: bool,
     pub app_secret_configured: bool,
@@ -748,6 +752,16 @@ fn lark_permission_payload(
     (Some(url), Some(scope_strings))
 }
 
+fn discord_gateway_state(bot: &crate::models::channel_bot::ChannelBot) -> Option<String> {
+    if bot.platform != "discord" {
+        return None;
+    }
+    bot.diagnostics
+        .discord_gateway
+        .as_ref()
+        .map(|gateway| gateway.state.clone())
+}
+
 fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
     ChannelBotItem {
         credential_source: bot.credential_source.clone(),
@@ -756,6 +770,7 @@ fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
         label: bot.label.clone(),
         platform_bot_username: bot.platform_bot_username.clone(),
         webhook_registered: bot.webhook_registered,
+        gateway_state: discord_gateway_state(bot),
         status: bot.status.clone(),
         is_active: bot.is_active,
         created_at: bot.created_at.to_rfc3339(),
@@ -1137,6 +1152,7 @@ pub async fn update_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        gateway_state: discord_gateway_state(&updated),
         last_verification: crate::services::channel_verification_service::current(
             &state.db,
             adapter.as_ref(),
@@ -1236,6 +1252,7 @@ pub async fn get_bot(
     .await?;
 
     Ok(Json(ChannelBotDetailResponse {
+        gateway_state: discord_gateway_state(&bot),
         last_verification: crate::services::channel_verification_service::current(
             &state.db,
             adapter.as_ref(),
@@ -1698,6 +1715,82 @@ pub(crate) async fn verify_bot_with_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_gateway_state_is_discord_only_and_legacy_rows_omit_it() {
+        let mut bot = make_telegram_bot();
+        for platform in ["discord", "telegram", "x"] {
+            bot.platform = platform.into();
+            for state in [
+                "connected",
+                "connecting",
+                "disconnected",
+                "waiting_capacity",
+            ] {
+                bot.diagnostics.discord_gateway =
+                    Some(crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: state.into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    });
+                let value = serde_json::to_value(bot_to_item(&bot)).unwrap();
+                if platform == "discord" {
+                    assert_eq!(value["gateway_state"], state);
+                } else {
+                    assert!(value.get("gateway_state").is_none());
+                }
+                assert_eq!(value["webhook_registered"], false);
+            }
+            let mut legacy = bson::to_document(&bot).unwrap();
+            legacy.remove("diagnostics");
+            let legacy = bson::from_document(legacy).unwrap();
+            let value = serde_json::to_value(bot_to_item(&legacy)).unwrap();
+            assert!(value.get("gateway_state").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn detail_gateway_state_matches_list_without_claiming_a_webhook() {
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        let db = connect_test_database("channel_bot_gateway_state")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for (platform, gateway) in [
+            ("discord", Some("connected")),
+            ("discord", None),
+            ("telegram", Some("connected")),
+        ] {
+            let mut bot = make_telegram_bot();
+            bot.platform = platform.into();
+            bot.diagnostics.discord_gateway =
+                gateway.map(
+                    |state| crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: state.into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    },
+                );
+            db.collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .insert_one(&bot)
+            .await
+            .unwrap();
+            let Json(response) = get_bot(
+                State(state.clone()),
+                test_auth_user(&bot.user_id),
+                Path(bot.id.clone()),
+            )
+            .await
+            .unwrap();
+            let detail = serde_json::to_value(response).unwrap();
+            let item = serde_json::to_value(bot_to_item(&bot)).unwrap();
+            assert_eq!(detail.get("gateway_state"), item.get("gateway_state"));
+            assert_eq!(detail["webhook_registered"], false);
+        }
+        db.drop().await.unwrap();
+    }
 
     #[test]
     fn list_scope_query_accepts_all_and_user_and_rejects_unknown_scopes() {

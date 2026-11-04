@@ -59,3 +59,30 @@ it("has a working retry control when key loading fails", () => {
   expect(refetch).toHaveBeenCalledOnce();
   expect(screen.getByRole("button", { name: "Add Route" })).toBeDisabled();
 });
+
+vi.mock("@/hooks/use-runtime-config", () => ({
+  useRuntimeConfig: () => ({ data: { api_base_url: "https://nyx.example" } }),
+}));
+vi.mock("@/hooks/use-channel-platforms", () => ({
+  useChannelPlatformViews: () => ({
+    getPlatform: (id: string) => ({ label: id === "discord" ? "Discord" : "Slack", webhookDocs: null }),
+  }),
+}));
+
+it("explains Gateway activation and optional Discord interactions without generic webhook directions", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "discord", status: "pending_webhook" } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("Finish Discord setup")).toBeInTheDocument();
+  expect(screen.getByText(/Ordinary chat arrives through the Gateway connection/)).toHaveTextContent("first authenticated message activates the bot");
+  expect(screen.getByText("Interactions Endpoint URL (optional)")).toBeInTheDocument();
+  expect(screen.getByText(/For slash commands\/components, paste this into Discord Developer Portal/)).toBeInTheDocument();
+  expect(screen.queryByText(/Event Subscriptions \/ webhook settings/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Finish webhook setup")).not.toBeInTheDocument();
+});
+
+it("keeps the existing webhook setup instructions for other platforms", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "slack", status: "pending_webhook" } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("Finish webhook setup")).toBeInTheDocument();
+  expect(screen.getByText(/Slack's Event Subscriptions \/ webhook settings/)).toBeInTheDocument();
+});

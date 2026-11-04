@@ -20,6 +20,7 @@ import {
   ACCESS_MODE_LABEL,
   effectiveAccessMode,
   modelDisplayName,
+  modelCannotViewImages,
 } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import {
@@ -166,6 +167,11 @@ export function ModelSelect({
             {row.available
               ? modelDisplayName(row)
               : `${modelDisplayName(row)} (unavailable)`}
+            {modelCannotViewImages(row) && (
+              <span className="ml-2 text-11 text-text-tertiary">
+                Can’t view images
+              </span>
+            )}
           </SelectItem>
         ))}
       </SelectContent>

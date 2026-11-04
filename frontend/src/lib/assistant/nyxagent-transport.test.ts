@@ -736,6 +736,7 @@ describe("NyxAgent server-backed transport", () => {
             label: "lobby-camera__snapshot",
             origin: "tool",
             image_input: "unavailable",
+            image_input_reason: "image_input_unsupported",
           },
         ],
       };
@@ -772,6 +773,7 @@ describe("NyxAgent server-backed transport", () => {
         label: "lobby-camera__snapshot",
         origin: "tool",
         imageInput: "unavailable",
+        imageInputReason: "image_input_unsupported",
       },
     ]);
     await transport.stop(id);

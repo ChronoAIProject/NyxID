@@ -204,9 +204,7 @@ describe("AdminAuditLogPage", () => {
       screen.queryByPlaceholderText("Filter by API key ID"),
     ).not.toBeInTheDocument();
     // The scoped search box replaces it.
-    expect(
-      screen.getByLabelText("Search audit log"),
-    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Search audit log")).toBeInTheDocument();
   });
 
   it("defaults to newest-first and sorts a column on click", async () => {
@@ -240,9 +238,7 @@ describe("AdminAuditLogPage", () => {
     await user.click(
       screen.getByRole("button", { name: "Sort by Created, descending" }),
     );
-    expect(
-      resolveLastNavigationSearch({ sort: "created_at" }),
-    ).toEqual({});
+    expect(resolveLastNavigationSearch({ sort: "created_at" })).toEqual({});
   });
 
   it("pages forward and resets the page when the page size changes", async () => {
@@ -279,6 +275,76 @@ describe("AdminAuditLogPage", () => {
     });
   });
 
+  it("sends exact user IDs through equality filters and allows editing and removal", async () => {
+    const user = userEvent.setup();
+    routeSearch.user_id = "user-1";
+    render(<AdminAuditLogPage />);
+    expect(mockUseAdminAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ user_id: "user-1" }),
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Edit User ID (exact) search: is user-1",
+      }),
+    );
+    await user.clear(screen.getByLabelText("Search audit log"));
+    await user.type(screen.getByLabelText("Search audit log"), "user-2{Enter}");
+    expect(resolveLastNavigationSearch({ user_id: "user-1", page: 3 })).toEqual(
+      { user_id: "user-2" },
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Remove User ID (exact) search value: user-1",
+      }),
+    );
+    expect(resolveLastNavigationSearch({ user_id: "user-1" })).toEqual({});
+  });
+
+  it("offers an exact API-key search without changing substring searches", async () => {
+    const user = userEvent.setup();
+    render(<AdminAuditLogPage />);
+    await user.click(screen.getByRole("combobox", { name: "Search field" }));
+    await user.click(
+      screen.getByRole("option", { name: "API key ID (exact)" }),
+    );
+    await user.type(screen.getByLabelText("Search audit log"), "key-1{Enter}");
+    expect(resolveLastNavigationSearch()).toEqual({ api_key_id: "key-1" });
+  });
+
+  it("allows paging while an exact total is loading or has failed", async () => {
+    const user = userEvent.setup();
+    const page = { ...auditResponse, total: undefined };
+    mockUseAdminAuditLog.mockReturnValue({
+      data: { ...page, has_more: true },
+      isLoading: false,
+      isFetching: false,
+      isPlaceholderData: false,
+      error: null,
+      totalError: null,
+    });
+    const view = render(<AdminAuditLogPage />);
+    expect(screen.getByText("proxy.request")).toBeInTheDocument();
+    expect(screen.getByText("Counting total…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    expect(resolveLastNavigationSearch()).toEqual({ page: 2 });
+
+    mockUseAdminAuditLog.mockReturnValue({
+      data: { ...page, has_more: true },
+      isLoading: false,
+      isFetching: false,
+      isPlaceholderData: false,
+      error: null,
+      totalError: new Error("count failed"),
+      refetchTotal: mockRefetch,
+    });
+    view.rerender(<AdminAuditLogPage />);
+    expect(screen.getByText("Total unavailable.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Retry total" }));
+    expect(mockRefetch).toHaveBeenCalledTimes(1);
+  });
+
   it("applies event-type and status filters together", async () => {
     const user = userEvent.setup();
     render(<AdminAuditLogPage />);
@@ -301,12 +367,14 @@ describe("AdminAuditLogPage", () => {
     const user = userEvent.setup();
     routeSearch.search = "mfa";
     routeSearch.status = "5xx";
+    routeSearch.user_id = "user-1";
+    routeSearch.api_key_id = "key-1";
     render(<AdminAuditLogPage />);
 
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
 
     expect(
-      resolveLastNavigationSearch({ search: "mfa", status: "5xx" }),
+      resolveLastNavigationSearch({ search: "mfa", status: "5xx", user_id: "user-1", api_key_id: "key-1" }),
     ).toEqual({});
   });
 

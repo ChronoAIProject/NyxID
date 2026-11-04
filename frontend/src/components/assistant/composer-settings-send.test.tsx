@@ -15,7 +15,7 @@ import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { nyxAgentConversationSchema } from "@/schemas/assistant-nyxagent";
-import { createUploadDraft } from "@/lib/assistant/uploads";
+import { createUploadDraft, uploadFile } from "@/lib/assistant/uploads";
 
 const id = `nyxa-${"a".repeat(32)}`;
 vi.mock("@/lib/assistant/uploads", async (original) => ({
@@ -174,4 +174,27 @@ it("keeps text and attachments when the selected model is rejected before send",
   );
   expect(await screen.findByText("Ready")).toBeVisible();
   expect(onSend).not.toHaveBeenCalled();
+});
+
+
+it.each([
+  { modalities: ["text"], warns: true },
+  { modalities: ["text", "image"], warns: false },
+  { modalities: undefined, warns: false },
+])("warns without blocking an image send only for known text-only models ($warns)", async ({ modalities, warns }) => {
+  client.setQueryData(nyxBotQueryKeys.models(undefined), [
+    { id: "nyxagent/chat", label: "Default model", available: true, input_modalities: modalities },
+  ]);
+  vi.mocked(uploadFile).mockResolvedValueOnce({ id: "photo", label: "photo.png", content_type: "image/png", size: 4, origin: "user_upload" });
+  render(<QueryClientProvider client={client}><NyxAgentComposer
+    active={false} sending={false} ownerUserId="owner" draftKey="screen:nyxagent:assistant"
+    scope={{ kind: "conversations" }} onSend={onSend} onStop={async () => {}}
+  /></QueryClientProvider>);
+  expect(screen.queryByText(/This model can’t view images/)).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Choose attachments"), { target: { files: [new File(["test"], "photo.png", { type: "image/png" })] } });
+  await screen.findByText("Ready");
+  if (warns) expect(screen.getByText(/This model can’t view images/)).toBeVisible();
+  else expect(screen.queryByText(/This model can’t view images/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(onSend).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ attachmentIds: ["photo"] }), undefined));
 });

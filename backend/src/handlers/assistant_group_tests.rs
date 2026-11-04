@@ -2065,3 +2065,6 @@ async fn shared_agent_crew_name_collisions_require_exact_identity() {
     assert_eq!(calls.lock().await.len(), before);
     server.abort();
 }
+
+#[path = "assistant_group_retirement_tests.rs"]
+mod retirement;

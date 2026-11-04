@@ -844,12 +844,10 @@ function MachineDesktopSwitcher({
     </div>
   ) : null;
   return (
-    <div className={cn("flex min-h-0 flex-col", pane && "h-full")}>
-      {/* In the column, the machine is one card in a stack; other cards
-          (pinned messages, for example) can sit beside it later. */}
-      <div className={cn(pane && "assistant-scrollbar min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain py-3 pl-3")}>
-        {/* Glued to the slab's right wall: square on that side. */}
-        <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
+    <div className="flex min-h-0 flex-col">
+      {/* The shell owns the preview stack's scrolling. Docked cards meet
+          the slab's right wall, with square corners on that side. */}
+      <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
         <MachineDesktopPanel
           key={conversationDesktopKey(shown)}
           nodeId={shown.node_id}
@@ -863,7 +861,6 @@ function MachineDesktopSwitcher({
           leading={tabs}
           onStatus={setShownStatus}
         />
-        </div>
       </div>
     </div>
   );

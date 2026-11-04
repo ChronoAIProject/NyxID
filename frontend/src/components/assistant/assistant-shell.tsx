@@ -21,8 +21,36 @@ import { OfflineBanner } from "./offline-banner";
 import { ChatGripSlotContext } from "./chat-header-context";
 import { AssistantSearchButton, AssistantSearchDialog } from "./assistant-search";
 import { useAssistantSearchShortcut } from "@/hooks/use-assistant-search-shortcut";
+import { CmaSessionObserver } from "./cma-session-card";
+import { useMachinePaneStore } from "@/stores/machine-pane-store";
 
-export function AssistantShell({
+interface AssistantShellProps {
+  readonly title: string;
+  readonly sidebar: ReactNode;
+  readonly headerActions?: ReactNode;
+  readonly onRenameTitle?: (title: string) => Promise<void>;
+  readonly titleKey?: string;
+  /** The content owns the visible title and rename control at every width. */
+  readonly contentTitle?: boolean;
+  readonly resizableContent?: boolean;
+  /** Preview cards docked beside chat on wide screens. */
+  readonly aside?: ReactNode;
+  /** Share of the content area `aside` takes, in percent. */
+  readonly asidePercent?: number;
+  /** Set by dragging (or keying) the divider between the content and `aside`. */
+  readonly onAsidePercentChange?: (percent: number) => void;
+  readonly children: ReactNode;
+}
+
+export function AssistantShell(props: AssistantShellProps) {
+  return (
+    <CmaSessionObserver>
+      {(cmaCards) => <AssistantShellLayout {...props} cmaCards={cmaCards} />}
+    </CmaSessionObserver>
+  );
+}
+
+function AssistantShellLayout({
   title,
   sidebar,
   headerActions,
@@ -34,25 +62,14 @@ export function AssistantShell({
   asidePercent,
   onAsidePercentChange,
   children,
-}: {
-  readonly title: string;
-  readonly sidebar: ReactNode;
-  readonly headerActions?: ReactNode;
-  readonly onRenameTitle?: (title: string) => Promise<void>;
-  readonly titleKey?: string;
-  /** The content owns the visible title and rename control at every width. */
-  readonly contentTitle?: boolean;
-  readonly resizableContent?: boolean;
-  /** A column docked to the right of the content (the machine column); wide screens only. */
-  readonly aside?: ReactNode;
-  /** Share of the content area `aside` takes, in percent. */
-  readonly asidePercent?: number;
-  /** Set by dragging (or keying) the divider between the content and `aside`. */
-  readonly onAsidePercentChange?: (percent: number) => void;
-  readonly children: ReactNode;
-}) {
+  cmaCards,
+}: AssistantShellProps & { readonly cmaCards: ReactNode }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const desktop = useMediaQuery("(min-width: 768px)");
+  const wideScreen = useMediaQuery("(min-width: 1024px)");
+  const savedPreviewPercent = useMachinePaneStore((state) => state.percent);
+  const setPreviewPercent = useMachinePaneStore((state) => state.setPercent);
+  const hasPreview = Boolean(aside || (wideScreen && cmaCards));
   const shellTitle = contentTitle ? null : onRenameTitle ? (
     <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
   ) : <h1 className="truncate text-15 font-semibold text-foreground" title={title}>{title}</h1>;
@@ -67,7 +84,7 @@ export function AssistantShell({
   const sidebarHidden = useAssistantLayoutStore((state) => state.sidebarHidden);
   const setSidebarHidden = useAssistantLayoutStore((state) => state.setSidebarHidden);
   const [asidePreview, setAsidePreview] = useState<number | null>(null);
-  const shownAsidePercent = asidePreview ?? asidePercent ?? 50;
+  const shownAsidePercent = asidePreview ?? asidePercent ?? savedPreviewPercent;
   const asideWidth = `${shownAsidePercent}%`;
   const openSearch = useCallback(() => setSearchOpen(true), []);
   useAssistantSearchShortcut(openSearch);
@@ -186,43 +203,49 @@ export function AssistantShell({
             )}
             {/* The slab is glued to the window's right edge: no gap, and only
                 its sidebar-facing corners are rounded. */}
-            <div className="relative flex min-w-0 flex-1 md:mt-3 md:mb-2">
-            <main className="flex min-w-0 flex-1 overflow-hidden bg-background md:rounded-l-2xl md:shadow-sm">
-              <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
-                {desktop && shellTitle ? <div className="shrink-0 px-6 pt-3 pb-2">{shellTitle}</div> : null}
-                <div className="min-h-0 flex-1">
-                {resizableContent ? (
-                  <ChatGripSlotContext value={gripSlot}>
-                    <ChatContentLayout>{children}</ChatContentLayout>
-                  </ChatGripSlotContext>
-                ) : children}
+            <div className="relative flex min-h-0 min-w-0 flex-1 md:mt-3 md:mb-2">
+              <main className="flex min-w-0 flex-1 overflow-hidden bg-background md:rounded-l-2xl md:shadow-sm">
+                <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
+                  {desktop && shellTitle ? <div className="shrink-0 px-6 pt-3 pb-2">{shellTitle}</div> : null}
+                  {!wideScreen && cmaCards ? (
+                    <div className="mx-3 my-3 max-h-[min(40dvh,50%)] min-h-0 shrink-0 overflow-y-auto">{cmaCards}</div>
+                  ) : null}
+                  <div className="min-h-0 flex-1">
+                    {resizableContent ? (
+                      <ChatGripSlotContext value={gripSlot}>
+                        <ChatContentLayout>{children}</ChatContentLayout>
+                      </ChatGripSlotContext>
+                    ) : children}
+                  </div>
                 </div>
-              </div>
-              {aside ? (
-                // Shares the content slab with the chat; no divider between them.
-                <aside
-                  aria-label="Machine"
-                  className="hidden h-full shrink-0 lg:block"
-                  style={{ width: asideWidth }}
-                >
-                  {aside}
-                </aside>
+                {hasPreview ? (
+                  // One shared stack for machine, CMA, and other preview cards.
+                  <aside
+                    aria-label="Preview"
+                    className="hidden h-full shrink-0 lg:block"
+                    style={{ width: asideWidth }}
+                  >
+                    <div className="assistant-scrollbar h-full space-y-3 overflow-y-auto overscroll-contain py-3 pl-3">
+                      {aside}
+                      {wideScreen ? cmaCards : null}
+                    </div>
+                  </aside>
+                ) : null}
+              </main>
+              {hasPreview ? (
+                <AsideDivider
+                  percent={shownAsidePercent}
+                  onPreview={setAsidePreview}
+                  onChange={onAsidePercentChange ?? setPreviewPercent}
+                />
               ) : null}
-            </main>
-            {aside && onAsidePercentChange ? (
-              <AsideDivider
-                percent={shownAsidePercent}
-                onPreview={setAsidePreview}
-                onChange={onAsidePercentChange}
+              {/* Unclipped layer over the chat column for the chat width grips,
+                  whose tabs stand in the gap above the slab. */}
+              <div
+                ref={setGripSlot}
+                className="pointer-events-none absolute inset-y-0 left-0 right-0 lg:right-[var(--assistant-aside-width,0px)]"
+                style={{ "--assistant-aside-width": hasPreview ? asideWidth : "0px" } as CSSProperties}
               />
-            ) : null}
-            {/* Unclipped layer over the chat column for the chat width grips,
-                whose tabs stand in the gap above the slab. */}
-            <div
-              ref={setGripSlot}
-              className="pointer-events-none absolute inset-y-0 left-0 right-0 lg:right-[var(--assistant-aside-width,0px)]"
-              style={{ "--assistant-aside-width": aside ? asideWidth : "0px" } as CSSProperties}
-            />
             </div>
           </div>
 
@@ -285,7 +308,7 @@ export function AssistantShell({
   );
 }
 
-/** Machine column bounds while dragging, mirrored from the store's clamp. */
+/** Preview column bounds while dragging, mirrored from the store's clamp. */
 const ASIDE_MIN = 25;
 const ASIDE_MAX = 75;
 const ASIDE_DEFAULT = 50;
@@ -313,12 +336,12 @@ function AsideDivider({
   return (
     <div
       role="separator"
-      aria-label="Resize machine column"
+      aria-label="Resize preview column"
       aria-orientation="vertical"
       aria-valuemin={ASIDE_MIN}
       aria-valuemax={ASIDE_MAX}
       aria-valuenow={percent}
-      aria-valuetext={`Machine column ${percent}%`}
+      aria-valuetext={`Preview column ${percent}%`}
       tabIndex={0}
       title="Drag to resize · double-click to reset"
       className="group absolute -top-3 bottom-0 z-40 hidden w-5 translate-x-1/2 cursor-col-resize touch-none outline-none lg:block"
@@ -347,7 +370,7 @@ function AsideDivider({
       onDoubleClick={() => onChange(ASIDE_DEFAULT)}
       onKeyDown={(event) => {
         if (event.key === "Escape") { cancel(); return; }
-        // The divider moves with the arrow; the machine column grows leftwards.
+        // The divider moves with the arrow; the preview column grows leftwards.
         const delta = { ArrowLeft: 2, ArrowRight: -2 }[event.key];
         if (delta !== undefined) {
           event.preventDefault();

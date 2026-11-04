@@ -2523,10 +2523,10 @@ async fn dispatch_groups(
                 let id = target_agent(state, owner, Some(&name)).await?.id;
                 ids.retain(|member| member != &id);
             }
-            let group = crate::services::assistant_group_service::update(
+            let group = crate::services::assistant_group_service::update_from_snapshot(
                 db,
                 owner,
-                &group.id,
+                &group,
                 args["name"].as_str(),
                 Some(&ids),
             )
