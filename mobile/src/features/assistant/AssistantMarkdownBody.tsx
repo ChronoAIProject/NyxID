@@ -244,7 +244,10 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
           const words = assistantLinkLabel(target, label);
           if (/^connect service$/i.test(words)) return null;
           return (
-            <Text key={node.key} style={{ fontFamily: fonts.bodySemi }}>
+            <Text
+              key={node.key}
+              style={{ fontFamily: fonts.bodySemi, color: colors.textPrimary }}
+            >
               {words}
             </Text>
           );

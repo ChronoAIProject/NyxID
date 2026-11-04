@@ -337,6 +337,10 @@ test("hosted connect links render one button under their block and keep plain wo
   );
   assert.equal(named.type, "Text");
   assert.equal(named.props.children, "Connect GitHub");
+  assert.ok(
+    named.props.style.color,
+    "the bold service name takes the theme's text colour, never the system default",
+  );
   assert.equal(named.props.onPress, undefined);
   assert.equal(named.props.accessibilityRole, undefined);
   const ordinary = rules.link(
