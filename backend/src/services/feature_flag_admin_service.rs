@@ -180,10 +180,10 @@ pub async fn mutate(
         ) {
             return Err(AppError::BadRequest("Unsupported rollout target".into()));
         }
-        if key == flags::INVITATION_CODE_FLAG_KEY && *kind != FlagTargetKind::Global {
-            return Err(AppError::BadRequest(
-                "invitation code flag supports only a global override".into(),
-            ));
+        if flags::is_global_only(key) && *kind != FlagTargetKind::Global {
+            return Err(AppError::BadRequest(format!(
+                "{key} supports only a global override"
+            )));
         }
         if key == flags::EXECUTION_PERMISSIONS_FLAG_KEY && *enabled == Some(true) {
             if *kind != FlagTargetKind::User {
@@ -587,6 +587,44 @@ mod tests {
             assert!(normalize_tags(&tags).is_err());
         }
         assert_eq!(normalize_tags(&vec!["a".into(); 13]).unwrap(), vec!["a"]);
+    }
+    #[tokio::test]
+    async fn pre_sign_in_flags_accept_only_a_global_override() {
+        let (db, actor) = setup("flag_global_only").await;
+        for key in [
+            flags::INVITATION_CODE_FLAG_KEY,
+            flags::MOBILE_NEW_DOMAINS_FLAG_KEY,
+        ] {
+            for kind in [FlagTargetKind::Org, FlagTargetKind::User] {
+                let refused = mutate(
+                    &db,
+                    key,
+                    Mutation::Override {
+                        kind,
+                        target_id: Some(actor.user_id.clone()),
+                        enabled: Some(true),
+                    },
+                    &actor,
+                )
+                .await;
+                assert!(
+                    matches!(&refused, Err(AppError::BadRequest(m)) if m.contains("supports only a global override")),
+                    "{key} must refuse a scoped override"
+                );
+            }
+        }
+        mutate(
+            &db,
+            flags::MOBILE_NEW_DOMAINS_FLAG_KEY,
+            Mutation::Override {
+                kind: FlagTargetKind::Global,
+                target_id: None,
+                enabled: Some(true),
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn sunset_is_metadata_only_and_sparse_writes_preserve_it() {

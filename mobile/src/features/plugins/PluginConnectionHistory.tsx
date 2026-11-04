@@ -2,38 +2,41 @@ import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
-  Pressable,
   StyleSheet,
+  Text,
   View,
 } from "react-native";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import {
   useInfiniteQuery,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { ChevronsUpDown, SlidersHorizontal } from "lucide-react-native";
+import type {
+  ContentScreenProps,
+  WorkspaceNavigationProp,
+} from "../../app/navigationTypes";
 import {
-  ChevronDown,
-  ChevronRight,
-  SlidersHorizontal,
-} from "lucide-react-native";
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
   ActionButton,
-  Card,
-  Label,
   Notice,
+  WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { ApiError } from "../../lib/api/ApiError";
 import { pluginConnectionHistoryApi as api } from "../../lib/api/pluginConnectionHistoryApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { fonts } from "../../theme/designTokens";
+import { spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import {
   historyActor,
   historyChange,
   historySummary,
-  type ConnectionHistoryGroup,
 } from "./pluginConnectionHistoryTypes";
 
 const ROOT = ["workspace", "services", "history"] as const;
@@ -48,6 +51,7 @@ const time = (value: string) => {
 export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
   const { colors } = useTheme();
   const focused = useIsFocused();
+  const navigation = useNavigation<WorkspaceNavigationProp>();
   const client = useQueryClient();
   const epoch = getAuthEpoch();
   const [foreground, setForeground] = useState(
@@ -113,35 +117,26 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
   const unavailable =
     query.error instanceof ApiError &&
     [403, 404].includes(query.error.statusCode);
+  const rows = groups.flatMap((group) => {
+    const summary = historySummary(group);
+    return summary ? [{ group, summary }] : [];
+  });
   return (
     <View style={styles.stack}>
-      <Card>
-        <Label style={{ color: colors.primaryOnTint, fontFamily: fonts.bodySemi }}>
-          ● Metadata only
-        </Label>
-        <Label style={styles.title}>Connection history</Label>
-        <Label muted>
-          Configuration changes and authorship are retained. Credentials are
-          never shown.
-        </Label>
-      </Card>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Filter history actions"
-        accessibilityState={{ expanded: filterOpen }}
-        onPress={() => setFilterOpen((value) => !value)}
-        style={[
-          styles.row,
-          styles.control,
-          { backgroundColor: colors.card, borderColor: colors.border },
-        ]}
-      >
-        <SlidersHorizontal size={16} color={colors.textSecondary} />
-        <Label style={styles.flex}>
-          {actions.length ? `${actions.length} action filters` : "All actions"}
-        </Label>
-        <ChevronDown size={18} color={colors.textSecondary} />
-      </Pressable>
+      <SettingsGroup footer="Metadata only. Configuration changes and authorship are retained. Credentials are never shown.">
+        <SettingsRow
+          icon={SlidersHorizontal}
+          label="Actions"
+          value={
+            actions.length ? `${actions.length} action filters` : "All actions"
+          }
+          accessibilityLabel="Filter history actions"
+          accessibilityHint="Opens a list of actions to include"
+          accessibilityState={{ expanded: filterOpen }}
+          accessory={<ChevronsUpDown size={16} color={colors.textMuted} />}
+          onPress={() => setFilterOpen((value) => !value)}
+        />
+      </SettingsGroup>
       {filterOpen && (
         <WorkspaceSelectionSheet
           label="History actions"
@@ -159,8 +154,10 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
           onClose={() => setFilterOpen(false)}
         >
           {options.isPending && (
-            <ActivityIndicator
-              color={colors.primary}
+            <SkeletonRows
+              rows={4}
+              icon={false}
+              detail={false}
               accessibilityLabel="Loading history filters"
             />
           )}
@@ -178,8 +175,10 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
         </WorkspaceSelectionSheet>
       )}
       {query.isPending && (
-        <ActivityIndicator
-          color={colors.primary}
+        <SkeletonRows
+          rows={4}
+          icon={false}
+          title
           accessibilityLabel="Loading connection history"
         />
       )}
@@ -193,12 +192,14 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
                 : "Connection history could not be loaded."
             }
           />
-          <ActionButton
-            label="Retry history"
-            variant="secondary"
-            disabled={!active}
-            onPress={() => void query.refetch()}
-          />
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              label="Retry history"
+              tone="action"
+              disabled={!active}
+              onPress={() => void query.refetch()}
+            />
+          </SettingsGroup>
         </>
       )}
       {first?.deleted && (
@@ -209,110 +210,118 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
           message={`Creator and earlier edits may not have been recorded.${first.tracked_since ? ` Tracking since ${time(first.tracked_since)}.` : ""}`}
         />
       )}
-      {first && !groups.length && (
-        <Label muted>
+      {first && !rows.length && (
+        <Text style={[styles.note, { color: colors.textMuted }]}>
           {actions.length
             ? "No changes match these filters."
             : "No recorded changes yet."}
-        </Label>
+        </Text>
       )}
-      {groups.map((group) => (
-        <HistoryGroup key={`${serviceId}:${group.id}`} group={group} />
-      ))}
-      {query.hasNextPage && !query.isError && (
-        <ActionButton
-          label="Load more history"
-          variant="secondary"
-          disabled={!active}
-          loading={query.isFetchingNextPage}
-          onPress={() => void query.fetchNextPage()}
-        />
+      {rows.length ? (
+        <SettingsGroup
+          title="Changes"
+          inset={false}
+          footer="Deleted or unavailable connections may still retain a readable history."
+        >
+          {rows.map(({ group, summary }) => {
+            const title = summary.action_label || "Connection updated";
+            return (
+              <SettingsRow
+                key={`${serviceId}:${group.id}`}
+                label={title}
+                detail={`${historyActor(summary.actor)} · ${time(group.events.at(-1)!.committed_at)}${group.events.length > 1 ? ` · ${group.events.length} changes` : ""}`}
+                accessibilityLabel={`${title}, ${historyActor(summary.actor)}`}
+                onPress={() =>
+                  navigation.push("ConnectionHistoryDetail", {
+                    title,
+                    group,
+                  })
+                }
+              />
+            );
+          })}
+          {query.hasNextPage && !query.isError ? (
+            <SettingsRow
+              label="Load more history"
+              tone="action"
+              disabled={!active || query.isFetchingNextPage}
+              accessory={
+                query.isFetchingNextPage ? (
+                  <ActivityIndicator color={colors.primary} />
+                ) : undefined
+              }
+              onPress={() => void query.fetchNextPage()}
+            />
+          ) : null}
+        </SettingsGroup>
+      ) : (
+        <Text style={[styles.note, { color: colors.textMuted }]}>
+          Deleted or unavailable connections may still retain a readable
+          history.
+        </Text>
       )}
-      <Notice message="Deleted or unavailable connections may still retain a readable history." />
     </View>
   );
 }
 
-function HistoryGroup({ group }: { group: ConnectionHistoryGroup }) {
-  const { colors } = useTheme();
-  const [open, setOpen] = useState(false);
-  const summary = historySummary(group);
-  if (!summary) return null;
-  const title = summary.action_label || "Connection updated";
+/** One recorded change set: every event as label/value rows, metadata only. */
+export function ConnectionHistoryDetailScreen({
+  route,
+}: ContentScreenProps<"ConnectionHistoryDetail">) {
+  const { group } = route.params;
   return (
-    <Card>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`${title}, ${historyActor(summary.actor)}`}
-        accessibilityState={{ expanded: open }}
-        onPress={() => setOpen((value) => !value)}
-        style={styles.row}
-      >
-        <View style={[styles.stackSmall, styles.flex]}>
-          <Label style={styles.title}>{title}</Label>
-          <Label muted>{historyActor(summary.actor)}</Label>
-          <Label muted style={styles.caption}>
-            {time(group.events.at(-1)!.committed_at)}
-            {group.events.length > 1 ? ` · ${group.events.length} changes` : ""}
-          </Label>
-        </View>
-        {open ? (
-          <ChevronDown size={18} color={colors.textSecondary} />
-        ) : (
-          <ChevronRight size={18} color={colors.textSecondary} />
-        )}
-      </Pressable>
-      {open &&
-        group.events.map((event) => (
-          <View
-            key={event.id}
-            style={[styles.event, { borderColor: colors.border }]}
+    <WorkspacePage
+      title={route.params.title}
+      showHeading={false}
+      contentStyle={styles.grouped}
+    >
+      {group.events.map((event) => (
+        <View key={event.id} style={styles.event}>
+          <SettingsGroup
+            title={event.action_label || "Connection updated"}
+            inset={false}
+            footer={
+              event.additional_changes
+                ? "Other service settings updated. Additional change details are unavailable."
+                : undefined
+            }
           >
-            <Label style={styles.title}>
-              {event.action_label || "Connection updated"}
-            </Label>
-            <Label muted>
-              {historyActor(event.actor)} · {time(event.committed_at)}
-            </Label>
-            {event.actor.api_key_id && (
-              <Label muted>Authenticated API key</Label>
-            )}
-            {event.actor.app_id && (
-              <Label muted>Application {event.actor.app_id}</Label>
-            )}
+            <SettingsRow label="Changed by" value={historyActor(event.actor)} />
+            <SettingsRow label="Time" value={time(event.committed_at)} />
+            {event.actor.api_key_id ? (
+              <SettingsRow label="Authenticated" value="API key" />
+            ) : null}
+            {event.actor.app_id ? (
+              <SettingsRow label="Application" value={event.actor.app_id} />
+            ) : null}
             {event.changes.map((change, index) => (
-              <View key={`${change.field}:${index}`} style={styles.stackSmall}>
-                <Label>{change.label || change.field}</Label>
-                <Label muted selectable>
-                  {historyChange(change)}
-                </Label>
-              </View>
-            ))}
-            {event.additional_changes && (
-              <Label muted>
-                Other service settings updated. Additional change details are
-                unavailable.
-              </Label>
-            )}
-            {event.audit_status === "mismatch" && (
-              <Notice
-                tone="error"
-                message="This record differs from its audit mirror."
+              <SettingsRow
+                key={`${change.field}:${index}`}
+                label={change.label || change.field}
+                value={historyChange(change)}
               />
-            )}
-          </View>
-        ))}
-    </Card>
+            ))}
+          </SettingsGroup>
+          {event.audit_status === "mismatch" && (
+            <Notice
+              tone="error"
+              message="This record differs from its audit mirror."
+            />
+          )}
+        </View>
+      ))}
+    </WorkspacePage>
   );
 }
 
 const styles = StyleSheet.create({
-  stack: { gap: 12 },
-  stackSmall: { gap: 4 },
-  flex: { flex: 1, minWidth: 0 },
-  title: { fontSize: 14, fontFamily: fonts.bodySemi },
-  caption: { fontSize: 11 },
-  row: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 44 },
-  control: { borderWidth: 1, borderRadius: 10, paddingHorizontal: 14 },
-  event: { gap: 8, borderTopWidth: 1, paddingTop: 12, marginTop: 4 },
+  stack: { gap: spacing.huge },
+  grouped: {
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.sm,
+    paddingBottom: spacing.huge * 2,
+    gap: spacing.huge,
+  },
+  event: { gap: spacing.md },
+  note: { ...typeScale.small, paddingHorizontal: spacing.xxl },
 });

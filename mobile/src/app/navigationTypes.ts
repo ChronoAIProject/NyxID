@@ -7,8 +7,10 @@ import type {
   NativeStackNavigationProp,
   NativeStackScreenProps,
 } from "@react-navigation/native-stack";
+import type { AgentProfileField } from "../features/agents/AgentProfileEditScreen";
 import type { UsageCreditsRouteParams } from "../features/billing/UsageCreditsScreen";
 import type { MachineDesktopRouteParams } from "../features/machines/desktopEntry";
+import type { ConnectionHistoryGroup } from "../features/plugins/pluginConnectionHistoryTypes";
 
 export type AssistantParams = {
   home?: boolean;
@@ -64,12 +66,14 @@ export type WorkspaceContentParamList = Omit<
   AssistantContext: AssistantParams | undefined;
   GroupChat: { groupId: string };
   AssistantDetails: { agentId?: string; conversationId?: string };
+  AssistantTitleEdit: { conversationId: string; agentId?: string };
   AssistantHistory: { agentId?: string } | undefined;
   AssistantWorkingContext: { conversationId: string };
   WorkspaceSearch: undefined;
   WorkspaceRecents: { agentId?: string } | undefined;
   AgentCreate: undefined;
   AgentDetail: { agentId: string };
+  AgentProfileEdit: { agentId: string; field: AgentProfileField };
   GroupEditor: { groupId?: string } | undefined;
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
@@ -81,11 +85,31 @@ export type WorkspaceContentParamList = Omit<
   AgentMachineEditor: { agentId: string; machineId: string };
   MachineDetail: { machineId: string };
   PluginConnections: { connectorId: string };
+  /** Metadata-only change set from a connection's History tab. */
+  ConnectionHistoryDetail: { title: string; group: ConnectionHistoryGroup };
   ActiveGrants: undefined;
   MachinePolicy: { machineId: string; ownerId: string };
-  MachineActivity: { machineId: string; ownerId: string };
+  MachineActivity: { machineId: string; ownerId: string; agent?: string };
+  MachineActivityFilter: {
+    machineId: string;
+    ownerId: string;
+    agent: string;
+    agents: { id: string; label: string }[];
+  };
+  MachineActivityDetail: {
+    id: string;
+    action: string;
+    outcome: string;
+    agent: string;
+    createdAt: string;
+    durationMs?: number;
+    exitCode?: number;
+  };
+  MachineSavedLogin: { loginId: string; ownerLabel: string };
   AutomationDetail: { id: string };
   AutomationRuns: { id: string };
+  AutomationRunDetail: { id: string; runId: string };
+  AutomationAgentFilter: { agentId?: string } | undefined;
   ActivityDetail: { challengeId: string; entryPoint?: string };
 };
 
@@ -94,6 +118,14 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   AccountSettings: WorkspaceParamList["AccountSettings"];
   AccountSecurity: undefined;
   UsageCredits: UsageCreditsRouteParams | undefined;
+  NotificationSettings: undefined;
+  DisplaySettings: undefined;
+  /** `voice` false: only dictation settings (no live voice for this account). */
+  VoiceSettings: { voice?: boolean } | undefined;
+  PrivacySettings: undefined;
+  ProfileEdit: { field: "display_name" | "avatar_url" };
+  SessionDetail: { sessionId: string };
+  ChatLayoutEdit: { key: "columnWidth" | "composerMaxHeight" };
 };
 
 export type RootStackParamList = SharedEntryParamList & {
@@ -131,6 +163,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "AssistantContext",
   "GroupChat",
   "AssistantDetails",
+  "AssistantTitleEdit",
   "AssistantHistory",
   "AssistantWorkingContext",
   "Automations",
@@ -143,6 +176,7 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "WorkspaceRecents",
   "AgentCreate",
   "AgentDetail",
+  "AgentProfileEdit",
   "GroupEditor",
   "ServiceSetup",
   "AgentSkills",
@@ -154,17 +188,27 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "AgentMachineEditor",
   "MachineDetail",
   "PluginConnections",
+  "ConnectionHistoryDetail",
   "ActiveGrants",
   "MachinePolicy",
   "MachineActivity",
+  "MachineActivityFilter",
+  "MachineActivityDetail",
+  "MachineSavedLogin",
   "AutomationDetail",
   "AutomationRuns",
+  "AutomationRunDetail",
+  "AutomationAgentFilter",
   "ActivityDetail",
 ];
 export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "AccountSettings",
   "AccountSecurity",
   "UsageCredits",
+  "NotificationSettings",
+  "DisplaySettings",
+  "VoiceSettings",
+  "PrivacySettings",
   "DeviceLogin",
   "AgentKeyLogin",
   "TermsOfService",

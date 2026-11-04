@@ -195,6 +195,16 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       } catch {
         this.unavailable();
       }
+    } else if (event.type === "level") {
+      // Cosmetic loudness for the call screen; malformed values are dropped
+      // rather than failing the call.
+      const valid = (value: unknown): value is number =>
+        typeof value === "number" &&
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= 1;
+      if (valid(event.input) && valid(event.output))
+        this.emit({ type: "level", input: event.input, output: event.output });
     } else if (event.type === "playback") {
       if (
         Number.isSafeInteger(event.playback_ms) &&
@@ -282,7 +292,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   }
 
   async prepare(
-    protocol: "openai_live" | "xai_realtime" | "dictation",
+    protocol: "openai_live" | "xai_realtime",
     signal: AbortSignal,
   ): Promise<string> {
     this.close();

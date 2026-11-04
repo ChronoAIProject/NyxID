@@ -72,6 +72,7 @@ function setup({
   creating = false,
   role = "creator",
   missingAgent = false,
+  pendingAgents = false,
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   let latest = { ...plain(group), your_role: role };
@@ -103,6 +104,7 @@ function setup({
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -117,7 +119,7 @@ function setup({
       useQuery: ({ queryKey }: { queryKey: unknown[] }) => {
         const key = queryKey.includes("group-picker") ? "agents" : queryKey[3];
         return {
-          isPending: false,
+          isPending: key === "agents" && pendingAgents,
           isError: key === "participants" && participantError,
           refetch: async () => {},
           data:
@@ -186,8 +188,13 @@ function setup({
         (name) => [name, name],
       ),
     ),
-    "../../components/workspace/WorkspaceSelectionField": {
-      WorkspaceSelectionField: "WorkspaceSelectionField",
+    "../../components/settings/SettingsList": Object.fromEntries(
+      ["SettingsGroup", "SettingsPage", "SettingsRow", "SettingsTextField"].map(
+        (name) => [name, name],
+      ),
+    ),
+    "../../components/settings/SettingsSelectionRow": {
+      SettingsSelectionRow: "SettingsSelectionRow",
     },
     "../../lib/api/agentsApi": { agentsApi: {} },
     "../../lib/api/groupsApi": {
@@ -239,7 +246,11 @@ function setup({
   });
   const find = (type: string, label: string) => {
     const row = elements(harness.flush()).find(
-      (item) => item.type === type && item.props.label === label,
+      (item) =>
+        item.type === type &&
+        (type === "SettingsSelectionRow"
+          ? item.props.label
+          : item.props.accessibilityLabel) === label,
     );
     assert.ok(row, `Expected ${type}: ${label}`);
     return row.props;
@@ -247,16 +258,20 @@ function setup({
   return {
     harness,
     calls,
+    all: () => elements(harness.flush()),
     closeGuard: () => {
       harness.flush();
       return backOptions.discardOnClose;
     },
-    field: (label: string) => find("WorkspaceSelectionField", label),
-    button: (label: string) => find("ActionButton", label),
-    name: (value: string) => find("Field", "Name").onChangeText(value),
+    field: (label: string) => find("SettingsSelectionRow", label),
+    button: (label: string) => find("SettingsRow", label),
+    name: (value: string) =>
+      find("SettingsTextField", "Name").onChangeText(value),
     hasButton: (label: string) =>
       elements(harness.flush()).some(
-        (item) => item.type === "ActionButton" && item.props.label === label,
+        (item) =>
+          item.type === "SettingsRow" &&
+          item.props.accessibilityLabel === label,
       ),
     notices: () =>
       elements(harness.flush())
@@ -479,4 +494,34 @@ test("drawer dismissal no longer treats a saved group as an unsaved draft", asyn
   env.button("Save changes").onPress();
   await env.harness.settle();
   assert.equal(env.closeGuard(), undefined);
+});
+
+test("crew settings are a grouped form: name field, selection rows, tinted save and solid delete", () => {
+  const env = setup();
+  const rows = elements(env.harness.flush());
+  assert.equal(rows[0]!.type, "SettingsPage");
+  assert.equal(
+    rows.some((row) =>
+      ["ActionButton", "Card", "Field", "WorkspaceSelectionField"].includes(
+        row.type as string,
+      ),
+    ),
+    false,
+  );
+  assert.equal(env.button("Save changes").tone, "action");
+  const remove = env.button("Delete crew");
+  assert.equal(remove.destructive, true);
+  assert.equal(remove.centered, true);
+});
+
+test("the crew editor's first load shows a settings skeleton, not a spinner", () => {
+  const env = setup({ pendingAgents: true });
+  const rows = env.all();
+  const skeleton = rows.find((item) => item.type === "SkeletonRows");
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading crew editor");
+  assert.equal(
+    rows.some((item) => item.type === "ActivityIndicator"),
+    false,
+  );
+  env.harness.unmount();
 });

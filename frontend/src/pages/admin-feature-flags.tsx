@@ -63,7 +63,7 @@ import {
 } from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite, canCreateFeatureFlags } from "@/types/api";
-import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { isGlobalOnlyFlag } from "@/lib/feature-flags";
 import { FlagOrganizationEditor } from "@/components/admin/feature-flags/flag-organization-editor";
 import {
   FlagBrowserControls,
@@ -992,7 +992,7 @@ function FlagTableRows({
                 />
               </Group>
 
-              {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+              {!isGlobalOnlyFlag(flag.key) && (
                 <Group label="By organization">
                   {canWrite && (
                     <AccountSearchPicker
@@ -1028,7 +1028,7 @@ function FlagTableRows({
                 </Group>
               )}
 
-              {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+              {!isGlobalOnlyFlag(flag.key) && (
                 <Group label="By user">
                   {canWrite && (
                     <AccountSearchPicker

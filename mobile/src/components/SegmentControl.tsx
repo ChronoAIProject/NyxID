@@ -8,7 +8,7 @@ import {
   View,
 } from "react-native";
 import type { StyleProp, ViewStyle } from "react-native";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { fonts, radius, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { createSegmentControlStyles } from "./segmentControlStyles";
@@ -167,15 +167,19 @@ const createStyles = (c: ThemeColors) => {
     itemStacked: {
       flex: undefined,
     },
+    // As on iOS both labels are primary text; the raised segment and a
+    // heavier weight mark the selection.
     label: {
       ...typeScale.label,
-      color: c.textMuted,
+      fontSize: 15,
+      lineHeight: 20,
+      color: c.textPrimary,
       minWidth: 0,
       flexShrink: 1,
     },
-    // Active label color matches BottomNavV2 — the textPrimary swap signals selection.
     labelActive: {
-      color: c.textPrimary,
+      fontFamily: fonts.bodySemi,
+      fontWeight: "600",
     },
     countBadge: {
       minWidth: 18,

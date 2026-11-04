@@ -46,10 +46,12 @@ import {
   workspaceChatNavigationAction,
   type WorkspaceChatTarget,
 } from "../../app/workspaceChatNavigation";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { agentsApi } from "../../lib/api/agentsApi";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { SkeletonRows } from "../Skeleton";
 import { useWorkspaceRecents } from "./useWorkspaceRecents";
 import { WorkspaceRecentRow } from "./WorkspaceRecents";
 import { WorkspacePage } from "./WorkspaceUI";
@@ -173,6 +175,7 @@ export function WorkspaceRecentsScreen({
     setQuery("");
   }, [route.params?.agentId]);
   const data = useBrowseData(agentId);
+  const pull = usePullRefresh(data.refresh);
   const history = route.name === "AssistantHistory";
   const rows = useMemo(
     () => filterWorkspaceRecents(data.rows, query, agentId),
@@ -277,26 +280,32 @@ export function WorkspaceRecentsScreen({
         }
         refreshControl={
           <RefreshControl
-            refreshing={data.refreshing}
-            onRefresh={() => void data.refresh()}
+            refreshing={pull.refreshing}
+            onRefresh={pull.onRefresh}
             tintColor={colors.textMuted}
           />
         }
         ListEmptyComponent={
-          <Text
-            accessibilityLiveRegion="polite"
-            style={[styles.note, { color: colors.textMuted }]}
-          >
-            {data.loading
-              ? "Loading recent chats…"
-              : data.error
+          data.loading ? (
+            <SkeletonRows
+              rows={5}
+              accessibilityLabel="Loading recent chats"
+              style={styles.skeleton}
+            />
+          ) : (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={[styles.note, { color: colors.textMuted }]}
+            >
+              {data.error
                 ? "Couldn’t load recent chats. Pull to refresh."
                 : !data.online
                   ? "Offline · showing saved recent chats."
                   : query.trim()
                     ? "No matching chats in loaded history."
                     : "No recent chats."}
-          </Text>
+            </Text>
+          )
         }
         ListFooterComponent={
           data.hasNextPage ? (
@@ -326,6 +335,7 @@ export function WorkspaceSearchScreen({
   const { colors, setPreference } = useTheme();
   const [query, setQuery] = useState("");
   const data = useBrowseData();
+  const pull = usePullRefresh(data.refresh);
   const sections = useMemo(
     () =>
       workspaceSearchSections(
@@ -426,16 +436,22 @@ export function WorkspaceSearchScreen({
           autoFocus
         />
       </View>
-      {(data.loading || data.error || data.agentsError || !data.online) && (
+      {data.online && !data.error && !data.agentsError ? (
+        data.loading && (
+          <SkeletonRows
+            rows={3}
+            accessibilityLabel="Loading chats, agents and crews"
+            style={styles.searchSkeleton}
+          />
+        )
+      ) : (
         <Text
           accessibilityLiveRegion="polite"
           style={[styles.notice, { color: colors.textMuted }]}
         >
           {!data.online
             ? "Offline · searching saved data."
-            : data.error || data.agentsError
-              ? "Some results couldn’t load. Pull to refresh."
-              : "Loading chats, agents and crews…"}
+            : "Some results couldn’t load. Pull to refresh."}
         </Text>
       )}
       <SectionList
@@ -457,8 +473,8 @@ export function WorkspaceSearchScreen({
         contentContainerStyle={styles.list}
         refreshControl={
           <RefreshControl
-            refreshing={data.refreshing}
-            onRefresh={() => void data.refresh()}
+            refreshing={pull.refreshing}
+            onRefresh={pull.onRefresh}
             tintColor={colors.textMuted}
           />
         }
@@ -530,6 +546,8 @@ const styles = StyleSheet.create({
   resultTitle: { flex: 1, fontFamily: fonts.bodyRegular, fontSize: 15 },
   hint: { maxWidth: "40%", fontFamily: fonts.bodyRegular, fontSize: 12 },
   note: { padding: 12, fontFamily: fonts.bodyRegular, fontSize: 14 },
+  skeleton: { paddingTop: 4 },
+  searchSkeleton: { paddingHorizontal: 16, paddingTop: 10 },
   notice: {
     paddingHorizontal: 28,
     paddingTop: 10,

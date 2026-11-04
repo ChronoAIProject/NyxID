@@ -64,6 +64,7 @@ function setup(
     listedAgents?: contracts.AssistantAgent[];
     onCreated?: (id: string) => void;
     onClose?: () => void;
+    memory?: { id: string; text: string }[];
   } = {},
 ) {
   const calls: ApiCall[] = [];
@@ -72,6 +73,7 @@ function setup(
     buttons: Array<{ text: string; onPress?: () => void }>;
   }> = [];
   let guard: Record<string, any> = {};
+  const edits: unknown[][] = [];
   let latest = plain(agent);
   const client = {
     invalidateQueries: async () => {
@@ -125,7 +127,7 @@ function setup(
         refetch: async () => {},
         data:
           queryKey[2] === "detail"
-            ? { agent: latest, memory: [], threads: [] }
+            ? { agent: latest, memory: options.memory ?? [], threads: [] }
             : queryKey[2] === "list"
               ? {
                   agents: options.listedAgents ?? [agent],
@@ -156,6 +158,10 @@ function setup(
         (name) => [name, name],
       ),
     ),
+    "../../components/Skeleton": {
+      SkeletonCards: "SkeletonCards",
+      SkeletonRows: "SkeletonRows",
+    },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
         (name) => [name, name],
@@ -169,6 +175,15 @@ function setup(
         },
         grants: async (...args: unknown[]) => {
           calls.push({ method: "grants", args: plain(args) });
+        },
+        update: async (...args: unknown[]) => {
+          calls.push({ method: "update", args: plain(args) });
+        },
+        destroy: async (...args: unknown[]) => {
+          calls.push({ method: "destroy", args: plain(args) });
+        },
+        forget: async (...args: unknown[]) => {
+          calls.push({ method: "forget", args: plain(args) });
         },
         create: async (...args: unknown[]) => {
           calls.push({ method: "create", args: plain(args) });
@@ -193,11 +208,25 @@ function setup(
     "../../components/workspace/WorkspaceSelectionField": {
       WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
     },
+    "../../components/settings/SettingsList": Object.fromEntries(
+      [
+        "SettingsGroup",
+        "SettingsMenuRow",
+        "SettingsPage",
+        "SettingsRow",
+        "SettingsTextField",
+      ].map((name) => [name, name]),
+    ),
+    "./AgentProfileEditScreen": {
+      agentProfileFieldTitle: (field: string, nyxbot?: boolean) =>
+        field === "description" ? (nyxbot ? "Notes" : "Purpose") : field,
+    },
   });
   const { AgentsScreen } = harness.load(
     fileURLToPath(new URL("./AgentsScreen.tsx", import.meta.url)),
   ) as {
     AgentsScreen: (props: {
+      onEditProfile?: (...args: unknown[]) => void;
       agentId?: string;
       initialCreate?: boolean;
       onCreated?: (id: string) => void;
@@ -212,6 +241,7 @@ function setup(
         initialCreate: options.initialCreate,
         onCreated: options.onCreated,
         onClose: options.onClose,
+        onEditProfile: (...args: unknown[]) => edits.push(args),
       }),
     ),
   );
@@ -233,6 +263,8 @@ function setup(
     calls,
     alerts,
     guard: () => guard,
+    edits,
+    all,
     one,
     action,
     field: () => one((row) => row.type === "AgentPermissionsField"),
@@ -471,8 +503,12 @@ test("shared specialists do not consume the owner's personal creation limit", ()
 
 test("agent details retain their actual name and personal or organization ownership heading", () => {
   const state = setup();
-  const page = () => state.one((row) => row.type === "WorkspacePage");
-  assert.notEqual(page().props.showHeading, false);
+  const page = () =>
+    state.one(
+      (row) =>
+        typeof row.type === "function" &&
+        row.type.name === "AgentIdentityHeader",
+    );
   assert.equal(page().props.title, "researcher");
   assert.equal(page().props.subtitle, "Personal agent");
   state.latest({
@@ -499,4 +535,114 @@ test("agent details retain their actual name and personal or organization owners
     ),
   );
   state.harness.unmount();
+});
+
+const row = (state: ReturnType<typeof setup>, label: string) =>
+  state.one((item) => item.type === "SettingsRow" && item.props.label === label);
+
+test("profile values are label/value rows that open their focused edit pages", () => {
+  const state = setup();
+  assert.equal(row(state, "Handle").props.value, "@researcher");
+  assert.equal(row(state, "Purpose").props.value, "Research documents");
+  assert.equal(row(state, "Display name").props.value, "None");
+  for (const label of ["Handle", "Display name", "Purpose", "Personality and tone"])
+    row(state, label).props.onPress();
+  assert.deepEqual(plain(state.edits), [
+    [agent.id, "name"],
+    [agent.id, "display_name"],
+    [agent.id, "description"],
+    [agent.id, "persona"],
+  ]);
+  assert.equal(
+    state.all().some((item) => item.type === "Field"),
+    false,
+    "the detail page has no inline profile fields",
+  );
+  state.latest({ can_maintain: false });
+  state.harness.render();
+  assert.equal(row(state, "Handle").props.onPress, undefined);
+  assert.equal(row(state, "Confirmation mode").props.value, "Follow workspace");
+  assert.equal(
+    state.all().some((item) => item.type === "SettingsMenuRow"),
+    false,
+  );
+  state.harness.unmount();
+});
+
+test("confirmation mode is one pop-up menu row that saves the choice with live conflict checks", async () => {
+  const state = setup();
+  const menu = () =>
+    state.one(
+      (item) =>
+        item.type === "SettingsMenuRow" &&
+        item.props.label === "Confirmation mode",
+    );
+  assert.equal(menu().props.value, "workspace");
+  assert.deepEqual(
+    plain(menu().props.options.map((option: { label: string }) => option.label)),
+    [
+      "Follow workspace",
+      "NyxMode · sensitive actions",
+      "Ask · every change",
+      "Autopilot",
+    ],
+  );
+  menu().props.onChange("workspace");
+  await state.harness.settle();
+  assert.equal(state.calls.length, 0, "re-choosing the current mode is a no-op");
+  menu().props.onChange("autopilot");
+  await state.harness.settle();
+  assert.deepEqual(
+    state.calls.filter((call) => call.method !== "invalidate"),
+    [
+      { method: "detail", args: [agent.id] },
+      {
+        method: "update",
+        args: [agent.id, { access_mode_override: "autopilot" }],
+      },
+    ],
+  );
+  const conflicted = setup();
+  const stale = conflicted.one(
+    (item) => item.type === "SettingsMenuRow",
+  ).props.onChange;
+  conflicted.latest({ access_mode_override: "nyxmode" });
+  stale("ask_every_time");
+  await conflicted.harness.settle();
+  assert.deepEqual(conflicted.calls, [{ method: "detail", args: [agent.id] }]);
+  assert.ok(
+    conflicted
+      .all()
+      .some(
+        (item) =>
+          item.type === "Notice" && /changed elsewhere/.test(item.props.message),
+      ),
+  );
+});
+
+test("destroy and forget remain behind explicit confirmations", async () => {
+  const state = setup(false, false, {
+    memory: [{ id: "note-1", text: "Prefers summaries" }],
+  });
+  const destroy = row(state, "Destroy Agent");
+  assert.equal(destroy.props.destructive, true);
+  assert.equal(destroy.props.centered, true);
+  destroy.props.onPress();
+  assert.equal(state.calls.length, 0);
+  assert.match(state.alerts[0]!.title, /Destroy/);
+  state.alerts[0]!.buttons.find((button) => button.text === "Destroy")!.onPress!();
+  await state.harness.settle();
+  assert.deepEqual(state.calls[0], { method: "destroy", args: [agent.id] });
+  const memory = setup(false, false, {
+    memory: [{ id: "note-1", text: "Prefers summaries" }],
+  });
+  row(memory, "Prefers summaries").props.onPress();
+  assert.equal(memory.calls.length, 0);
+  assert.equal(memory.alerts[0]!.title, "Forget this memory?");
+  memory.alerts[0]!.buttons.find((button) => button.text === "Forget")!.onPress!();
+  await memory.harness.settle();
+  assert.deepEqual(memory.calls[0], {
+    method: "forget",
+    args: [agent.id, "note-1"],
+  });
 });
