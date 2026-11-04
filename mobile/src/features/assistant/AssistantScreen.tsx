@@ -904,7 +904,7 @@ export function AssistantScreen({
             {input !== undefined ? (
               <QuietButton
                 label="Retry"
-                icon={<RotateCcw size={14} color={colors.primaryOnTint} />}
+                icon={<RotateCcw size={14} color={colors.textPrimary} />}
                 disabled={
                   running ||
                   !assistant.online ||

@@ -177,7 +177,7 @@ export function AssistantMessageNotices({
     </View>
   );
 }
-/** A small tinted action for in-chat follow-ups; rows of them wrap. */
+/** A compact secondary button for in-chat follow-ups; rows of them wrap. */
 export function QuietButton({
   label,
   onPress,
@@ -203,9 +203,10 @@ export function QuietButton({
       style={({ pressed }) => [
         styles.button,
         {
-          backgroundColor: colors.primaryTone.bg,
-          borderColor: colors.primaryTone.border,
-          opacity: disabled ? 0.5 : pressed ? 0.6 : 1,
+          backgroundColor: pressed ? colors.navActive : colors.card,
+          borderColor: colors.controlBorder,
+          shadowColor: colors.shadowColor,
+          opacity: disabled ? 0.5 : 1,
         },
       ]}
     >
@@ -213,7 +214,7 @@ export function QuietButton({
       <Label
         maxFontSizeMultiplier={1.3}
         style={{
-          color: colors.primaryOnTint,
+          color: colors.textPrimary,
           fontFamily: fonts.bodySemi,
           fontSize: 13,
           lineHeight: 17,
@@ -237,14 +238,19 @@ const styles = StyleSheet.create({
   errorText: { flex: 1, fontSize: 14, lineHeight: 19 },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   details: { padding: 10, borderRadius: 8, borderWidth: 1, gap: 4 },
+  // A compact secondary button: white surface, control edge, soft lift.
   button: {
-    minHeight: TOUCH_TARGET - 12,
+    minHeight: TOUCH_TARGET - 10,
     flexDirection: "row",
     alignItems: "center",
     alignSelf: "flex-start",
-    gap: 5,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
+    gap: 6,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
 });
