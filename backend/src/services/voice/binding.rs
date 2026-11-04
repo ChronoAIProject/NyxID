@@ -24,7 +24,12 @@ pub async fn get(db: &Database, owner: &str, agent: &str) -> AppResult<Option<Us
         .map_err(Into::into)
 }
 
-pub async fn publish(db: &Database, owner: &str, agent_id: &str) -> AppResult<UserService> {
+pub async fn publish(
+    db: &Database,
+    owner: &str,
+    agent_id: &str,
+    base_url: &str,
+) -> AppResult<UserService> {
     super::access::personal_owner(db, owner).await?;
     let agent = team::agent(db, owner, agent_id).await?;
     if agent.user_id != owner || agent.destroyed_at.is_some() {
@@ -41,6 +46,7 @@ pub async fn publish(db: &Database, owner: &str, agent_id: &str) -> AppResult<Us
         })?;
     let db = db.clone();
     let owner = owner.to_owned();
+    let base_url = base_url.to_owned();
     service_history::transaction::run(&db.clone(), async move |tx| {
         let result: AppResult<UserService> = async {
             // Serialize concurrent publication and destruction on the existing Bot row.
@@ -69,6 +75,7 @@ pub async fn publish(db: &Database, owner: &str, agent_id: &str) -> AppResult<Us
                 return Ok(existing);
             }
             let now = chrono::Utc::now();
+            let id = uuid::Uuid::new_v4();
             let endpoint = UserEndpoint {
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner.clone(),
@@ -76,15 +83,14 @@ pub async fn publish(db: &Database, owner: &str, agent_id: &str) -> AppResult<Us
                     "{} · Voice",
                     agent.display_name.as_deref().unwrap_or(&agent.name)
                 ),
-                url: super::execution::INTERNAL_BASE_URL.into(),
+                url: super::execution::service_url(&base_url, &id.to_string())?,
                 catalog_service_id: Some(catalog.id.clone()),
-                openapi_spec_url: catalog.openapi_spec_url.clone(),
+                // Voice is an HTTP/WebSocket service, not an MCP tool catalog.
+                openapi_spec_url: None,
                 recommended_skills: None,
                 created_at: now,
                 updated_at: now,
             };
-            crate::services::user_endpoint_service::validate_endpoint_url(&endpoint.url)?;
-            let id = uuid::Uuid::new_v4();
             let service = UserService {
                 id: id.to_string(),
                 user_id: owner.clone(),

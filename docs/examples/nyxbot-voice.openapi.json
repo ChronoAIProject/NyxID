@@ -2,13 +2,23 @@
   "openapi": "3.0.3",
   "info": {
     "title": "NyxBot Voice",
-    "version": "1.0.0",
-    "description": "NyxID realtime voice using the original caller Agent Key. Every selected Bot requires its own owner-published voice connection and an existing service grant to that exact UserService. Unbound connections authorize no Bot. All-services Keys retain their existing semantics. Bot tools, private history, confirmations and billing remain authoritative."
+    "version": "1.1.0",
+    "description": "HTTP/WebSocket reference for a published NyxBot Voice service. Call the endpoint returned by owner publication with the board Agent Key. The selected UserService fixes the Bot and the key credential identifies the board. A generic catalog connection authorizes no Bot. This document describes the dedicated Voice service and must not be imported as ordinary MCP tool endpoints."
   },
   "servers": [
     {
-      "url": "https://nyxid.invalid/internal/nyxbot-voice",
-      "description": "Internal capability marker; invoke through the current deployment native API or the exact UserService proxy. No HTTP request is sent to this URL."
+      "url": "{nyxid_base_url}/api/v1/proxy/nyxbot-voice/{service_id}",
+      "description": "Use the real service endpoint returned by owner publication. Replace both variables with this deployment and the exact authorized Voice UserService.",
+      "variables": {
+        "nyxid_base_url": {
+          "default": "https://nyxid.example",
+          "description": "NyxID deployment base URL, without a trailing slash."
+        },
+        "service_id": {
+          "default": "00000000-0000-4000-8000-000000000000",
+          "description": "Owner-published Voice UserService ID; this binding selects the Bot."
+        }
+      }
     }
   ],
   "security": [
@@ -19,7 +29,7 @@
   "paths": {
     "/voice/agents": {
       "get": {
-        "summary": "List personal Bots and saved voice preferences",
+        "summary": "Inspect the Bot bound to this Voice service",
         "operationId": "nyxbot_voice_get_voice_agents",
         "responses": {
           "200": {
@@ -53,10 +63,11 @@
           {
             "name": "conversation_id",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "Optional conversation of the bound Bot; omitted selects that Bot's home thread."
           }
         ]
       }
@@ -393,7 +404,8 @@
         "properties": {
           "agent_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Optional echo of the bound Bot ID. It cannot select a different Bot."
           },
           "client_request_id": {
             "type": "string",
@@ -409,21 +421,9 @@
           "service_id": {
             "type": "string",
             "format": "uuid",
-            "description": "Exact owner-published Voice UserService; determines the Bot. Proxy calls supply their selected connection automatically."
+            "description": "Optional echo of the service ID in the URL. If supplied it must match; the URL always selects the Voice connection."
           }
-        },
-        "anyOf": [
-          {
-            "required": [
-              "service_id"
-            ]
-          },
-          {
-            "required": [
-              "agent_id"
-            ]
-          }
-        ]
+        }
       },
       "Control": {
         "type": "object",

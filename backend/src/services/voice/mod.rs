@@ -26,7 +26,6 @@ pub mod receipt;
 mod responses;
 pub mod runtime;
 pub mod session;
-pub(crate) mod source;
 mod speech;
 #[cfg(test)]
 mod tests;

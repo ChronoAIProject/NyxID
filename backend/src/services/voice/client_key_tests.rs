@@ -65,7 +65,7 @@ async fn setup(
         crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &f.row)
             .await
             .unwrap();
-    let id = super::binding::publish(&f.state.db, &f.owner, &agent.id)
+    let id = super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
         .await
         .unwrap()
         .id;
@@ -129,9 +129,14 @@ async fn voice_key_uses_existing_service_grants_and_no_bot_hardcoding() {
             crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &primary)
                 .await
                 .unwrap();
-        let other = super::binding::publish(&f.state.db, &f.owner, &primary_agent.id)
-            .await
-            .unwrap();
+        let other = super::binding::publish(
+            &f.state.db,
+            &f.owner,
+            &primary_agent.id,
+            &f.state.config.base_url,
+        )
+        .await
+        .unwrap();
         assert_ne!(service, other.id);
         assert!(keys::authorize(&f.state.db, &a, &primary.id).await.is_err());
         f.state
@@ -249,15 +254,13 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
         let _ = auth(&f, &secret).await;
         let mut tx = f.state.db.client().start_session().await.unwrap();
         tx.start_transaction().await.unwrap();
-        super::source::fence_request(&f.state.db, &f.owner, &request.id, &mut tx)
-            .await
-            .unwrap();
+        keys::fence_call(&f.state.db, &call, &mut tx).await.unwrap();
         tx.commit_transaction().await.unwrap();
-        // Once action admission fences the child, a concurrent revocation must
+        // Once Voice task admission fences the child, a concurrent revocation must
         // retry after that admission commits rather than silently passing it.
         let mut admission = f.state.db.client().start_session().await.unwrap();
         admission.start_transaction().await.unwrap();
-        super::source::fence_request(&f.state.db, &f.owner, &request.id, &mut admission)
+        keys::fence_call(&f.state.db, &call, &mut admission)
             .await
             .unwrap();
         let mut revocation = f.state.db.client().start_session().await.unwrap();
@@ -286,12 +289,26 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
         let mut after_revocation = f.state.db.client().start_session().await.unwrap();
         after_revocation.start_transaction().await.unwrap();
         assert!(
-            super::source::fence_request(&f.state.db, &f.owner, &request.id, &mut after_revocation)
+            keys::fence_call(&f.state.db, &call, &mut after_revocation)
                 .await
                 .is_err()
         );
         after_revocation.abort_transaction().await.unwrap();
+        assert!(
+            super::transcript::delegate(&f.state.db, &call, "revoked-auth", &segment)
+                .await
+                .is_err(),
+            "Revoked credentials cannot submit new Bot tasks"
+        );
         keys::end(&f.state.db, &call).await.unwrap();
+        assert_eq!(
+            crate::services::assistant_voice::get(&f.state.db, &f.owner, &f.row.id, &request.id)
+                .await
+                .unwrap()
+                .state,
+            crate::models::assistant_voice::RequestState::Queued,
+            "Ending a revoked call does not cancel an already accepted request"
+        );
         assert!(
             session::get(&f.state.db, &f.owner, &f.row.id, &call.id)
                 .await
@@ -375,7 +392,7 @@ async fn voice_child_http_discovery_and_start_enforce_exact_bot_connection() {
         let (_, private) = crate::routes::build_router_with_state(f.state.clone());
         let app = private.with_state(f.state.clone());
         let response = app.clone().oneshot(Request::builder()
-            .uri("/api/v1/assistant/nyxagent/voice/agents")
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/agents"))
             .header("authorization", format!("Bearer {secret}"))
             .body(Body::empty()).unwrap()).await.unwrap();
         let status = response.status();
@@ -386,7 +403,7 @@ async fn voice_child_http_discovery_and_start_enforce_exact_bot_connection() {
         assert_eq!(body["agents"][0]["agent_id"], agent.id);
         assert_eq!(body["agents"][0]["service_id"], service_id);
         let response = app.clone().oneshot(Request::builder().method("POST")
-            .uri(format!("/api/v1/assistant/nyxagent/voice/sessions/{}/control", Uuid::new_v4()))
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/sessions/{}/control", Uuid::new_v4()))
             .header("authorization", format!("Bearer {secret}"))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::json!({"command_id":Uuid::new_v4(),
@@ -409,7 +426,7 @@ async fn voice_child_http_discovery_and_start_enforce_exact_bot_connection() {
             assert_eq!(response.status(), 403, "{method} {path}");
         }
         // A connection for another Bot, published later, still needs a Key grant.
-        let other = super::binding::publish(&f.state.db, &f.owner, &root_agent.id).await.unwrap();
+        let other = super::binding::publish(&f.state.db, &f.owner, &root_agent.id, &f.state.config.base_url).await.unwrap();
         assert_ne!(service_id, other.id);
         assert!(keys::authorize(&f.state.db, &auth(&f, &secret).await, &f.nyxbot_thread).await.is_err());
         f.state.db.drop().await.unwrap();
@@ -424,9 +441,10 @@ async fn voice_publication_is_idempotent_revocable_and_cannot_retarget_a_grant()
             crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &f.row)
                 .await
                 .unwrap();
-        let same = super::binding::publish(&f.state.db, &f.owner, &agent.id)
-            .await
-            .unwrap();
+        let same =
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
+                .await
+                .unwrap();
         assert_eq!(same.id, service_id);
         assert_ne!(same.source.as_deref(), Some("auto_provision"));
         let proof = keys::authorize(&f.state.db, &auth(&f, &raw).await, &f.row.id)
@@ -469,9 +487,10 @@ async fn voice_publication_is_idempotent_revocable_and_cannot_retarget_a_grant()
         .await
         .unwrap();
         assert!(keys::revalidate(&f.state.db, &call).await.is_err());
-        let replacement = super::binding::publish(&f.state.db, &f.owner, &agent.id)
-            .await
-            .unwrap();
+        let replacement =
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
+                .await
+                .unwrap();
         assert_eq!(
             replacement.id, service_id,
             "Disable preserves the exact connection"
@@ -485,9 +504,10 @@ async fn voice_publication_is_idempotent_revocable_and_cannot_retarget_a_grant()
         )
         .await
         .unwrap();
-        let replacement = super::binding::publish(&f.state.db, &f.owner, &agent.id)
-            .await
-            .unwrap();
+        let replacement =
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
+                .await
+                .unwrap();
         assert_ne!(
             replacement.id, service_id,
             "Delete and republish creates fresh authority"
@@ -526,7 +546,7 @@ async fn generic_voice_connection_and_auto_connected_scope_delegate_no_bot() {
             doc! {"$unset":{"source":"","source_id":""},"$set":{"slug":"nyxbot-voice"}}).await.unwrap();
         assert!(keys::authorize(&f.state.db, &auth(&f,&raw).await, &f.row.id).await.is_err());
         let agent = crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &f.row).await.unwrap();
-        super::binding::publish(&f.state.db, &f.owner, &agent.id).await.unwrap();
+        super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url).await.unwrap();
         let key = auth(&f, &raw).await.api_key_id.unwrap();
         f.state.db.collection::<bson::Document>(KEYS).update_one(doc! {"_id":key}, doc! {"$set":{
             "allowed_service_ids":[],"allow_all_services":false,"allow_auto_connected_services":true}}).await.unwrap();
@@ -742,14 +762,11 @@ async fn voice_discovery_and_start_admission_need_only_live_exact_grants() {
             .await
             .unwrap();
         let a = auth(&f, &raw).await;
-        let discovery = crate::handlers::assistant_voice::agents(
-            axum::extract::State(f.state.clone()),
-            a.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(discovery.0["agents"].as_array().unwrap().len(), 1);
-        assert_eq!(discovery.0["agents"][0]["service_id"], service);
+        let discovery = super::application::agents(&f.state, &a, None)
+            .await
+            .unwrap();
+        assert_eq!(discovery["agents"].as_array().unwrap().len(), 1);
+        assert_eq!(discovery["agents"][0]["service_id"], service);
         let binding = keys::authorize(&f.state.db, &a, &f.row.id).await.unwrap();
         let call = session::admit_for_client_key(
             &f.state.db,
@@ -778,13 +795,10 @@ async fn voice_discovery_and_start_admission_need_only_live_exact_grants() {
             )
             .await
             .unwrap();
-        let read_discovery = crate::handlers::assistant_voice::agents(
-            axum::extract::State(f.state.clone()),
-            a.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(read_discovery.0["agents"].as_array().unwrap().len(), 1);
+        let read_discovery = super::application::agents(&f.state, &a, None)
+            .await
+            .unwrap();
+        assert_eq!(read_discovery["agents"].as_array().unwrap().len(), 1);
         assert!(keys::authorize(&f.state.db, &a, &f.row.id).await.is_err());
         assert_eq!(
             f.state
@@ -826,7 +840,7 @@ async fn voice_discovery_and_start_admission_need_only_live_exact_grants() {
             .unwrap();
         assert!(keys::resolve(&f.state.db, &a, &f.row.id).await.is_err());
         assert!(
-            crate::handlers::assistant_voice::agents(axum::extract::State(f.state.clone()), a)
+            super::application::agents(&f.state, &a, None)
                 .await
                 .is_err()
         );
@@ -873,7 +887,7 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
         // Both HTTP start entry points reach the existing transport validator
         // under restrictive service-approval settings, without provider I/O.
         for uri in ["/api/v1/assistant/nyxagent/voice/sessions".into(),
-            format!("/api/v1/proxy/s/{}/voice/sessions", identity.service.slug)] {
+            format!("/api/v1/proxy/nyxbot-voice/{}/voice/sessions", service)] {
             let response = app.clone().oneshot(Request::builder().method("POST").uri(uri)
                 .header("authorization", format!("Bearer {secret}"))
                 .header("content-type", "application/json")
@@ -1123,9 +1137,7 @@ async fn voice_snapshot_concurrent_revocation_prevents_the_effect_after_retry() 
             .await;
         let error =
             crate::services::api_key_mutation_service::map_transaction_error(result.unwrap_err());
-        assert!(crate::errors::access_denial::permanent_authority_failure(
-            &error
-        ));
+        assert!(crate::services::voice::client_key::permanent_authority_failure(&error));
         assert_eq!(
             f.state
                 .db
@@ -1149,9 +1161,7 @@ fn voice_authority_classification_preserves_uncertain_work() {
         AppError::NotFound("source removed".into()),
         AppError::Forbidden("disabled".into()),
     ] {
-        assert!(crate::errors::access_denial::permanent_authority_failure(
-            &error
-        ));
+        assert!(crate::services::voice::client_key::permanent_authority_failure(&error));
     }
     for error in [
         AppError::Internal("temporary".into()),
@@ -1161,83 +1171,12 @@ fn voice_authority_classification_preserves_uncertain_work() {
             request_id: "pending".into(),
         },
     ] {
-        assert!(!crate::errors::access_denial::permanent_authority_failure(
-            &error
-        ));
+        assert!(!crate::services::voice::client_key::permanent_authority_failure(&error));
     }
 }
 
 #[tokio::test]
-async fn voice_dispatcher_cancels_revoked_queued_work_after_the_call_closes() {
-    Box::pin(async {
-        let (f, voice, _, raw) = setup("voice_closed_call_revoked_queue").await;
-        let a = auth(&f, &raw).await;
-        let proof = keys::authorize(&f.state.db, &a, &f.row.id).await.unwrap();
-        let call = session::admit_for_client_key(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            &Uuid::new_v4().to_string(),
-            platform(&voice),
-            "fixture".into(),
-            "worker",
-            proof,
-        )
-        .await
-        .unwrap();
-        let request = crate::services::assistant_voice::enqueue(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            &call.id,
-            "source",
-            "do work",
-        )
-        .await
-        .unwrap();
-        f.state
-            .db
-            .collection::<bson::Document>(crate::models::assistant_voice::REQUESTS)
-            .update_one(
-                doc! {"_id":&request.id},
-                doc! {"$set":{"client_key":bson::to_bson(&call.client_key).unwrap()}},
-            )
-            .await
-            .unwrap();
-        session::write(
-            &f.state.db,
-            &call,
-            doc! {"state":"closed","live_slot":false},
-        )
-        .await
-        .unwrap();
-        f.state
-            .db
-            .collection::<bson::Document>(KEYS)
-            .update_one(
-                doc! {"_id":a.api_key_id.unwrap()},
-                doc! {"$set":{"is_active":false}},
-            )
-            .await
-            .unwrap();
-        crate::handlers::assistant_voice::sweep(&f.state)
-            .await
-            .unwrap();
-        let saved =
-            crate::services::assistant_voice::get(&f.state.db, &f.owner, &f.row.id, &request.id)
-                .await
-                .unwrap();
-        assert_eq!(
-            saved.state,
-            crate::models::assistant_voice::RequestState::Cancelled
-        );
-        f.state.db.drop().await.unwrap();
-    })
-    .await;
-}
-
-#[tokio::test]
-async fn voice_internal_proxy_preserves_exact_service_and_never_uses_the_endpoint_host() {
+async fn voice_service_preserves_exact_binding_and_ignores_retargeting_input() {
     Box::pin(async {
         use axum::{body::{Body,to_bytes},http::Request};
         use tower::ServiceExt;
@@ -1246,23 +1185,23 @@ async fn voice_internal_proxy_preserves_exact_service_and_never_uses_the_endpoin
         let identity=super::execution::resolve(&f.state.db,&a,&service).await.unwrap();
         let primary=crate::services::assistant_nyxagent::get(&f.state.db,&f.owner,&f.nyxbot_thread).await.unwrap();
         let other_agent=crate::services::assistant_team_service::agent_for_conversation(&f.state.db,&primary).await.unwrap();
-        let other=super::binding::publish(&f.state.db,&f.owner,&other_agent.id).await.unwrap();
+        let other=super::binding::publish(&f.state.db,&f.owner,&other_agent.id, &f.state.config.base_url).await.unwrap();
         f.state.db.collection::<bson::Document>(KEYS).update_one(doc! {"_id":a.api_key_id.unwrap()},
             doc! {"$set":{"allowed_service_ids":[&service,&other.id]}}).await.unwrap();
         let (_,private)=crate::routes::build_router_with_state(f.state.clone());let app=private.with_state(f.state.clone());
-        // The persisted endpoint deliberately has no deployable HTTP host.
+        // Publication records a real, exact connection URL on this deployment.
         let endpoint=f.state.db.collection::<crate::models::user_endpoint::UserEndpoint>("user_endpoints")
             .find_one(doc! {"_id":&identity.service.endpoint_id}).await.unwrap().unwrap();
-        assert_eq!(endpoint.url,super::execution::INTERNAL_BASE_URL);
+        assert_eq!(endpoint.url,super::execution::service_url(&f.state.config.base_url,&service).unwrap());
         let response=app.clone().oneshot(Request::builder()
-            .uri(format!("/api/v1/proxy/s/{}/voice/agents",identity.service.slug))
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{}/voice/agents",service))
             .header("authorization",format!("Bearer {raw}")).body(Body::empty()).unwrap()).await.unwrap();
         let status=response.status();let bytes=to_bytes(response.into_body(),128*1024).await.unwrap();
         assert_eq!(status,200,"{}",String::from_utf8_lossy(&bytes));
         let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["agents"].as_array().unwrap().len(),1);
         assert_eq!(value["agents"][0]["agent_id"],identity.agent.id);
-        for uri in [format!("/api/v1/proxy/s/{}/voice/sessions",identity.service.slug),
+        for uri in [format!("/api/v1/proxy/nyxbot-voice/{}/voice/sessions",service),
             "/api/v1/assistant/nyxagent/voice/sessions".into()] {
             let response=app.clone().oneshot(Request::builder().method("POST").uri(uri)
                 .header("authorization",format!("Bearer {raw}")).header("content-type","application/json")
@@ -1272,7 +1211,7 @@ async fn voice_internal_proxy_preserves_exact_service_and_never_uses_the_endpoin
         }
         for body in ["[]", "null", "true", "42", "\"invalid\"", "{}"] {
             let response = app.clone().oneshot(Request::builder().method("POST")
-                .uri(format!("/api/v1/proxy/s/{}/voice/sessions", identity.service.slug))
+                .uri(format!("/api/v1/proxy/nyxbot-voice/{}/voice/sessions", service))
                 .header("authorization", format!("Bearer {raw}"))
                 .header("content-type", "application/json")
                 .body(Body::from(body)).unwrap()).await.unwrap();
@@ -1419,8 +1358,8 @@ async fn voice_concurrent_publication_retains_one_live_binding_and_fresh_identit
         .await
         .unwrap();
         let (left, right) = tokio::join!(
-            super::binding::publish(&f.state.db, &f.owner, &agent.id),
-            super::binding::publish(&f.state.db, &f.owner, &agent.id)
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url),
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
         );
         let old = left.unwrap();
         assert_eq!(old.id, service);
@@ -1434,8 +1373,8 @@ async fn voice_concurrent_publication_retains_one_live_binding_and_fresh_identit
         .await
         .unwrap();
         let (left, right) = tokio::join!(
-            super::binding::publish(&f.state.db, &f.owner, &agent.id),
-            super::binding::publish(&f.state.db, &f.owner, &agent.id)
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url),
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
         );
         let new = left.unwrap();
         assert_ne!(new.id, service);
@@ -1460,144 +1399,8 @@ async fn voice_concurrent_publication_retains_one_live_binding_and_fresh_identit
     .await;
 }
 
-#[tokio::test]
-async fn voice_delayed_reports_inherit_source_and_revocation_preserves_unrelated_events() {
-    Box::pin(async {
-        use crate::models::assistant_conversation::TurnOrigin;
-        use crate::services::{assistant_nyxagent as engine, assistant_team_service as team};
-        let (f, voice, _, raw) = setup("voice_report_source_lifecycle").await;
-        let a = auth(&f, &raw).await;
-        let proof = keys::authorize(&f.state.db, &a, &f.row.id).await.unwrap();
-        let call = session::admit_for_client_key(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            &Uuid::new_v4().to_string(),
-            platform(&voice),
-            "fixture".into(),
-            "worker",
-            proof,
-        )
-        .await
-        .unwrap();
-        let segment = super::transcript::Segment {
-            fragments: vec![],
-            id: Uuid::new_v4().to_string(),
-            speaker: super::transcript::Speaker::User,
-            text: "delegate work".into(),
-            start_ms: 0,
-            end_ms: 100,
-            sealed: true,
-            complete: true,
-        };
-        super::transcript::persist(&f.state.db, &call, &segment)
-            .await
-            .unwrap();
-        let source = super::transcript::delegate(&f.state.db, &call, "report-source", &segment)
-            .await
-            .unwrap();
-        let rows = f
-            .state
-            .db
-            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
-        rows.update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{
-            "active_turn.voice_source_request_id":&source.id}},
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            crate::services::execution_source::source_for_chat(&f.state.db, &f.chat)
-                .await
-                .unwrap()
-                .as_deref(),
-            Some(source.id.as_str())
-        );
-        let mut stale = f.chat.clone();
-        stale.turn_id = Some(Uuid::new_v4().to_string());
-        assert!(matches!(
-            crate::services::execution_source::source_for_chat(&f.state.db, &stale).await,
-            Err(crate::errors::AppError::AssistantTurnRequired)
-        ));
-        rows.update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{
-            "active_turn.voice_source_request_id":bson::Bson::Null}},
-        )
-        .await
-        .unwrap();
-        let report = team::event("subagent_settled", "Quoted completed result".into(), None)
-            .with_voice_source(Some(&source.id));
-        let unrelated = team::event("message", "Independent owner work".into(), None);
-        let conversations = f
-            .state
-            .db
-            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME);
-        conversations
-            .update_one(
-                doc! {"_id":&f.nyxbot_thread},
-                doc! {"$set":{"active_turn":bson::Bson::Null}},
-            )
-            .await
-            .unwrap();
-        engine::push_events(
-            &f.state.db,
-            &f.owner,
-            &f.nyxbot_thread,
-            vec![report.clone(), unrelated.clone()],
-        )
-        .await
-        .unwrap();
-        let mut start = engine::TurnStart::from(&engine::TurnRequest {
-            acknowledgement_id: None,
-            retry_of: None,
-            conversation_id: Some(f.nyxbot_thread.clone()),
-            text: "queued reports".into(),
-            model: None,
-            agent_id: None,
-            attachment_ids: vec![],
-            access_mode: None,
-        });
-        start.origin = TurnOrigin::Event;
-        let admitted = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
-            .await
-            .unwrap();
-        assert_eq!(
-            admitted
-                .active_turn
-                .as_ref()
-                .unwrap()
-                .voice_source_request_id
-                .as_deref(),
-            Some(source.id.as_str())
-        );
-        assert!(
-            admitted
-                .active_turn
-                .as_ref()
-                .unwrap()
-                .voice_request_id
-                .is_none()
-        );
-        assert_eq!(admitted.pending_events.len(), 1);
-        assert_eq!(admitted.pending_events[0].id, unrelated.id);
-        let mut late = report;
-        late.id = Uuid::new_v4().to_string();
-        engine::push_events(&f.state.db, &f.owner, &f.nyxbot_thread, vec![late])
-            .await
-            .unwrap();
-        keys::end(&f.state.db, &call).await.unwrap();
-        let stopped = engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
-            .await
-            .unwrap();
-        assert!(stopped.active_turn.unwrap().stop_requested);
-        assert_eq!(stopped.pending_events.len(), 1);
-        assert_eq!(stopped.pending_events[0].id, unrelated.id);
-        f.state.db.drop().await.unwrap();
-    })
-    .await;
-}
-
 #[path = "deep_audit_tests.rs"]
 mod deep_audit_tests;
+
+#[path = "service_ingress_tests.rs"]
+mod service_ingress_tests;

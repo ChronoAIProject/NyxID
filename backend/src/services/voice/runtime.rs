@@ -605,7 +605,7 @@ async fn active(
                 if let Transport::Grok(grok) = socket { measured_usage(state, call, grok.measured_ms()).await?; }
                 if Utc::now()-last_authority>=Duration::seconds(5) {
                     if let Err(error) = Box::pin(super::client_key::revalidate(&state.db,call)).await {
-                        if crate::errors::access_denial::permanent_authority_failure(&error) {
+                        if crate::services::voice::client_key::permanent_authority_failure(&error) {
                             super::client_key::end(&state.db,call).await?;
                             return Err(error);
                         }

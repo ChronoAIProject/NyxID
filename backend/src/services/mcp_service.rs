@@ -14424,7 +14424,6 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
-                execution: crate::services::proxy_service::ServiceExecution::External,
                 credential_deferred: false,
                 workspace_destinations_pending: false,
                 target_id: None,

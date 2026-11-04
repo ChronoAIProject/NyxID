@@ -60,18 +60,11 @@ pub(crate) async fn approval_target_for_tool(
         )
         .await?
         .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
-            execution: crate::services::proxy_service::ServiceExecution::External,
             service_id: downstream_service_id.clone(),
             service_owner_id: effective_approval_owner_user_id.to_string(),
             is_auto_connected: false,
         }),
     };
-
-    if hint.execution == crate::services::proxy_service::ServiceExecution::NyxBotVoice {
-        return Err(AppError::Forbidden(
-            "Voice requires ordinary internal execution".into(),
-        ));
-    }
 
     Ok(McpApprovalTarget {
         service_id: hint.service_id,
@@ -239,40 +232,6 @@ mod tests {
                 "approval target must yield denied_by_policy for org_owned={org_owned}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn internal_voice_mcp_refuses_before_service_approval() {
-        let db = crate::test_utils::connect_test_database("mcp_internal_voice_no_approval")
-            .await
-            .unwrap();
-        let owner = uuid::Uuid::new_v4().to_string();
-        let catalog = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
-        let slug = "bound-voice";
-        insert_deny_fixture(&db, &owner, &owner, &catalog, &service_id, slug, false).await;
-        db.collection::<UserService>(USER_SERVICES)
-            .update_one(
-                doc! {"_id":&service_id},
-                doc! {"$set":{"source":crate::services::voice::access::BOUND_SOURCE,
-                "source_id":uuid::Uuid::new_v4().to_string()}},
-            )
-            .await
-            .unwrap();
-        let loaded = loaded_user_service(&service_id, &owner, slug);
-        let error = approval_target_for_tool(&db, &owner, &loaded, None)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, AppError::Forbidden(message)
-            if message == "Voice requires ordinary internal execution"));
-        assert_eq!(
-            db.collection::<mongodb::bson::Document>("approval_requests")
-                .count_documents(doc! {})
-                .await
-                .unwrap(),
-            0
-        );
-        db.drop().await.unwrap();
     }
 
     #[tokio::test]

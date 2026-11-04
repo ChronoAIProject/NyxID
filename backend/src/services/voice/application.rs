@@ -467,7 +467,9 @@ pub async fn agents(
             .await
             {
                 Ok(()) => {}
-                Err(error) if crate::errors::access_denial::permanent_authority_failure(&error) => {
+                Err(error)
+                    if crate::services::voice::client_key::permanent_authority_failure(&error) =>
+                {
                     continue;
                 }
                 Err(error) => return Err(error),

@@ -1,11 +1,11 @@
 {
   "name": "NyxBot Voice",
   "slug": "nyxbot-voice",
-  "description": "Realtime voice for a specific personal Bot. The owner explicitly creates a separate voice connection for each Bot in Agent details, then grants that UserService to an Agent Key. A generic catalog connection authorizes no Bot. Each Bot retains its existing grants, confirmations, private conversation history and billing. Keys with all-services access include published connections under the existing policy.",
+  "description": "Realtime voice for one owner-published personal Bot. Grant a board Agent Key access to that exact Voice UserService. The connection selects the Bot; the board credential identifies the caller. A generic catalog connection authorizes no Bot. Each Bot keeps its own existing service grants and billing.",
   "service_type": "http",
   "service_category": "connection",
   "visibility": "public",
-  "base_url": "https://nyxid.invalid/internal/nyxbot-voice",
+  "base_url": "https://nyxid.example/api/v1/proxy/nyxbot-voice",
   "auth_method": "none",
   "forward_access_token": false,
   "capabilities": {
@@ -13,8 +13,8 @@
     "supports_proxy_write": true,
     "supports_websocket": true
   },
-  "auth_notes": "Internal NyxID capability: the ordinary proxy dispatches in this deployment without outbound HTTP or Bearer forwarding. Requires an ordinary Agent Key with proxy scope and a grant to the exact owner-published Bot Voice UserService. The service binding selects the Bot. Generic catalog connections authorize no Bot; no provider credential is distributed.",
-  "known_limitations": "Personal owned Bots only. Publish through Agent details; direct catalog connection does not bind a Bot. Operation-scoped Keys cannot open WebSockets under existing B1 policy. Voice forwarding honors explicit service Deny rules without creating service-operation approval requests. Owner action cards require confirmation in NyxID; device speech cannot decide them. Devices share the Bot home thread and existing per-person live-call slot. All API and background workers must be upgraded and old workers drained before enabling assistant:voice-agent-key. Announcement support is exposed per provider option; only personal OpenAI Live currently supports it.",
+  "auth_notes": "Set base_url to this NyxID deployment. Owner publication creates a real service endpoint at {BASE_URL}/api/v1/proxy/nyxbot-voice/{service_id}. Call that endpoint directly with the board Agent Key and proxy scope. The service checks the exact UserService grant and bound Bot before using the existing Voice runtime. No downstream credential is distributed or caller Bearer forwarded.",
+  "known_limitations": "Personal owned Bots only. Publish through Agent details; direct catalog connection does not bind a Bot. This is an HTTP/WebSocket service, not an MCP tool offering: keep openapi_spec_url empty and do not import the reference OpenAPI document as catalog ServiceEndpoint rows. Operation-scoped Keys cannot open WebSockets under existing policy. Explicit service Deny rules remain effective; Voice does not create service-operation approval requests. Owner action cards are confirmed in NyxID. Devices share the Bot home thread and existing per-person live-call slot. Upgrade and drain all API and background workers before enabling assistant:voice-agent-key. Announcement support is exposed per provider option.",
   "proxy_operation_policy": {
     "rules": [
       {
@@ -58,5 +58,6 @@
         "path_template": "/voice/sessions/{sid}/announcements"
       }
     ]
-  }
+  },
+  "openapi_spec_url": null
 }

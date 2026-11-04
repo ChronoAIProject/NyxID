@@ -60,7 +60,7 @@ pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantC
     private_thread(&row)?;
     if row.shared_agent_thread {
         super::shared_agent_transport::require_ready(db).await?;
-        crate::mw::auth::api_key_auth_user_for_thread_inference(db, &row).await?;
+        crate::mw::auth::api_key_auth_user_for_voice(db, &row).await?;
     }
     Ok(row)
 }
@@ -132,7 +132,6 @@ pub async fn enqueue(
     }
     let request = VoiceRequest {
         model_task: None,
-        client_key: None,
         progress: None,
         timing: Default::default(),
         started_at: None,
@@ -510,13 +509,6 @@ pub(crate) async fn claim(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Voice conversation unavailable".into()))?;
-    Box::pin(super::voice::source::fence_request(
-        db,
-        &request.user_id,
-        &request.id,
-        session,
-    ))
-    .await?;
     private_thread(&visible)?;
     if row.id != visible.id
         && (request.task_conversation_id.as_deref() != Some(&row.id)
@@ -828,12 +820,6 @@ pub(crate) async fn ensure_task_conversation(
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     request: &VoiceRequest,
 ) -> AppResult<VoiceRequest> {
-    Box::pin(super::voice::source::request(
-        db,
-        &request.user_id,
-        &request.id,
-    ))
-    .await?;
     if request.task_conversation_id.is_some() {
         return Ok(request.clone());
     }
@@ -1134,13 +1120,6 @@ pub(crate) async fn continuation(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Voice request unavailable".into()))?;
-    Box::pin(super::voice::source::fence_request(
-        db,
-        &parent.user_id,
-        &parent.id,
-        session,
-    ))
-    .await?;
     if parent.state == RequestState::Cancelled {
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
@@ -1165,7 +1144,6 @@ pub(crate) async fn continuation(
         db,
         VoiceRequest {
             model_task: None,
-            client_key: parent.client_key.clone(),
             progress: None,
             timing: Default::default(),
             started_at: None,
@@ -1241,27 +1219,9 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                 let root = request.root_request_id.as_deref().unwrap_or(&request.id);
                 let mut family = doc! {"user_id":&user,"conversation_id":&conversation,
                 "$or":[{"_id":root},{"root_request_id":root}]};
-                // Descendants retain the same causing request, including after
-                // the root turn has settled. Stop pending descendants and exact
-                // async watches; completed effects remain recorded.
-                let mut cursor = db.collection::<bson::Document>(REQUESTS).find(doc! {"user_id":&user,
-                    "$or":[{"_id":root},{"root_request_id":root}]})
-                    .projection(doc! {"_id":1}).session(&mut *session).await?;
-                let mut source_ids = Vec::new();
-                while cursor.advance(&mut *session).await? {
-                    if let Ok(id) = cursor.deserialize_current()?.get_str("_id") { source_ids.push(id.to_owned()); }
+                if request.state == RequestState::Cancelled {
+                    return Ok(());
                 }
-                let removed_events = db.collection::<bson::Document>(CONVERSATIONS)
-                    .update_many(doc! {"user_id":&user,"pending_events.voice_source_request_id":{"$in":&source_ids}},
-                        doc! {"$pull":{"pending_events":{"voice_source_request_id":{"$in":&source_ids}}}})
-                    .session(&mut *session).await?.modified_count;
-                let descendants = removed_events + db.collection::<bson::Document>(CONVERSATIONS)
-                    .update_many(doc! {"user_id":&user,"active_turn.voice_source_request_id":{"$in":&source_ids},
-                        "active_turn.stop_requested":false},
-                        doc! {"$set":{"active_turn.stop_requested":true}})
-                    .session(&mut *session).await?.matched_count;
-                super::async_service_operation::cancel_voice_in_session(&db, &user, root, session).await?;
-                if request.state == RequestState::Cancelled { return Ok(()); }
                 family.insert(
                     "state",
                     doc! {"$in":["queued","claimed","awaiting_confirmation"]},
@@ -1270,7 +1230,7 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                     .find_one(family.clone())
                     .session(&mut *session)
                     .await?
-                    .is_none() && descendants == 0
+                    .is_none()
                 {
                     return Ok(());
                 }
@@ -1289,6 +1249,8 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                         doc! {"$set":{"state":"cancelled","terminal_error_code":"cancelled"}},
                     )
                     .session(&mut *session)
+                    .await?;
+                super::async_service_operation::cancel_voice_in_session(&db, &user, root, session)
                     .await?;
                 let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
                 let current = conversations

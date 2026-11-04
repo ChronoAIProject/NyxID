@@ -116,6 +116,8 @@ pub(crate) async fn connection(db: &Database, auth: &AuthUser, id: &str) -> AppR
     }
     Ok(service)
 }
+/// Route and authority checks shared by ingress and ongoing call revalidation.
+/// The HTTP ingress checks value limits against the actual request separately.
 pub async fn policy(
     db: &Database,
     auth: &AuthUser,
@@ -154,17 +156,6 @@ pub async fn policy(
         &canonical,
         false,
         websocket,
-    )?;
-    crate::services::agent_operation_scope_service::check_inputs(
-        &auth.assistant_operation_scopes,
-        &service.id,
-        Some(&catalog.id),
-        None,
-        method,
-        &canonical,
-        None,
-        &[],
-        None,
     )?;
     Ok(())
 }

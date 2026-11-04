@@ -48,7 +48,7 @@ pub async fn admit(
         return Ok(None);
     }
     transport::require_ready(db).await?;
-    let auth = crate::mw::auth::api_key_auth_user_for_thread_inference(db, thread).await?;
+    let auth = crate::mw::auth::api_key_auth_user_for_voice(db, thread).await?;
     let access = auth
         .org_agent_access
         .as_ref()

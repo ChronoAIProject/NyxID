@@ -61,16 +61,3 @@ impl super::AppError {
         }
     }
 }
-
-/// Only confirmed loss of source authority is destructive. Storage, readiness,
-/// provider and concurrency failures preserve durable work for bounded retry.
-pub fn permanent_authority_failure(error: &super::AppError) -> bool {
-    error.is_forbidden()
-        || matches!(
-            error,
-            super::AppError::Unauthorized(_)
-                | super::AppError::ApiKeyScopeForbidden(_)
-                | super::AppError::NotFound(_)
-                | super::AppError::TokenExpired
-        )
-}

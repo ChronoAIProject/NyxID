@@ -294,63 +294,69 @@ async fn audit_ended_grok_relay_recovery_finishes_without_waiting_for_remote_clo
 }
 
 #[tokio::test]
-async fn audit_unrelated_owner_turn_keeps_voice_reports_queued_under_their_source() {
+async fn audit_device_revocation_ends_audio_but_only_stop_cancels_accepted_bot_work() {
     Box::pin(async {
-        let (f, _, call, source) = device_task("audit_voice_report_mixed_turn").await;
+        use crate::models::assistant_voice::RequestState;
+        let (f, binding, call, request) =
+            device_task("audit_device_independent_task_lifetime").await;
         f.state
             .db
-            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .collection::<bson::Document>(KEYS)
             .update_one(
-                doc! {"_id":&f.nyxbot_thread},
-                doc! {"$set":{"active_turn":bson::Bson::Null}},
+                doc! {"_id":&binding.key_id},
+                doc! {"$set":{"is_active":false}},
             )
             .await
             .unwrap();
-        let report = crate::services::assistant_team_service::event(
-            "subagent_settled",
-            "Voice-caused delayed report".into(),
-            None,
-        )
-        .with_voice_source(Some(&source.id));
-        engine::push_events(
-            &f.state.db,
-            &f.owner,
-            &f.nyxbot_thread,
-            vec![report.clone()],
-        )
-        .await
-        .unwrap();
-        let admitted = engine::begin_turn(
-            &f.state.db,
-            &f.owner,
-            &engine::TurnRequest {
-                acknowledgement_id: None,
-                retry_of: None,
-                attachment_ids: vec![],
-                conversation_id: Some(f.nyxbot_thread.clone()),
-                agent_id: None,
-                text: "Independent owner question".into(),
-                model: None,
-                access_mode: None,
-            },
-            &f.state.encryption_keys,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            admitted.pending_events.len(),
-            1,
-            "Do not consume Voice authority into an unrelated owner turn"
-        );
-        assert_eq!(admitted.pending_events[0].id, report.id);
+        assert!(keys::revalidate(&f.state.db, &call).await.is_err());
         keys::end(&f.state.db, &call).await.unwrap();
-        let stopped = engine::get(&f.state.db, &f.owner, &f.nyxbot_thread)
+        assert!(
+            session::get(&f.state.db, &f.owner, &f.row.id, &call.id)
+                .await
+                .unwrap()
+                .end_requested
+        );
+        let active = engine::get(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap();
+        assert_eq!(
+            active.voice_request_id.as_deref(),
+            Some(request.id.as_str())
+        );
+        assert!(!active.stop_requested);
+        assert_eq!(
+            crate::services::assistant_voice::get(&f.state.db, &f.owner, &f.row.id, &request.id)
+                .await
+                .unwrap()
+                .state,
+            RequestState::Claimed
+        );
+        assert!(
+            acks::for_key(&f.state.db, &f.owner, Some(&f.row.credential_api_key_id))
+                .await
+                .unwrap()
+                .is_some(),
+            "The selected Bot retains its own execution authority"
+        );
+        crate::services::assistant_voice::cancel(&f.state.db, &f.owner, &f.row.id, &request.id)
             .await
             .unwrap();
-        assert!(stopped.pending_events.is_empty());
+        assert_eq!(
+            crate::services::assistant_voice::get(&f.state.db, &f.owner, &f.row.id, &request.id)
+                .await
+                .unwrap()
+                .state,
+            RequestState::Cancelled
+        );
         assert!(
-            !stopped.active_turn.unwrap().stop_requested,
-            "Revocation must preserve unrelated owner work"
+            engine::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .active_turn
+                .unwrap()
+                .stop_requested
         );
         f.state.db.drop().await.unwrap();
     })

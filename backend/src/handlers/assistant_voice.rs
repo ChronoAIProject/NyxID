@@ -1,14 +1,11 @@
 mod client_key;
 pub(crate) mod internal;
-pub use client_key::{
-    agents, publish_voice_service, service_announcement, service_control, service_start,
-    service_status, service_stream, voice_service,
-};
+pub use client_key::{publish_voice_service, voice_service};
 mod dictation;
 mod socket;
 pub use dictation::{dictation_options, dictation_stream};
 pub use socket::stream;
-// Browser and ordinary Agent Key voice control; durable request dispatch.
+// First-party browser voice adapter and durable request dispatch.
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -23,8 +20,8 @@ use mongodb::bson::doc;
 use serde::Deserialize;
 
 pub use crate::services::voice::application::{
-    ActiveSessionResponse, AnnouncementRequest, ControlRequest, OptionsQuery, Preferences,
-    RequestResponse, SessionResponse, StartRequest, StartResponse, preference_patch,
+    ActiveSessionResponse, ControlRequest, OptionsQuery, Preferences, RequestResponse,
+    SessionResponse, StartRequest, StartResponse, preference_patch,
 };
 
 pub async fn options(
@@ -32,6 +29,7 @@ pub async fn options(
     auth: AuthUser,
     Query(q): Query<OptionsQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::services::voice::application::options(&state, &auth, q)
         .await
         .map(Json)
@@ -44,6 +42,7 @@ pub async fn start(
     headers: axum::http::HeaderMap,
     Json(body): Json<StartRequest>,
 ) -> AppResult<Json<StartResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     client_key::start_origin(&state, &auth, &headers).await?;
     crate::services::voice::application::start(&state, &auth, id, body)
         .await
@@ -55,6 +54,7 @@ pub async fn active_session(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<ActiveSessionResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::services::voice::application::active_session(&state, &auth, id)
         .await
         .map(Json)
@@ -65,6 +65,7 @@ pub async fn session_status(
     auth: AuthUser,
     Path((id, sid)): Path<(String, String)>,
 ) -> AppResult<Json<SessionResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::services::voice::application::session_status(&state, &auth, id, sid)
         .await
         .map(Json)
@@ -77,7 +78,8 @@ pub async fn control(
     headers: axum::http::HeaderMap,
     Json(body): Json<ControlRequest>,
 ) -> AppResult<Json<SessionResponse>> {
-    client_key::origin(&state, &auth, &headers)?;
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_origin(&state, &headers)?;
     crate::services::voice::application::control(&state, &auth, id, sid, body)
         .await
         .map(Json)
@@ -88,6 +90,7 @@ pub async fn request(
     auth: AuthUser,
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<Json<RequestResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
     crate::services::voice::application::request(&state, &auth, id, rid)
         .await
         .map(Json)
@@ -98,6 +101,7 @@ pub async fn cancel(
     auth: AuthUser,
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<()> {
+    super::login_client_context::require_first_party_human(&auth)?;
     let cancelled = crate::services::voice::application::cancel(&state, &auth, id, rid).await?;
     for conversation in cancelled {
         super::mcp_transport::async_operations::drain_cancellations(
@@ -124,7 +128,6 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
             if request.expires_at <= chrono::Utc::now() {
                 return Err(AppError::Conflict("Voice request expired".into()));
             }
-            Box::pin(crate::services::voice::source::request(&state.db, &request.user_id, &request.id)).await?;
             voice::thread(&state.db, &request.user_id, &request.conversation_id).await?;
             let running = state
                 .db
@@ -191,21 +194,14 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         }).await;
         if result
             .as_ref()
-            .is_err_and(crate::errors::access_denial::permanent_authority_failure)
+            .is_err_and(|error| error.is_forbidden() || matches!(error, AppError::NotFound(_)))
             || request.expires_at <= chrono::Utc::now()
         {
-            voice::cancel(
-                &state.db,
-                &request.user_id,
-                &request.conversation_id,
-                &request.id,
-            )
-            .await?;
             state
                 .db
                 .collection::<crate::models::assistant_voice::VoiceRequest>(REQUESTS)
                 .update_one(
-                    doc! {"_id":&request.id,"state":"cancelled"},
+                    doc! {"_id":&request.id,"state":"queued"},
                     doc! {"$set":{"state":"cancelled", "terminal_error_code":
                         if request.expires_at <= chrono::Utc::now() { "voice_request_expired".to_owned() }
                         else { result.as_ref().err().map(|e|e.error_key().to_owned()).unwrap_or_else(||"cancelled".into()) } }},

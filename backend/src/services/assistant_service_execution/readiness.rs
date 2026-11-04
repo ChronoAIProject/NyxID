@@ -376,7 +376,6 @@ pub(crate) async fn bound_target(
         service.requires_user_credential = false;
     }
     Ok(Some(proxy_service::ProxyTarget {
-        execution: crate::services::proxy_service::ServiceExecution::for_catalog(&service),
         credential_deferred: false,
         workspace_destinations_pending:
             crate::services::destination_routing::workspace_destinations_pending(&service),

@@ -164,7 +164,6 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
-        execution: crate::services::proxy_service::ServiceExecution::for_catalog(&service),
         credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,

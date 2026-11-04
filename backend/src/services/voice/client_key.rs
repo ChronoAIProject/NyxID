@@ -16,6 +16,19 @@ use mongodb::{
     Database,
     bson::{self, doc},
 };
+/// Only confirmed loss of call authority closes audio or cancels notices.
+/// Storage, provider and concurrency failures remain retryable.
+pub(crate) fn permanent_authority_failure(error: &AppError) -> bool {
+    error.is_forbidden()
+        || matches!(
+            error,
+            AppError::Unauthorized(_)
+                | AppError::ApiKeyScopeForbidden(_)
+                | AppError::NotFound(_)
+                | AppError::TokenExpired
+        )
+}
+
 fn refused() -> AppError {
     AppError::ApiKeyScopeForbidden("This Key cannot access the selected Bot voice service".into())
 }
@@ -76,11 +89,6 @@ pub async fn caller(db: &Database, auth: &AuthUser) -> AppResult<Caller> {
     {
         return Err(AppError::Forbidden("Agent Key voice is not enabled".into()));
     }
-    crate::services::security_readiness_service::require(
-        db,
-        crate::services::feature_flag_service::VOICE_AGENT_KEY_FLAG_KEY,
-    )
-    .await?;
     // Reuse authentication's live user/organization checks, not just a key row.
     let fresh = crate::mw::auth::api_key_auth_user(
         db,
@@ -382,14 +390,11 @@ pub async fn fence_call(
         .session(&mut *session)
         .await?
         .ok_or_else(refused)?;
-    super::super::catalog_reader_fence::admit(
-        db,
-        service.catalog_service_id.as_deref().unwrap_or_default(),
-        user,
-        session,
-    )
-    .await?;
     let mut fences = vec![
+        (
+            crate::models::downstream_service::COLLECTION_NAME,
+            doc! {"_id":service.catalog_service_id.as_deref().ok_or_else(refused)?,"is_active":true},
+        ),
         (
             crate::models::assistant_conversation::COLLECTION_NAME,
             doc! {"_id":&call.conversation_id,"user_id":user,"shared_agent_thread":{"$ne":true}},
@@ -432,18 +437,6 @@ pub async fn fence_call(
     // snapshot rows. Revocation either preceded this attempt or conflicts with
     // it; metadata-only Key updates cannot become stable call ownership.
     Box::pin(revalidate_binding(db, call, true)).await?;
-    for flag in [
-        crate::services::feature_flag_service::VOICE_AGENT_KEY_FLAG_KEY,
-        crate::services::feature_flag_service::ASSISTANT_VOICE_FLAG_KEY,
-    ] {
-        if !crate::services::feature_flag_service::personal_flag_enabled_in_session(
-            db, user, flag, session,
-        )
-        .await?
-        {
-            return Err(refused());
-        }
-    }
     call_operation(db, call, "POST", "/voice/sessions", true, session).await?;
     Ok(())
 }
@@ -458,15 +451,5 @@ pub async fn end(db: &Database, call: &VoiceSession) -> AppResult<()> {
             doc! {"$set":{"state":"cancelled"}},
         )
         .await?;
-    use futures::TryStreamExt;
-    let pending: Vec<crate::models::assistant_voice::VoiceRequest> = db
-        .collection(crate::models::assistant_voice::REQUESTS)
-        .find(doc! {"session_id":&call.id,"user_id":&call.user_id})
-        .await?
-        .try_collect()
-        .await?;
-    for row in pending {
-        assistant_voice::cancel(db, &row.user_id, &row.conversation_id, &row.id).await?;
-    }
     Ok(())
 }

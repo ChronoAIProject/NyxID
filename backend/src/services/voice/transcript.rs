@@ -334,7 +334,6 @@ async fn admit_task(
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
     let request = VoiceRequest {
         model_task,
-        client_key: call.client_key.clone(),
         progress: None,
         timing: Default::default(),
         started_at: None,
@@ -367,6 +366,7 @@ async fn admit_task(
     tx.start_transaction()
         .and_run2(async move |tx| {
             let result = Box::pin(async {
+                Box::pin(super::client_key::fence_call(&db, &call, tx)).await?;
                 let mut admission_fence = super::session::fence(&call);
                 admission_fence.extend(doc! {"live_slot":true,"end_requested":false,
                 "deadline":{"$gt":mongodb::bson::DateTime::now()}});

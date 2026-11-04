@@ -9075,30 +9075,17 @@ and personal connections without creating a thread, reserving funds, or authoriz
 a call. Supplying `conversation_id` retains the live thread and source checks above;
 call startup always reauthorizes the selected connection against its actual thread.
 
-Independently running devices can use their own ordinary Agent Key or login
-child credential when `assistant:voice-agent-key` is enabled (default off).
-The human owner first publishes one fixed Voice connection per personal Bot;
-the device Key must hold that exact connection under the existing service scope.
-Publishing a connection grants no Key. Calls retain the Bot's normal tool,
-confirmation and billing authority and bind the exact calling child credential.
-
-| Route | Contract |
-| --- | --- |
-| `GET, PUT /api/v1/assistant/nyxagent/agents/{id}/voice-service` | First-party human owner reads/publishes that Bot's connection. |
-| `GET /api/v1/assistant/nyxagent/voice/agents` | Discover only Bots with an authorized published connection. |
-| `POST /api/v1/assistant/nyxagent/voice/sessions` | Start with `agent_id`, `client_request_id`, `preferences` and `sdp_offer`; Key requires `proxy` scope. |
-| `GET /api/v1/assistant/nyxagent/voice/sessions/{sid}` | Read the exact caller's call. |
-| `POST /api/v1/assistant/nyxagent/voice/sessions/{sid}/control` | Existing revision/command controls; current connection grants remain mandatory. |
-| `GET /api/v1/assistant/nyxagent/voice/sessions/{sid}/stream` | Authenticated control WebSocket and bounded snapshots. |
-| `POST /api/v1/assistant/nyxagent/voice/sessions/{sid}/announcements` | Personal active Live call only: UUID `request_id` and nonblank `text` up to 300 UTF-8 bytes; duplicate text is idempotent, changed text conflicts. |
-
-Parent/sibling credentials cannot take over a child's call. Revocation is
-rechecked at admission, during calls and before queued work dispatch. Notifications
-are quoted provider commentary, never user transcripts or tool approval; accepted
-does not mean audibly played. Pending notifications expire after 30 seconds.
-See [Agent Key voice](chat/12-agent-key-voice.md) for publication, queue bounds,
-service policy and deployment requirements. Existing browser voice behavior and
-the first-party-only dictation boundary are retained.
+Devices use a published Bot Voice service with their own ordinary Agent Key.
+The human owner publishes a connection through
+`GET, PUT /api/v1/assistant/nyxagent/agents/{id}/voice-service` and grants its
+exact `UserService.id` through existing Key service scope. The service URL is
+`{BASE_URL}/api/v1/proxy/nyxbot-voice/{service_id}`; it exposes `/voice/options`,
+`/voice/sessions`, session status/control/stream and bounded announcements.
+Each connection fixes one Bot, and each call binds the actual login child
+credential. Existing browser routes remain first-party human only.
+See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
+independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
+work running; explicit Stop cancels it.
 
 Dictation adds two first-party human browser routes:
 

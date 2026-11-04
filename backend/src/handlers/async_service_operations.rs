@@ -25,48 +25,17 @@ async fn call(
     if credential.api_key_id != watch.api_key_id {
         return Err(denied());
     }
-    let cleanup = Some(name) == watch.contract.cancel_operation.as_deref()
-        || (watch.state == "cancelling" && name == watch.contract.status_operation);
-    if !cleanup
-        && let Some(request) = &watch.delivery.voice_request_id
-        && let Err(error) = crate::services::execution_source::Source::VoiceRequest(request)
-            .require(&state.db, &watch.user_id)
-            .await
-    {
-        if !crate::errors::access_denial::permanent_authority_failure(&error) {
-            return Err(error);
-        }
-        if let Some(request) = state
-            .db
-            .collection::<crate::models::assistant_voice::VoiceRequest>(
-                crate::models::assistant_voice::REQUESTS,
-            )
-            .find_one(doc! {"_id":request,"user_id":&watch.user_id})
-            .await?
-        {
-            crate::services::assistant_voice::cancel(
-                &state.db,
-                &watch.user_id,
-                &request.conversation_id,
-                &request.id,
-            )
-            .await?;
-        }
-        return Err(denied());
-    }
     let mut headers = HeaderMap::new();
     headers.insert(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = if watch.shared_execution.is_some() || watch.delivery.voice_request_id.is_some()
-    {
+    let mut auth = if watch.shared_execution.is_some() {
         let key =
             crate::services::key_service::get_api_key(&state.db, &watch.user_id, &watch.api_key_id)
                 .await?;
-        McpAuthContext::from_watch_auth(
-            crate::mw::auth::api_key_auth_user_for_watch(&state.db, &key, watch).await?,
-        )
+        let auth = crate::mw::auth::api_key_auth_user_for_watch(&state.db, &key, watch).await?;
+        McpAuthContext::from_watch_auth(auth)
     } else {
         authenticate_mcp(state, &headers, false)
             .await
@@ -372,13 +341,19 @@ pub(crate) async fn sweep(state: &AppState) -> crate::errors::AppResult<()> {
 }
 
 async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
+    use crate::errors::AppError;
     for _ in 0..8 {
         let Some(w) = watches::claim(&state.db).await? else {
             break;
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
-            Ok(Err(error)) if crate::errors::access_denial::permanent_authority_failure(&error) => {
+            Ok(Err(
+                AppError::Forbidden(_)
+                | AppError::Unauthorized(_)
+                | AppError::ApiKeyScopeForbidden(_)
+                | AppError::NotFound(_),
+            )) => {
                 watches::ready(&state.db, &w, None, "authority_lost", None).await?;
             }
             _ => watches::defer(&state.db, &w).await?,

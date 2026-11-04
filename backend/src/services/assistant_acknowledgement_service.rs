@@ -1503,33 +1503,6 @@ pub async fn for_key_with_access(
     key: Option<&str>,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<Option<ChatAuthority>> {
-    Box::pin(for_key_with_access_in(
-        db,
-        user,
-        key,
-        access,
-        ConversationAccess::Execution,
-    ))
-    .await
-}
-
-/// Recovery is server-only: the caller must already own the exact work lease or
-/// persisted acknowledgement origin. It permits cleanup, never new user effects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ConversationAccess {
-    Execution,
-    Recovery,
-}
-
-/// The server's exact async watch checks its causing voice request separately;
-/// this permits bounded cancellation after the originating device is revoked.
-pub(crate) async fn for_key_with_access_in(
-    db: &Database,
-    user: &str,
-    key: Option<&str>,
-    access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
-    mode: ConversationAccess,
-) -> AppResult<Option<ChatAuthority>> {
     let Some(key) = key else { return Ok(None) };
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
@@ -1569,14 +1542,6 @@ pub(crate) async fn for_key_with_access_in(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
-    if mode == ConversationAccess::Execution
-        && let Some(request) = conversation
-            .active_turn
-            .as_ref()
-            .and_then(super::execution_source::legacy_turn_request_id)
-    {
-        Box::pin(super::execution_source::Source::VoiceRequest(request).require(db, user)).await?;
-    }
     let resolved = if access.is_none() && agent.user_id != user {
         super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
     } else {
@@ -1692,33 +1657,6 @@ pub(crate) async fn fence(
     ApiKey,
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
-    Box::pin(fence_with_source(db, chat, session, None)).await
-}
-
-/// Recovery uses the persisted origin's source, never an unrelated later turn.
-pub(crate) async fn fence_origin(
-    db: &Database,
-    chat: &ChatAuthority,
-    source: Option<&str>,
-    session: &mut ClientSession,
-) -> AppResult<(
-    AssistantConversation,
-    ApiKey,
-    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
-)> {
-    Box::pin(fence_with_source(db, chat, session, Some(source))).await
-}
-
-async fn fence_with_source(
-    db: &Database,
-    chat: &ChatAuthority,
-    session: &mut ClientSession,
-    source: Option<Option<&str>>,
-) -> AppResult<(
-    AssistantConversation,
-    ApiKey,
-    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
-)> {
     super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
     if !super::assistant_invocation_service::fence_in_session(
         db,
@@ -1751,16 +1689,6 @@ async fn fence_with_source(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
-    if let Some(request) = source.unwrap_or_else(|| {
-        row.active_turn
-            .as_ref()
-            .and_then(super::execution_source::legacy_turn_request_id)
-    }) {
-        Box::pin(
-            super::execution_source::Source::VoiceRequest(request).fence(db, &row.user_id, session),
-        )
-        .await?;
-    }
     let key = db
         .collection::<ApiKey>(KEYS)
         .find_one(doc! {"_id": &chat.api_key_id, "user_id": &chat.user_id, "is_active": true})
@@ -2353,17 +2281,7 @@ async fn request_candidate_in_session(
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
-    let (conversation, _, access) = if let Some(origin) = origin {
-        Box::pin(fence_origin(
-            db,
-            chat,
-            origin.voice_request_id.as_deref(),
-            session,
-        ))
-        .await?
-    } else {
-        Box::pin(fence(db, chat, session)).await?
-    };
+    let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
     // Covers every permission kind, including machine/skill/scope
     // requests and internal callers without an auth snapshot.
     // Reuse the access already resolved or reused by the fence.
@@ -2452,8 +2370,7 @@ async fn request_candidate_in_session(
     row.voice_request_id = conversation
         .active_turn
         .as_ref()
-        .and_then(super::execution_source::legacy_turn_request_id)
-        .map(str::to_owned);
+        .and_then(|t| t.voice_request_id.clone());
     row.trigger_run_id = conversation
         .active_turn
         .as_ref()
@@ -3207,13 +3124,7 @@ pub(crate) async fn decide_in_session(
     // Decision requests have no inherited auth snapshot. The
     // transaction's fence resolves live membership, including for
     // cards created before delegation supported org specialists.
-    let (_, key, access) = Box::pin(fence_origin(
-        db,
-        &chat,
-        row.voice_request_id.as_deref(),
-        session,
-    ))
-    .await?;
+    let (_, key, access) = Box::pin(fence(db, &chat, session)).await?;
     if by_nyxbot && access.as_ref().is_some_and(|a| !a.can_maintain()) {
         return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
     }

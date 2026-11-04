@@ -207,7 +207,7 @@ pub async fn reserve_with_arguments(
             let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:super::execution_source::legacy_turn_request_id(turn).map(str::to_owned),voice_source_only:turn.voice_request_id.is_none() && turn.voice_source_request_id.is_some(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
+                DeliveryBinding{invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
             };
             // Never a parent operation's stored field wholesale.
             match super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|live| !live.stop_requested) {
@@ -575,7 +575,6 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             let event = AgentEvent {
-                voice_source_request_id: w.delivery.voice_request_id.clone(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,
@@ -792,7 +791,7 @@ pub fn apply_delivery(row: &mut AssistantConversation, w: &AsyncServiceOperation
                 .clone()
                 .unwrap_or(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly),
         );
-        super::execution_source::restore_delivery(&w.delivery, turn);
+        turn.voice_request_id = w.delivery.voice_request_id.clone();
         turn.trigger_run_id = w.delivery.trigger_run_id.clone();
         turn.also_deliver.clear();
     }
@@ -921,7 +920,7 @@ pub async fn bind_in_session(
             .clone()
             .unwrap_or(crate::models::assistant_conversation::PlatformReplyRouting::WebOnly),
     );
-    super::execution_source::restore_delivery(&w.delivery, turn);
+    turn.voice_request_id = w.delivery.voice_request_id.clone();
     turn.trigger_run_id = w.delivery.trigger_run_id.clone();
     // A bound event that disagrees with its carrier resolves to None.
     if turn.report_to.is_some()

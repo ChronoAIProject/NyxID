@@ -2253,34 +2253,23 @@ settles those checkpoints without reopening capture; conversational attach and
 control paths reject dictation sessions. No audio recording is stored. See the
 [voice architecture and transport contract](chat/11-voice.md).
 
-## Agent Key voice and remote notifications
+## Agent Key voice service
 
-The optional `assistant:voice-agent-key` feature reuses ordinary Key service
-scopes, published catalog operations and service approval policy. A human owner
-publishes a `nyxbot_voice` source connection bound to one personal Bot through
-`services/voice/binding.rs`; names and slugs never select authority. The fixed
-connection and endpoint cannot be retargeted by service editing. Creating a
-connection does not grant any device access.
+A human owner publishes an ordinary UserService bound to one personal Bot through
+server-owned `source=nyxbot_voice` and `source_id=Bot UUID`. The board Key receives
+that exact connection through existing service scope. The explicit service route
+`/api/v1/proxy/nyxbot-voice/{service_id}` authenticates that Key, checks the binding
+and invokes the existing Voice application. Browser routes keep their original
+first-party human authentication. No generic proxy target execution kind,
+MCP/Exact Service branch or device-source execution framework is introduced.
 
-`services/voice/client_key.rs` revalidates the parent Key, exact login child,
-Bot and connection throughout admission, control, provider runtime and deferred
-tasks. Additive optional `client_key` identities on VoiceSession and VoiceRequest
-retain legacy browser rows. Transaction fences serialize execution against
-revocation; async-watch cleanup can cancel revoked work without permitting new
-status/result execution. Voice continues through the existing provider, Bot
-tool authority, confirmation and billing paths.
-
-`assistant_voice_announcements` stores bounded, per-call remote notification
-text and processing states. An index supports call/queue lookup, and a TTL index
-expires records at the call deadline plus 24 hours. Unsent entries expire after
-30 seconds; each call allows four queued and 128 total. Dispatch is persisted
-before provider I/O, so an uncertain send is not replayed after a crash. Provider
-commentary acknowledges acceptance independently of audio playback. Snapshots
-expose the latest eight IDs and stages without text. Notifications never become
-user utterances or action approvals, and no provider credentials or audio are
-stored in the collection. Conversation deletion, settled call purging and the
-personal-erasure inventory remove the corresponding notification text. See
-[Agent Key voice](chat/12-agent-key-voice.md).
+VoiceSession binds the parent Key, actual login child, Bot and connection.
+Admission and runtime revalidate current permissions; revoked devices cannot
+continue audio or submit work. Accepted Bot tasks retain their existing lifetime
+independent of the call and use the Bot's own tool grants. Explicit Stop remains
+the cancellation operation. Speech notifications share the authorized call and
+are data, never permission or owner action-card decisions. Existing Voice usage
+and settlement own billing. See [Agent Key voice service](chat/12-agent-key-voice.md).
 
 ## Native channel mention admission
 

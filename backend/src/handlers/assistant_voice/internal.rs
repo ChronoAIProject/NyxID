@@ -1,13 +1,56 @@
-//! HTTP projection for NyxID's internal Voice service transport. The ordinary
-//! proxy still owns service admission, concurrency, metering and attribution.
+//! HTTP/WebSocket entry for a published Bot Voice connection. The service
+//! binding selects the Bot; the existing Voice runtime owns calls and billing.
 use super::*;
 use crate::services::voice::{application as app, execution};
 use axum::{
     body::Body,
-    extract::FromRequestParts,
+    extract::{FromRequestParts, Path, State},
     http::Request,
     response::{IntoResponse, Response},
 };
+
+pub(crate) async fn service_root(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(service_id): Path<String>,
+) -> AppResult<Response> {
+    auth.ensure_rest_proxy_access()?;
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth).await?;
+    execution::resolve(&state.db, &auth, &service_id).await?;
+    Err(AppError::NotFound(
+        "Select a Voice service operation".into(),
+    ))
+}
+
+pub(crate) async fn service_request(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((service_id, path)): Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    auth.ensure_rest_proxy_access()?;
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth).await?;
+    let method = request.method().clone();
+    let query = request.uri().query().map(str::to_owned);
+    let headers = request.headers().clone();
+    let (parts, body) = request.into_parts();
+    let bytes = crate::handlers::body_limit::read_body(body, 128 * 1024, "Voice service").await?;
+    // Preserve the original request parts, including Hyper's upgrade handle,
+    // while bounding the HTTP body for both ordinary and upgrade requests.
+    let request = Request::from_parts(parts, Body::from(bytes.clone()));
+    dispatch(
+        &state,
+        &auth,
+        &service_id,
+        method.as_str(),
+        &path,
+        query.as_deref(),
+        &bytes,
+        headers,
+        Some(request),
+    )
+    .await
+}
 
 fn body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> AppResult<T> {
     serde_json::from_slice(bytes)
@@ -26,7 +69,40 @@ pub(crate) async fn dispatch(
     headers: axum::http::HeaderMap,
     websocket: Option<Request<Body>>,
 ) -> AppResult<Response> {
-    let identity = execution::resolve(&state.db, auth, service_id).await?;
+    let caller = crate::services::voice::client_key::caller(&state.db, auth).await?;
+    let auth = &caller.auth;
+    let identity = execution::resolve_for_caller(&state.db, auth, service_id).await?;
+    let operation_path = format!("/{}", path.trim_start_matches('/'));
+    let is_websocket = headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
+    crate::services::voice::access::policy(
+        &state.db,
+        auth,
+        &identity.service,
+        method,
+        &operation_path,
+        is_websocket,
+    )
+    .await?;
+    // Only this boundary has the caller's actual inputs. Application and
+    // runtime rechecks must not substitute an empty request for them.
+    let canonical =
+        crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(&operation_path)?;
+    crate::services::agent_operation_scope_service::check_inputs(
+        &auth.assistant_operation_scopes,
+        &identity.service.id,
+        identity.service.catalog_service_id.as_deref(),
+        None,
+        method,
+        &canonical,
+        query,
+        bytes,
+        headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    )?;
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
 
     match (method, parts.as_slice()) {

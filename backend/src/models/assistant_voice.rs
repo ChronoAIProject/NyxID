@@ -60,8 +60,6 @@ pub struct VoiceRequest {
     /// Model-authored task provenance, distinct from the user's ASR captions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_task: Option<VoiceTaskSource>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_key: Option<super::assistant_voice_session::VoiceClientKey>,
     #[serde(default)]
     pub progress: Option<VoiceTaskProgress>,
     /// First observed offsets from the call start, never transcript or tool content.

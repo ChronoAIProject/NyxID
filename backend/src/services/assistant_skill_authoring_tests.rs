@@ -4643,33 +4643,6 @@ async fn allowed_unstarted_drafts_join_the_original_publication_without_another_
 }
 
 #[tokio::test]
-async fn persisted_voice_skill_card_rechecks_its_original_source_after_turn_replacement() {
-    let f = fixture("authoring_original_voice_source_loss").await;
-    let (_, mut card) = make(&f, input(&f.chat.agent_id)).await;
-    card.voice_request_id = Some(Uuid::new_v4().to_string());
-    // A later owner turn is unrelated and must not erase the card's source gate.
-    f.state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(doc! {"_id":&f.row.id},doc! {"$set":{
-            "active_turn.turn_id":Uuid::new_v4().to_string(),"active_turn.voice_request_id":bson::Bson::Null}}).await.unwrap();
-    assert!(matches!(
-        card_authority(&f.state.db, &f.owner, &card).await,
-        Err(AppError::ApiKeyScopeForbidden(_))
-    ));
-    f.state
-        .db
-        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
-        .replace_one(doc! {"_id":&card.id}, &card)
-        .await
-        .unwrap();
-    assert!(
-        acks::decide(&f.state.db, &f.owner, &card.conversation_id, &card.id, true)
-            .await
-            .is_err()
-    );
-    f.state.db.drop().await.unwrap();
-}
-
-#[tokio::test]
 async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_identity() {
     let f = fixture("authoring_orphan_recovery").await;
     let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;

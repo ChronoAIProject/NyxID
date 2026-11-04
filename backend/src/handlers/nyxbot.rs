@@ -3391,7 +3391,6 @@ async fn start_chat_turn(
         note.push_str(&telegram_input.note);
     }
     let start = TurnStart {
-        voice_source_request_id: None,
         owner_instruction_source: (!guest && private)
             .then_some(engine::OwnerInstructionSource::VerifiedPrivateChannel),
         media_event_ids: if guest {

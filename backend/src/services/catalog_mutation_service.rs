@@ -114,7 +114,6 @@ async fn check_parent(
         }
     }
     if write_fence {
-        super::catalog_reader_fence::invalidate(db, &live.id, session).await?;
         db.collection::<Document>(COLLECTION_NAME)
             .update_one(
                 doc! {"_id": &live.id},

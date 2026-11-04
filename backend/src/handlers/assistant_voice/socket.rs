@@ -80,6 +80,7 @@ pub async fn stream(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    super::super::login_client_context::require_first_party_human(&auth)?;
     open(state, auth, id, sid, headers, upgrade).await
 }
 
@@ -263,7 +264,7 @@ async fn serve(
                     }
                     Authority::Key => {
                         if let Err(error) = Box::pin(crate::services::voice::client_key::revalidate(&state.db,&call)).await {
-                            if crate::errors::access_denial::permanent_authority_failure(&error) {
+                            if crate::services::voice::client_key::permanent_authority_failure(&error) {
                                 crate::services::voice::client_key::end(&state.db,&call).await?;
                             }
                             return Err(error);

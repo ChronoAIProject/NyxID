@@ -373,11 +373,6 @@ impl AuthUser {
     }
 }
 
-/// Server-owned route metadata: this endpoint executes a granted service, rather
-/// than changing account configuration. HTTP callers cannot supply this marker.
-#[derive(Clone, Copy)]
-pub(crate) struct ServiceExecutionRoute;
-
 /// Name of the session cookie.
 pub const SESSION_COOKIE_NAME: &str = "nyx_session";
 
@@ -560,16 +555,6 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
         "scheduled_invocation API keys are restricted to durable proxy execution routes"
             .to_string(),
     ))
-}
-
-fn ensure_route_write_scope(auth: &AuthUser, parts: &Parts, path: &str) -> Result<(), AppError> {
-    if parts.extensions.get::<ServiceExecutionRoute>().is_some()
-        && auth.auth_method == AuthMethod::ApiKey
-    {
-        auth.ensure_rest_proxy_access()
-    } else {
-        auth.ensure_management_write_scope(&parts.method, path)
-    }
 }
 
 fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
@@ -873,16 +858,7 @@ pub(crate) async fn api_key_auth_user(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<AuthUser, AppError> {
-    api_key_auth_user_inner(
-        db,
-        key,
-        credential_id,
-        ip_address,
-        user_agent,
-        false,
-        crate::services::assistant_acknowledgement_service::ConversationAccess::Execution,
-    )
-    .await
+    api_key_auth_user_inner(db, key, credential_id, ip_address, user_agent, false).await
 }
 
 /// Server-only authentication for one leased watch. Never reachable from a
@@ -892,12 +868,6 @@ pub(crate) async fn api_key_auth_user_for_watch(
     key: &crate::models::api_key::ApiKey,
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
 ) -> Result<AuthUser, AppError> {
-    if key.id != watch.api_key_id
-        || key.user_id != watch.user_id
-        || !crate::services::async_service_operation::owns_lease(db, watch).await?
-    {
-        return Err(AppError::AssistantTurnRequired);
-    }
     let shared_resume = if let Some(binding) = &watch.shared_execution {
         if binding.actor != watch.user_id
             || binding.agent != watch.agent_id
@@ -916,22 +886,12 @@ pub(crate) async fn api_key_auth_user_for_watch(
     } else {
         false
     };
-    api_key_auth_user_inner(
-        db,
-        key,
-        None,
-        None,
-        None,
-        shared_resume,
-        crate::services::assistant_acknowledgement_service::ConversationAccess::Recovery,
-    )
-    .await
+    api_key_auth_user_inner(db, key, None, None, None, shared_resume).await
 }
 
-/// Resolve inference authority for one exact thread, including an idle thread.
-/// This is an internal capability loader, never HTTP/MCP authentication or a
-/// synthetic live turn that could authorize arbitrary service effects.
-pub(crate) async fn api_key_auth_user_for_thread_inference(
+/// Only voice's exact private-thread loader can use an idle key. This never
+/// enters the HTTP/MCP authentication paths or supplies a live turn.
+pub(crate) async fn api_key_auth_user_for_voice(
     db: &mongodb::Database,
     thread: &crate::models::assistant_conversation::AssistantConversation,
 ) -> Result<AuthUser, AppError> {
@@ -944,16 +904,8 @@ pub(crate) async fn api_key_auth_user_for_thread_inference(
         &thread.credential_api_key_id,
     )
     .await?;
-    let auth = api_key_auth_user_inner(
-        db,
-        &key,
-        None,
-        None,
-        None,
-        thread.shared_agent_thread,
-        crate::services::assistant_acknowledgement_service::ConversationAccess::Execution,
-    )
-    .await?;
+    let auth =
+        api_key_auth_user_inner(db, &key, None, None, None, thread.shared_agent_thread).await?;
     if auth.assistant_chat.as_ref().is_none_or(|chat| {
         chat.conversation_id != thread.id || chat.user_id != thread.user_id || chat.guest
     }) {
@@ -969,7 +921,6 @@ async fn api_key_auth_user_inner(
     ip_address: Option<String>,
     user_agent: Option<String>,
     shared_resume: bool,
-    conversation_access: crate::services::assistant_acknowledgement_service::ConversationAccess,
 ) -> Result<AuthUser, AppError> {
     crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
@@ -996,21 +947,14 @@ async fn api_key_auth_user_inner(
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
     let assistant_chat = if is_assistant_conversation_key_candidate(key) {
-        crate::services::assistant_acknowledgement_service::for_key_with_access_in(
+        crate::services::assistant_acknowledgement_service::for_key_with_access(
             db,
             &key.user_id,
             Some(&key.id),
             org_agent_access.as_ref(),
-            conversation_access,
         )
         .await
-        .map_err(|error| {
-            if crate::errors::access_denial::permanent_authority_failure(&error) {
-                AppError::Unauthorized("Invalid authentication credentials".to_string())
-            } else {
-                error
-            }
-        })?
+        .map_err(|_| AppError::Unauthorized("Invalid authentication credentials".to_string()))?
         .map(std::sync::Arc::new)
     } else {
         None
@@ -1240,7 +1184,10 @@ impl FromRequestParts<AppState> for AuthUser {
                                             request_path,
                                         )
                                         .await?;
-                                    ensure_route_write_scope(&auth_user, parts, request_path)?;
+                                    auth_user.ensure_management_write_scope(
+                                        &parts.method,
+                                        request_path,
+                                    )?;
                                     return Ok(auth_user);
                                 }
                                 Err(_) => return Err(jwt_err),
@@ -1705,7 +1652,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 auth_user
                     .ensure_conversation_key_route_if_enabled(&state.db, request_path)
                     .await?;
-                ensure_route_write_scope(&auth_user, parts, request_path)?;
+                auth_user.ensure_management_write_scope(&parts.method, request_path)?;
                 return Ok(auth_user);
             }
 
@@ -4601,36 +4548,6 @@ mod tests {
                 "{method:?} {path} should reject read-only API key auth"
             );
         }
-    }
-
-    #[test]
-    fn service_execution_classification_is_server_metadata_and_requires_proxy_scope() {
-        let path = "/api/v1/assistant/nyxagent/voice/sessions";
-        let (mut parts, _) = axum::http::Request::builder()
-            .method(Method::POST)
-            .uri(path)
-            .header("service-execution-route", "true")
-            .body(())
-            .unwrap()
-            .into_parts();
-        let proxy = test_auth_user(AuthMethod::ApiKey, "read proxy");
-        assert!(
-            ensure_route_write_scope(&proxy, &parts, path).is_err(),
-            "Headers cannot classify a route"
-        );
-        parts.extensions.insert(ServiceExecutionRoute);
-        assert!(ensure_route_write_scope(&proxy, &parts, path).is_ok());
-        assert!(
-            ensure_route_write_scope(
-                &test_auth_user(AuthMethod::ApiKey, "read write"),
-                &parts,
-                path
-            )
-            .is_err(),
-            "Account write does not grant service execution"
-        );
-        parts.extensions.remove::<ServiceExecutionRoute>();
-        assert!(ensure_route_write_scope(&proxy, &parts, "/api/v1/keys").is_err());
     }
 
     #[test]

@@ -16,7 +16,6 @@ use mongodb::{
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::announcements::ensure_indexes(db).await?;
-    super::super::catalog_reader_fence::ensure_indexes(db).await?;
     db.collection::<VoiceSession>(COLLECTION_NAME)
         .create_indexes([
             IndexModel::builder()

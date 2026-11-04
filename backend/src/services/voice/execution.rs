@@ -1,12 +1,30 @@
-//! A server-owned Voice connection selects the Bot for every ingress.
-//! The URL is a non-routable capability marker; execution stays in this instance.
+//! A server-owned Voice connection selects the Bot for the service ingress.
 use crate::{
     errors::{AppError, AppResult},
     models::user_service::UserService,
     mw::auth::AuthUser,
 };
 use mongodb::{Database, bson::doc};
-pub const INTERNAL_BASE_URL: &str = "https://nyxid.invalid/internal/nyxbot-voice";
+
+pub fn service_url(base_url: &str, service_id: &str) -> AppResult<String> {
+    let base = url::Url::parse(base_url)
+        .map_err(|_| AppError::ValidationError("Invalid NyxID base URL".into()))?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(AppError::ValidationError("Invalid NyxID base URL".into()));
+    }
+    let url = format!(
+        "{}/api/v1/proxy/nyxbot-voice/{service_id}",
+        base.as_str().trim_end_matches('/')
+    );
+    crate::services::user_endpoint_service::validate_endpoint_url(&url)?;
+    Ok(url)
+}
 
 pub struct Identity {
     pub service: UserService,
