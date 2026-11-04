@@ -4618,6 +4618,62 @@ async fn execute_resolved_proxy_inner<'a>(
         );
     }
 
+    // Only enrolled callers can carry coverage; skip body/header preparation
+    // entirely for everyone else (admit_http would return immediately).
+    if auth_user.execution_permission.is_some()
+        && machine_ingress.is_none()
+        && permission_ingress.is_none()
+        && !is_ws_candidate
+        && !shared_connect
+        && streaming_body.is_none()
+    {
+        let mut permission_body = force_stream_usage_for_service(
+            &target.service.slug,
+            path,
+            (!body_bytes.is_empty()).then(|| body_bytes.clone()),
+        )
+        .unwrap_or_default();
+        let mut permission_path = path.to_owned();
+        let mut permission_method = method_str.as_str();
+        let mut permission_headers = all_headers.clone();
+        if auth_user.execution_permission.is_some()
+            && target.service.slug == "llm-openai-codex"
+            && !is_pool_attempt
+            && target.target_id.is_none()
+            && is_codex_transport_path(path)
+            && !permission_body.is_empty()
+        {
+            use crate::services::llm_gateway_service::LlmTranslator;
+            let body = serde_json::from_slice(&permission_body)
+                .map_err(|_| AppError::BadRequest("Invalid model request".into()))?;
+            let translated =
+                chatgpt_translator::ChatgptTranslator.translate_request(path, &body)?;
+            permission_path = translated.path;
+            permission_method = "POST";
+            permission_body = serde_json::to_vec(&translated.body)
+                .map_err(|_| AppError::BadRequest("Invalid model request".into()))?
+                .into();
+            permission_headers = chatgpt_translator::execution_header_map();
+        }
+        crate::services::execution_permission_dispatch::admit_http(
+            state,
+            auth_user,
+            resolved_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &mut target,
+            permission_method,
+            &permission_path,
+            query.as_deref(),
+            &permission_body,
+            &permission_headers,
+            None,
+            &operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     let assistant_ack = all_headers
         .remove(crate::services::assistant_service_execution::ACK_HEADER)
         .and_then(|value| value.to_str().ok().map(str::to_owned));
@@ -4729,7 +4785,8 @@ async fn execute_resolved_proxy_inner<'a>(
         .unwrap_or(&approval_owner_user_id);
     let approval_requester_id = auth_user.approval_requester_id();
     let (approval_outcome, approval_auto) = box_proxy_future(|| {
-        approval_service::evaluate_for_chat(
+        crate::services::execution_permission_dispatch::approval(
+            auth_user.execution_permission.as_ref(),
             &state.db,
             &approval_owner_user_id,
             service_owner_for_approval,
@@ -4743,6 +4800,13 @@ async fn execute_resolved_proxy_inner<'a>(
         )
     })
     .await?;
+
+    let approval_outcome = crate::services::execution_permission_dispatch::approval_outcome(
+        auth_user.execution_permission.as_ref(),
+        service_owner_for_approval,
+        resolved_user_service_id.as_deref(),
+        approval_outcome,
+    );
 
     *assistant_approval_slot =
         crate::services::assistant_service_execution::HttpApprovalReceipt::new(
@@ -5834,6 +5898,51 @@ async fn execute_resolved_proxy_inner<'a>(
                     let target_admission_ms = *first_dispatch_admission_ms
                         .get_or_insert_with(|| elapsed_ms(exchange_started_at));
                     let downstream_started_at = std::time::Instant::now();
+                    if let Some(context) = &target.execution_request
+                        && let Err(error) = context.check_drain().await
+                    {
+                        state
+                            .billing
+                            .reject_before_send(
+                                &metered,
+                                "execution_enrollment_changed",
+                                had_dispatched_failure,
+                            )
+                            .await?;
+                        return Err(error);
+                    }
+                    if let Some(permit) = &target.execution_permission {
+                        let validation = async {
+                            permit.validate_effect(
+                                &target,
+                                &method_str,
+                                path,
+                                query.as_deref(),
+                                body.as_deref().unwrap_or_default(),
+                                &all_headers,
+                            )?;
+                            permit.before_send(&target).await
+                        }
+                        .await;
+                        if let Err(error) = validation {
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                durable_operation_grant_service::mark_send_rejected(
+                                    &state.db,
+                                    reservation,
+                                )
+                                .await;
+                            }
+                            state
+                                .billing
+                                .reject_before_send(
+                                    &metered,
+                                    "execution_permission_changed",
+                                    had_dispatched_failure,
+                                )
+                                .await?;
+                            return Err(error);
+                        }
+                    }
                     let result = if let Some(upload) = streaming_body.take() {
                         let mut parameters =
                             serde_json::to_value(&attempt_request).map_err(|_| {
@@ -5885,6 +5994,9 @@ async fn execute_resolved_proxy_inner<'a>(
                             )
                             .await
                     };
+                    if let Some(permit) = &target.execution_permission {
+                        permit.complete(result.is_ok()).await?;
+                    }
                     // A streamed body can exceed its limit after provider dispatch.
                     // Keep it on the normal failure path so durable grants record the
                     // uncertain outcome and the upload is never retried on another node.
@@ -6696,6 +6808,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             }),
                             Some(usage_complete),
                             billing_egress_permit,
+                            Some(&target),
                         )
                     }),
                 )
@@ -10033,6 +10146,8 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -12108,6 +12223,8 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -12143,6 +12260,8 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,

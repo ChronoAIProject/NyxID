@@ -702,6 +702,8 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.billing = Some(fixture_billing());
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

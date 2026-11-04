@@ -790,6 +790,7 @@ mod tests {
     fn user(id: &str, user_type: UserType, active: bool) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: id.to_string(),
             email: format!("{id}@example.com"),
             password_hash: user_type.is_person().then(|| "hash".to_string()),

@@ -48,6 +48,8 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        execution_enrolled: false,
+        execution_permission: None,
         mfa_assured: false,
         mfa_enabled: None,
         org_agent_access: None,
@@ -167,6 +169,8 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        execution_enrollment: false,
+        execution_parent: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -346,7 +350,7 @@ pub(crate) async fn owner_denial_decided(
     {
         return;
     }
-    let event = crate::models::assistant_acknowledgement::bind_continuation(
+    let mut event = crate::models::assistant_acknowledgement::bind_continuation(
         row.routing.as_ref(),
         team::event(
             "action_denied",
@@ -358,6 +362,7 @@ pub(crate) async fn owner_denial_decided(
             None,
         ),
     );
+    event.execution_task = row.execution_task.clone();
     notify(state, owner, &row.conversation_id, vec![event]).await;
 }
 
@@ -496,20 +501,14 @@ pub(crate) async fn after_turn(
             excerpt(text, 1200).replace('"', "'"),
             agent.id
         );
+        let mut completion_event = team::event("subagent_settled", note, Some(&agent.id))
+            .for_invocation(turn.invocation_id.as_deref());
+        completion_event.execution_task = turn.execution_task.clone();
         let queued = if published_assignment {
             // The exact assignment result was queued in the settlement transaction.
             Ok(None)
         } else {
-            engine::push_events(
-                &state.db,
-                owner,
-                &target,
-                vec![
-                    team::event("subagent_settled", note, Some(&agent.id))
-                        .for_invocation(turn.invocation_id.as_deref()),
-                ],
-            )
-            .await
+            engine::push_events(&state.db, owner, &target, vec![completion_event]).await
         };
         if queued.is_err() {
             if turn.delegated_images.assignment.is_some() {
@@ -719,10 +718,11 @@ pub(crate) async fn permission_decided(
     note.push(' ');
     note.push_str(acks::DECISION_NARRATION);
     if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
-        let event = crate::models::assistant_acknowledgement::bind_continuation(
+        let mut event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
             team::event("permission_decided", note, None),
         );
+        event.execution_task = request.execution_task.clone();
         Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
     if allowed
@@ -927,6 +927,7 @@ pub(crate) async fn assign(
     text: &str,
     report_to: Option<&str>,
     invocation_id: Option<&str>,
+    execution_parent: Option<&acks::ChatAuthority>,
 ) -> AppResult<Started> {
     if agent.user_id != owner {
         crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
@@ -947,6 +948,9 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: execution_parent
+                .and_then(crate::services::execution_permission_dispatch::tasks::parent),
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -1669,6 +1673,7 @@ async fn dispatch_specialists(
                                 task,
                                 Some(caller),
                                 chat.invocation_id.as_deref(),
+                                Some(chat),
                             ))
                             .await?,
                         ),
@@ -1695,6 +1700,7 @@ async fn dispatch_specialists(
                         text_arg(args, "text"),
                         Some(caller),
                         chat.invocation_id.as_deref(),
+                        Some(chat),
                     ))
                     .await?,
                 ),

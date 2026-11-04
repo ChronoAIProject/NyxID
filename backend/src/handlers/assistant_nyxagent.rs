@@ -2077,6 +2077,7 @@ pub async fn turns(
     let permit = state.direct_chat_limiter.admit(&user_id).await?;
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
+    start.execution_enrollment = auth.execution_enrolled;
     start.org_access = org_access;
     if super::login_client_context::require_first_party_human(&auth).is_ok() {
         start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
