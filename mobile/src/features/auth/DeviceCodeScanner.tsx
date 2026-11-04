@@ -15,7 +15,7 @@ import {
   type BarcodeScanningResult,
 } from "expo-camera";
 import { StatusBar } from "expo-status-bar";
-import { CameraOff, ChevronLeft } from "lucide-react-native";
+import { Camera, ChevronLeft } from "lucide-react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { PrimaryButton } from "../../components/PrimaryButton";
@@ -26,6 +26,7 @@ import {
   spacing,
   typeScale,
   TOUCH_TARGET,
+  fonts,
 } from "../../theme/designTokens";
 import { extractLoginRequestFromQr } from "./deviceUserCode";
 
@@ -187,13 +188,15 @@ export function DeviceCodeScanner({
         >
           <View style={styles.permissionCopy}>
             <View style={styles.permissionIcon}>
-              <CameraOff size={22} color={colors.textSecondary} />
+              <Camera size={34} color={colors.textPrimary} strokeWidth={1.75} />
             </View>
-            <Text style={styles.permissionTitle}>Camera access is off</Text>
+            <Text style={styles.permissionTitle}>
+              {canRequest ? "Allow Camera Access" : "Camera Access Is Off"}
+            </Text>
             <Text style={styles.permissionBody}>
               {canRequest
-                ? "Enable camera access to scan a NyxID login QR code. NyxID does not record audio."
-                : "Camera access is disabled for NyxID. Open camera settings to enable scanning."}
+                ? "Scan the QR code on your computer to sign it in. NyxID only uses the camera while this screen is open and never records audio."
+                : "Turn on Camera for NyxID in Settings to scan login QR codes."}
             </Text>
             {permissionError ? (
               <Text style={styles.permissionError}>{permissionError}</Text>
@@ -204,11 +207,11 @@ export function DeviceCodeScanner({
               label={
                 canRequest
                   ? permissionPending
-                    ? "Requesting access..."
-                    : "Enable camera"
+                    ? "Requesting Access…"
+                    : "Allow Camera"
                   : permissionPending
-                    ? "Opening settings..."
-                    : "Open camera settings"
+                    ? "Opening Settings…"
+                    : "Open Settings"
               }
               disabled={permissionPending}
               onPress={() =>
@@ -217,17 +220,19 @@ export function DeviceCodeScanner({
                   : handleOpenSettings())
               }
             />
-            <View style={styles.permissionDivider}>
-              <View style={styles.permissionDividerLine} />
-              <Text style={styles.permissionDividerText}>or</Text>
-              <View style={styles.permissionDividerLine} />
-            </View>
-            <PrimaryButton
-              label="Manually enter code"
-              kind="ghost"
+            {/* iOS pairs one filled action with a plain text alternative. */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Enter code manually"
               disabled={permissionPending}
               onPress={onManualEntry}
-            />
+              style={({ pressed }) => [
+                styles.textAction,
+                { opacity: permissionPending ? 0.4 : pressed ? 0.6 : 1 },
+              ]}
+            >
+              <Text style={styles.textActionLabel}>Enter Code Manually</Text>
+            </Pressable>
           </View>
         </View>
       </View>
@@ -249,7 +254,7 @@ export function DeviceCodeScanner({
       {header(true)}
       <View style={styles.scannerGuide} pointerEvents="none">
         <Text style={styles.cameraInstruction}>
-          Center the complete QR code inside the frame
+          Point at the QR code on your computer
         </Text>
         <View
           style={[styles.scanArea, { width: reticleSize, height: reticleSize }]}
@@ -363,29 +368,37 @@ const createStyles = (c: ThemeColors) =>
       alignItems: "center",
       gap: spacing.lg,
     },
+    // A large symbol in a soft circle, as in iOS permission screens.
     permissionIcon: {
-      width: 48,
-      height: 48,
-      borderRadius: radius.md,
+      width: 76,
+      height: 76,
+      borderRadius: 38,
       alignItems: "center",
       justifyContent: "center",
-      backgroundColor: c.ghostBg,
-      borderWidth: 1,
-      borderColor: c.border,
-      marginBottom: spacing.sm,
+      backgroundColor: c.segmentTrack,
+      marginBottom: spacing.md,
     },
     permissionTitle: {
-      ...typeScale.h2,
+      fontFamily: fonts.displaySemi,
+      fontSize: 24,
+      lineHeight: 30,
       color: c.textPrimary,
       textAlign: "center",
-      letterSpacing: 0,
     },
     permissionBody: {
-      ...typeScale.description,
+      fontFamily: fonts.body,
+      fontSize: 15,
+      lineHeight: 21,
       color: c.textSecondary,
       maxWidth: 320,
       textAlign: "center",
-      letterSpacing: 0,
+    },
+    textAction: { minHeight: 44, alignItems: "center", justifyContent: "center" },
+    textActionLabel: {
+      fontFamily: fonts.bodySemi,
+      fontSize: 15,
+      lineHeight: 20,
+      color: c.textPrimary,
     },
     permissionError: {
       ...typeScale.body,
@@ -398,21 +411,6 @@ const createStyles = (c: ThemeColors) =>
       maxWidth: 360,
       alignSelf: "center",
       gap: spacing.lg,
-    },
-    permissionDivider: {
-      flexDirection: "row",
-      alignItems: "center",
-    },
-    permissionDividerLine: {
-      flex: 1,
-      height: StyleSheet.hairlineWidth,
-      backgroundColor: c.border,
-    },
-    permissionDividerText: {
-      ...typeScale.small,
-      marginHorizontal: spacing.sm,
-      color: c.textMuted,
-      letterSpacing: 0,
     },
     cameraScreen: { flex: 1, backgroundColor: "#000000" },
     cameraShade: {
@@ -435,7 +433,8 @@ const createStyles = (c: ThemeColors) =>
       backgroundColor: "rgba(0,0,0,0.58)",
       paddingHorizontal: spacing.xxl,
       paddingVertical: spacing.sm,
-      borderRadius: radius.md,
+      // A capsule, like the system camera's code-scanning hint.
+      borderRadius: 999,
       overflow: "hidden",
     },
     scanArea: {

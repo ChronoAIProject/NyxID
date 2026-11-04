@@ -1,16 +1,15 @@
 import { useState } from "react";
-import { Switch, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { WorkspaceContentParamList } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
-  ActionButton,
-  Card,
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsGroup,
+  SettingsMenuRow,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { machinesApi } from "../../lib/api/machinesApi";
 import {
   confirmDiscard,
@@ -19,6 +18,7 @@ import {
   useMachineRuntime,
   useMachineWrite,
 } from "./MachineUI";
+import { machinePageContent, MachineSwitch } from "./MachinePresentation";
 import {
   updateInProgress,
   updateResultMessage,
@@ -26,38 +26,14 @@ import {
   type MachineUpdate,
 } from "./machineContracts";
 
-export function MachineSwitch({
-  label,
-  value,
-  disabled,
-  onChange,
-}: {
+const CONFIRMATION_OPTIONS = [
+  { value: "none", label: "No machine confirmation" },
+  { value: "changes", label: "Confirm changes" },
+  { value: "all", label: "Confirm every operation" },
+] as const satisfies readonly {
+  value: MachineNode["machine_confirm"];
   label: string;
-  value: boolean;
-  disabled?: boolean;
-  onChange: (value: boolean) => void;
-}) {
-  return (
-    <View
-      style={{
-        flexDirection: "row",
-        flexWrap: "wrap",
-        alignItems: "center",
-        gap: 12,
-        minHeight: 44,
-      }}
-    >
-      <Label style={{ flexGrow: 1, flexShrink: 1 }}>{label}</Label>
-      <Switch
-        accessibilityLabel={label}
-        value={value}
-        disabled={disabled}
-        onValueChange={onChange}
-        style={{ minHeight: 44 }}
-      />
-    </View>
-  );
-}
+}[];
 
 export function MachinePolicyScreen({
   navigation,
@@ -76,16 +52,29 @@ export function MachinePolicyScreen({
     retry: false,
   });
   return (
-    <WorkspacePage title="Owner policy and updates" showHeading={false}>
-      {query.isPending && <Label muted>Loading machine authority…</Label>}
+    <WorkspacePage
+      title="Owner policy and updates"
+      showHeading={false}
+      contentStyle={machinePageContent}
+    >
+      {query.isPending && (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          title
+          accessibilityLabel="Loading machine authority"
+        />
+      )}
       {query.error && (
         <>
           <Notice tone="error" message={machineError(query.error)} />
-          <ActionButton
-            label="Refresh machine authority"
-            variant="secondary"
-            onPress={() => void query.refetch()}
-          />
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              tone="action"
+              label="Refresh Machine Authority"
+              onPress={() => void query.refetch()}
+            />
+          </SettingsGroup>
         </>
       )}
       {query.data && !query.error && (
@@ -173,45 +162,53 @@ export function PolicyEditor({
   async function settled() {
     await client.invalidateQueries({ queryKey: machineKeys(write.epoch) });
   }
+  const savePolicy = () =>
+    void write.run(async (current) => {
+      await machinesApi.policy(
+        baseline,
+        {
+          machine_confirm: confirm,
+          allow_single_user_saved_logins: allow,
+          acknowledge_single_user_risk: ack,
+        },
+        current,
+      );
+      if (!current()) return;
+      setBaseline({
+        ...baseline,
+        machine_confirm: confirm,
+        allow_single_user_saved_logins: allow,
+      });
+      setAck(false);
+      setNotice(
+        "Owner policy saved. Automatic-update policy is saved separately.",
+      );
+      await settled();
+    });
   return (
     <>
-      <Card>
-        <Label>
-          {node.name} · {node.owner.display_name}
-        </Label>
-        <Label muted>
-          Owner policy does not change the local capability ceiling or any
-          agent's grant.
-        </Label>
-      </Card>
+      <SettingsGroup
+        inset={false}
+        footer="Owner policy does not change the local capability ceiling or any agent's grant."
+      >
+        <SettingsRow label="Machine" value={node.name} />
+        <SettingsRow label="Owner" value={node.owner.display_name} />
+      </SettingsGroup>
       {write.error && <Notice tone="error" message={write.error} />}
       {refreshError && <Notice tone="error" message={refreshError} />}
       {notice && <Notice message={notice} />}
-      <ActionButton
-        label="Reload policy and update status"
-        variant="secondary"
-        disabled={write.busy || !write.active}
-        onPress={() => confirmDiscard(dirty, () => void refresh())}
-      />
-      <Card>
-        <Label>Machine confirmation</Label>
-        {(
-          [
-            ["none", "No machine confirmation"],
-            ["changes", "Confirm changes"],
-            ["all", "Confirm every operation"],
-          ] as const
-        ).map(([value, label]) => (
-          <ActionButton
-            key={value}
-            label={`${confirm === value ? "Selected: " : ""}${label}`}
-            variant="secondary"
-            disabled={blocked}
-            onPress={() => setConfirm(value)}
-          />
-        ))}
+      <SettingsGroup title="Owner policy" inset={false}>
+        <SettingsMenuRow
+          label="Machine confirmation"
+          value={confirm}
+          options={CONFIRMATION_OPTIONS}
+          disabled={blocked}
+          onChange={setConfirm}
+        />
         <MachineSwitch
-          label="Allow saved-login typing on a single-user browser"
+          label="Saved-login typing"
+          detail="Allow on a single-user browser"
+          accessibilityLabel="Allow saved-login typing on a single-user browser"
           value={allow}
           disabled={blocked}
           onChange={(value) => {
@@ -219,86 +216,82 @@ export function PolicyEditor({
             setAck(false);
           }}
         />
-        {needsAck && (
-          <>
-            <Notice message="Commands run as the browser user. A misbehaving or prompt-injected agent could read typed values. Prefer a machine container or a VM with separate browser and agent users." />
+      </SettingsGroup>
+      {needsAck && (
+        <>
+          <Notice message="Commands run as the browser user. A misbehaving or prompt-injected agent could read typed values. Prefer a machine container or a VM with separate browser and agent users." />
+          <SettingsGroup inset={false}>
             <MachineSwitch
-              label="I acknowledge the risk of typed saved-login values being read"
+              label="I acknowledge the risk"
+              detail="Typed saved-login values could be read"
+              accessibilityLabel="I acknowledge the risk of typed saved-login values being read"
               value={ack}
               disabled={blocked}
               onChange={setAck}
             />
-          </>
-        )}
-        <ActionButton
-          label="Save owner policy"
-          loading={write.busy}
+          </SettingsGroup>
+        </>
+      )}
+      <SettingsGroup inset={false}>
+        <SettingsRow
+          tone="action"
+          label={write.busy ? "Saving…" : "Save Owner Policy"}
+          accessibilityLabel="Save owner policy"
           disabled={blocked || !policyDirty || (needsAck && !ack)}
-          onPress={() =>
-            void write.run(async (current) => {
-              await machinesApi.policy(
-                baseline,
-                {
-                  machine_confirm: confirm,
-                  allow_single_user_saved_logins: allow,
-                  acknowledge_single_user_risk: ack,
-                },
-                current,
-              );
-              if (!current()) return;
-              setBaseline({
-                ...baseline,
-                machine_confirm: confirm,
-                allow_single_user_saved_logins: allow,
-              });
-              setAck(false);
-              setNotice(
-                "Owner policy saved. Automatic-update policy is saved separately.",
-              );
-              await settled();
-            })
-          }
+          onPress={savePolicy}
         />
-      </Card>
+      </SettingsGroup>
       {update ? (
-        <Card>
-          <Label>
-            Updates: {update.current_version} → {update.target_version}
-          </Label>
-          <Label muted>
-            Phase: {update.phase} {update.code ?? ""}
-          </Label>
-          {update.guidance && <Label muted>{update.guidance}</Label>}
-          {update.updater_guidance && (
-            <Label muted>{update.updater_guidance}</Label>
-          )}
-          <MachineSwitch
-            label="Automatic machine updates"
-            value={automatic}
-            disabled={blocked}
-            onChange={setAutomaticDraft}
-          />
-          <ActionButton
-            label="Save automatic-update policy"
-            variant="secondary"
-            disabled={blocked || !automaticDirty}
-            onPress={() =>
-              void write.run(async (current) => {
-                await machinesApi.automatic(
-                  node,
-                  update.automatic,
-                  automatic,
-                  current,
-                );
-                if (!current()) return;
-                setAutomaticDraft(undefined);
-                setNotice(
-                  "Automatic-update policy saved. Owner policy is saved separately.",
-                );
-                await settled();
-              })
+        <>
+          <SettingsGroup
+            title="Updates"
+            inset={false}
+            footer={
+              [update.guidance, update.updater_guidance]
+                .filter(Boolean)
+                .join("\n\n") || undefined
             }
-          />
+          >
+            <SettingsRow
+              label="Current version"
+              value={update.current_version}
+            />
+            <SettingsRow label="Target version" value={update.target_version} />
+            <SettingsRow
+              label="Phase"
+              value={`${update.phase}${update.code ? ` · ${update.code}` : ""}`}
+            />
+            <MachineSwitch
+              label="Automatic machine updates"
+              value={automatic}
+              disabled={blocked}
+              onChange={setAutomaticDraft}
+            />
+          </SettingsGroup>
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              tone="action"
+              label="Save Automatic-Update Policy"
+              accessibilityLabel="Save automatic-update policy"
+              disabled={blocked || !automaticDirty}
+              onPress={() =>
+                void write.run(async (current) => {
+                  await machinesApi.automatic(
+                    node,
+                    update.automatic,
+                    automatic,
+                    current,
+                  );
+                  if (!current()) return;
+                  setAutomaticDraft(undefined);
+                  setNotice(
+                    "Automatic-update policy saved. Owner policy is saved separately.",
+                  );
+                  await settled();
+                })
+              }
+            />
+          </SettingsGroup>
           {!update.updater_ready && (
             <Notice message="This updater needs manual host steps. Open this machine on the web for verified instructions. Queuing guided update does not perform those steps." />
           )}
@@ -307,48 +300,68 @@ export function PolicyEditor({
               <Notice
                 message={`Update ${node.name} owned by ${node.owner.display_name} to ${update.target_version}? The machine may restart and interrupt current agent work. A manual step or failure can still be returned.`}
               />
-              <ActionButton
-                label="Confirm machine update"
-                variant="danger"
-                disabled={blocked}
-                onPress={() =>
-                  void write.run(async (current) => {
-                    const result = await machinesApi.update(
-                      node,
-                      update.target_version,
-                      current,
-                    );
-                    if (!current()) return;
-                    setConfirmUpdate(false);
-                    setNotice(updateResultMessage(result));
-                    await settled();
-                  })
-                }
-              />
-              <ActionButton
-                label="Cancel update"
-                variant="secondary"
-                disabled={write.busy}
-                onPress={() => setConfirmUpdate(false)}
-              />
+              <SettingsGroup inset={false}>
+                <SettingsRow
+                  centered
+                  destructive
+                  label="Confirm Machine Update"
+                  accessibilityLabel="Confirm machine update"
+                  disabled={blocked}
+                  onPress={() =>
+                    void write.run(async (current) => {
+                      const result = await machinesApi.update(
+                        node,
+                        update.target_version,
+                        current,
+                      );
+                      if (!current()) return;
+                      setConfirmUpdate(false);
+                      setNotice(updateResultMessage(result));
+                      await settled();
+                    })
+                  }
+                />
+              </SettingsGroup>
+              <SettingsGroup inset={false}>
+                <SettingsRow
+                  centered
+                  tone="action"
+                  label="Cancel Update"
+                  accessibilityLabel="Cancel update"
+                  disabled={write.busy}
+                  onPress={() => setConfirmUpdate(false)}
+                />
+              </SettingsGroup>
             </>
           ) : (
-            <ActionButton
-              label="Review machine update"
-              variant="secondary"
-              disabled={
-                blocked ||
-                !node.is_connected ||
-                !update.update_available ||
-                updateInProgress(update)
-              }
-              onPress={() => setConfirmUpdate(true)}
-            />
+            <SettingsGroup inset={false}>
+              <SettingsRow
+                tone="action"
+                label="Review Machine Update"
+                accessibilityLabel="Review machine update"
+                disabled={
+                  blocked ||
+                  !node.is_connected ||
+                  !update.update_available ||
+                  updateInProgress(update)
+                }
+                onPress={() => setConfirmUpdate(true)}
+              />
+            </SettingsGroup>
           )}
-        </Card>
+        </>
       ) : (
         <Notice message="Update status is unavailable. Owner policy can still be reviewed." />
       )}
+      <SettingsGroup inset={false}>
+        <SettingsRow
+          tone="action"
+          label="Reload Policy and Update Status"
+          accessibilityLabel="Reload policy and update status"
+          disabled={write.busy || !write.active}
+          onPress={() => confirmDiscard(dirty, () => void refresh())}
+        />
+      </SettingsGroup>
     </>
   );
 }

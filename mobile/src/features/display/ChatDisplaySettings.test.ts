@@ -29,13 +29,22 @@ function elements(root: Element): Element[] {
 }
 const style = (node: Element) =>
   Object.assign({}, ...[node.props.style].flat(Infinity).filter(Boolean));
-function setup(width = 402, fontScale = 3.12) {
-  let layout = { ...defaultChatLayout };
+
+function setup(
+  file: "./ChatDisplaySettings.tsx" | "./ChatLayoutEditScreen.tsx",
+  {
+    width = 402,
+    initial = defaultChatLayout,
+    key = "composerMaxHeight" as keyof ChatLayout,
+  } = {},
+) {
+  let layout = { ...initial };
+  const navigations: unknown[][] = [];
   const jsx = (
     type: unknown,
     props: Element["props"],
-    key?: number | string,
-  ) => ({ type, props, key });
+    elementKey?: number | string,
+  ) => ({ type, props, key: elementKey });
   const dynamicText = {};
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
@@ -44,11 +53,23 @@ function setup(width = 402, fontScale = 3.12) {
       Text: "Text",
       Pressable: "Pressable",
       StyleSheet: { create: (value: unknown) => value },
-      useWindowDimensions: () => ({ width, fontScale }),
+      useWindowDimensions: () => ({ width, fontScale: 1 }),
+    },
+    "@react-navigation/native": {
+      useNavigation: () => ({
+        navigate: (...args: unknown[]) => navigations.push(args),
+      }),
     },
     "lucide-react-native": { Minus: "Minus", Plus: "Plus" },
     "../../components/DynamicTypeText": dynamicText,
     "./ChatBubbleSettings": { ChatBubbleSettings: "ChatBubbleSettings" },
+    "./ChatPreview": { ChatPreview: "ChatPreview" },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsPage: "SettingsPage",
+      SettingsRow: "SettingsRow",
+    },
+    "../../theme/designTokens": { spacing: {}, typeScale: {} },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./ChatLayoutContext": {
       useChatLayout: () => ({
@@ -70,126 +91,78 @@ function setup(width = 402, fontScale = 3.12) {
       ),
     ),
   );
-  const { ChatDisplaySettings } = harness.load(
-    fileURLToPath(new URL("./ChatDisplaySettings.tsx", import.meta.url)),
-  ) as {
-    ChatDisplaySettings: () => Element;
-  };
-  harness.mount(ChatDisplaySettings);
+  const module = harness.load(
+    fileURLToPath(new URL(file, import.meta.url)),
+  ) as Record<string, (props: any) => Element>;
+  const Screen =
+    file === "./ChatDisplaySettings.tsx"
+      ? module.ChatDisplaySettings!
+      : module.ChatLayoutEditScreen!;
+  harness.mount(() => Screen({ route: { params: { key } } }));
   const all = () => elements(harness.value());
-  const button = (label: string) => {
-    const node = all().find((item) => item.props.accessibilityLabel === label);
+  const find = (label: string) => {
+    const node = all().find(
+      (item) =>
+        item.props.accessibilityLabel === label ||
+        (item.type === "SettingsRow" && item.props.label === label),
+    );
     assert.ok(node, label);
     return node;
   };
-  return {
-    harness,
-    all,
-    button,
-    layout: () => layout,
-    scale: (next: number) => {
-      fontScale = next;
-      harness.render();
-    },
-  };
+  return { harness, all, find, navigations, layout: () => layout };
 }
 
-test("large-text Display keeps labels and values scalable while step icons fit their accessible 44pt targets", () => {
-  for (const width of [320, 402, 800]) {
-    const env = setup(width);
-    const increase = env.button("Increase maximum composer height");
-    const decrease = env.button("Decrease maximum composer height");
-    for (const [button, glyph] of [
-      [increase, "Plus"],
-      [decrease, "Minus"],
-    ] as const) {
-      assert.equal(button.props.accessibilityRole, "button");
-      assert.equal(style(button).width, 44);
-      assert.equal(style(button).height, 44);
-      assert.equal(button.props.children.type, glyph);
-      assert.equal(button.props.children.props.size, 22);
-      assert.equal(button.props.children.props.accessible, false);
-    }
-    const label = env
-      .all()
-      .find((item) => item.props.children === "Maximum composer height")!;
-    assert.equal(style(label).width, "100%");
-    for (const node of env.all().filter((item) => item.type === "Text")) {
-      assert.notEqual(node.props.allowFontScaling, false);
-      assert.equal(node.props.maxFontSizeMultiplier, undefined);
-    }
-    increase.props.onPress();
-    env.harness.render();
-    assert.equal(env.layout().composerMaxHeight, 140);
-    env.button("Reset chat layout").props.onPress();
-    env.harness.render();
-    assert.equal(env.layout().composerMaxHeight, 120);
-    env.harness.unmount();
-  }
+test("chat layout values are rows with their value that open an edit page", () => {
+  const env = setup("./ChatDisplaySettings.tsx");
+  const composer = env.find("Maximum composer height");
+  assert.equal(composer.props.value, "120 pt");
+  composer.props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(env.navigations)), [
+    ["ChatLayoutEdit", { key: "composerMaxHeight" }],
+  ]);
+  assert.equal(
+    env.all().some((node) => node.props.label === "Chat column width"),
+    false,
+    "column width is offered only on wide screens",
+  );
+  assert.equal(
+    env.all().some((node) => node.props.label === "Reset Chat Layout"),
+    false,
+    "reset appears only once a value differs from its default",
+  );
+  env.harness.unmount();
+  const wide = setup("./ChatDisplaySettings.tsx", {
+    width: 800,
+    initial: { ...defaultChatLayout, composerMaxHeight: 200 },
+  });
+  assert.equal(wide.find("Chat column width").props.value, "758 pt");
+  wide.find("Reset Chat Layout").props.onPress();
+  assert.deepEqual(wide.layout(), defaultChatLayout);
+  wide.harness.unmount();
 });
 
-test("Display keeps bounds and column-width availability at standard text size", () => {
-  const env = setup(800, 1);
+test("the edit page steps within bounds with 44pt targets and offers a reset", () => {
+  const env = setup("./ChatLayoutEditScreen.tsx");
+  assert.ok(env.all().some((node) => node.type === "ChatPreview"));
+  const increase = () => env.find("Increase maximum composer height");
+  for (const button of [increase(), env.find("Decrease maximum composer height")]) {
+    const box = style({ ...button, props: { ...button.props, style: button.props.style({ pressed: false }) } });
+    assert.equal(box.width, 44);
+    assert.equal(box.height, 44);
+    assert.equal(button.props.accessibilityRole, "button");
+  }
   for (let step = 0; step < 20; step++) {
-    const button = env.button("Increase maximum composer height");
-    if (!button.props.disabled) button.props.onPress();
+    if (!increase().props.disabled) increase().props.onPress();
     env.harness.render();
   }
   assert.equal(env.layout().composerMaxHeight, 320);
+  assert.equal(increase().props.accessibilityState.disabled, true);
+  env.find("Reset to 120 pt").props.onPress();
+  env.harness.render();
+  assert.equal(env.layout().composerMaxHeight, 120);
   assert.equal(
-    env.button("Increase maximum composer height").props.accessibilityState
-      .disabled,
-    true,
-  );
-  assert.ok(env.button("Increase chat column width"));
-  env.harness.unmount();
-});
-
-test("live Display scaling refreshes text metrics while retaining row/control identity and preference state", () => {
-  const env = setup(800, 1);
-  env.button("Increase maximum composer height").props.onPress();
-  env.harness.render();
-  const identities = () =>
-    env
-      .all()
-      .filter((node) => node.type !== "Text")
-      .map((node) => [node.type, node.key]);
-  const before = identities();
-  assert.ok(
-    env
-      .all()
-      .filter((node) => node.type === "Text")
-      .every((node) => node.key === 1),
-  );
-  env.scale(2.143);
-  assert.deepEqual(
-    identities(),
-    before,
-    "card, rows, buttons and icons retain their React identity",
-  );
-  assert.ok(
-    env
-      .all()
-      .filter((node) => node.type === "Text")
-      .every((node) => node.key === 2.143),
-  );
-  assert.equal(env.layout().composerMaxHeight, 140);
-  env.button("Increase maximum composer height").props.onPress();
-  env.harness.render();
-  assert.equal(env.layout().composerMaxHeight, 160);
-  assert.ok(
-    env
-      .all()
-      .filter((node) => node.type === "Text")
-      .every((node) => node.key === 2.143),
-    "preference edits do not replace text again",
-  );
-  env.scale(1);
-  assert.ok(
-    env
-      .all()
-      .filter((node) => node.type === "Text")
-      .every((node) => node.key === 1),
+    env.all().some((node) => node.props.label === "Reset to 120 pt"),
+    false,
   );
   env.harness.unmount();
 });

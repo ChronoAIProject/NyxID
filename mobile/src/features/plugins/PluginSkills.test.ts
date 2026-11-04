@@ -3,6 +3,7 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as skillTypes from "./pluginSkillsTypes";
+import * as designTokens from "../../theme/designTokens";
 import type { AssistantAgent } from "../agents/agentContracts";
 import type { AssistantParams } from "../../app/navigationTypes";
 
@@ -16,7 +17,7 @@ type QueryOptions = {
 function elements(root: Element): Element[] {
   return [
     root,
-    ...[root.props.children]
+    ...[root.props.children, root.props.leading, root.props.accessory]
       .flat(Infinity)
       .flatMap((child) =>
         child && typeof child === "object" && "props" in child
@@ -98,6 +99,10 @@ function setup({
   let routeView = initialPage ? "versions" : "detail";
   const routes: { name: string; params: any }[] = [];
   const chats: AssistantParams[] = [];
+  const alerts: {
+    title: string;
+    buttons: { text: string; style?: string; onPress?: () => void }[];
+  }[] = [];
   const navigation = {
     push: (name: string, params: any) => {
       routes.push(JSON.parse(JSON.stringify({ name, params })));
@@ -194,6 +199,10 @@ function setup({
         currentState: "active",
         addEventListener: () => ({ remove: () => {} }),
       },
+      Alert: {
+        alert: (title: string, _message: string, buttons: never) =>
+          alerts.push({ title, buttons }),
+      },
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "@react-navigation/native": {
@@ -217,6 +226,7 @@ function setup({
         "BookOpen",
         "Check",
         "ChevronDown",
+        "ChevronsUpDown",
         "ChevronLeft",
         "ChevronRight",
         "X",
@@ -226,12 +236,14 @@ function setup({
       SafeAreaProvider: "SafeAreaProvider",
       SafeAreaView: "SafeAreaView",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice"].map((name) => [
-        name,
-        name,
-      ]),
+      ["Label", "Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
     "../../components/workspace/WorkspaceSelectionField": {
       WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
     },
@@ -252,7 +264,7 @@ function setup({
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": {
       useTheme: () => ({ colors: { primaryTone: {} } }),
     },
@@ -299,6 +311,7 @@ function setup({
     state,
     routes,
     chats,
+    alerts,
     navigation: navigation.push,
     elements: () => elements(harness.flush()),
     manager: () => manager!,
@@ -331,11 +344,11 @@ function setup({
   };
 }
 
-test("manager defaults to Added, passes descriptions and exact pin state, and keeps catalog disabled", () => {
+test("manager shows Added and the catalog together, passes descriptions and exact pin state, and debounces search", () => {
   const env = setup();
   try {
     const library = env.library().props;
-    assert.equal(library.tab, "added");
+    assert.equal("tab" in library, false, "no nested Added/Discover selector");
     assert.equal(library.query, "");
     assert.equal(library.agentName, "Nyx Bot");
     assert.equal(library.added.items[0].id, "pin-original");
@@ -346,7 +359,7 @@ test("manager defaults to Added, passes descriptions and exact pin state, and ke
     assert.equal(library.added.items[0].version, "1.0.0");
     assert.equal(library.added.items[0].disabled, false);
     assert.equal(library.added.known, true);
-    assert.equal(env.queries.get("catalog")?.enabled, false);
+    assert.equal(env.queries.get("catalog")?.enabled, true);
     library.onQueryChange("DNS words");
     env.harness.flush();
     assert.equal(env.library().props.query, "DNS words");
@@ -362,33 +375,23 @@ test("manager defaults to Added, passes descriptions and exact pin state, and ke
   }
 });
 
-test("Added and Discover retain separate search inputs and clear only their own scope", (t) => {
+test("one search filters Added locally and drives the debounced catalog search", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const env = setup();
   try {
-    env.library().props.onQueryChange("local DNS");
-    env.harness.flush();
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
-    assert.equal(env.library().props.query, "");
-    assert.equal(env.queries.get("catalog")?.enabled, true);
     env.library().props.onQueryChange("weekly report");
     env.harness.flush();
-    t.mock.timers.tick(300);
-    env.harness.flush();
-    env.library().props.onTabChange("added");
-    env.harness.flush();
-    assert.equal(env.library().props.query, "local DNS");
-    assert.equal(env.queries.get("catalog")?.enabled, false);
-    env.library().props.onQueryChange("");
-    env.harness.flush();
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     assert.equal(env.library().props.query, "weekly report");
+    assert.equal(env.queries.get("catalog")?.enabled, false);
+    t.mock.timers.tick(300);
+    env.harness.flush();
+    assert.equal(env.queries.get("catalog")?.enabled, true);
+    assert.equal(env.queries.get("catalog")?.queryKey[4], "weekly report");
     env.library().props.onQueryChange("");
     env.harness.flush();
     t.mock.timers.tick(300);
     env.harness.flush();
+    assert.equal(env.library().props.query, "");
     assert.equal(env.queries.get("catalog")?.queryKey[4], "");
     assert.equal(env.queries.get("catalog")?.enabled, true);
   } finally {
@@ -400,8 +403,6 @@ test("Discover debounces by 300ms, hides stale results, resets paging and calls 
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const env = setup();
   try {
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     env.library().props.onPageChange(3);
     env.harness.flush();
     env.library().props.onQueryChange("  week  ");
@@ -436,11 +437,9 @@ test("Discover debounces by 300ms, hides stale results, resets paging and calls 
   }
 });
 
-test("pagination is part of the server query and catalog requests stop when unfocused or on Added", () => {
+test("pagination is part of the server query and catalog requests stop when unfocused", () => {
   const env = setup();
   try {
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     env.library().props.onPageChange(2);
     env.harness.flush();
     assert.equal(env.queries.get("catalog")?.queryKey[5], 2);
@@ -451,9 +450,6 @@ test("pagination is part of the server query and catalog requests stop when unfo
     assert.equal(env.queries.get(first.id)?.enabled, false);
     env.focused(true);
     assert.equal(env.queries.get("catalog")?.enabled, true);
-    env.library().props.onTabChange("added");
-    env.harness.flush();
-    assert.equal(env.queries.get("catalog")?.enabled, false);
   } finally {
     env.unmount();
   }
@@ -486,8 +482,6 @@ test("manager reports query failure and unknown data separately from an empty li
     assert.ok(env.library().props.added.error);
     assert.equal(env.library().props.added.items.length, 0);
     env.library().props.added.onRetry();
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     assert.equal(env.library().props.catalog.known, false);
     assert.ok(env.library().props.catalog.error);
     env.library().props.catalog.onRetry();
@@ -533,7 +527,6 @@ test("skills agent sheet applies a new keyed manager and Cancel preserves the cu
   try {
     assert.equal(explicit.library().props.agentName, "DNS helper");
     assert.equal(explicit.library().props.query, "");
-    assert.equal(explicit.library().props.tab, "added");
     assert.equal(explicit.library().props.added.items.length, 0);
     assert.equal(explicit.queries.get(second.id)?.enabled, true);
   } finally {
@@ -597,8 +590,6 @@ test("skills choices exclude unavailable agents and discard drafts when route, o
 test("catalog review opens original identity without mutating and exact attach retains revision plus sibling pins", async () => {
   const env = setup();
   try {
-    env.library().props.onTabChange("discover");
-    env.harness.flush();
     env
       .library()
       .props.onOpenSkill(
@@ -674,9 +665,7 @@ test("skill detail is read-only with version choice, newest supported pin and ag
     assert.ok(
       env
         .elements()
-        .some(
-          (row) => row.props.children === "To change this skill, ask NyxBot.",
-        ),
+        .some((row) => row.props.footer === "To change this skill, ask NyxBot."),
     );
     env.state.get("versions").data.items = [
       { ...version, version: "deprecated", deprecated: true },
@@ -702,7 +691,23 @@ test("skill detail is read-only with version choice, newest supported pin and ag
       name: "dns-helper",
     });
     env.control("Remove from agent").props.onPress();
-    env.control("Confirm remove from agent").props.onPress();
+    assert.equal(
+      env.calls.filter((call) => call.method === "write").length,
+      0,
+      "removal waits for the system confirmation",
+    );
+    const confirm = env.alerts.at(-1)!;
+    assert.equal(confirm.title, "Remove from agent?");
+    assert.deepEqual(
+      JSON.parse(
+        JSON.stringify(confirm.buttons.map((button) => [button.text, button.style])),
+      ),
+      [
+        ["Cancel", "cancel"],
+        ["Remove", "destructive"],
+      ],
+    );
+    confirm.buttons[1]!.onPress!();
     await env.harness.settle();
     const written = env.calls.find((call) => call.method === "write")!;
     assert.equal(written.args[0], first.id);
@@ -744,7 +749,9 @@ test("skill guidance opens a fresh normal NyxBot chat while retaining the exact 
 test("skill details distinguish loading or failed pin reads from a known unattached skill and retry only that read", async () => {
   const env = setup();
   const text = (value: string) =>
-    env.elements().some((item) => item.props.children === value);
+    env
+      .elements()
+      .some((item) => item.props.children === value || item.props.value === value);
   try {
     const query = env.state.get(first.id);
     Object.assign(query, { data: undefined, isPending: true });
@@ -788,7 +795,14 @@ test("skill details distinguish loading or failed pin reads from a known unattac
 test("cached pin details survive refresh and a failed refresh blocks pin changes until a successful read", async () => {
   const env = setup();
   const text = (value: string) =>
-    env.elements().some((item) => item.props.children === value);
+    env
+      .elements()
+      .some(
+        (item) =>
+          item.props.children === value ||
+          item.props.value === value ||
+          item.props.label === value,
+      );
   try {
     env.library().props.onOpenSkill("pin-original", "dns-helper");
     const query = env.state.get(first.id);
@@ -862,25 +876,33 @@ test("the latest pinned version is badged and does not offer a redundant latest 
       { ...version, version: "1.0.0", sha256: "sha-original" },
     ];
     env.harness.render();
-    assert.ok(
-      env
-        .elements()
-        .some(
-          (row) =>
-            typeof row.type === "function" && row.type.name === "LatestBadge",
-        ),
-    );
+    assert.equal(env.control("Pinned version").props.detail, "Latest version");
     assert.throws(() => env.control("Use latest (v1.0.0)"));
     env.control("Choose exact version").props.onPress();
-    assert.ok(
-      env
-        .elements()
-        .some(
-          (row) =>
-            typeof row.type === "function" && row.type.name === "LatestBadge",
-        ),
-    );
+    assert.equal(env.control("Select version 1.0.0").props.value, "Latest");
     assert.equal(env.calls.filter((call) => call.method === "write").length, 0);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("first loads show skeletons and a background catalog refetch keeps cached results without a loader", () => {
+  const env = setup();
+  try {
+    Object.assign(env.state.get("catalog")!, { isFetching: true });
+    env.harness.render();
+    assert.equal(env.library().props.catalog.loading, false);
+    assert.equal(env.library().props.catalog.items.length, 1);
+    Object.assign(env.state.get("agents")!, { data: undefined, isPending: true });
+    env.harness.render();
+    const skeleton = env
+      .elements()
+      .find((item) => item.props.accessibilityLabel === "Loading agents for skills");
+    assert.equal(skeleton?.type, "SkeletonRows");
+    assert.equal(
+      env.elements().some((item) => item.type === "ActivityIndicator"),
+      false,
+    );
   } finally {
     env.unmount();
   }

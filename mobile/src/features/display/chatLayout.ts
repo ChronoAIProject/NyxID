@@ -57,3 +57,8 @@ export function transcriptColumnStyle(
     paddingHorizontal: TRANSCRIPT_SIDE_PADDING,
   };
 }
+
+/** Row and page titles for each chat layout value. */
+export function chatLayoutTitle(key: keyof ChatLayout) {
+  return key === "columnWidth" ? "Chat column width" : "Maximum composer height";
+}

@@ -30,13 +30,13 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
 import { GrantCard } from "../../components/GrantCard";
 import { OfflineBanner } from "../../components/OfflineBanner";
+import { SkeletonRows } from "../../components/Skeleton";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mobileApi } from "../../lib/api/mobileApi";
 import {
   getDecisionErrorMessage,
   formatGrantDuration,
 } from "./challengeUiState";
-import { PrimaryButton } from "../../components/PrimaryButton";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
@@ -86,7 +86,7 @@ export function ActivityScreen() {
   const activeSegmentRef = useRef(activeSegment);
   activeSegmentRef.current = activeSegment;
   const [isPullRefreshing, setIsPullRefreshing] = useState(false);
-  const [isRefreshRunning, setIsRefreshRunning] = useState(false);
+  const [isHeaderRefreshing, setIsHeaderRefreshing] = useState(false);
   const [isUserRefreshRunning, setIsUserRefreshRunning] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
@@ -360,7 +360,6 @@ export function ActivityScreen() {
         return refreshInFlightRef.current;
       }
 
-      setIsRefreshRunning(true);
       const refreshPromise = (async () => {
         let shouldRefreshAllSegments = source === "signal";
         let shouldRunAgain = false;
@@ -391,7 +390,6 @@ export function ActivityScreen() {
         }
       })().finally(() => {
         refreshInFlightRef.current = null;
-        setIsRefreshRunning(false);
       });
 
       refreshInFlightRef.current = refreshPromise;
@@ -464,12 +462,14 @@ export function ActivityScreen() {
     if (startedUserRefresh) {
       setIsUserRefreshRunning(true);
     }
+    setIsHeaderRefreshing(true);
     try {
       await handleRefresh("user");
     } finally {
       if (startedUserRefresh) {
         setIsUserRefreshRunning(false);
       }
+      setIsHeaderRefreshing(false);
     }
   }, [handleRefresh]);
 
@@ -494,9 +494,9 @@ export function ActivityScreen() {
     }
   }, [recheckConnection, handleRefresh]);
 
-  // Passive backstop polls deliberately stay invisible. Only refreshes started
-  // by the user or approval signal own the header/pull refresh feedback.
-  const isRefreshing = isRefreshRunning || isPullRefreshing;
+  // Passive backstop polls and approval-signal refreshes stay invisible. Only
+  // the user's own Refresh tap or pull owns the refresh feedback.
+  const isRefreshing = isHeaderRefreshing || isPullRefreshing;
 
   const sortedActiveItems = [...activeItems].sort(
     (a, b) =>
@@ -577,22 +577,26 @@ export function ActivityScreen() {
                 busy: isRefreshing,
               }}
               disabled={isManualRefreshDisabled}
+              hitSlop={4}
               onPress={() => {
                 void handleHeaderRefresh();
               }}
-              style={styles.refreshButton}
+              style={[
+                styles.refreshButton,
+                isManualRefreshDisabled && styles.disabled,
+              ]}
             >
               {isRefreshing ? (
                 <ActivityIndicator color={colors.primary} />
               ) : (
-                <RefreshCw size={21} color={colors.primary} />
+                <RefreshCw size={20} color={colors.primary} />
               )}
             </Pressable>
           </View>
           <FlatList
             data={sortedActiveItems}
             keyExtractor={(item) => item.id}
-            renderItem={({ item }) => {
+            renderItem={({ item, index = 0 }) => {
               const loaded = [
                 ...(queryClient.getQueryData<ServiceConnection[]>([
                   "workspace",
@@ -613,6 +617,8 @@ export function ActivityScreen() {
               return (
                 <GrantCard
                   grant={item}
+                  first={index === 0}
+                  last={index === sortedActiveItems.length - 1}
                   iconSlug={
                     connection?.catalog_service_slug ??
                     connection?.slug ??
@@ -626,39 +632,42 @@ export function ActivityScreen() {
             }}
             ListHeaderComponent={
               approvalsQuery.isError ? (
-                <View style={styles.queryNotice}>
+                <View accessibilityRole="alert" style={styles.queryNotice}>
                   <Text style={styles.subtitle}>
                     Could not load active grants. Displayed grants may be out of
                     date.
                   </Text>
-                  <PrimaryButton
-                    label="Retry active grants"
-                    kind="ghost"
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry active grants"
+                    accessibilityState={{ disabled: !isConnected }}
                     disabled={!isConnected}
                     onPress={() => {
                       void approvalsQuery.refetch();
                     }}
-                  />
+                    style={[styles.textButton, !isConnected && styles.disabled]}
+                  >
+                    <Text style={styles.linkText}>Retry</Text>
+                  </Pressable>
                 </View>
               ) : null
             }
             ListEmptyComponent={
               !isConnected ? (
-                <View style={styles.queryNotice}>
-                  <Text style={styles.subtitle}>
+                <View style={styles.emptyCell}>
+                  <Text style={styles.emptyDescription}>
                     Connect to check active grants.
                   </Text>
                 </View>
               ) : approvalsQuery.isPending ? (
-                <ActivityIndicator
+                <SkeletonRows
+                  rows={3}
                   accessibilityLabel="Loading active grants"
-                  color={colors.primary}
-                  style={styles.loadingFooter}
                 />
               ) : !approvalsQuery.isError ? (
-                <View style={styles.queryNotice}>
+                <View style={styles.emptyCell}>
                   <Text style={styles.emptyTitle}>No active grants</Text>
-                  <Text style={styles.subtitle}>
+                  <Text style={styles.emptyDescription}>
                     Reusable grants appear after you approve a grant-mode
                     request.
                   </Text>
@@ -666,7 +675,6 @@ export function ActivityScreen() {
               ) : null
             }
             contentContainerStyle={styles.listContent}
-            ItemSeparatorComponent={() => <View style={styles.separator} />}
             onEndReached={() => {
               if (
                 approvalsQuery.hasNextPage &&
@@ -702,42 +710,58 @@ export function ActivityScreen() {
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
     header: {
-      paddingHorizontal: spacing.xxl,
-      paddingTop: spacing.sm,
-      minHeight: 41,
+      paddingHorizontal: spacing.xxl + spacing.xxl,
+      paddingTop: spacing.lg,
+      paddingBottom: spacing.sm,
       flexDirection: "row",
       alignItems: "flex-start",
       justifyContent: "space-between",
-      gap: spacing.lg,
+      gap: spacing.sm,
     },
     headerCopy: {
       flex: 1,
-      gap: spacing.xxs,
+      paddingTop: spacing.xs,
     },
     subtitle: {
       ...typeScale.label,
       color: c.textSecondary,
-      marginBottom: spacing.md,
     },
+    // Borderless 44pt icon target; the tint carries the affordance.
     refreshButton: {
       width: 44,
       height: 44,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      borderColor: c.border,
-      backgroundColor: c.ghostBg,
+      marginTop: -spacing.md,
+      marginRight: -spacing.md,
       alignItems: "center",
       justifyContent: "center",
     },
+    disabled: { opacity: 0.45 },
     listContent: {
       paddingHorizontal: spacing.xxl,
+      paddingTop: spacing.sm,
       paddingBottom: spacing.huge,
     },
-    separator: {
-      height: spacing.sm,
+    queryNotice: { paddingHorizontal: spacing.xxl, paddingBottom: spacing.sm },
+    textButton: {
+      minHeight: 44,
+      justifyContent: "center",
+      alignItems: "flex-start",
     },
-    queryNotice: { paddingVertical: spacing.xxl, gap: spacing.sm },
+    linkText: { ...typeScale.label, color: c.primaryOnTint },
+    emptyCell: {
+      backgroundColor: c.card,
+      borderRadius: radius.lg,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.xxl,
+      alignItems: "center",
+      gap: spacing.sm,
+    },
     emptyTitle: { ...typeScale.bodyStrong, color: c.textPrimary },
+    emptyDescription: {
+      ...typeScale.label,
+      color: c.textSecondary,
+      textAlign: "center",
+    },
     loadingFooter: {
       paddingVertical: spacing.xl,
     },

@@ -105,13 +105,30 @@ function setup(
     snapshot?: VoiceSnapshot;
     error?: string;
     recovery?: VoiceStartRecovery;
+    reducedMotion?: boolean;
+    actions?: unknown;
+    actionCount?: number;
   } = {},
 ) {
   const events: unknown[][] = [];
   let focused = true;
   let online = true;
   let browserFails = false;
-  const environment = { origin: "https://nyx.example", epoch: 7 };
+  const environment = {
+    origin: "https://nyx.example",
+    epoch: 7,
+    api: {
+      savePreferences: async (preferences: VoicePreferences) => {
+        events.push(["save", preferences.input_mode]);
+      },
+    },
+  };
+  const levels = {
+    input: { value: 0 },
+    output: { value: 0 },
+    speaking: false,
+    media: undefined as unknown,
+  };
   const voice = {
     media: { id: 1 },
     mediaAttempt: 1,
@@ -142,6 +159,10 @@ function setup(
     },
     muteSpeaker: (value: boolean) => {
       events.push(["speaker", value]);
+    },
+    setInputMode: (mode: string) => {
+      events.push(["mode", mode]);
+      return true;
     },
     resumeAudio: async () => {
       events.push(["resume"]);
@@ -176,6 +197,8 @@ function setup(
     onReview: (id?: string) => {
       events.push(["review", id]);
     },
+    actions: input.actions,
+    actionCount: input.actionCount,
   };
   const harness = hookHarness<Element>({
     "../../../components/workspace/useNativeSheetDismiss": {
@@ -185,7 +208,7 @@ function setup(
       }),
     },
     "../../../lib/accessibility/useReducedMotion": {
-      useReducedMotion: () => false,
+      useReducedMotion: () => input.reducedMotion ?? false,
     },
     "react/jsx-runtime": {
       Fragment: "Fragment",
@@ -207,12 +230,26 @@ function setup(
           "Modal",
           "Pressable",
           "ScrollView",
-          "Switch",
           "Text",
           "View",
         ].map((name) => [name, name]),
       ),
       StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
+      useWindowDimensions: () => ({ width: 390, height: 844 }),
+      Animated: {
+        View: "Animated.View",
+        Value: class {
+          setValue() {}
+          interpolate() {
+            return 0;
+          }
+        },
+        spring: () => ({ start() {}, stop() {} }),
+        timing: () => ({ start() {}, stop() {} }),
+      },
+    },
+    "react-native-safe-area-context": {
+      useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
     },
     "@react-navigation/native": { useIsFocused: () => focused },
     "expo-web-browser": {
@@ -225,19 +262,32 @@ function setup(
       useQuery: ({ queryKey }: { queryKey: unknown[] }) =>
         queryKey.includes("voice-options") ? query.options : query.settings,
     },
+    "expo-linear-gradient": { LinearGradient: "LinearGradient" },
     "lucide-react-native": Object.fromEntries(
       [
         "ChevronDown",
         "ChevronLeft",
+        "ChevronUp",
+        "MessageSquareText",
+        "X",
         "Mic",
         "MicOff",
-        "Minus",
+        "Ellipsis",
         "PhoneOff",
         "Volume2",
         "VolumeX",
-        "X",
       ].map((name) => [name, name]),
     ),
+    "../ChatComposer": { ChatComposerFrame: "ComposerFrame" },
+    "../../../components/workspace/ScrollEdgeFades": {
+      ScrollEdgeFades: "ScrollEdgeFades",
+      useScrollEdges: () => ({
+        edges: { start: false, end: false },
+        layout() {},
+        content() {},
+        scroll() {},
+      }),
+    },
     "../../../components/workspace/WorkspaceSheetSurface": {
       WorkspaceSheetSurface: "SheetSurface",
     },
@@ -255,11 +305,21 @@ function setup(
     },
     "../../../theme/ThemeContext": {
       useTheme: () => ({
-        colors: { primaryTone: { bg: "pink", border: "pink" } },
+        colors: {
+          primaryTone: { bg: "pink", border: "pink" },
+          warningTone: { bg: "amber", text: "amber-text" },
+        },
       }),
     },
     "../../../theme/designTokens": { fonts: {} },
     "./useNativeVoice": { useNativeVoice: () => voice },
+    "./useVoiceLevels": {
+      useVoiceLevels: (media: unknown) => {
+        levels.media = media;
+        return levels;
+      },
+    },
+    "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
     "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
   });
   const component = harness.load(
@@ -276,6 +336,7 @@ function setup(
     harness,
     events,
     voice,
+    levels,
     query,
     all,
     text: () =>
@@ -293,6 +354,7 @@ function setup(
           (row.type === "ActionButton" && row.props.label === label),
       ),
     modal: () => one((row) => row.type === "Modal").props,
+    aura: () => one((row) => row.type === "VoiceAura").props,
     media: () => one((row) => row.type === "VoiceMediaBridge"),
     setFocused: (value: boolean) => {
       focused = value;
@@ -419,13 +481,8 @@ test("Grok forces Hold to talk even when the saved microphone mode was automatic
     "push_to_talk",
   );
   assert.equal(f.events[0]?.[2], "xai_realtime");
-  f.button("Microphone: Hold to talk").props.onPress();
-  assert.equal(
-    f
-      .all()
-      .some((row) => row.props.accessibilityLabel?.startsWith("Automatic")),
-    false,
-  );
+  assert.match(f.text(), /Hold to talk/);
+  assert.doesNotMatch(f.text(), /Hands-free/);
   f.harness.unmount();
 });
 
@@ -470,25 +527,15 @@ test("voice never exposes source or configuration selectors, and starts with the
   f.harness.unmount();
 });
 
-test("minimizing releases push-to-talk before hiding the sheet and keeps the media owner mounted", () => {
+test("closing voice releases push-to-talk and ends the call", () => {
   const f = setup({ active: true });
   f.voice.holding = true;
-  const media = f.media();
-  f.button("Minimize voice call").props.onPress();
-  assert.deepEqual(f.events, [["hold", false]]);
-  assert.equal(f.modal().visible, false);
-  assert.equal(f.media().key, media.key);
-  assert.equal(f.media().props.media, media.props.media);
-  f.button("Restore voice call").props.onPress();
-  assert.equal(f.modal().visible, true);
-  assert.equal(
-    f.events.some(([event]) => event === "end"),
-    false,
-  );
+  f.button("End voice and close").props.onPress();
+  assert.deepEqual(f.events, [["hold", false], ["end"], ["close"]]);
   f.harness.unmount();
 });
 
-test("reviewing an approval releases held audio and leaves both the call and task running", () => {
+test("reviewing an approval scrolls the chat to it and keeps the call and task running", () => {
   const f = setup({
     active: true,
     snapshot: {
@@ -505,12 +552,13 @@ test("reviewing an approval releases held audio and leaves both the call and tas
     },
   });
   f.voice.holding = true;
+  f.button("Show agent tasks").props.onPress();
+  f.harness.render();
   f.button("Review in chat").props.onPress();
   assert.deepEqual(f.events, [
     ["hold", false],
     ["review", "ack-1"],
   ]);
-  assert.equal(f.modal().visible, false);
   assert.equal(
     f.events.some(([event]) => event === "end" || event === "stopTask"),
     false,
@@ -544,19 +592,9 @@ test("a new call gets a fresh media engine while ordinary updates preserve its o
   f.harness.unmount();
 });
 
-test("native Back returns from a picker before dismissing the voice surface", () => {
+test("closing voice before a call returns to the message composer", () => {
   const f = setup();
-  f.button("Voice: Cedar").props.onPress();
-  f.button("Back to voice call");
-  f.modal().onRequestClose();
-  assert.equal(
-    f
-      .all()
-      .some((row) => row.props.accessibilityLabel === "Back to voice call"),
-    false,
-  );
-  assert.deepEqual(f.events, []);
-  f.modal().onRequestClose();
+  f.button("Close voice").props.onPress();
   assert.deepEqual(f.events, [["end"], ["close"]]);
   f.harness.unmount();
 });
@@ -577,6 +615,8 @@ test("closing the surface ends the call while Stop task calls only the cancellat
       ],
     },
   });
+  f.button("Show agent tasks").props.onPress();
+  f.harness.render();
   f.button("Stop task").props.onPress();
   assert.deepEqual(f.events, [["stopTask", serviceId]]);
   f.button("End voice and close").props.onPress();
@@ -601,6 +641,47 @@ test("push-to-talk disables input during server muting and exposes accessible pr
   f.harness.unmount();
 });
 
+test("hold to talk names itself under the mic, mutes with a mute symbol and runs no call timer; hands-free is a phone call", () => {
+  const walkie = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+  });
+  const labels = walkie.all().map((row) => row.props?.accessibilityLabel);
+  assert.equal(
+    labels.some((label) => String(label ?? "").startsWith("Call time")),
+    false,
+    "no call length while waiting to talk",
+  );
+  const nodes = walkie.all();
+  const hold = nodes.findIndex((row) => row.props?.accessibilityLabel === "Hold to talk");
+  const hint = nodes.findIndex(
+    (row, index) =>
+      index > hold &&
+      row.type === "Text" &&
+      [row.props.children].flat().includes("Hold to talk"),
+  );
+  assert.ok(hold >= 0 && hint > hold, "the instruction follows the microphone");
+  const mute = nodes.find((row) => row.props?.accessibilityLabel === "Mute microphone")!;
+  assert.ok(
+    [mute.props.children].flat(Infinity).some((child: any) => child?.type === "MicOff"),
+    "the left control is a mute symbol, not a second mic",
+  );
+  assert.doesNotMatch(walkie.text(), /Audio is sent only/, "details stay collapsed");
+  walkie.harness.unmount();
+  const phone = setup({ active: true });
+  assert.ok(
+    phone
+      .all()
+      .some((row) => String(row.props?.accessibilityLabel ?? "").startsWith("Call time")),
+  );
+  assert.ok(phone.all().some((row) => row.type === "PhoneOff"), "End hangs up");
+  assert.doesNotMatch(phone.text(), /Talk any time|Resume audio/, "no helpers once connected");
+  phone.button("Call options").props.onPress();
+  phone.harness.render();
+  assert.ok(phone.button("No sound? Resume audio"), "helpers live in the ⋯ menu");
+  phone.harness.unmount();
+});
+
 test("loss of connectivity ends local voice and disables starting until the app reconnects", () => {
   const f = setup();
   f.setOnline(false);
@@ -614,5 +695,216 @@ test("loss of connectivity ends local voice and disables starting until the app 
       ),
     true,
   );
+  f.harness.unmount();
+});
+
+test("the voice composer's animated bubble follows listening, speaking and thinking", () => {
+  const f = setup({ active: true });
+  assert.equal(f.levels.media, f.voice.media);
+  assert.equal(f.aura().phase, "listening");
+  assert.equal(f.aura().input, f.levels.input);
+  assert.equal(f.aura().output, f.levels.output);
+  assert.equal(f.aura().reducedMotion, false);
+  assert.match(f.text(), /Listening/);
+  f.levels.speaking = true;
+  f.harness.render();
+  assert.equal(f.aura().phase, "speaking");
+  assert.match(f.text(), /Speaking/);
+  f.levels.speaking = false;
+  f.voice.snapshot = {
+    ...snapshot,
+    captions: [
+      {
+        id: "caption-1",
+        speaker: "user",
+        text: "Summarise my inbox",
+        sealed: true,
+        complete: true,
+      },
+    ],
+  };
+  f.harness.render();
+  assert.equal(f.aura().phase, "thinking");
+  assert.match(f.text(), /Thinking/);
+  f.harness.unmount();
+});
+
+test("Reduce Motion reaches the aura", () => {
+  const f = setup({ active: true, reducedMotion: true });
+  assert.equal(f.aura().reducedMotion, true);
+  f.harness.unmount();
+});
+
+test("round call controls mute the microphone and speaker and End closes the call", () => {
+  const f = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+  });
+  f.button("Mute microphone").props.onPress();
+  f.button("Mute speaker").props.onPress();
+  const hold = f.button("Hold to talk");
+  hold.props.onPressIn();
+  hold.props.onPressOut();
+  f.button("End voice and close").props.onPress();
+  assert.deepEqual(f.events, [
+    ["mute", true],
+    ["speaker", true],
+    ["hold", true],
+    ["hold", false],
+    ["end"],
+    ["close"],
+  ]);
+  f.harness.unmount();
+});
+
+test("automatic mode has no hold button and the call shows no in-call pickers", () => {
+  const f = setup({ active: true });
+  assert.equal(
+    f.all().some((row) => row.props.accessibilityLabel === "Hold to talk"),
+    false,
+  );
+  assert.equal(
+    f
+      .all()
+      .some((row) =>
+        /^(Voice|Microphone):/.test(row.props.accessibilityLabel ?? ""),
+      ),
+    false,
+  );
+  f.harness.unmount();
+});
+
+test("before a call the screen names the saved voice and mode, set in Settings", () => {
+  const f = setup();
+  assert.match(f.text(), /Cedar voice/);
+  assert.match(f.text(), /Hands-free/);
+  assert.match(f.text(), /Settings › Voice/);
+  assert.match(f.text(), /Ready to talk/);
+  assert.equal(f.aura().phase, "resting");
+  f.harness.unmount();
+});
+
+test("captions scroll as one live transcript without a Show all toggle", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      captions: ["one", "two", "three"].map((text, index) => ({
+        id: `caption-${index}`,
+        speaker: index % 2 ? ("assistant" as const) : ("user" as const),
+        text,
+        sealed: true,
+        complete: index < 2,
+      })),
+    },
+  });
+  const text = f.text();
+  assert.match(text, /one/);
+  assert.match(text, /two/);
+  assert.match(text, /three/);
+  assert.doesNotMatch(text, /Show all|Show latest/);
+  f.harness.unmount();
+});
+
+test("in a call tasks are tucked into a chip that opens the full list", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "claimed",
+          pending_acknowledgement_ids: [],
+          title: "Read messages",
+        },
+        {
+          id: sessionId,
+          turn_id: "turn-2",
+          state: "awaiting_confirmation",
+          pending_acknowledgement_ids: ["ack-2"],
+          title: "Send reply",
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /Needs your OK/, "the chip flags the task waiting on you");
+  assert.doesNotMatch(f.text(), /Agent tasks · 2/, "the list stays tucked away");
+  assert.equal(
+    f.all().some((row) => row.props.label === "Stop task"),
+    false,
+  );
+  f.button("Show agent tasks").props.onPress();
+  f.harness.render();
+  assert.match(f.text(), /Agent tasks · 2/);
+  assert.ok(f.button("Review in chat"));
+  f.button("Stop task").props.onPress();
+  assert.equal(
+    f.button("Hide agent tasks").props.accessibilityState.expanded,
+    true,
+  );
+  assert.deepEqual(f.events, [["stopTask", serviceId]]);
+  f.harness.unmount();
+});
+
+test("a call without tasks shows no tasks tray", () => {
+  const f = setup({ active: true });
+  assert.doesNotMatch(f.text(), /Agent tasks/);
+  f.harness.unmount();
+});
+
+test("voice is a composer with the animated bubble on top, not a page over the chat", () => {
+  const idle = setup();
+  assert.equal(idle.all().some((row) => row.type === "Modal"), false);
+  const frame = idle.all().find((row) => row.type === "ComposerFrame")!;
+  assert.ok(frame, "it takes the message composer's place");
+  assert.ok(idle.all().some((row) => row.type === "VoiceAura"), "the aura around the composer");
+  assert.match(idle.text(), /我的助手/);
+  assert.equal(idle.button("Start voice").props.disabled, false);
+  idle.harness.unmount();
+  // Hands-free: the microphone in the middle, End on the right.
+  const f = setup({ active: true });
+  f.button("Mute microphone").props.onPress();
+  f.button("End voice and close").props.onPress();
+  assert.deepEqual(f.events, [["mute", true], ["end"], ["close"]]);
+  f.harness.unmount();
+});
+
+
+test("the call switches between Hands-free and Hold to talk in place and remembers it", async () => {
+  const f = setup({ active: true });
+  assert.equal(f.button("Hands-free mode").props.accessibilityState.selected, true);
+  f.button("Hold to talk mode").props.onPress();
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events.slice(0, 2), [
+    ["mode", "push_to_talk"],
+    ["save", "push_to_talk"],
+  ]);
+  // Hold to talk is now the centre control and the toggle reflects it.
+  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
+  f.harness.unmount();
+  // Before a call the choice is only saved, for the call about to start.
+  const idle = setup();
+  idle.button("Hold to talk mode").props.onPress();
+  await idle.harness.settle();
+  assert.deepEqual(idle.events, [["save", "push_to_talk"]]);
+  idle.harness.unmount();
+});
+
+test("Grok keeps Hold to talk and offers no mode toggle", () => {
+  const f = setup({
+    active: true,
+    source: {
+      ...source,
+      voice: { ...source.voice, protocol: "xai_realtime", usage_source: "server_measured" },
+    },
+  });
+  assert.equal(
+    f.all().some((row) => row.props.accessibilityLabel === "Hands-free mode"),
+    false,
+  );
+  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
   f.harness.unmount();
 });

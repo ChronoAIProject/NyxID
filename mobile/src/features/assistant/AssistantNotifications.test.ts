@@ -31,6 +31,14 @@ function render(
       View: "View",
       Pressable: "Pressable",
       AppState: { currentState: "active" },
+      Animated: {
+        Value: class {
+          stopAnimation() {}
+        },
+        createAnimatedComponent: (component: unknown) => component,
+        timing: () => ({ start: (done?: () => void) => done?.() }),
+        spring: () => ({ start: () => undefined }),
+      },
     },
     "lucide-react-native": {
       X: "X",
@@ -51,6 +59,10 @@ function render(
         },
       }),
     },
+    "../../lib/accessibility/useReducedMotion": {
+      useReducedMotion: () => false,
+    },
+    "../../components/workspace/FirstLineIcon": { FirstLineIcon: "FirstLineIcon" },
     "../../components/workspace/WorkspaceUI": {
       Card: "Card",
       Label: "Label",

@@ -110,21 +110,21 @@ export function billingError(
       return {
         title: "Not enough credits",
         message:
-          "There aren't enough credits to run this turn. Add credits in Billing & Usage, then try again.",
+          "There aren't enough credits to run this turn. Check your balance in Usage & credits.",
         openBilling: true,
       };
     case "wallet_suspended":
       return {
         title: "Billing wallet suspended",
         message:
-          "Your billing wallet is suspended. Contact support or check Billing & Usage.",
+          "Your billing wallet is suspended. Contact support or check Usage & credits.",
         openBilling: true,
       };
     case "plan_entitlement_required":
       return {
         title: "Service not included in your plan",
         message:
-          "Your plan does not include this service. Check your plan in Billing & Usage.",
+          "Your plan does not include this service. Check your plan in Usage & credits.",
         openBilling: true,
       };
     case "billing_not_configured":
