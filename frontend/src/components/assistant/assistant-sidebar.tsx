@@ -631,7 +631,7 @@ function AgentsSection({
     // NyxBot pinned first; the server already orders the rest.
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
-    <div data-tour="agents" className="space-y-0.5">
+    <div className="space-y-0.5">
       {agentOwnerSections(visible).map((section) => (
         <section key={section.id} aria-label={`${section.label} agents`}>
           <OwnerLabel>{section.label} agents</OwnerLabel>

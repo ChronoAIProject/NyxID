@@ -22,9 +22,16 @@ interface Placement {
 
 function place(element: HTMLElement, cardHeight: number): Placement {
   const box = element.getBoundingClientRect();
-  // Long lists (the sidebar) are spotlit from their top, not end to end.
-  const height = Math.min(box.height, window.innerHeight * 0.4);
-  const rect = { top: box.top, left: box.left, width: box.width, height };
+  // Keep the spotlight on screen, so a full-height target (the sidebar) is
+  // outlined whole.
+  const shownTop = Math.max(box.top, PAD);
+  const shownLeft = Math.max(box.left, PAD);
+  const rect = {
+    top: shownTop,
+    left: shownLeft,
+    width: Math.min(box.right, window.innerWidth - PAD) - shownLeft,
+    height: Math.min(box.bottom, window.innerHeight - PAD) - shownTop,
+  };
   const hole = {
     top: rect.top - PAD,
     left: rect.left - PAD,

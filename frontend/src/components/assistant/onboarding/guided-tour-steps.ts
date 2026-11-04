@@ -18,9 +18,9 @@ export const ASSISTANT_TOUR: readonly TourStep[] = [
     body: "One click hands a step to NyxBot. Dismiss the ones you don't need.",
   },
   {
-    target: "agents",
-    title: "NyxBot and your specialists",
-    body: "NyxBot is your chief of staff. Specialists you create appear here too; open one to chat with it directly.",
+    target: "sidebar",
+    title: "Your workspace",
+    body: "NyxBot, your chief of staff, sits here with the specialists you create and all of your chats. Open an agent to talk to it directly. Automations, Machines, Plugins and Approvals are here as well.",
   },
   {
     target: "create-agent",

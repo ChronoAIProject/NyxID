@@ -87,7 +87,9 @@ for (const [name, run] of Object.entries(CLIPS)) {
       window.__nyxidAssistantHttpFaults = faults;
     }, FAULTS[name]);
   }
-  await page.goto(`${base}/assistant?mock=1&nyxbot=1`);
+  // Start in an empty NyxBot chat: the home greets the fixture user by name,
+  // and the clips are shown to every user.
+  await page.goto(`${base}/assistant?mock=1&nyxbot=1&draft=true`);
   await page.getByRole("textbox", { name: /Message NyxBot/ }).first().waitFor({ timeout: 30_000 });
   await page.waitForTimeout(800);
   // Only the chat slab: the transcript and composer, not the sidebar.
