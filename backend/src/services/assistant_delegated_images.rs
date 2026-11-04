@@ -119,6 +119,22 @@ pub async fn publish_in_session(
     let Some(edge) = &message.delegated_images.assignment else {
         return Ok(None);
     };
+    // Durable automation handoff owns this notification. Its retry reads the
+    // exact saved reply and carries the image assignment on the same run event.
+    // Terminal receipts must never fall back to an ordinary unbound notice.
+    if db
+        .collection::<Document>(crate::models::assistant_direct_handoff::COLLECTION_NAME)
+        .find_one(
+            doc! {"_id":&edge.source_turn,"user_id":&edge.actor,"child_thread_id":&edge.source_conversation,
+            "child_turn_id":&edge.source_turn},
+        )
+        .projection(doc! {"_id":1})
+        .session(&mut *tx)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
     // A cancelled invocation must still settle its source turn, but cannot
     // publish a continuation. Match the existing invocation event producer.
     if !super::assistant_invocation_service::fence_in_session(
@@ -484,7 +500,18 @@ pub async fn consume_wait(
         if row.guest_turn || row.is_subagent() || engine::live_turn(&row, Utc::now()).is_none() { return Err(AppError::AssistantTurnRequired) }
         // Only consume results for this live coordinator's server-derived run.
         // Ordinary owner waits must preserve unrelated queued automation replies.
-        let run_id = row.active_turn.as_ref().and_then(|t| t.trigger_run_id.as_deref());
+        let active_run = row.active_turn.as_ref().and_then(|t| t.trigger_run_id.as_deref());
+        let run_id = if let Some(run) = active_run {
+            let saved = db.collection::<Document>(crate::models::trigger_run::COLLECTION_NAME)
+                .find_one(doc! {"_id":run,"user_id":owner,"thread_id":conversation})
+                .projection(doc! {"continuation_protocol_version":1}).session(&mut *tx).await?
+                .ok_or(AppError::AssistantTurnRequired)?;
+            match saved.get("continuation_protocol_version") {
+                None | Some(bson::Bson::Int32(0)) | Some(bson::Bson::Int64(0)) => None,
+                Some(bson::Bson::Int32(2)) | Some(bson::Bson::Int64(2)) => Some(run),
+                _ => return Err(AppError::AssistantTurnRequired),
+            }
+        } else { None };
         let events: Vec<_> = row.pending_events.iter().filter(|e| e.kind == "subagent_settled" && e.trigger_run_id.as_deref() == run_id && e.agent_id.as_ref().is_some_and(|id| agents.contains(id))).cloned().collect();
         adopt_in_session(db, tx, &mut row, &events).await?;
         let mut results = Vec::new();

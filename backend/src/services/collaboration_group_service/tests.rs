@@ -2896,6 +2896,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
     let mut items = Vec::new();
     for delivery in [true, false] {
         let mut image = image::AssistantAttachment {
+            artifact: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             origin: "tool".into(),
             user_id: f.member.clone(),
@@ -2915,6 +2916,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
             .await
             .unwrap();
         items.push(TurnAttachment {
+            artifact: Default::default(),
             id: image.id,
             origin: "tool".into(),
             content_type: "image/png".into(),

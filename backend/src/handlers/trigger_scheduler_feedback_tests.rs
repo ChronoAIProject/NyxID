@@ -1045,3 +1045,129 @@ async fn automation_stop_cleanup_failure_cannot_block_actual_turn_stop() {
         .unwrap();
     server.abort();
 }
+
+// Main's delegated image publication and durable automation handoffs share one
+// run-bound notification; waits preserve work belonging to other runs.
+#[tokio::test]
+async fn automation_direct_image_wait_preserves_mixed_runs_and_recovers_once() {
+    use crate::services::assistant_delegated_images as images;
+    let (state, _, server) = setup("automation_direct_image_wait").await;
+    let (_, run, parent) = Box::pin(completion_coordinator(&state)).await;
+    let agent = specialist(&state).await;
+    let home = team::home_thread_for(&state.db, &state.encryption_keys, OWNER, &agent).await.unwrap();
+    let parent_turn = &parent.active_turn.as_ref().unwrap().turn_id;
+    let mut start = completion_start(&home.id, TurnOrigin::Orchestrator, None);
+    start.report_to = Some(parent.id.clone());
+    start.automation_parent = Some(schedules::direct::Parent {
+        run_id: run.id.clone(), thread_id: parent.id.clone(), turn_id: parent_turn.clone(),
+    });
+    let child = Box::pin(engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)).await.unwrap();
+    let child_turn = &child.active_turn.as_ref().unwrap().turn_id;
+    let attachment_id = Uuid::new_v4().to_string();
+    let attachment = crate::models::assistant_attachment::AssistantAttachment {
+        secret_context_versions: Default::default(), artifact: Default::default(),
+        id: attachment_id.clone(), origin: "tool".into(), user_id: OWNER.into(),
+        conversation_id: child.id.clone(), turn_id: child_turn.clone(), content_type: "image/png".into(),
+        size: 8, data_encrypted: state.encryption_keys.encrypt(b"pixels-0").await.unwrap(), created_at: Utc::now(),
+    };
+    state.db.collection(crate::models::assistant_attachment::COLLECTION_NAME).insert_one(attachment).await.unwrap();
+    let metadata = crate::models::assistant_conversation::TurnAttachment {
+        artifact: Default::default(), id: attachment_id.clone(), origin: "tool".into(),
+        content_type: "image/png".into(), size: 8, label: "camera".into(), pages: None,
+        chat_delivery: Some(true), image_input: None, image_input_reason: None, image_inspection: None,
+    };
+    state.db.collection::<Document>(CONVERSATIONS).update_one(doc! {"_id":&child.id},
+        doc! {"$push":{"active_turn.attachments":bson::to_bson(&metadata).unwrap()}}).await.unwrap();
+    Box::pin(engine::finish_turn(&state.db, &child, &child.credential_api_key_id, &Uuid::new_v4().to_string(),
+        &engine::TurnResult {text:"Specialist image result".into(),session_id:None,response_id:None,error:None})).await.unwrap();
+    let ordinary = team::event("subagent_settled", "ordinary result".into(), Some(&agent.id));
+    let other = team::event("subagent_settled", "run B result".into(), Some(&agent.id)).for_trigger(Some("run-B"));
+    state.db.collection::<Document>(CONVERSATIONS).update_one(doc! {"_id":&parent.id},
+        doc! {"$push":{"pending_events":{"$each":bson::to_bson(&vec![ordinary.clone(),other.clone()]).unwrap()}}}).await.unwrap();
+    for _ in 0..2 {
+        assert_eq!(schedules::direct::settled(&state.db, OWNER, &child.id, child_turn).await.unwrap().as_deref(), Some(parent.id.as_str()));
+        schedules::direct::recover(&state.db).await.unwrap();
+    }
+    let queued = engine::get(&state.db, OWNER, &parent.id).await.unwrap();
+    assert_eq!(queued.pending_events.len(), 3, "one durable bound notification plus unrelated ordinary/run-B events");
+    let notification = queued.pending_events.iter().find(|e| e.trigger_run_id.as_deref()==Some(run.id.as_str())).unwrap();
+    assert!(notification.delegated_result.is_some(), "exact saved source assignment survives durable handoff");
+    assert_eq!(notification.id, notification.delegated_result.as_ref().unwrap().id,
+        "the single bound event retains the persisted image assignment identity");
+    let adopted = images::consume_wait(&state.db, OWNER, &parent.id, parent_turn, std::slice::from_ref(&agent.id)).await.unwrap();
+    assert_eq!(adopted.references.len(),1);
+    assert_eq!(adopted.references[0].attachment.id, attachment_id);
+    assert_eq!(adopted.results.len(),1);
+    assert_eq!(adopted.results[0].1.as_ref().unwrap().text,"Specialist image result");
+    let remaining = engine::get(&state.db, OWNER, &parent.id).await.unwrap();
+    assert_eq!(remaining.pending_events.iter().map(|e|e.id.as_str()).collect::<Vec<_>>(),vec![ordinary.id.as_str(),other.id.as_str()]);
+    schedules::direct::recover(&state.db).await.unwrap();
+    schedules::direct::settled(&state.db, OWNER, &child.id, child_turn).await.unwrap();
+    let repeated = images::consume_wait(&state.db, OWNER, &parent.id, parent_turn, std::slice::from_ref(&agent.id)).await.unwrap();
+    assert!(repeated.results.is_empty());
+    assert_eq!(repeated.references.len(),1);
+    assert_eq!(engine::get(&state.db, OWNER, &parent.id).await.unwrap().pending_events.len(),2);
+    // A lost or unsupported saved run must not downgrade to an ordinary wait.
+    for version in [None, Some(bson::Bson::String("invalid".into())), Some(bson::Bson::Int32(3))] {
+        if let Some(version) = version {
+            state.db.collection::<Document>(RUNS).update_one(doc! {"_id":&run.id},
+                doc! {"$set":{"continuation_protocol_version":version}}).await.unwrap();
+        } else {
+            state.db.collection::<Document>(RUNS).delete_one(doc! {"_id":&run.id}).await.unwrap();
+        }
+        assert!(matches!(images::consume_wait(&state.db, OWNER, &parent.id, parent_turn,
+            std::slice::from_ref(&agent.id)).await, Err(AppError::AssistantTurnRequired)));
+        assert_eq!(engine::get(&state.db, OWNER, &parent.id).await.unwrap().pending_events.len(),2);
+        // Restore the exact persisted server run for the next malformed case.
+        state.db.collection::<TriggerRun>(RUNS).replace_one(doc! {"_id":&run.id},&run).upsert(true).await.unwrap();
+    }
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn automation_thread_delete_rolls_back_added_state_and_preserves_other_scopes() {
+    let (state, _, server) = setup("automation_delete_merge_scope").await;
+    let (_, run, parent) = Box::pin(completion_coordinator(&state)).await;
+    let collections = [
+        crate::models::generated_artifact::COLLECTION_NAME,
+        crate::models::generated_artifact::DELIVERIES,
+        crate::models::generated_artifact::SERIES,
+        crate::models::assistant_model_control::COLLECTION_NAME,
+        "assistant_model_denial_notices",
+    ];
+    for collection in collections {
+        let rows = [(OWNER,parent.id.as_str()),("other-owner",parent.id.as_str()),(OWNER,"other-thread")]
+            .map(|(owner,conversation)| {
+                let identity = Uuid::new_v4().to_string();
+                // Respect real unique artifact/delivery/model-control indexes;
+                // this test exercises scoped transactional deletion, not parsing.
+                doc! {"_id":&identity,"user_id":owner,"conversation_id":conversation,
+                    "watch_id":&identity,"source_result_identity":&identity,"artifact_index":0,
+                    "event_turn_id":&identity,"catalog_service_id":&identity,"source_path_sha256":&identity,
+                    "api_key_id":&identity,"turn_ids":[&identity]}
+            });
+        state.db.collection::<Document>(collection).insert_many(rows).await.unwrap();
+    }
+    let mut session = state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    Box::pin(engine::delete_in_session(&state.db,OWNER,&parent.id,&mut session)).await.unwrap();
+    session.abort_transaction().await.unwrap();
+    assert!(engine::get(&state.db,OWNER,&parent.id).await.is_ok());
+    assert_eq!(completion_load(&state,&run.id).await.outcome,RunOutcome::Started);
+    for collection in collections {
+        assert_eq!(state.db.collection::<Document>(collection).count_documents(doc!{}).await.unwrap(),3,"rollback {collection}");
+    }
+    Box::pin(engine::delete(&state.db,OWNER,&parent.id)).await.unwrap();
+    assert!(engine::get(&state.db,OWNER,&parent.id).await.is_err());
+    let terminal=completion_load(&state,&run.id).await;
+    assert_eq!(terminal.outcome,RunOutcome::Failed);
+    assert_eq!(terminal.reason.as_deref(),Some("thread_deleted"));
+    for collection in collections {
+        let rows=state.db.collection::<Document>(collection);
+        assert_eq!(rows.count_documents(doc!{"user_id":OWNER,"conversation_id":&parent.id}).await.unwrap(),0,"deleted {collection}");
+        assert_eq!(rows.count_documents(doc!{}).await.unwrap(),2,"scope {collection}");
+    }
+    server.abort();
+    state.db.drop().await.unwrap();
+}

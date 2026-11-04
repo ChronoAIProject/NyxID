@@ -49,6 +49,7 @@ fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson()
     let legacy: Metadata = bson::from_document(doc! {}).unwrap();
     assert!(bson::to_document(&legacy).unwrap().is_empty());
     let legacy = TurnAttachment {
+        image_input_reason: None,
         artifact: Metadata::default(),
         chat_delivery: None,
         image_input: None,

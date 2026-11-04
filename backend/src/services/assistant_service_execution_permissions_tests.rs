@@ -62,6 +62,7 @@ fn inference_target() -> crate::services::proxy_service::ProxyTarget {
         voice: None,
     });
     crate::services::proxy_service::ProxyTarget {
+        credential_deferred: false,
         service,
         base_url: "https://example.invalid".into(),
         auth_method: "none".into(),

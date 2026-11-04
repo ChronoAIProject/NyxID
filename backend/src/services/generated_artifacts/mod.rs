@@ -788,6 +788,7 @@ async fn materialize(
         // bytes use ordinary retention from their own attachment creation time.
         let expiry = Utc::now() + Duration::days(i64::from(normal_days));
         let mut meta = TurnAttachment {
+            image_input_reason: None,
             artifact: metadata(&row, expiry),
             id: row.assistant_attachment_id.clone(),
             origin: "generated_artifact".into(),

@@ -817,7 +817,7 @@ async fn append_following_bound(
     text: &str,
     recipients: &[String],
     extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
-    follower: Option<&str>,
+    follower: Option<(&str, Option<&str>)>,
     source_thread: Option<&str>,
 ) -> AppResult<GroupMessage> {
     let source_thread = source_thread.map(str::to_owned);

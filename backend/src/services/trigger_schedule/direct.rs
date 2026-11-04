@@ -144,15 +144,26 @@ async fn deliver(db: &Database, saved: &DirectHandoff) -> AppResult<()> {
                 "user_id":&receipt.user_id,"conversation_id":&receipt.child_thread_id,
                 "turn_id":&receipt.child_turn_id,"role":"assistant",
             }).session(&mut *session).await?;
-            let (status, text) = match reply {
-                Some(reply) => (reply.error_code.unwrap_or_else(|| "replied".into()), reply.text),
+            let (status, text, assignment) = match reply {
+                Some(reply) => {
+                    let assignment = reply.delegated_images.assignment.filter(|edge|
+                        reply.delegated_images.publication_refusal.is_none()
+                        && edge.id == receipt.child_turn_id
+                        && edge.actor == receipt.user_id
+                        && edge.source_agent == receipt.agent_id
+                        && edge.source_conversation == receipt.child_thread_id
+                        && edge.source_turn == receipt.child_turn_id
+                        && edge.recipient_conversation == receipt.parent_thread_id
+                        && edge.assigning_turn == receipt.parent_turn_id);
+                    (reply.error_code.unwrap_or_else(|| "replied".into()), reply.text, assignment)
+                },
                 None => {
                     if db.collection::<Document>(THREADS).find_one(
                         doc! {"_id":&receipt.child_thread_id,"user_id":&receipt.user_id},
                     ).projection(doc! {"_id":1}).session(&mut *session).await?.is_some() {
                         return Ok(());
                     }
-                    ("thread_deleted".into(), String::new())
+                    ("thread_deleted".into(), String::new(), None)
                 }
             };
             let mut event = team::bound_event("subagent_settled", format!(
@@ -161,6 +172,13 @@ async fn deliver(db: &Database, saved: &DirectHandoff) -> AppResult<()> {
             ), Some(&receipt.agent_id), None)
                 .for_trigger(Some(&receipt.run_id)).for_invocation(receipt.invocation_id.as_deref());
             event.id = Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("direct-handoff:{}",receipt.id).as_bytes()).to_string();
+            if let Some(edge) = assignment {
+                // Main's image filters bind notification identity to the
+                // exact assignment saved on the specialist reply.
+                event.id = edge.id.clone();
+                event.reply_to = edge.destinations.iter().filter(|origin| origin.thread.is_some()).cloned().collect();
+                event.delegated_result = Some(edge);
+            }
             if !engine::append_events_in_session(&db,&receipt.user_id,&receipt.parent_thread_id,&[event],session).await? {
                 return Err(AppError::AssistantTurnRequired);
             }

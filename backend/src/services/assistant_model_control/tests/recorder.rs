@@ -237,6 +237,7 @@ async fn live_non_user_input_stays_exact_only_but_stale_missing_input_fails_the_
         &c.f.owner,
         &c.f.row.id,
         vec![crate::models::assistant_conversation::AgentEvent {
+            delegated_result: None,
             trigger_run_id: None,
             continuation_protocol_version: 0,
             id: uuid::Uuid::new_v4().to_string(),

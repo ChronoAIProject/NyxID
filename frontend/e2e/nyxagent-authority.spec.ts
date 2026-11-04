@@ -40,6 +40,11 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/public/config", (route) =>
     route.fulfill({ json: { mcp_url: "https://nyxid.test/mcp" } }),
   );
+  await page.route("**/api/v1/proxy/services?**", (route) =>
+    route.fulfill({
+      json: { services: [], custom_services: [], page: 1, per_page: 100, total: 0 },
+    }),
+  );
   await page.route("**/api/v1/platform-personal-bindings", (route) =>
     route.fulfill({ json: { bindings: [], next_before_id: null } }),
   );

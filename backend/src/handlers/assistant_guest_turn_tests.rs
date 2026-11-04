@@ -263,6 +263,10 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
     let current_scenario = scenario_source.clone();
     let setup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let setup_sink = setup_calls.clone();
+    // These negative permission scenarios deliberately have no independent
+    // owner setup available; ordinary first-guest setup keeps main's contract.
+    let setup_rejections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let setup_rejection_sink = setup_rejections.clone();
     let callback_db = f.state.db.clone();
     let callback_conversation = f.row.id.clone();
     let agent = Router::new().route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
@@ -272,6 +276,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         let scenario_source = scenario_source.clone();
         let db = callback_db.clone();
         let setup_calls = setup_sink.clone();
+        let setup_rejections = setup_rejection_sink.clone();
         let conversation = callback_conversation.clone();
         async move {
             let scenario = scenario_source.lock().await.clone();
@@ -282,6 +287,16 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             let (_, validated_key, _) = crate::services::key_service::validate_api_key(&db,thread_key).await.unwrap();
             let setup = db.collection::<bson::Document>("assistant_conversations").find_one(doc!{"credential_api_key_id":&validated_key.id,"guest_model_setup":true}).await.unwrap().is_some();
             if setup {assert_eq!(body["input"],crate::services::assistant_guest_model_setup::INSTRUCTION);}
+            if setup && permissions && scenario == "unbound" {
+                // Main can legitimately establish a route through a separate
+                // owner setup. Keep this negative's no-authority premise by
+                // refusing that producer before any model callback/provider.
+                setup_rejections.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                let event = json!({"type":"response.failed","sequence_number":0,
+                    "response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":"failed",
+                    "error":{"code":"turn_failed","message":"Owner setup unavailable in this fixture"},"output":[]}});
+                return Sse::new(futures::stream::iter([Ok::<_, Infallible>(Event::default().data(event.to_string()))])).into_response();
+            }
             let mut observations = Vec::new();
             for method in ["initialize", "tools/list"] {
                 let response = callbacks.clone().oneshot(Request::builder().method("POST").uri("/mcp")
@@ -568,6 +583,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
     {
         let provider_calls_before = provider.received_requests().await.unwrap().len();
         let setups_before = setup_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let setup_rejections_before = setup_rejections.load(std::sync::atomic::Ordering::SeqCst);
         let guest = !scenario.starts_with("owner");
         let cards_before = f
             .state
@@ -857,6 +873,29 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             assert!(reply.activities.is_empty());
         }
         let initialized = setup_calls.load(std::sync::atomic::Ordering::SeqCst) > setups_before;
+        if permissions && scenario == "unbound" {
+            assert!(
+                setup_rejections.load(std::sync::atomic::Ordering::SeqCst)
+                    > setup_rejections_before,
+                "the no-authority negative must actually refuse the independent owner setup"
+            );
+            assert_eq!(
+                setup_calls.load(std::sync::atomic::Ordering::SeqCst),
+                setups_before,
+                "a rejected setup must not send a model callback"
+            );
+            assert_eq!(
+                provider.received_requests().await.unwrap().len(),
+                provider_calls_before,
+                "neither the guest nor rejected setup may reach the provider"
+            );
+        }
+        if scenario == "bootstrap_byok" && !permissions {
+            assert!(
+                initialized,
+                "ordinary fresh BYOK setup must initialize independently of an owner message"
+            );
+        }
         assert_eq!(
             reply.turn_metadata.as_ref().unwrap().attempts,
             Some(if guest && initialized { 2 } else { 1 }),
@@ -883,19 +922,13 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         let expected = match scenario {
             "approval" => Some((403, "api_key_scope_forbidden", 9000)),
             "stateful" | "missing_input" => Some((403, "guest_model_route_required", 9000)),
-            "unbound"
-            | "catalog_unbound"
-            | "bootstrap_byok"
-            | "metadata_stateful"
+            "unbound" if permissions => Some((403, "guest_model_route_required", 9000)),
+            "metadata_stateful"
             | "metadata_hosted"
             | "metadata_unknown"
             | "metadata_unknown_effect"
             | "metadata_replacement"
-            | "semantic_header"
-                if !initialized =>
-            {
-                Some((403, "guest_model_route_required", 9000))
-            }
+            | "semantic_header" => Some((403, "guest_model_route_required", 9000)),
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
         };
