@@ -23,6 +23,8 @@ import {
   ChevronUp,
   Mic,
   MicOff,
+  Phone,
+  PhoneOff,
   Volume2,
   VolumeX,
   X,
@@ -42,6 +44,7 @@ import { useNativeVoice } from "./useNativeVoice";
 import { useVoiceLevels } from "./useVoiceLevels";
 import { VoiceAura } from "./VoiceAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
+import { WalkieTalkieIcon } from "./WalkieTalkieIcon";
 import { voiceAuraPhase, voiceAuraStatus } from "./voiceAuraState";
 import { chooseVoiceOption, voiceElapsed, voiceTariff } from "./voiceSelection";
 import type { VoicePreferences, VoiceSnapshot } from "./voiceContracts";
@@ -129,6 +132,7 @@ function VoiceConversation({
   const voice = useNativeVoice(thread, environment, onUpdate);
   const levels = useVoiceLevels(voice.media);
   const [hold] = useState(() => new Animated.Value(0));
+  const [holdStartedAt, setHoldStartedAt] = useState<number>();
   const [transcriptFrame, setTranscriptFrame] = useState({ x: 0, y: 0 });
   const transcriptSize = useRef({ content: 0, visible: 0 });
   const [transcriptOverflows, setTranscriptOverflows] = useState(false);
@@ -206,6 +210,9 @@ function VoiceConversation({
             ? "Call ended"
             : "Ready to talk";
   const duration = voiceElapsed(session?.created_at, session?.closed_at, now);
+  const talking = holdStartedAt
+    ? voiceElapsed(new Date(holdStartedAt).toISOString(), null, now)
+    : undefined;
   const canStart =
     !!option?.available &&
     !active &&
@@ -231,6 +238,10 @@ function VoiceConversation({
     setShowErrorDetails(false);
   }, [voice.error]);
 
+  useEffect(() => {
+    setHoldStartedAt(voice.holding ? Date.now() : undefined);
+    if (voice.holding) setNow(Date.now());
+  }, [voice.holding]);
   // Holding the microphone swells the button and lifts a soft halo around it;
   // releasing settles it back. Reduce Motion switches without animating.
   useEffect(() => {
@@ -445,12 +456,21 @@ function VoiceConversation({
               >
                 {status}
               </Text>
-              {active ? (
+              {/* A phone call shows its length; a walkie-talkie shows only the
+                  current transmission while the button is held. */}
+              {active && inputMode === "automatic" ? (
                 <Text
                   accessibilityLabel={`Call time ${duration}`}
                   style={[styles.elapsed, quiet]}
                 >
                   {duration}
+                </Text>
+              ) : active && talking ? (
+                <Text
+                  accessibilityLabel={`Talking for ${talking}`}
+                  style={[styles.elapsed, quiet]}
+                >
+                  {talking}
                 </Text>
               ) : null}
             </View>
@@ -733,6 +753,17 @@ function VoiceConversation({
                       selected && { backgroundColor: main },
                     ]}
                   >
+                    {mode === "automatic" ? (
+                      <Phone
+                        size={15}
+                        color={selected ? onMain : colors.textSecondary}
+                      />
+                    ) : (
+                      <WalkieTalkieIcon
+                        size={15}
+                        color={selected ? onMain : colors.textSecondary}
+                      />
+                    )}
                     <Text
                       style={[
                         styles.modeLabel,
@@ -842,7 +873,7 @@ function VoiceConversation({
                       },
                     ]}
                   >
-                    <Mic size={30} color={onMain} />
+                    <WalkieTalkieIcon size={30} color={onMain} />
                   </Pressable>
                 </Animated.View>
               </View>
@@ -866,31 +897,63 @@ function VoiceConversation({
               surface={surface}
               onPress={close}
             >
-              <X size={20} color={active ? colors.danger : colors.textPrimary} />
+              {active && inputMode === "automatic" ? (
+                <PhoneOff size={20} color={colors.danger} />
+              ) : (
+                <X size={20} color={active ? colors.danger : colors.textPrimary} />
+              )}
             </RoundButton>
           </View>
           <View style={styles.footer}>
             {active ? (
               <>
-                <Text style={[styles.footnote, quiet]}>
+                <Text style={[styles.hint, { color: colors.textSecondary }]}>
                   {inputMode === "automatic"
-                    ? "Your microphone is on while unmuted. Use headphones for the clearest audio."
-                    : "Audio is sent only while holding the button. Use headphones if you hear echo."}
-                  {option && (option.pricing || option.key_source === "own")
-                    ? ` ${voiceTariff(option)}`
-                    : ""}
+                    ? muted
+                      ? "Muted · tap the microphone to talk"
+                      : "Talk any time · NyxBot answers when you pause"
+                    : voice.holding
+                      ? "Release to send"
+                      : "Hold to talk · release to send"}
                 </Text>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel="Resume audio"
-                  disabled={voice.starting}
-                  onPress={() => void voice.resumeAudio()}
-                  style={styles.textButton}
-                >
+                {pricingOpen && option ? (
                   <Text style={[styles.footnote, quiet]}>
-                    No sound? Resume audio
+                    {inputMode === "automatic"
+                      ? "Your microphone is on while unmuted."
+                      : "Audio is sent only while you hold the button."}{" "}
+                    Use headphones if you hear echo.
+                    {option.pricing || option.key_source === "own"
+                      ? ` ${voiceTariff(option)}`
+                      : ""}
                   </Text>
-                </Pressable>
+                ) : null}
+                <View style={styles.footerLinks}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      pricingOpen ? "Hide call details" : "Show call details"
+                    }
+                    accessibilityState={{ expanded: pricingOpen }}
+                    onPress={() => setPricingOpen((value) => !value)}
+                    style={styles.textButton}
+                  >
+                    <Text style={[styles.footnote, quiet]}>
+                      {pricingOpen ? "Less" : "Details"}
+                    </Text>
+                  </Pressable>
+                  <Text style={[styles.footnote, quiet]}>·</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Resume audio"
+                    disabled={voice.starting}
+                    onPress={() => void voice.resumeAudio()}
+                    style={styles.textButton}
+                  >
+                    <Text style={[styles.footnote, quiet]}>
+                      No sound? Resume audio
+                    </Text>
+                  </Pressable>
+                </View>
               </>
             ) : option ? (
               <>
@@ -1126,10 +1189,19 @@ const styles = StyleSheet.create({
     minWidth: 112,
     paddingHorizontal: 14,
     borderRadius: 17,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 6,
   },
   modeLabel: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 18 },
+  hint: {
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: "center",
+  },
+  footerLinks: { flexDirection: "row", alignItems: "center", gap: 6 },
   pill: {
     borderRadius: 12,
     paddingHorizontal: 12,

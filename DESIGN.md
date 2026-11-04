@@ -604,12 +604,11 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   and a trailing Send/Stop circle inside a 44pt target. Attach offers Camera,
   Photos and Files through their native pickers. Dictation uses Apple's speech
   recognizer (on-device when the iPhone supports it) in the iPhone's language;
-  no audio goes to NyxID. It never sends a message automatically. Until
-  speech recognition is allowed, the first tap opens a compact intro sheet
-  once (what it does, microphone and speech recognition access, on-iPhone
-  recognition, language, Start); once it is allowed a tap dictates at once,
-  and a long press always starts directly. While it runs it stays inside the
-  composer pill: the existing draft (secondary) and the recognized words
+  no audio goes to NyxID. It never sends a message automatically and never
+  opens a sheet or window: a tap or long press dictates at once, iOS asks for
+  microphone and speech recognition access itself the first time, and the
+  language is chosen in Settings › Voice (Dictation for accounts without live
+  voice). While it runs it stays inside the composer pill: the existing draft (secondary) and the recognized words
   (interim words in tertiary) appear at the field's 14/20pt above a streaming
   waveform line that takes the place of the placeholder (3pt bars, one per
   ~90ms native volume sample, silent samples as dots), between an outlined
@@ -687,10 +686,15 @@ transcript under it (the two newest utterances large, earlier ones smaller,
 interim words in tertiary, scrolling for more, older lines fading out toward
 the top once they overflow); the chat's pending action cards and a small
 collapsible tasks tray only while they exist; the Hands-free / Hold to talk
-switch; round mute and red End controls around a 76pt centre button; and the
-price as a quiet footnote. Holding to talk swells the centre button and lifts
-a soft halo around it, settling back on release (no animation under Reduce
-Motion). Leaving the voice page by any route ends the call; accepted agent
+switch (Hands-free with a phone icon, Hold to talk with a walkie-talkie);
+round mute and End controls around a 76pt centre button; one short hint line
+under the controls; and Details / No sound? Resume audio links, with the
+microphone, echo and price notes behind Details. Hands-free is a phone call:
+the call timer runs and End hangs up. Hold to talk is a walkie-talkie: the
+centre button carries the walkie-talkie, no call timer runs, and the timer
+counts only the current transmission while the button is held. Holding swells
+the centre button and lifts a soft halo around it, settling back on release
+(no animation under Reduce Motion). Leaving the voice page by any route ends the call; accepted agent
 tasks keep running. The aura is decorative and hidden from VoiceOver (see the
 2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside
 the composer (see Chat composers).

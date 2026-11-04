@@ -272,11 +272,13 @@ function setup(
         "X",
         "Mic",
         "MicOff",
+        "Phone",
         "PhoneOff",
         "Volume2",
         "VolumeX",
       ].map((name) => [name, name]),
     ),
+    "./WalkieTalkieIcon": { WalkieTalkieIcon: "WalkieTalkie" },
     "../../../components/workspace/WorkspaceSheetSurface": {
       WorkspaceSheetSurface: "SheetSurface",
     },
@@ -628,6 +630,32 @@ test("push-to-talk disables input during server muting and exposes accessible pr
   assert.equal(typeof hold.props.onPressOut, "function");
   assert.equal(typeof hold.props.onAccessibilityAction, "function");
   f.harness.unmount();
+});
+
+test("hold to talk is a walkie-talkie with no running call timer; hands-free is a phone call", () => {
+  const walkie = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+  });
+  const labels = walkie.all().map((row) => row.props?.accessibilityLabel);
+  assert.equal(
+    labels.some((label) => String(label ?? "").startsWith("Call time")),
+    false,
+    "no call length while waiting to talk",
+  );
+  assert.ok(walkie.all().some((row) => row.type === "WalkieTalkie"));
+  assert.match(walkie.text(), /Hold to talk · release to send/);
+  assert.doesNotMatch(walkie.text(), /Audio is sent only/, "details stay collapsed");
+  walkie.harness.unmount();
+  const phone = setup({ active: true });
+  assert.ok(
+    phone
+      .all()
+      .some((row) => String(row.props?.accessibilityLabel ?? "").startsWith("Call time")),
+  );
+  assert.ok(phone.all().some((row) => row.type === "PhoneOff"), "End hangs up");
+  assert.match(phone.text(), /Talk any time/);
+  phone.harness.unmount();
 });
 
 test("loss of connectivity ends local voice and disables starting until the app reconnects", () => {
