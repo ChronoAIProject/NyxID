@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
-import { Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { CircleAlert } from "lucide-react-native";
+import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { TOUCH_TARGET } from "../../theme/designTokens";
 import type { AssistantMessage } from "./assistantTypes";
@@ -61,21 +62,37 @@ export function AssistantMessageNotices({
         </Label>
       ) : null}
       {error ? (
-        <Notice
-          tone="error"
-          message={storedError(message.error_code, detail?.capacity_wait_ms)}
-        />
+        // One compact line instead of a full-width alert box.
+        <View
+          accessibilityRole="alert"
+          style={[styles.error, { backgroundColor: colors.dangerSoftBg }]}
+        >
+          <CircleAlert size={15} color={colors.danger} />
+          <Label
+            maxFontSizeMultiplier={1.4}
+            style={[styles.errorText, { color: colors.danger }]}
+          >
+            {storedError(message.error_code, detail?.capacity_wait_ms)}
+          </Label>
+        </View>
       ) : null}
-      {error && billingCodes.includes(message.error_code ?? "") ? (
-        <QuietButton label="Usage & credits" onPress={onOpenBilling} />
+      {error &&
+      (billingCodes.includes(message.error_code ?? "") || detail) ? (
+        <View style={styles.actions}>
+          {billingCodes.includes(message.error_code ?? "") ? (
+            <QuietButton label="Usage & credits" onPress={onOpenBilling} />
+          ) : null}
+          {detail ? (
+            <QuietButton
+              label="Details"
+              expanded={details}
+              onPress={() => setDetails((value) => !value)}
+            />
+          ) : null}
+        </View>
       ) : null}
       {error && detail ? (
         <>
-          <QuietButton
-            label="Details"
-            expanded={details}
-            onPress={() => setDetails((value) => !value)}
-          />
           {details ? (
             <View style={[styles.details, { borderColor: colors.border }]}>
               {failure?.source === "nyxid" &&
@@ -160,16 +177,19 @@ export function AssistantMessageNotices({
     </View>
   );
 }
+/** A small tinted action for in-chat follow-ups; rows of them wrap. */
 export function QuietButton({
   label,
   onPress,
   expanded,
   disabled,
+  icon,
 }: {
   label: string;
   onPress: () => void;
   expanded?: boolean;
   disabled?: boolean;
+  icon?: ReactNode;
 }) {
   const { colors } = useTheme();
   return (
@@ -178,14 +198,20 @@ export function QuietButton({
       accessibilityLabel={label}
       accessibilityState={{ expanded, disabled }}
       disabled={disabled}
+      hitSlop={{ top: 7, bottom: 7 }}
       onPress={onPress}
-      style={styles.button}
+      style={({ pressed }) => [
+        styles.button,
+        { backgroundColor: colors.segmentTrack, opacity: pressed ? 0.6 : 1 },
+      ]}
     >
+      {icon}
       <Label
+        maxFontSizeMultiplier={1.3}
         style={{
-          color: disabled ? colors.textMuted : colors.textSecondary,
-          fontSize: 12,
-          textDecorationLine: "underline",
+          color: disabled ? colors.textMuted : colors.textPrimary,
+          fontSize: 13,
+          lineHeight: 17,
         }}
       >
         {label}
@@ -194,12 +220,25 @@ export function QuietButton({
   );
 }
 const styles = StyleSheet.create({
-  container: { gap: 4 },
+  container: { gap: 6 },
+  error: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  errorText: { flex: 1, fontSize: 14, lineHeight: 19 },
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   details: { padding: 10, borderRadius: 8, borderWidth: 1, gap: 4 },
   button: {
-    minHeight: TOUCH_TARGET,
-    justifyContent: "center",
+    minHeight: TOUCH_TARGET - 14,
+    flexDirection: "row",
+    alignItems: "center",
     alignSelf: "flex-start",
-    paddingHorizontal: 3,
+    gap: 5,
+    paddingHorizontal: 11,
+    borderRadius: 15,
   },
 });

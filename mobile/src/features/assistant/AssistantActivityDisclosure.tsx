@@ -36,6 +36,7 @@ export function AssistantActivityDisclosure({
   onToggle,
   activityTotal,
   turnLabel,
+  turnFailed = false,
   metadata,
   decisions = [],
   confirmationActivityIds,
@@ -44,6 +45,8 @@ export function AssistantActivityDisclosure({
   onToggle: () => void;
   activityTotal?: number | null;
   turnLabel?: string;
+  /** The turn itself failed, even if every action in it completed. */
+  turnFailed?: boolean;
   metadata?: AssistantMessage["turn_metadata"];
   decisions?: AssistantAcknowledgement[];
   /** Calls that raised a confirmation card, including cards still pending. */
@@ -79,7 +82,7 @@ export function AssistantActivityDisclosure({
   ).length;
   const status = activities.some((activity) => activity.status === "running")
     ? "running"
-    : failed
+    : failed || turnFailed
       ? "error"
       : "completed";
   const total = Math.max(activities.length, activityTotal ?? 0);
@@ -100,24 +103,20 @@ export function AssistantActivityDisclosure({
   const Chevron = open ? ChevronDown : ChevronRight;
 
   return (
-    <View
-      style={[
-        styles.container,
-        { backgroundColor: colors.cardSoft, borderColor: colors.border },
-      ]}
-    >
+    <View style={styles.container}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Turn details: ${summary}`}
         accessibilityHint={open ? "Hide action details" : "Show action details"}
         accessibilityState={{ expanded: open }}
+        hitSlop={{ top: 7, bottom: 7 }}
         onPress={() => {
           onToggle();
           setOpen((value) => !value);
         }}
         style={({ pressed }) => [
           styles.summary,
-          { opacity: pressed ? 0.65 : 1 },
+          { backgroundColor: colors.segmentTrack, opacity: pressed ? 0.65 : 1 },
         ]}
       >
         <View
@@ -127,7 +126,12 @@ export function AssistantActivityDisclosure({
           <Chevron size={14} color={colors.textSecondary} />
         </View>
         <ActivityStatusIcon status={status} />
-        <Label muted style={styles.count}>
+        <Label
+          muted
+          numberOfLines={1}
+          maxFontSizeMultiplier={1.3}
+          style={styles.count}
+        >
           {summary}
           {total > activities.length
             ? ` · latest ${activities.length} of ${total} shown`
@@ -135,7 +139,7 @@ export function AssistantActivityDisclosure({
         </Label>
       </Pressable>
       {open ? (
-        <View style={[styles.details, { borderColor: colors.border }]}>
+        <View style={[styles.details, { borderColor: colors.borderSoft }]}>
           {activities.map((activity) => {
             const confirmation = gated.has(activity.id);
             const description = confirmation
@@ -283,14 +287,18 @@ function DeliveryNotice({
 }
 
 const styles = StyleSheet.create({
-  container: { borderWidth: 1, borderRadius: radius.md, overflow: "hidden" },
+  // A quiet one-line pill; details open beneath it on a thin left rule.
+  container: { gap: 6 },
   summary: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    minHeight: TOUCH_TARGET,
+    alignSelf: "flex-start",
+    maxWidth: "100%",
+    gap: 6,
+    minHeight: TOUCH_TARGET - 14,
     paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingVertical: 3,
+    borderRadius: radius.md + 6,
   },
   count: { fontSize: 12, lineHeight: 18, flexShrink: 1 },
   status: {
@@ -299,7 +307,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  details: { borderTopWidth: 1, padding: 10, gap: 8 },
+  details: { borderLeftWidth: 2, paddingLeft: 12, paddingVertical: 4, gap: 8, marginLeft: 6 },
   activity: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   activityText: { flex: 1, gap: 2 },
   description: { fontSize: 12, lineHeight: 20 },

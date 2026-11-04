@@ -316,10 +316,14 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
             : "Listening";
   const capturing = phase === "listening" || phase === "stopping";
   return (
+    // Opaque overFullScreen, as the voice call does: a fullScreen
+    // presentation detaches the chat underneath, which blurs it and ends
+    // dictation through its focus fence.
     <Modal
       visible
+      transparent
       animationType="slide"
-      presentationStyle="fullScreen"
+      presentationStyle="overFullScreen"
       onRequestClose={dictation.discard}
     >
       <View

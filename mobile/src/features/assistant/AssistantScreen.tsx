@@ -53,7 +53,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
 import { AssistantReplyBody } from "./AssistantReplyBody";
-import { MoreHorizontal, SquarePen, X } from "lucide-react-native";
+import { MoreHorizontal, RotateCcw, SquarePen, X } from "lucide-react-native";
 import type {
   AssistantParams,
   WorkspaceNavigationProp,
@@ -825,6 +825,10 @@ export function AssistantScreen({
                           ? "Turn failed"
                           : "Completed"
                     }
+                    turnFailed={
+                      item.status === "failed" &&
+                      item.error_code !== "cancelled"
+                    }
                     metadata={item.turn_metadata}
                     confirmationActivityIds={confirmationActivityIds}
                     decisions={(
@@ -894,25 +898,32 @@ export function AssistantScreen({
             }
           />
         ) : null}
-        {input !== undefined ? (
-          <ActionButton
-            label="Retry"
-            variant="secondary"
-            disabled={
-              running ||
-              !assistant.online ||
-              assistant.recoveryRequired ||
-              assistant.loadingOlder
-            }
-            onPress={() => void perform(() => assistant.retry(item.id))}
-          />
-        ) : null}
-        {item.status === "failed" && item.error_code !== "cancelled" ? (
-          <QuietButton
-            label="Check retry availability"
-            disabled={running || !assistant.online || assistant.loadingOlder}
-            onPress={() => void perform(() => assistant.checkRecovery(item.id))}
-          />
+        {input !== undefined ||
+        (item.status === "failed" && item.error_code !== "cancelled") ? (
+          <View style={styles.turnActions}>
+            {input !== undefined ? (
+              <QuietButton
+                label="Retry"
+                icon={<RotateCcw size={14} color={colors.textPrimary} />}
+                disabled={
+                  running ||
+                  !assistant.online ||
+                  assistant.recoveryRequired ||
+                  assistant.loadingOlder
+                }
+                onPress={() => void perform(() => assistant.retry(item.id))}
+              />
+            ) : null}
+            {item.status === "failed" && item.error_code !== "cancelled" ? (
+              <QuietButton
+                label="Check retry availability"
+                disabled={running || !assistant.online || assistant.loadingOlder}
+                onPress={() =>
+                  void perform(() => assistant.checkRecovery(item.id))
+                }
+              />
+            ) : null}
+          </View>
         ) : null}
       </>
     );
@@ -1834,6 +1845,7 @@ const styles = StyleSheet.create({
   transcriptSeparator: { height: 20 },
   message: { gap: 8, paddingVertical: 10 },
   userTurn: { gap: 8 },
+  turnActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   userRow: {
     alignSelf: "flex-end",
     alignItems: "flex-end",

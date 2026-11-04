@@ -230,7 +230,7 @@ test("listening fills the screen with a live transcript, meter and Finish", () =
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
   assert.equal(tree[0]!.type, "Modal");
-  assert.equal(tree[0]!.props.presentationStyle, "fullScreen");
+  assert.equal(tree[0]!.props.presentationStyle, "overFullScreen");
   const texts = tree.filter((node) => node.type === "Text");
   assert.ok(texts.some((node) => node.props.children === "Speech to Text"));
   assert.ok(texts.some((node) => node.props.children === "Listening"));
