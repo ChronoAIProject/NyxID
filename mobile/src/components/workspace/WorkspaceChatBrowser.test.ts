@@ -131,7 +131,7 @@ function setup(
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": Object.fromEntries(
-      ["ChevronLeft", "RefreshCw", "Search", "X", "Plus", "MessageSquare"].map(
+      ["ChevronLeft", "RefreshCw", "Search", "SquarePen", "X", "Plus", "MessageSquare"].map(
         (name) => [name, name],
       ),
     ),

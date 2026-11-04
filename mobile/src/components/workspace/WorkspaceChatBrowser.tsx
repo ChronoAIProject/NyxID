@@ -20,7 +20,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { ChevronLeft, RefreshCw, Search, X } from "lucide-react-native";
+import { ChevronLeft, RefreshCw, Search, SquarePen, X } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { SkeletonRows } from "../Skeleton";
 import { fonts } from "../../theme/designTokens";
@@ -232,13 +232,14 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                     <View
                       style={[
                         styles.searchBox,
-                        {
-                          backgroundColor: colors.card,
-                          borderColor: colors.border,
-                        },
+                        { backgroundColor: colors.segmentTrack },
                       ]}
                     >
-                      <Search size={18} color={colors.textMuted} />
+                      <Search
+                        size={17}
+                        color={colors.textMuted}
+                        accessible={false}
+                      />
                       <TextInput
                         accessibilityLabel={`Search ${title}`}
                         placeholder={`Search ${title.toLowerCase()}`}
@@ -248,6 +249,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                         value={query}
                         onChangeText={setQuery}
                         returnKeyType="search"
+                        selectionColor={colors.primary}
                         onSubmitEditing={Keyboard.dismiss}
                         style={[
                           styles.searchInput,
@@ -274,17 +276,23 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                         Keyboard.dismiss();
                         primaryAction.onPress();
                       }}
-                      style={[
+                      // A neutral filled control beside the search field, as on
+                      // Plugins, with the drawer's compose icon.
+                      style={({ pressed }) => [
                         styles.primaryAction,
                         !(items.length > 0 || searching) &&
                           styles.primaryActionFull,
-                        { backgroundColor: colors.primary },
+                        {
+                          backgroundColor: colors.segmentTrack,
+                          opacity: pressed ? 0.7 : 1,
+                        },
                       ]}
                     >
+                      <SquarePen size={17} color={colors.textPrimary} />
                       <Text
                         style={[
                           styles.primaryActionLabel,
-                          { color: colors.onPrimary },
+                          { color: colors.textPrimary },
                         ]}
                       >
                         {primaryAction.label}
@@ -404,12 +412,13 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   primaryAction: {
-    minHeight: 48,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 12,
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
+    gap: 6,
   },
   primaryActionFull: { flexGrow: 1 },
   primaryActionLabel: {
@@ -427,12 +436,11 @@ const styles = StyleSheet.create({
     flexBasis: 180,
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    paddingLeft: 14,
+    gap: 6,
+    paddingLeft: 12,
     paddingRight: 4,
-    borderWidth: 1,
-    borderRadius: 12,
-    minHeight: 48,
+    borderRadius: 10,
+    minHeight: 44,
   },
   searchInput: {
     flex: 1,
