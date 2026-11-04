@@ -122,6 +122,7 @@ pub mod event_dedup_cache;
 pub mod exact_service_approval_service;
 pub mod execution_authority;
 pub(crate) mod execution_source;
+pub mod execution_permission;
 pub mod feature_flag_admin_service;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
@@ -543,6 +544,7 @@ pub mod domain_alias_service;
 #[cfg(test)]
 mod shared_agent_tests;
 
+pub(crate) mod nyxbot_admission_service;
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
 
@@ -550,3 +552,5 @@ pub mod assistant_connection_service;
 pub mod monitoring_service;
 
 pub mod assistant_delegated_images;
+
+pub mod cma_session_origin;

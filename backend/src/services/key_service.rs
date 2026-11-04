@@ -643,6 +643,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     let expires_at = expires_at.into().resolve_for_storage(now)?;
 
     let new_key = ApiKey {
+        permission_policy_id: None,
         id: id.clone(),
         user_id: user_id.to_string(),
         name: name.to_string(),
@@ -1177,6 +1178,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .clone()
                 };
                 let mut successor = ApiKey {
+                    permission_policy_id: old_key.permission_policy_id.clone(),
                     id: successor_for_transaction.clone(),
                     user_id: old_key.user_id.clone(),
                     name: old_key.name.clone(),

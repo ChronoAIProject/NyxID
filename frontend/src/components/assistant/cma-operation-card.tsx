@@ -1,3 +1,4 @@
+import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import { Check, CircleAlert, Clock3, ExternalLink, Radio, Workflow } from "lucide-react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { CmaGlyph } from "@/components/service-icons/cma";
@@ -41,7 +42,6 @@ function presentation(operation: CmaOperation) {
   if (["working", "running", "in_progress"].includes(status)) return { label: kind === "cma_provisioning" ? "Starting" : "Working", tone: "active" };
   return { label: "Status unavailable", tone: "warning" };
 }
-
 const tones: Record<string, string> = {
   active: "border-[#c6ef68]/25 bg-[#c6ef68]/10 text-[#d4f58b]",
   success: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200",
@@ -51,21 +51,6 @@ const tones: Record<string, string> = {
   neutral: "border-border bg-muted text-muted-foreground",
 };
 
-function safeCmaUrl(value: string | null | undefined): string | undefined {
-  if (!value || new TextEncoder().encode(value).length > 2048
-    || !/^https?:\/\//.test(value) || /[\s\\]/u.test(value)
-    || [...value].some((char) => char.charCodeAt(0) < 32 || (char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159))) return undefined;
-  try {
-    const url = new URL(value);
-    const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
-    return ["https:", "http:"].includes(url.protocol) && Boolean(host) && !url.username && !url.password
-      && !value.includes("?") && !value.includes("#")
-      && !["metadata.google.internal", "169.254.169.254", "fd00:ec2::254", "100.100.100.200", "168.63.129.16"].includes(host)
-      ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 const phases: Record<string, string> = {
   sandbox_creation: "Creating sandbox",

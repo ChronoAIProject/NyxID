@@ -803,6 +803,25 @@ rejected. Valid URLs preserve CMA's configured hostname, port, and route.
 See the [CMA producer handoff](plans/2026-10-27-cma-callback-url-contract.md)
 for required CMA response surfaces and `CHRONO_SERVER_PUBLIC_URL` configuration.
 
+The read-only `GET /api/v1/assistant/nyxagent/cma-sessions` projects verified
+personal origin receipts: `service_id`, CMA `agent_id`, NyxID `conversation_id`,
+`turn_id`, `specialist_id`, validated nullable `cma_url`, and safe
+`connection_name` / `connection_slug`. It never emits credentials or result
+bodies. `conversation` and up to 50 comma-separated `pins`
+(`<connection UUID>:<agt_id>`) select scope; `agents` optionally intersects up to
+50 exact candidates. `after` advances a 50-row page using `next_cursor`.
+`discover=true` returns eligible personal `connections` (id/name/slug/connected/
+requires_connection) with the same cursor envelope. Every read rechecks live
+personal connection identity, owner/history access, and erasure admission.
+Inventory cannot author an origin. Origin rows retain the earliest verified
+invocation independently of watch expiry, with transactional source deletion and
+personal erasure cleanup. See [CMA session status cards](chat/12-cma-sessions.md)
+for pin persistence, bounded status-filtered discovery (15-second discovery and
+five-second active-detail polling), independent pin receipt queries, and
+per-connection observer recovery. Retryable connection failures retain only
+previously authorized observations in the same account/source scope; a denied
+connection does not suppress healthy peers.
+
 These adapters use the existing authenticated async-watch executor, two-hour
 deadline, quotas, billing and live authority checks. They add no user-controlled
 polling URL or new cancellation API. Guest calls retain their ordinary tool

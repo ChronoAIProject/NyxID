@@ -309,10 +309,48 @@ pub async fn submitted(
     let operation_id = (!agent_input).then_some(&id);
     // Replayed idempotent submissions reuse the existing watch, never queue a
     // second completion. Do not change another thread's existing destination.
-    let result=db.collection::<bson::Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},vec![doc!{"$set":{
-        "operation_id":{"$literal":operation_id},"cma":{"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},"state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},"poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5))}}]).await;
+    let cma_value = if cma.is_some() {
+        bson::Bson::Document(doc! {"$mergeObjects":[
+            {"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},
+            {"observer_binding":"$cma.observer_binding"},
+        ]})
+    } else {
+        bson::Bson::Null
+    };
+    let result = db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},
+            vec![doc! {"$set":{
+                "operation_id":{"$literal":operation_id},"cma":cma_value,
+                "state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},
+                "poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5)),
+            }}],
+        )
+        .await;
     match result {
-        Ok(_) => Ok(()),
+        Ok(updated) => {
+            if updated.matched_count == 1 && cma.is_some() {
+                // This read is optional and happens after provider success. Missing
+                // watches (deletion) and projection failures cannot trigger retry.
+                let observation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    db.collection::<AsyncServiceOperation>(WATCHES)
+                        .find_one(doc! {"_id":&watch.id,"user_id":&watch.user_id})
+                        .await
+                })
+                .await;
+                match observation {
+                    Ok(Ok(Some(admitted))) => {
+                        if let Some(cma) = &admitted.cma {
+                            super::cma_session_origin::record_best_effort(db, &admitted, cma).await;
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    _ => super::cma_session_origin::metadata_unavailable(),
+                }
+            }
+            Ok(())
+        }
         Err(e) if matches!(e.kind.as_ref(),mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code==11000) =>
         {
             db.collection::<bson::Document>(WATCHES)

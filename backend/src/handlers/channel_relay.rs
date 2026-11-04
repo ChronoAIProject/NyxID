@@ -3993,6 +3993,7 @@ mod tests {
             .expect("encrypt test bot token");
 
         let api_key = ApiKey {
+            permission_policy_id: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             name: "agent".to_string(),
@@ -4086,6 +4087,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4119,6 +4121,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4326,6 +4329,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,

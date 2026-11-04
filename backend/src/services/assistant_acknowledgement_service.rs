@@ -457,6 +457,7 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             | "set_agent_operations"
             | "set_agent_skills"
             | "connect_channel_bot"
+            | "retry_channel_gateway"
             | "link_channel_bot"
             | "update_channel_access"
             | "update_channel_chat"

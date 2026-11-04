@@ -56,6 +56,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "link_channel_bot",
     "list_channel_agents",
     "disconnect_channel_bot",
+    "retry_channel_gateway",
     "list_channel_chats",
     "list_channel_threads",
     "stop_following_thread",
@@ -581,7 +582,7 @@ pub fn schema(name: &str) -> Value {
             vec![],
         ),
         "list_channel_agents" => (json!({}), vec![]),
-        "disconnect_channel_bot" => (
+        "disconnect_channel_bot" | "retry_channel_gateway" => (
             json!({"channel_agent_id": string(64)}),
             vec!["channel_agent_id"],
         ),
@@ -840,6 +841,9 @@ pub(crate) fn description(name: &str) -> &'static str {
             "List connected channel bots, the agent each one reaches, and status."
         }
         "disconnect_channel_bot" => "Disconnect a channel bot from its agent and remove its route.",
+        "retry_channel_gateway" => {
+            "Retry native Discord gateway activation now for an owner-verified channel on NyxID relay. Requires the existing gateway flag, live org-admin authority and no active answer; limited to once per channel per ten minutes. Reports actual transport and bounded activation diagnostics. Relay replies do not prove native acceptance. Never change flags or recreate the bot to retry."
+        }
         "remember" => {
             "Save a durable fact about the user or your work (preferences, people, goals, how \
             they like things done) so you recall it in every thread and chat app. Never store \

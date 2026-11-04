@@ -8,6 +8,10 @@ pub struct DiscordGatewayFacts {
     pub version: u8,
     pub bot_id: String,
     pub bot_mentioned: bool,
+    #[serde(default)]
+    pub managed_role_mentioned: bool,
+    #[serde(default)]
+    pub broadcast_role_count: u16,
     pub mentions_others: bool,
     /// Discord supplies one boolean for @everyone OR @here, not separate facts.
     pub broadcast_everyone_or_here: bool,

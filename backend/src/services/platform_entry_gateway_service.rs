@@ -863,6 +863,7 @@ fn transport_key(owner: &str) -> (ApiKey, Zeroizing<String>) {
         .unwrap_or(issued_at);
     let now = bson::DateTime::from_chrono(issued_at).to_chrono();
     let key = ApiKey {
+        permission_policy_id: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner.into(),
         name: "NyxID shared entry transport".into(),

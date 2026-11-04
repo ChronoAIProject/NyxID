@@ -7,7 +7,7 @@ use crate::models::{
 use crate::services::channel_platform::PlatformAdapter;
 use serde_json::json;
 
-fn bot() -> ChannelBot {
+pub(super) fn bot() -> ChannelBot {
     bson::from_document(doc! {
         "_id":uuid::Uuid::new_v4().to_string(),"user_id":uuid::Uuid::new_v4().to_string(),
         "platform":"discord","label":"fixture","platform_bot_id":"100","platform_bot_username":"helper",
