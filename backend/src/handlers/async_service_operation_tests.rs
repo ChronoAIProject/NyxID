@@ -1264,6 +1264,7 @@ async fn attach_voice(
     .await;
     let now = chrono::Utc::now();
     let request = VoiceRequest {
+        model_task: None,
         client_key: None,
         progress: None,
         timing: Default::default(),

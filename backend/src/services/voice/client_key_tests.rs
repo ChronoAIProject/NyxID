@@ -908,7 +908,7 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, provider_app).await.unwrap() });
-        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput {
+        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { responses_billing: None,
             client_key:binding, user:&f.owner, conversation:&f.row.id,
             client_request_id:&Uuid::new_v4().to_string(), preferences:platform(&voice),
             sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",

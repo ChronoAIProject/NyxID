@@ -85,6 +85,9 @@ pub struct VoiceChoice {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct VoiceInference {
     pub protocol: VoiceProtocol,
+    /// Catalog-selected Responses model for Live's model-authored task requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_model: Option<String>,
     pub models: Vec<VoiceModel>,
     pub voices: Vec<VoiceChoice>,
     pub usage_source: VoiceUsageSource,

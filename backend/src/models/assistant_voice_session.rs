@@ -36,6 +36,16 @@ impl std::fmt::Debug for VoiceClientKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// Native Responses calls cannot be replayed when their sideband is lost.
+    #[serde(default)]
+    pub responses_model: Option<String>,
+    #[serde(default)]
+    pub responses_reserved: bool,
+    #[serde(default)]
+    pub responses_finalized: bool,
+    /// Provider-reported usage only, deduplicated by response ID.
+    #[serde(default)]
+    pub responses_usage: std::collections::BTreeMap<String, super::service_billing::PlatformUsage>,
     /// Accepted work suspends user-idle expiry, but never heartbeat or hard limits.
     #[serde(default, with = "super::bson_datetime::optional")]
     pub last_work_at: Option<DateTime<Utc>>,

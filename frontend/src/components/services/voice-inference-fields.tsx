@@ -32,6 +32,10 @@ export function VoiceInferenceFields({
                 ? null
                 : {
                     protocol,
+                    delegation_model:
+                      protocol === "openai_live"
+                        ? value?.delegation_model
+                        : null,
                     models: value?.models ?? [],
                     voices: value?.voices ?? [],
                     usage_source:
@@ -52,6 +56,23 @@ export function VoiceInferenceFields({
       </label>
       {value && (
         <>
+          {value.protocol === "openai_live" && (
+            <label className="block text-xs">
+              Responses delegation model
+              <Input
+                aria-label="Responses delegation model"
+                value={value.delegation_model ?? ""}
+                maxLength={128}
+                placeholder="Provider model ID"
+                onChange={(e) =>
+                  onChange({
+                    ...value,
+                    delegation_model: e.target.value || null,
+                  })
+                }
+              />
+            </label>
+          )}
           {(["models", "voices"] as const).map((field) => (
             <fieldset key={field} className="space-y-2">
               <legend className="text-xs font-medium">

@@ -131,6 +131,7 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        model_task: None,
         client_key: None,
         progress: None,
         timing: Default::default(),
@@ -1163,6 +1164,7 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            model_task: None,
             client_key: parent.client_key.clone(),
             progress: None,
             timing: Default::default(),
@@ -1551,9 +1553,7 @@ async fn audio_options(
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.platform_key.pricing.clone()
                     } else {
                         None
@@ -1585,9 +1585,7 @@ async fn audio_options(
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.byok_pricing.clone()
                     } else {
                         None

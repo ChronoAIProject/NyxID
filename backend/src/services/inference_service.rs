@@ -130,6 +130,15 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
                 doc! { "slug": slug, "inference": { "$type": "object" }, "inference.voice": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
                 doc! { "$set": { "inference.voice": bson::to_bson(&voice).expect("voice serialization") } },
             ).await?;
+            // Upgrade untouched Live defaults without replacing administrator choices.
+            if let Some(model) = &voice.delegation_model {
+                db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
+                    doc! {"slug":slug,"inference.voice.protocol":"openai_live",
+                        "inference.voice.delegation_model":{"$exists":false},"inference_admin_modified":{"$ne":true}},
+                    doc! {"$set":{"inference.voice.delegation_model":model,
+                        "inference.voice.billing_metrics":bson::to_bson(&voice.billing_metrics).expect("voice metrics serialization")}},
+                ).await?;
+            }
         }
     }
     Ok(())

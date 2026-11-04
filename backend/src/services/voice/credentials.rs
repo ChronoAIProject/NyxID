@@ -19,6 +19,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 pub struct Resolved {
+    pub delegation_model: Option<String>,
     pub concurrency_policy: Option<crate::models::service_concurrency::ServiceConcurrencyPolicy>,
     pub key: Zeroizing<String>,
     pub identity: String,
@@ -61,6 +62,12 @@ pub(crate) async fn resolve_audio(
         .ok_or(AppError::VoiceProviderUnavailable)?;
     let voice = super::selected_voice(metadata, &p.model, p.voice.as_deref())?;
     let protocol = metadata.protocol;
+    let delegation_model = metadata.delegation_model.clone();
+    if protocol == VoiceProtocol::OpenaiLive && !dictation && delegation_model.is_none() {
+        return Err(AppError::ValidationError(
+            "Configure a Responses delegation model in the voice catalog".into(),
+        ));
+    }
     if protocol == VoiceProtocol::XaiRealtime {
         if p.input_mode != crate::models::assistant_voice::VoiceInputMode::PushToTalk {
             return Err(AppError::ValidationError("Grok beta requires Hold to talk with headphones; automatic speaker mode is not verified".into()));
@@ -245,16 +252,18 @@ pub(crate) async fn resolve_audio(
             b"session-identity"
         },
         format!(
-            "{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}",
             thread.credential_api_key_id,
             service.id,
             owner,
             p.connection_id.as_deref().unwrap_or("platform"),
-            revision
+            revision,
+            delegation_model.as_deref().unwrap_or_default()
         )
         .as_bytes(),
     );
     Ok(Resolved {
+        delegation_model,
         concurrency_policy: service.concurrency_policy.clone(),
         voice,
         key,

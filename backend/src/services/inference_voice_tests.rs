@@ -108,3 +108,47 @@ async fn voice_backfill_seeds_fresh_and_existing_but_preserves_admin_edits_and_c
     })
     .await;
 }
+
+#[tokio::test]
+async fn voice_responses_backfill_preserves_admin_model_choices() {
+    let db = crate::test_utils::connect_transaction_test_database("voice_responses_backfill").await;
+    let rows = db.collection::<DownstreamService>(COLLECTION_NAME);
+    for (id, modified, model) in [
+        ("old-default", false, None),
+        ("old-admin", true, None),
+        ("chosen", true, Some("admin-task-model")),
+    ] {
+        let mut service = dummy_service();
+        service.id = id.into();
+        service.slug = "llm-openai".into();
+        service.inference_admin_modified = modified;
+        service.inference = inference::default_inference("llm-openai");
+        service
+            .inference
+            .as_mut()
+            .unwrap()
+            .voice
+            .as_mut()
+            .unwrap()
+            .delegation_model = model.map(str::to_owned);
+        rows.insert_one(service).await.unwrap();
+    }
+    inference::backfill(&db).await.unwrap();
+    for (id, expected) in [
+        ("old-default", Some("gpt-6-luna")),
+        ("old-admin", None),
+        ("chosen", Some("admin-task-model")),
+    ] {
+        let row = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        assert_eq!(
+            row.inference
+                .unwrap()
+                .voice
+                .unwrap()
+                .delegation_model
+                .as_deref(),
+            expected
+        );
+    }
+    db.drop().await.unwrap();
+}

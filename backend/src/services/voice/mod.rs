@@ -22,6 +22,7 @@ pub mod openai;
 mod openai_tests;
 pub mod progress;
 pub mod receipt;
+mod responses;
 pub mod runtime;
 pub mod session;
 mod speech;
