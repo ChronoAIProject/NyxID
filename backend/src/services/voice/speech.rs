@@ -52,6 +52,16 @@ pub(super) async fn result(
     language: Option<&str>,
 ) -> Presentation {
     use crate::services::assistant_oneshot_inference::{TextCaller, TextLimits, one_shot_text};
+    // Failure text may be a server-authored English status, not the user's
+    // language. Let the live call present these facts in its own language.
+    if task_state(&message.status, message.error_code.as_deref()) == "failed" {
+        return presentation(
+            None,
+            &message.text,
+            &message.status,
+            message.error_code.as_deref(),
+        );
+    }
     // One coherent, billed summary. This is presentation, never authorization.
     // It runs only once the complete answer is durably published. The existing
     // inference helper refuses oversized input rather than summarizing a prefix.
@@ -181,6 +191,99 @@ mod tests {
         };
         assert!(facts.to_string().len() <= super::super::runtime::COMMENTARY_MAX_BYTES);
         facts
+    }
+
+    #[tokio::test]
+    async fn failures_use_call_context_without_resolving_a_summary_provider() {
+        use mongodb::{
+            bson::{self, doc},
+            event::{EventHandler, command::CommandEvent},
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "voice_failure_language",
+            EventHandler::callback(move |event| {
+                if matches!(event, CommandEvent::Started(_)) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut message: AssistantMessage = bson::from_document(doc! {
+            "_id":"result", "conversation_id":"thread", "user_id":"owner",
+            "seq":0_i64,"turn_id":"turn","role":"assistant","text":"",
+            "status":"failed","error_code":bson::Bson::Null,"created_at":bson::DateTime::now(),
+        })
+        .unwrap();
+        reads.store(0, Ordering::SeqCst);
+        for (status, code, text) in [
+            (
+                "failed",
+                Some("cancelled"),
+                "The background task was stopped.".to_owned(),
+            ),
+            (
+                "failed",
+                Some("timeout"),
+                super::super::progress::terminal_detail(Some("timeout")).into(),
+            ),
+            (
+                "failed",
+                None,
+                "The task failed before returning an answer.".into(),
+            ),
+            (
+                "completed",
+                Some("permission_denied"),
+                "Permission was refused.".into(),
+            ),
+            (
+                "failed",
+                Some("cancelled"),
+                "é".repeat(super::super::runtime::COMMENTARY_MAX_BYTES),
+            ),
+        ] {
+            message.status = status.into();
+            message.error_code = code.map(str::to_owned);
+            message.text = text.clone();
+            let facts = context(result(&state, "owner", &message, None).await);
+            assert_eq!(facts["type"], "task_result");
+            assert_eq!(facts["state"], "failed");
+            assert_eq!(facts["error_code"], serde_json::json!(code));
+            if facts["presentation"] == "original" {
+                assert_eq!(
+                    facts["answer"], text,
+                    "Only the complete failure may be included"
+                );
+            } else {
+                assert!(facts.get("answer").is_none());
+            }
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                0,
+                "Failures must not resolve or invoke utility inference"
+            );
+        }
+        // Control: ordinary successful answers still use the existing summary
+        // attempt and complete short-answer fallback when no route is available.
+        message.status = "completed".into();
+        message.error_code = None;
+        message.text = "La luminosité est réglée à 80 %".into();
+        assert_eq!(
+            result(&state, "owner", &message, None).await,
+            Presentation::Text(message.text.clone()),
+        );
+        assert!(
+            reads.load(Ordering::SeqCst) > 0,
+            "The observer must detect the existing successful-answer inference path"
+        );
+        db.drop().await.unwrap();
     }
 
     #[test]

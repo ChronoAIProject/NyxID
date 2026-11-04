@@ -599,13 +599,20 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
 async fn voice_2083_terminal_refusals_publish_explanations_once_without_a_worker() {
     Box::pin(async {
         let (state, thread, call) = super::super::tests::setup("voice_2083_terminals").await;
-        for (code, phrase) in [
-            ("voice_request_expired", "timed out"),
-            ("permission_denied", "Permission was refused"),
-            ("turn_lost", "server restart"),
-            ("tool_error", "task failed"),
-            ("confirmation_expired", "Approval expired"),
-        ] {
+        assert!(call.preferences.language.is_none());
+        let (mut socket, server, received) = fixture_socket().await;
+        let mut coordinator = Coordinator::new();
+        for (index, (code, phrase, outcome)) in [
+            ("voice_request_expired", "timed out", "failed"),
+            ("permission_denied", "Permission was refused", "failed"),
+            ("turn_lost", "server restart", "failed"),
+            ("tool_error", "task failed", "failed"),
+            ("confirmation_expired", "Approval expired", "failed"),
+            ("cancelled", "task was stopped", "cancelled"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let r = voice::enqueue(
                 &state.db,
                 &call.user_id,
@@ -638,8 +645,69 @@ async fn voice_2083_terminal_refusals_publish_explanations_once_without_a_worker
                 .unwrap();
             assert!(msg.text.contains(phrase), "{code}: {}", msg.text);
             assert_eq!(msg.error_code.as_deref(), Some(code));
-            assert_eq!(voice::request_outcome(&saved), Some("failed"));
+            assert_eq!(voice::request_outcome(&saved), Some(outcome));
+            let count = state
+                .db
+                .collection::<Document>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                assert!(
+                    !task_updates(&state, &call, &mut socket, &mut coordinator)
+                        .await
+                        .unwrap()
+                );
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while received.lock().await.len() < index + 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let messages = received.lock().await;
+            assert_eq!(
+                messages.len(),
+                index + 1,
+                "One notice per failed or stopped task"
+            );
+            let event = messages.last().unwrap();
+            assert_eq!(event["type"], "session.commentary.append");
+            let content = event["content"].as_str().unwrap();
+            assert!(content.len() <= COMMENTARY_MAX_BYTES);
+            let facts: Value = serde_json::from_str(content).unwrap();
+            assert_eq!(facts["type"], "task_result");
+            assert_eq!(facts["state"], "failed");
+            assert_eq!(facts["error_code"], code);
+            if let Some(answer) = facts.get("answer") {
+                assert_eq!(
+                    answer,
+                    &json!(msg.text),
+                    "The complete source is quoted data, never a forced script"
+                );
+            }
+            assert!(coordinator.pending_audio.is_empty());
+            drop(messages);
+            assert_eq!(
+                state
+                    .db
+                    .collection::<Document>(REQUESTS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                count,
+                "Presenting a failure cannot enqueue the underlying task again"
+            );
+            assert_eq!(
+                voice::get(&state.db, &call.user_id, &thread.id, &r.id)
+                    .await
+                    .unwrap()
+                    .state,
+                RequestState::Cancelled
+            );
         }
+        server.abort();
         state.db.drop().await.unwrap();
     })
     .await;
