@@ -320,7 +320,7 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             let uri = scenario.strip_prefix("stale_").map(|kind| format!("/api/v1/proxy/held/{kind}"))
                 .unwrap_or_else(|| format!("/api/v1/proxy/s/{model_slug}/{model_path}"));
             let mut request = Request::builder().method("POST").uri(uri);
-            if scenario == "semantic_header" {
+            if !setup && scenario == "semantic_header" {
                 request = request.header("idempotency-key", "other");
                 assert_eq!(
                     crate::services::proxy_service::collect_forward_headers(request.headers_ref().unwrap()),
@@ -940,6 +940,75 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
             assert_eq!(
                 provider.received_requests().await.unwrap().len(),
                 provider_calls_before
+            );
+        } else if permissions && scenario == "unbound" {
+            // This fixture deliberately rejects the independently authenticated
+            // hidden owner setup. The saved visitor failure is NyxID-authored,
+            // distinct from the original upstream callback failure below.
+            assert_eq!(calls[2]["status"], 403);
+            assert_eq!(reply.status, "failed");
+            assert_eq!(
+                reply.error_code.as_deref(),
+                Some("guest_model_route_required")
+            );
+            assert_eq!(reply.upstream_error_code, None);
+            assert_eq!(reply.error_detail.as_ref().unwrap().stage, "guest_setup");
+            let setup = crate::services::assistant_guest_model_setup::record(
+                &f.state.db,
+                &f.owner,
+                &f.chat.agent_id,
+                &row.model,
+            )
+            .await
+            .unwrap()
+            .expect("failed independent owner setup remains durable");
+            assert_eq!(setup.get_str("status"), Ok("failed"));
+            assert_eq!(setup.get_str("reason"), Ok("model_route_unavailable"));
+            assert_eq!(setup.get("route"), Some(&bson::Bson::Null));
+            let reason = reply
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_ref()
+                .unwrap();
+            assert_eq!(reason.source, "nyxid");
+            assert_eq!(reason.stage, "guest_setup");
+            assert_eq!(reason.code, setup.get_str("reason").unwrap());
+            assert_eq!(reason.http_status, None);
+            assert_eq!(reason.nyxid_error_code, None);
+            let diagnostic = reason
+                .model_route
+                .as_ref()
+                .expect("closed setup diagnostic");
+            assert_eq!(diagnostic.reason, "model_route_unavailable");
+            assert!(diagnostic.unknown_fields.is_empty());
+            assert_eq!(diagnostic.attempt_id, None);
+            assert_eq!(
+                provider.received_requests().await.unwrap().len(),
+                provider_calls_before
+            );
+            let dto = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();
+            for event in [&dto, &completed] {
+                assert_eq!(event["turn_metadata"]["failure_reason"]["source"], "nyxid");
+                assert_eq!(
+                    event["turn_metadata"]["failure_reason"]["stage"],
+                    "guest_setup"
+                );
+                assert_eq!(
+                    event["turn_metadata"]["failure_reason"]["code"],
+                    "model_route_unavailable"
+                );
+                assert!(!event.to_string().contains("untrusted upstream detail"));
+                assert!(
+                    !event
+                        .to_string()
+                        .contains("Owner setup unavailable in this fixture")
+                );
+            }
+            assert_eq!(
+                completed["error"]["message"],
+                "Visitor setup could not finish. The owner has been notified. Please try again later."
             );
         } else if let Some((status, code, numeric)) = expected {
             assert_eq!(calls[2]["status"], status, "{scenario}: {}", calls[2]);

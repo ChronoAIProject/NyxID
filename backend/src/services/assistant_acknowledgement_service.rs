@@ -2632,7 +2632,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "code": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
         "status":status,"conversation_id":row.conversation_id,"review_path":review_path,
         "message": if denied {"The request was denied; no approval is waiting."} else {"A pending request is available at review_path. This does not confirm that the owner has seen it."},
-        "expires_at":row.expires_at});
+        "expires_at":bson::DateTime::from_chrono(row.expires_at).to_chrono()});
     if row.kind == "action"
         && !denied
         && row.voice_request_id.is_none()

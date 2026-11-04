@@ -13,6 +13,24 @@ fn card(status: &str, expired: bool) -> AssistantAcknowledgement {
 }
 
 #[test]
+fn invisible_card_refusal_expiry_matches_persisted_bson_precision() {
+    let expiry = chrono::DateTime::parse_from_rfc3339("2099-01-02T03:04:05.123456789Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    for status in ["pending", "denied"] {
+        let mut row = card(status, false);
+        row.expires_at = expiry;
+        let saved: AssistantAcknowledgement =
+            bson::from_document(bson::to_document(&row).unwrap()).unwrap();
+        assert_ne!(row.expires_at, saved.expires_at);
+        let immediate = refusal_with_frontend(&row, "https://nyxid.example/");
+        let reloaded = refusal_with_frontend(&saved, "https://nyxid.example/");
+        assert_eq!(immediate["expires_at"], "2099-01-02T03:04:05.123Z");
+        assert_eq!(immediate, reloaded);
+    }
+}
+
+#[test]
 fn invisible_card_2072_tool_result_state_matrix_and_exact_links() {
     for (stored, expired, status, code) in [
         ("pending", false, "pending", "acknowledgement_required"),
