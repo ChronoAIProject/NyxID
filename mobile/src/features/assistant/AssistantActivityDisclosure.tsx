@@ -139,7 +139,7 @@ export function AssistantActivityDisclosure({
         </View>
       </Pressable>
       {open ? (
-        <View style={[styles.details, { borderColor: colors.borderSoft }]}>
+        <View style={styles.details}>
           {activities.map((activity) => {
             const confirmation = gated.has(activity.id);
             const description = confirmation
@@ -163,15 +163,6 @@ export function AssistantActivityDisclosure({
                 accessibilityLabel={`${description}, ${activity.label}, ${confirmation ? "Confirmation requested" : activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running"}${elapsed ? `, ${elapsed}` : ""}`}
                 style={styles.activity}
               >
-                <ServiceIcon
-                  slug={
-                    activity.label.includes("__") &&
-                    !activity.label.startsWith("nyx__")
-                      ? activity.label.split("__")[0]
-                      : undefined
-                  }
-                  size="xs"
-                />
                 <ActivityStatusIcon
                   status={confirmation ? "confirmation" : activity.status}
                 />
@@ -211,6 +202,11 @@ export function AssistantActivityDisclosure({
                     </Label>
                   ) : null}
                 </View>
+                {/* The connected service, trailing so every row's text aligns;
+                    NyxID's own tools carry no service mark. */}
+                {serviceSlug(activity.label) ? (
+                  <ServiceIcon slug={serviceSlug(activity.label)} size="xs" />
+                ) : null}
               </View>
             );
           })}
@@ -245,6 +241,13 @@ export function AssistantActivityDisclosure({
       ) : null}
     </View>
   );
+}
+
+/** "api-github__get_repo" -> "api-github"; NyxID's own tools have none. */
+function serviceSlug(label: string): string | undefined {
+  if (!label.includes("__")) return undefined;
+  const slug = label.split("__")[0]!;
+  return slug === "nyx" || slug === "nyxid" ? undefined : slug;
 }
 
 function ActivityStatusIcon({
@@ -306,7 +309,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  details: { borderLeftWidth: 2, paddingLeft: 12, paddingVertical: 4, gap: 8, marginLeft: 6 },
+  // Rows share the header's columns: status icon under its icon, text under
+  // its label.
+  details: { paddingHorizontal: 12, paddingVertical: 2, gap: 10 },
   activity: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   activityText: { flex: 1, gap: 2 },
   description: { fontSize: 12, lineHeight: 20 },
