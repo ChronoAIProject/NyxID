@@ -666,6 +666,7 @@ fn oauth_refresh_preserves_coverage_but_account_replacement_invalidates() {
     let service = crate::models::downstream_service::test_helpers::dummy_service();
     let mut resolution = UserServiceResolution {
         target: ProxyTarget {
+            execution: super::super::proxy_service::ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

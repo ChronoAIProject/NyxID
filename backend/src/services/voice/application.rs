@@ -79,7 +79,7 @@ pub async fn options(
             false,
         )
         .await?;
-    } else if crate::services::voice::client_key::authenticate(&state.db, &auth)
+    } else if crate::services::voice::client_key::authenticate(&state.db, auth)
         .await?
         .is_some()
     {
@@ -459,7 +459,7 @@ pub async fn agents(
             match crate::services::voice::access::policy(
                 &state.db,
                 auth,
-                &service,
+                service,
                 "GET",
                 "/voice/agents",
                 false,
