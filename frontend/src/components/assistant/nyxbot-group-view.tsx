@@ -1,7 +1,7 @@
 import { GroupAgentAccessRequest } from "./group-agent-access";
 import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
-import { collaborationApi } from "@/hooks/use-collaboration-groups";
+import { collaborationApi, useCollaborationRead } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -124,14 +124,6 @@ function recipientLine(
     .join(", ")}`;
 }
 
-function PeopleChips({ ids, participants }: { readonly ids: readonly string[]; readonly participants: readonly MentionPerson[] }) {
-  if (!ids.length) return null;
-  return <div aria-label="Mentioned people" className="my-1 flex flex-wrap gap-1">{ids.map((id) => {
-    const person = participants.find((p) => p.id === id);
-    return <span key={id} title={person?.handle ? `@${person.handle}` : undefined} className="rounded-full border border-border bg-muted px-2 py-0.5 text-11">@{person?.display_name ?? "Former participant"}</span>;
-  })}</div>;
-}
-
 export function GroupMessageRow({
   groupId,
   message,
@@ -188,7 +180,6 @@ export function GroupMessageRow({
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
-          <PeopleChips ids={message.mentioned_participant_ids ?? []} participants={participants} />
           <UserText text={projection.text} names={names} mentions={projection.mentions} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -264,7 +255,6 @@ export function GroupMessageRow({
               }}
             />
           ))}
-          <PeopleChips ids={message.mentioned_participant_ids ?? []} participants={participants} />
           <TextBlock text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} />
           <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
             <MessageCopyAction text={sanitizeAssistantMessageContent(projection.copyText)} />
@@ -780,6 +770,7 @@ export function NyxAgentGroupPage({
         }
       : message,
   );
+  useCollaborationRead(groupId, messages.at(-1)?.seq ?? 0, Boolean(group?.collaboration));
   const people = group?.collaboration ? (group.participants ?? []).filter((p) => p.handle) : [];
   const draftPeople = peopleMentions(draftText, people, group?.members ?? [], Boolean(group?.collaboration));
   const recipients = resolveRecipients(

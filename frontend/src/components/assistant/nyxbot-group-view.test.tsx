@@ -9,6 +9,11 @@ import type {
   AssistantGroupMessage,
 } from "@/schemas/assistant-nyxagent";
 
+vi.mock("@/hooks/use-collaboration-groups", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/hooks/use-collaboration-groups")>(),
+  useCollaborationRead: vi.fn(),
+}));
+
 const post = vi.fn();
 let group: AssistantGroup;
 let groupLoaded = true;
@@ -528,9 +533,18 @@ describe("collaboration participant composer", () => {
     const participants = [{ id: "shining", display_name: "Shining", handle: "person-0123456789abcdef" }];
     const message: AssistantGroupMessage = { id: "mention", seq: 1, role: "user", agent: null, text: "@person-0123456789abcdef hello", mentioned_participant_ids: ["shining"], created_at: "2026-11-03T00:00:00Z" };
     const view = render(<GroupMessageRow groupId={group.id} message={message} names={[]} participants={participants} onOpenAgent={() => undefined} />);
-    expect(screen.getByLabelText("Mentioned people")).toHaveTextContent("@Shining");
+    expect(screen.queryByLabelText("Mentioned people")).not.toBeInTheDocument();
+    expect(screen.getAllByText("@Shining")).toHaveLength(1);
+    expect(screen.getByText("@Shining")).toHaveAttribute("data-group-mention");
     view.rerender(<GroupMessageRow groupId={group.id} message={{ ...message, role: "agent", agent: { id: RESEARCHER, name: "researcher", kind: "specialist" } }} names={[]} participants={participants} onOpenAgent={() => undefined} />);
-    expect(screen.getByLabelText("Mentioned people")).toHaveTextContent("@Shining");
+    expect(screen.queryByLabelText("Mentioned people")).not.toBeInTheDocument();
+    expect(screen.getAllByText("@Shining")).toHaveLength(1);
+    expect(screen.getByText("@Shining")).toHaveAttribute("data-group-mention");
+    // Hidden protocol markup may leave resolved metadata behind. Do not
+    // resurrect it as a separate visible mention row.
+    view.rerender(<GroupMessageRow groupId={group.id} message={{ ...message, role: "agent", text: "<function_calls>@person-0123456789abcdef</function_calls>Done", agent: { id: RESEARCHER, name: "researcher", kind: "specialist" } }} names={[]} participants={participants} onOpenAgent={() => undefined} />);
+    expect(screen.queryByText("@Shining")).not.toBeInTheDocument();
+    expect(screen.getByText("Done")).toBeVisible();
   });
   it("enables people-only chat without any usable agent and retains server display names", async () => {
     render(<QueryClientProvider client={new QueryClient()}><NyxAgentGroupPage groupId={group.id} mock={false} /></QueryClientProvider>);

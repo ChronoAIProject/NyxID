@@ -998,6 +998,7 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         approval_timeout_secs: 300,
         grant_expiry_days: 30,
         approval_required: None,
+        group_mentions_enabled: true,
         push_enabled: false,
         push_devices: vec![],
         created_at: now,
@@ -1363,6 +1364,106 @@ pub async fn machine_control_requested(
         .await;
     }
     Ok(())
+}
+
+/// Group mentions reuse registered push devices only; never Telegram or email.
+/// As with approval pushes, transcript content is absent from title/body/data.
+pub async fn send_group_mention_push(
+    state: &crate::AppState,
+    user: &str,
+    group: &str,
+    name: &str,
+    sender: &str,
+) -> AppResult<bool> {
+    send_group_mention_push_with(
+        &state.db,
+        user,
+        group,
+        name,
+        sender,
+        &state.config.frontend_url,
+        |device, title, body, data| async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                send_push_to_device(
+                    &state.http_client,
+                    state.fcm_auth.as_deref(),
+                    state.apns_auth.as_deref(),
+                    &state.config,
+                    &device,
+                    &title,
+                    &body,
+                    &data,
+                ),
+            )
+            .await
+            .map_err(|_| AppError::Internal("Group mention push timed out".into()))?
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_group_mention_push_with<F, Fut>(
+    db: &Database,
+    user: &str,
+    group: &str,
+    name: &str,
+    sender: &str,
+    frontend: &str,
+    send: F,
+) -> AppResult<bool>
+where
+    F: Fn(DeviceToken, String, String, HashMap<String, String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<PushResult>>,
+{
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":user,"push_enabled":true,"group_mentions_enabled":{"$ne":false}})
+        .await?
+    else {
+        return Ok(false);
+    };
+    let label = |value: &str| {
+        value
+            .chars()
+            .filter(|c| {
+                !c.is_control() && !matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(80)
+            .collect::<String>()
+    };
+    let title = format!("Mention in {}", label(name));
+    let body = format!("{} mentioned you", label(sender));
+    let data = HashMap::from([
+        ("type".into(), "group_mention".into()),
+        ("group_id".into(), group.into()),
+        (
+            "deeplink".into(),
+            super::assistant_links::AssistantPage::Group { group }.url(frontend),
+        ),
+    ]);
+    let mut sent = Vec::new();
+    let mut invalid = Vec::new();
+    for device in unique_devices_by_token(&channel.push_devices) {
+        match send(device.clone(), title.clone(), body.clone(), data.clone()).await {
+            Ok(PushResult::Success) => sent.push(device.device_id.clone()),
+            Ok(PushResult::TokenInvalid) => invalid.push(device.device_id.clone()),
+            Err(_) => tracing::debug!("Group mention push unavailable"),
+        }
+    }
+    if !invalid.is_empty() {
+        remove_stale_device_tokens(db, &channel.id, &invalid).await;
+    }
+    if !sent.is_empty() {
+        update_device_last_used(db, &channel.id, &sent).await;
+    }
+    Ok(!sent.is_empty())
 }
 
 #[cfg(test)]
@@ -1991,5 +2092,69 @@ mod tests {
                 .is_some_and(|preview| preview.chars().count() <= PUSH_TRIGGER_PREVIEW_MAX_CHARS)
         );
         assert!(!rendered.push_data.contains_key("envelope"));
+    }
+}
+
+#[cfg(test)]
+mod group_mention_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    #[tokio::test]
+    async fn group_mention_push_uses_registered_devices_settings_and_private_preview_policy() {
+        let db = crate::test_utils::connect_test_database("notification_group_push")
+            .await
+            .unwrap();
+        let user = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user).await.unwrap();
+        assert!(channel.group_mentions_enabled);
+        let device = DeviceToken {
+            device_id: uuid::Uuid::new_v4().to_string(),
+            platform: "fcm".into(),
+            token: "test-token".into(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        db.collection::<NotificationChannel>(COLLECTION_NAME).update_one(doc! {"_id":&channel.id},doc! {"$set":{"push_enabled":true,"push_devices":[bson::to_document(&device).unwrap()]}}).await.unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        for enabled in [false, true] {
+            db.collection::<NotificationChannel>(COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&channel.id},
+                    doc! {"$set":{"group_mentions_enabled":enabled}},
+                )
+                .await
+                .unwrap();
+            let sink = sent.clone();
+            let delivered = send_group_mention_push_with(
+                &db,
+                &user,
+                "nyxg-test",
+                "Group\nname",
+                "Kai\u{202e}",
+                "https://nyxid.example",
+                move |device, title, body, data| {
+                    assert_eq!(device.token, "test-token");
+                    sink.lock().unwrap().push((title, body, data));
+                    async { Ok(PushResult::Success) }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(delivered, enabled);
+        }
+        {
+            let rows = sent.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "Mention in Groupname");
+            assert_eq!(rows[0].1, "Kai mentioned you");
+            assert_eq!(
+                rows[0].2["deeplink"],
+                "https://nyxid.example/assistant?c=nyxg-test"
+            );
+            assert_eq!(rows[0].2.len(), 3); // no text/preview, key, card or account payload
+        }
+        db.drop().await.unwrap();
     }
 }

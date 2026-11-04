@@ -123,6 +123,16 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             "assistant_resources",
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
         ),
+        // An older replica may have deleted the group before it knew these
+        // additive collections. Erasure must not depend on a surviving parent.
+        (
+            "assistant_group_read_states",
+            doc! {"_id":"read-state","user_id":&owner,"group_id":"deleted-group","last_seen_seq":42_i64},
+        ),
+        (
+            "assistant_group_mention_notifications",
+            doc! {"_id":"pending-mention","user_id":&owner,"group_id":"deleted-group"},
+        ),
         (
             "assistant_voice_announcements",
             doc! {"_id":"private-notice","user_id":&owner,"conversation_id":"private-chat","text":"Private notification"},

@@ -739,6 +739,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         created_at: Utc::now(),
         activities: (0..40)
             .map(|i| crate::models::assistant_conversation::TurnActivity {
+                retry_identity: None,
                 failure: None,
                 machine: None,
                 id: i.to_string(),
@@ -817,6 +818,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "a".into(),
@@ -884,6 +886,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "owner-action".into(),
@@ -951,6 +954,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "activity-42".into(),

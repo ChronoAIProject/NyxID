@@ -1,12 +1,12 @@
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
-import { useRef, useState, type PropsWithChildren } from "react";
+import { useEffect, useRef, useState, type PropsWithChildren } from "react";
 import {
   ScrollView,
   StyleSheet,
   View,
   type ScrollViewProps,
 } from "react-native";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ActionButton,
   Card,
@@ -16,6 +16,10 @@ import {
 import { SectionBadge } from "../../components/SectionBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import { agentsApi } from "../../lib/api/agentsApi";
+import { onboardingApi } from "../../lib/api/onboardingApi";
+import { FirstRunIntro } from "../onboarding/FirstRunIntro";
+import { NextStepList } from "../onboarding/NextStepList";
+import { onboardingKey, type NextStep } from "../onboarding/onboardingContracts";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { getCurrentUserProfileRequest } from "../../lib/api/http";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
@@ -42,6 +46,8 @@ type Props = {
   onOpenCrew: (groupId: string) => void;
   onNewAgent: () => void;
   onNewCrew: () => void;
+  /** Sends a next step's prompt to NyxBot. */
+  onStartNextStep?: (step: NextStep) => void;
 };
 
 /** The empty primary NyxBot chat uses the same reads as the workspace lists. */
@@ -51,6 +57,7 @@ export function NyxBotHome({
   onOpenCrew,
   onNewAgent,
   onNewCrew,
+  onStartNextStep,
 }: Props) {
   const { colors } = useTheme();
   const { epoch, active, online, available } = useGroupAvailability();
@@ -80,6 +87,28 @@ export function NyxBotHome({
     staleTime: 60_000,
     retry: false,
   });
+  const queryClient = useQueryClient();
+  const onboarding = useQuery({
+    queryKey: onboardingKey,
+    queryFn: ({ signal }) => onboardingApi.get(signal),
+    enabled: active && Boolean(onStartNextStep),
+    staleTime: 60_000,
+    retry: false,
+  });
+  const hideSuggestions = useMutation({
+    mutationFn: () => onboardingApi.hideSuggestions(),
+    onSuccess: (next) => queryClient.setQueryData(onboardingKey, next),
+  });
+  const [intro, setIntro] = useState<"first_run" | "home">();
+  const introShown = useRef(false);
+  useEffect(() => {
+    if (!onboarding.data?.show_intro || introShown.current) return;
+    introShown.current = true;
+    setIntro("first_run");
+  }, [onboarding.data?.show_intro]);
+  const nextSteps = onboarding.data?.suggestions_hidden
+    ? []
+    : (onboarding.data?.recommendations ?? []);
   const roster = agents.data?.agents ?? [];
   const groups = crews.data ?? [];
   const latest = useRef({ roster, groups });
@@ -142,6 +171,45 @@ export function NyxBotHome({
       </View>
       {!online ? (
         <Notice message="You're offline. Reconnect to refresh your agents and crews." />
+      ) : null}
+      {nextSteps.length && onStartNextStep ? (
+        <Section
+          title="Suggested for you"
+          action={
+            <>
+              <ActionButton
+                label="Replay intro"
+                compact
+                variant="secondary"
+                onPress={() => setIntro("home")}
+              />
+              <ActionButton
+                label="Hide"
+                compact
+                variant="secondary"
+                disabled={!online || hideSuggestions.isPending}
+                onPress={() => hideSuggestions.mutate()}
+              />
+            </>
+          }
+        >
+          <NextStepList
+            steps={nextSteps}
+            disabled={!online}
+            onStart={onStartNextStep}
+          />
+        </Section>
+      ) : null}
+      {intro && onboarding.data && onStartNextStep ? (
+        <FirstRunIntro
+          visible
+          state={onboarding.data}
+          entryPoint={intro}
+          firstName={firstName}
+          online={online}
+          onClose={() => setIntro(undefined)}
+          onStart={onStartNextStep}
+        />
       ) : null}
       {!hasTeam &&
       !agents.isPending &&

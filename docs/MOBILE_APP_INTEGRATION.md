@@ -853,3 +853,24 @@ Mobile App                          NyxID Backend
 | `PUT` | `/api/v1/users/me` | Update current user profile |
 
 All endpoints require `Authorization: Bearer <access_token>` unless otherwise noted.
+
+
+### Collaboration group mentions
+
+Notification settings GET/PUT add optional `group_mentions_enabled` (default
+`true` when absent). Push alerts also require `push_enabled` and a registered
+FCM/APNs device. `type: "group_mention"` uses the existing push providers and
+carries only `group_id` and `deeplink` (the canonical `/assistant?c=nyxg-...`
+URL from `AssistantPage::Group`). Existing generic deep-link handling opens it.
+Title/body contain bounded sender/group names but no transcript preview,
+matching approval-push privacy. No new bot, Telegram or email delivery is added.
+Web Push subscriptions are not implemented; browsers receive existing live events.
+
+The server checks current participation and coalesces at most one push per
+person/group every five minutes, including agent mentions. Delivery is
+best-effort without retrying an ambiguous send. Unread/mention counts are
+returned on collaboration group responses. A visible transcript advances its
+server read marker with `POST /api/v1/assistant/nyxagent/groups/{id}/read`,
+`{"last_seen_seq": <last displayed seq>}`. Only human participants may write it;
+removed participants receive not-found and never receive further notifications.
+See [the group contract](chat/12-shared-agents-and-groups.md).
