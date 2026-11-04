@@ -243,6 +243,7 @@ async fn serve(
                         "fragments":fragments_response(m.voice.as_ref()),
                         "sealed":m.voice.as_ref().is_some_and(|v|v.sealed),"complete":m.voice.as_ref().is_some_and(|v|v.complete)})).collect::<Vec<_>>(),
                     "tasks":tasks.into_iter().rev().map(|r|json!({"id":r.id,"state":r.state,"outcome":crate::services::assistant_voice::request_outcome(&r),"turn_id":r.turn_id,
+                        "progress":r.progress.as_ref().map(|p|json!({"stage":p.stage,"detail":p.detail,"last_completed_step":p.last_completed_step,"completed_steps":p.completed_steps,"updated_at":p.updated_at})),
                         "pending_acknowledgement_ids":r.pending_acknowledgement_ids,
                         "title":source_titles.get(&r.message_id),"result_message_id":r.result_message_id})).collect::<Vec<_>>()});
                 tokio::time::timeout(std::time::Duration::from_secs(2),socket.send(Message::Text(value.to_string().into())))

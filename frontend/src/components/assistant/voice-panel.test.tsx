@@ -113,6 +113,22 @@ beforeEach(() => {
   mock.tasks = [];
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-10-04T00:00:00Z"));
 });
+
+it("shows evidence-based voice progress and the last finished step", () => {
+  mock.tasks = [{
+    id: "task", title: "Check my GitHub issues", state: "claimed",
+    pending_acknowledgement_ids: [],
+    progress: {
+      stage: "working", detail: "Checking issue progress",
+      last_completed_step: "Reading account identity", completed_steps: 1,
+      updated_at: "2026-11-04T00:00:00Z",
+    },
+  }];
+  render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
+  expect(screen.getByText("Checking issue progress")).toBeInTheDocument();
+  expect(screen.getByText("Last finished step: Reading account identity")).toBeInTheDocument();
+  expect(screen.queryByText(/get_authenticated_user|api-github-pat/)).not.toBeInTheDocument();
+});
 afterEach(() => vi.restoreAllMocks());
 it("minimizes and restores without ending the media session", () => {
   render(<VoicePanel threadId="thread" onClose={vi.fn()} />);
