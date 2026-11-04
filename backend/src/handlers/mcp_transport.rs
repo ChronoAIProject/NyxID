@@ -2393,6 +2393,29 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
     )
 }
 
+/// Schedule creation has no client-generated object ID. Approval handles and
+/// the universal-tool wrapper are transport, not a different creation. Keep the
+/// old digest as a lookup candidate for replies written by older replicas.
+fn chat_retry_digest(params: &serde_json::Value) -> String {
+    let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
+        let arguments = params["arguments"]["arguments_json"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        (params["arguments"]["tool_name"].as_str(), arguments)
+    } else {
+        (params["name"].as_str(), params.get("arguments").cloned())
+    };
+    if name == Some("nyxid__create_schedule")
+        && let Some(arguments) = arguments
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        arguments.remove("acknowledgement_id");
+        return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+    }
+    chat_activity_digest(params)
+}
+
 /// Refuse a retried turn's repeat of a completed call: an MCP `isError`
 /// result the model can act on, recorded on the live turn (so a retry of this
 /// retry stays fenced) and audited with metadata only.
@@ -2504,19 +2527,20 @@ async fn handle_tools_call(
     if let Some(chat) = &auth.chat
         && let Some(params) = request.params.as_ref()
     {
-        let digest = chat_activity_digest(params);
-        match crate::services::assistant_nyxagent::retry_duplicate(
+        let digest = chat_retry_digest(params);
+        let legacy = chat_activity_digest(params);
+        match crate::services::assistant_nyxagent::retry_duplicate_any(
             &state.db,
             &chat.user_id,
             &chat.conversation_id,
             chat.turn_id.as_deref().unwrap_or_default(),
-            &digest,
+            &[digest.as_str(), legacy.as_str()],
         )
         .await
         {
             Ok(false) => {}
             Ok(true) => {
-                return refuse_retry_duplicate(state, auth, chat, request, params, &digest).await;
+                return refuse_retry_duplicate(state, auth, chat, request, params, &legacy).await;
             }
             Err(_) => {
                 return rpc_error(request.id.clone(), -32603, ACTIVITY_RECORDING_RETRY);
@@ -2541,13 +2565,14 @@ async fn handle_tools_call(
     };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
-            match crate::services::assistant_nyxagent::activity_started_with_digest(
+            match crate::services::assistant_nyxagent::activity_started_with_identity(
                 &state.db,
                 &chat.user_id,
                 &chat.conversation_id,
                 chat.turn_id.as_deref().unwrap_or_default(),
                 &chat_activity_label(params),
                 Some(&chat_activity_digest(params)),
+                Some(&chat_retry_digest(params)),
             )
             .await
             {
@@ -2774,14 +2799,18 @@ async fn dispatch_tools_call(
         };
         match Box::pin(gate).await {
             Ok(Some(refusal)) => {
-                return tool_result(request.id.clone(), &refusal.to_string(), true);
-            }
-            Err(_) => {
                 return tool_result(
                     request.id.clone(),
-                    "Confirmation could not be checked",
+                    &crate::services::assistant_access_policy::with_frontend(
+                        refusal,
+                        &state.config.frontend_url,
+                    )
+                    .to_string(),
                     true,
                 );
+            }
+            Err(_) => {
+                return tool_result(request.id.clone(), &acks::unavailable().to_string(), true);
             }
             Ok(None) => {}
         }
@@ -3706,10 +3735,10 @@ async fn authorize_mcp_operation(
         pending.resolution.from_org_policy,
     )
     .await
-    .map_err(|e| {
+    .map_err(|_| {
         tool_result(
             request_id.clone(),
-            &format!("Approval request failed: {e}"),
+            &serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string(),
             true,
         )
     })?;
@@ -3718,12 +3747,9 @@ async fn authorize_mcp_operation(
     approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
         .await
         .map_err(|error| {
-            let mapped = approval_service::map_wait_for_decision_error(
-                error,
-                &req_id,
-                &state.config.frontend_url,
-            );
-            tool_result(request_id.clone(), &format!("{mapped}"), true)
+            let outcome =
+                approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
+            tool_result(request_id.clone(), &outcome.to_string(), true)
         })?;
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
@@ -4126,7 +4152,11 @@ async fn webhook_service_gate(
         {
             return Ok::<_, crate::errors::AppError>(Err(tool_result(
                 request_id.clone(),
-                &refusal.to_string(),
+                &crate::services::assistant_access_policy::with_frontend(
+                    refusal,
+                    &state.config.frontend_url,
+                )
+                .to_string(),
                 true,
             )));
         }
@@ -4136,7 +4166,7 @@ async fn webhook_service_gate(
         Ok(result) => result,
         Err(_) => Err(tool_result(
             request_id,
-            "Confirmation could not be checked",
+            &acks::unavailable().to_string(),
             true,
         )),
     }
@@ -7744,6 +7774,7 @@ mod tests {
 
         db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
             .insert_one(ApprovalGrant {
+                execution: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: org_id.clone(),
                 service_id: catalog_service_id.clone(),
@@ -7788,6 +7819,7 @@ mod tests {
                 approval_timeout_secs: 0,
                 grant_expiry_days: 30,
                 approval_required: Some(false),
+                group_mentions_enabled: true,
                 push_enabled: false,
                 push_devices: vec![],
                 created_at: now,
@@ -8061,13 +8093,16 @@ mod tests {
             .unwrap();
         let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result["result"]["isError"], true);
-        assert!(
-            result["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Approval request was rejected"),
+        // The MCP text is the structured wait outcome (#2072): a truthful,
+        // stable code plus the reviewed state, never a pending-card claim.
+        let outcome: serde_json::Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap())
+                .expect("structured approval outcome");
+        assert_eq!(
+            outcome["code"], "approval_denied",
             "the MCP result must honor the web rejection"
         );
+        assert_eq!(outcome["status"], "rejected");
         assert_eq!(
             db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
                 .count_documents(doc! { "service_id": &service.id })
@@ -11212,3 +11247,30 @@ mod lark_base_tests;
 #[cfg(test)]
 #[path = "mcp_lark_im_tests.rs"]
 mod lark_im_tests;
+
+#[cfg(test)]
+mod schedule_retry_identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn schedule_retry_identity_ignores_approval_handle_and_wrapper_only() {
+        let args = json!({"label":"QA", "instruction":"Say hello", "schedule":{"kind":"at","at":"2099-12-31T15:00:00Z"}});
+        let direct = json!({"name":"nyxid__create_schedule","arguments":args});
+        let mut approved = direct.clone();
+        approved["arguments"]["acknowledgement_id"] = json!("one-use-card");
+        let wrapped = json!({"name":"nyx__call_tool", "arguments":{
+            "tool_name":"nyxid__create_schedule", "arguments_json":approved["arguments"].to_string()}});
+        assert_eq!(chat_retry_digest(&direct), chat_retry_digest(&approved));
+        assert_eq!(chat_retry_digest(&direct), chat_retry_digest(&wrapped));
+        assert_ne!(
+            chat_activity_digest(&direct),
+            chat_activity_digest(&approved)
+        );
+        approved["arguments"]["label"] = json!("Different automation");
+        assert_ne!(chat_retry_digest(&direct), chat_retry_digest(&approved));
+        let other =
+            json!({"name":"service__write", "arguments":{"acknowledgement_id":"provider-field"}});
+        assert_eq!(chat_retry_digest(&other), chat_activity_digest(&other));
+    }
+}

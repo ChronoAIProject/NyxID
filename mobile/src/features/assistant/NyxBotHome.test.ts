@@ -87,7 +87,10 @@ function setup() {
     },
     "lucide-react-native": { Bot: "Bot", Users: "Users" },
     "@tanstack/react-query": {
+      useQueryClient: () => ({ setQueryData: () => undefined }),
+      useMutation: () => ({ mutate: () => undefined }),
       useQuery: (options: Record<string, any>) => {
+        if (options.queryKey.includes("onboarding")) return { data: undefined };
         const name = options.queryKey.includes("agents")
           ? "agents"
           : options.queryKey.includes("groups")
@@ -131,6 +134,10 @@ function setup() {
         list: (signal: AbortSignal) => calls.push(["crews-api", signal]),
       },
     },
+    "../../lib/api/onboardingApi": { onboardingApi: {} },
+    "../onboarding/FirstRunIntro": { FirstRunIntro: "FirstRunIntro" },
+    "../onboarding/NextStepList": { NextStepList: "NextStepList" },
+    "../onboarding/onboardingContracts": { onboardingKey: ["assistant", "onboarding"] },
     "../../lib/api/http": {
       getCurrentUserProfileRequest: (signal: AbortSignal) =>
         calls.push(["profile-api", signal]),

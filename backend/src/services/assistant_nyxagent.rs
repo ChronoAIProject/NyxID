@@ -4262,6 +4262,8 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
 /// A pending proxy approval request raised by this chat's key. The chat renders
 /// it as a card; the decision itself goes through the ordinary approvals API.
 pub struct ChatApproval {
+    pub status: String,
+    pub review_path: String,
     pub id: String,
     pub service_slug: String,
     pub service_name: String,
@@ -4276,10 +4278,30 @@ pub struct ChatApproval {
 /// carry the key's name as `requester_label` (proxy approvals record the API
 /// key name), and the owner is either the request owner or a notified
 /// approver for org-policy requests.
+#[cfg(test)]
 pub async fn pending_approvals(
     db: &Database,
     user_id: &str,
     credential_api_key_id: &str,
+) -> AppResult<Vec<ChatApproval>> {
+    chat_approvals(db, user_id, credential_api_key_id, false).await
+}
+
+/// Keep terminal requests visible after expiry/decision and after a reload.
+/// This is the same owner/key scope as pending cards, never the global inbox.
+pub async fn approval_history(
+    db: &Database,
+    user_id: &str,
+    credential_api_key_id: &str,
+) -> AppResult<Vec<ChatApproval>> {
+    chat_approvals(db, user_id, credential_api_key_id, true).await
+}
+
+async fn chat_approvals(
+    db: &Database,
+    user_id: &str,
+    credential_api_key_id: &str,
+    include_decided: bool,
 ) -> AppResult<Vec<ChatApproval>> {
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS};
     if credential_api_key_id.is_empty() {
@@ -4288,24 +4310,44 @@ pub async fn pending_approvals(
     let Ok(key) = super::key_service::get_api_key(db, user_id, credential_api_key_id).await else {
         return Ok(Vec::new());
     };
-    let rows: Vec<ApprovalRequest> = db
-        .collection::<ApprovalRequest>(APPROVALS)
-        .find(doc! {
-            "status": "pending",
-            "requester_type": "user",
-            "requester_id": user_id,
-            "requester_label": &key.name,
-            "expires_at": {"$gt": bson::DateTime::now()},
-            "$or": [{"user_id": user_id}, {"notify_user_ids": user_id}],
-        })
-        .sort(doc! {"created_at": 1})
+    let scope = doc! {
+        "requester_type":"user", "requester_id":user_id,"requester_label":&key.name,
+        "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+    };
+    let now = Utc::now();
+    let mut pending = scope.clone();
+    pending.extend(doc! {"status":"pending","expires_at":{"$gt":bson::DateTime::from_chrono(now)}});
+    let collection = db.collection::<ApprovalRequest>(APPROVALS);
+    let mut rows: Vec<ApprovalRequest> = collection
+        .find(pending)
+        .sort(doc! {"created_at":1})
         .limit(10)
         .await?
         .try_collect()
         .await?;
+    if include_decided {
+        let terminal = doc! {"$and":[scope, {"$or":[
+            {"status":{"$ne":"pending"}}, {"expires_at":{"$lte":bson::DateTime::from_chrono(now)}},
+        ]}]};
+        let recent: Vec<ApprovalRequest> = collection
+            .find(terminal)
+            .sort(doc! {"created_at":-1})
+            .limit(20)
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(recent);
+        rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    }
     Ok(rows
         .into_iter()
         .map(|row| ChatApproval {
+            status: if row.status == "pending" && row.expires_at <= now {
+                "expired".into()
+            } else {
+                row.status
+            },
+            review_path: super::assistant_links::AssistantPage::Approvals.path(),
             id: row.id,
             service_slug: row.service_slug,
             service_name: row.service_name,
@@ -4912,6 +4954,7 @@ pub async fn activity_started_for_turn(
     activity_started_with_digest(db, user_id, conversation_id, turn_id, label, None).await
 }
 
+#[cfg(test)]
 pub async fn activity_started_with_digest(
     db: &Database,
     user_id: &str,
@@ -4919,6 +4962,18 @@ pub async fn activity_started_with_digest(
     turn_id: &str,
     label: &str,
     digest: Option<&str>,
+) -> AppResult<Option<String>> {
+    activity_started_with_identity(db, user_id, conversation_id, turn_id, label, digest, None).await
+}
+
+pub async fn activity_started_with_identity(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    label: &str,
+    digest: Option<&str>,
+    retry_identity: Option<&str>,
 ) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label = if label
@@ -4934,6 +4989,7 @@ pub async fn activity_started_with_digest(
         "id": &id,
         "label": label,
         "digest": digest,
+        "retry_identity": retry_identity,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -4980,6 +5036,8 @@ pub struct RecoveryPreview {
 struct RetryActivityEvidence {
     label: String,
     digest: Option<String>,
+    #[serde(default)]
+    retry_identity: Option<String>,
     status: String,
 }
 
@@ -5019,6 +5077,7 @@ impl From<&AssistantMessage> for RetryEvidence {
                 .map(|a| RetryActivityEvidence {
                     label: a.label.clone(),
                     digest: a.digest.clone(),
+                    retry_identity: a.retry_identity.clone(),
                     status: a.status.clone(),
                 })
                 .collect(),
@@ -5031,7 +5090,7 @@ fn retry_evidence_projection() -> bson::Document {
         "turn_id": 1, "seq": 1, "role": 1, "status": 1, "error_code": 1,
         "origin": 1, "retry_of": 1, "retry_claimed_by": 1,
         "activity_count": 1, "activities.label": 1,
-        "activities.digest": 1, "activities.status": 1,
+        "activities.digest": 1, "activities.retry_identity": 1, "activities.status": 1,
     }
 }
 
@@ -5103,6 +5162,11 @@ fn retry_evidence(
                 .ok_or("activity_evidence_incomplete")?;
             if !digests.iter().any(|seen| seen == digest) {
                 digests.push(digest.to_owned());
+            }
+            if let Some(identity) = activity.retry_identity.as_deref().filter(|d| !d.is_empty())
+                && !digests.iter().any(|seen| seen == identity)
+            {
+                digests.push(identity.to_owned());
             }
             if completed_keys.insert(digest) {
                 completed_labels.push(activity.label.clone());
@@ -5403,6 +5467,7 @@ pub async fn retry_context_in_session(
 
 /// Whether a chat-key call repeats a completed call of the failed turn the
 /// live turn retries. One point read of the conversation.
+#[cfg(test)]
 pub async fn retry_duplicate(
     db: &Database,
     user_id: &str,
@@ -5410,12 +5475,22 @@ pub async fn retry_duplicate(
     turn_id: &str,
     digest: &str,
 ) -> AppResult<bool> {
+    retry_duplicate_any(db, user_id, conversation_id, turn_id, &[digest]).await
+}
+
+pub async fn retry_duplicate_any(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    digests: &[&str],
+) -> AppResult<bool> {
     Ok(db
         .collection::<bson::Document>(CONVERSATIONS)
         .find_one(doc! {
             "_id": conversation_id, "user_id": user_id,
             "active_turn.turn_id": turn_id,
-            "active_turn.retry_digests": digest,
+            "active_turn.retry_digests": {"$in": digests},
         })
         .projection(doc! {"_id": 1})
         .await?
@@ -5440,6 +5515,9 @@ pub async fn record_retry_duplicate(
         "label": label,
         "digest": digest,
         "status": "completed",
+        // Retain the completed digest for retry ancestry, but make clear this
+        // turn did not execute the action again. Additive metadata for readers.
+        "failure": {"kind": RETRY_DUPLICATE_ACTION},
         "started_at": now,
         "ended_at": now,
     };

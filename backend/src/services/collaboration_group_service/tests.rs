@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, sync::atomic::Ordering};
 #[path = "turn_tests.rs"]
 mod turn_tests;
 
-async fn setup(name: &str) -> (Fixture, AssistantAgent, AssistantGroup) {
+pub(super) async fn setup(name: &str) -> (Fixture, AssistantAgent, AssistantGroup) {
     let f = Fixture::new(name).await;
     enable(&f).await;
     let agent = specialist(&f, &f.admin, "collab-one").await;
@@ -58,7 +58,12 @@ async fn specialist(f: &Fixture, owner: &str, name: &str) -> AssistantAgent {
     .unwrap()
     .0
 }
-async fn change(f: &Fixture, actor: &str, group: &AssistantGroup, change: Change) -> Mutation {
+pub(super) async fn change(
+    f: &Fixture,
+    actor: &str,
+    group: &AssistantGroup,
+    change: Change,
+) -> Mutation {
     membership::apply_ready(
         &f.state.db,
         actor,
@@ -83,7 +88,7 @@ async fn invite(f: &Fixture, group: &AssistantGroup) -> IssuedInvite {
     .invite
     .unwrap()
 }
-async fn join(f: &Fixture, group: &AssistantGroup, actor: &str) -> AssistantGroup {
+pub(super) async fn join(f: &Fixture, group: &AssistantGroup, actor: &str) -> AssistantGroup {
     let invite = invite(f, group).await;
     membership::accept_ready(&f.state.db, actor, &invite.token, true)
         .await

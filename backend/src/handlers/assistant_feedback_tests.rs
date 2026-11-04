@@ -74,6 +74,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),

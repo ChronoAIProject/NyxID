@@ -61,6 +61,13 @@ export const voiceSnapshotSchema = z.object({
       pending_acknowledgement_ids: z.array(z.string()),
       title: z.string().max(120).nullable().optional(),
       result_message_id: z.string().nullable().optional(),
+      progress: z.object({
+        stage: z.string(),
+        detail: z.string(),
+        last_completed_step: z.string().nullable(),
+        completed_steps: z.number().int().nonnegative(),
+        updated_at: z.string().datetime(),
+      }).nullable().optional(),
     }),
   ),
 });

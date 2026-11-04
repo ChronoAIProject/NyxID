@@ -163,7 +163,16 @@ const turnMetadataSchema = z.object({
   failure_reason: nyxAgentFailureReasonSchema.nullish(),
   channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
 });
+export const nyxAgentActionOutcomeSchema = z.object({
+  summary: z.string(),
+  complete: z.boolean(),
+  actions: z.array(z.object({
+    activity_id: z.string(), label: z.string(), status: z.string(), summary: z.string(),
+  })),
+  retry_warning: z.string().nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
+  action_outcome: nyxAgentActionOutcomeSchema.nullish(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
@@ -224,6 +233,7 @@ export const nyxAgentModelSchema = z.object({
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  review_path: z.string().optional(),
   connect_own: z.object({
     supported: z.boolean(), catalog_service_id: z.string().optional(), service_slug: z.string().optional(),
     reason: z.string().optional(), instructions: z.string().optional(),
@@ -257,6 +267,8 @@ export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSche
 /// A pending proxy approval raised by the chat's key; decided through the
 /// ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
+  review_path: z.string().optional(),
   id: z.string(),
   service_slug: z.string(),
   service_name: z.string(),
@@ -287,6 +299,7 @@ export const nyxAgentHistorySchema = z.object({
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
   approvals: z.array(nyxAgentApprovalSchema).default([]),
+  approval_history: z.array(nyxAgentApprovalSchema).optional(),
   waiting: z.array(nyxAgentWaitingSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
@@ -435,6 +448,9 @@ export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFor
 
 /** A specialist's permission request awaiting NyxBot (or the user). */
 export const assistantAgentRequestSchema = z.object({
+  status: z.string().optional(),
+  code: z.string().optional(),
+  review_path: z.string().optional(),
   request_id: z.string(),
   /** The requesting agent's name. */
   agent: z.string(),
