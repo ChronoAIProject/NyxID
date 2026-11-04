@@ -79,7 +79,7 @@ export function AssistantVoiceConversation(props: Props) {
   return setup.environment ? (
     <VoiceConversation {...props} environment={setup.environment} />
   ) : (
-    <ChatComposerFrame style={styles.frame}>
+    <ChatComposerFrame style={styles.frame} bounce={false}>
       <Notice message={setup.error ?? "Voice is unavailable."} tone="error" />
       <ActionButton label="Return to chat" variant="secondary" onPress={props.onClose} />
     </ChatComposerFrame>
@@ -373,7 +373,7 @@ function VoiceConversation({
           output={levels.output}
           reducedMotion={reducedMotion}
         >
-        <ChatComposerFrame style={styles.frame}>
+        <ChatComposerFrame style={styles.frame} bounce={false}>
           <View style={styles.header}>
             <View style={styles.headerText}>
               <Text numberOfLines={1} style={[styles.title, { color: colors.textPrimary }]}>
