@@ -330,6 +330,35 @@ test("a stalled permissions save stays dismissible and reopening preserves its w
   }
 });
 
+test("a permissions save settling after dismissal does not close another shared sheet", async () => {
+  const x = setup();
+  let sheet: "permissions" | "agents" | undefined;
+  x.props.onOpenChange = (open: boolean) => {
+    sheet = open ? "permissions" : undefined;
+    x.props.visible = sheet === "permissions";
+  };
+  x.h.render();
+  x.open();
+  assert.equal(sheet, "permissions");
+  const wait = deferred<any>();
+  x.writeMode(() => wait.promise);
+  x.find("Full access").props.onPress();
+  x.h.flush();
+  x.find("Dismiss permissions").props.onPress();
+  x.h.render();
+  assert.equal(sheet, undefined);
+  sheet = "agents";
+  x.props.visible = false;
+  x.h.render();
+
+  wait.resolve({ access_mode: "autopilot" });
+  await x.h.settle();
+  assert.equal(x.settings.data.access_mode, "autopilot");
+  assert.equal(x.calls.filter((call) => call[0] === "cache").length, 1);
+  assert.equal(sheet, "agents");
+  x.h.unmount();
+});
+
 test("backdrop, close, system Back and accessibility Escape dismiss without a setting write", () => {
   for (const action of ["backdrop", "close", "back", "escape"]) {
     const x = setup();

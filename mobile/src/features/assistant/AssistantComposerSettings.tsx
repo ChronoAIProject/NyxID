@@ -93,7 +93,8 @@ export function AssistantComposerSettings(props: Props) {
       const result = await assistantApi.updateAccessMode(value);
       if (current()) {
         queryClient.setQueryData(settingsKey, result);
-        latest.current.props.onOpenChange(false);
+        if (latest.current.props.visible)
+          latest.current.props.onOpenChange(false);
       }
     } catch (cause) {
       if (current())
