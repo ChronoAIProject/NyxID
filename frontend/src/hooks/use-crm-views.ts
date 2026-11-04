@@ -34,12 +34,37 @@ const crmViewValidationResponseSchema = z.object({
   errors: z.array(crmValidationErrorSchema),
 });
 
+const crmViewDeleteResponseSchema = z.object({
+  id: z.string().min(1),
+  deleted: z.literal(true),
+});
+
 export type CrmSavedViewSummary = z.infer<typeof crmSavedViewSummarySchema>;
 export type CrmSavedView = z.infer<typeof crmSavedViewSchema>;
 
 export interface CrmViewValidationResponse {
   readonly valid: boolean;
   readonly errors: readonly CrmValidationError[];
+}
+
+export function parseCrmSavedViewsResponse(
+  response: unknown,
+): CrmSavedViewSummary[] {
+  return crmSavedViewsResponseSchema.parse(response).views;
+}
+
+export function parseCrmSavedViewResponse(response: unknown): CrmSavedView {
+  return crmSavedViewSchema.parse(response);
+}
+
+export function parseCrmViewValidationResponse(
+  response: unknown,
+): CrmViewValidationResponse {
+  return crmViewValidationResponseSchema.parse(response);
+}
+
+export function parseCrmViewDeleteResponse(response: unknown) {
+  return crmViewDeleteResponseSchema.parse(response);
 }
 
 export const crmViewQueryKeys = {
@@ -96,26 +121,21 @@ export function useCrmViews(ownerId?: string) {
   return useQuery({
     queryKey: crmViewQueryKeys.list(owner),
     queryFn: async () =>
-      crmSavedViewsResponseSchema.parse(
-        await assistantJson(
-          `${CRM_VIEWS_PATH}${ownerSearch(owner, actor)}`,
-        ),
-      ).views,
+      parseCrmSavedViewsResponse(
+        await assistantJson(`${CRM_VIEWS_PATH}${ownerSearch(owner, actor)}`),
+      ),
     enabled: Boolean(actor && owner),
     retry: false,
     refetchInterval: 30_000,
   });
 }
 
-export function useCrmView(
-  viewId: string | undefined,
-  ownerId?: string,
-) {
+export function useCrmView(viewId: string | undefined, ownerId?: string) {
   const { actor, owner } = useCrmViewOwner(ownerId);
   return useQuery({
     queryKey: crmViewQueryKeys.detail(owner, viewId ?? ""),
     queryFn: async () =>
-      crmSavedViewSchema.parse(
+      parseCrmSavedViewResponse(
         await assistantJson(
           `${CRM_VIEWS_PATH}/${encodeURIComponent(viewId ?? "")}${ownerSearch(owner, actor)}`,
         ),
@@ -132,7 +152,7 @@ export function useValidateCrmView(ownerId?: string) {
     mutationFn: async (
       envelope: CrmViewEnvelope,
     ): Promise<CrmViewValidationResponse> =>
-      crmViewValidationResponseSchema.parse(
+      parseCrmViewValidationResponse(
         await assistantJson(`${CRM_VIEWS_PATH}/validate`, {
           method: "POST",
           body: ownerBody({ envelope }, owner, actor),
@@ -153,15 +173,11 @@ export function useCreateCrmView(ownerId?: string) {
       readonly envelope: CrmViewEnvelope;
       readonly idempotencyKey?: string;
     }) =>
-      crmSavedViewSchema.parse(
+      parseCrmSavedViewResponse(
         await assistantJson(CRM_VIEWS_PATH, {
           method: "POST",
           headers: mutationHeaders(idempotencyKey),
-          body: ownerBody(
-            { title, envelope },
-            context.owner,
-            context.actor,
-          ),
+          body: ownerBody({ title, envelope }, context.owner, context.actor),
         }),
       ),
     onSuccess: (view) => context.invalidate(view.id),
@@ -184,23 +200,20 @@ export function useUpdateCrmView(ownerId?: string) {
       readonly expectedRevision: number;
       readonly idempotencyKey?: string;
     }) =>
-      crmSavedViewSchema.parse(
-        await assistantJson(
-          `${CRM_VIEWS_PATH}/${encodeURIComponent(id)}`,
-          {
-            method: "PUT",
-            headers: mutationHeaders(idempotencyKey),
-            body: ownerBody(
-              {
-                title,
-                envelope,
-                expected_revision: expectedRevision,
-              },
-              context.owner,
-              context.actor,
-            ),
-          },
-        ),
+      parseCrmSavedViewResponse(
+        await assistantJson(`${CRM_VIEWS_PATH}/${encodeURIComponent(id)}`, {
+          method: "PUT",
+          headers: mutationHeaders(idempotencyKey),
+          body: ownerBody(
+            {
+              title,
+              envelope,
+              expected_revision: expectedRevision,
+            },
+            context.owner,
+            context.actor,
+          ),
+        }),
       ),
     onSuccess: (view) => context.invalidate(view.id),
   });
@@ -216,12 +229,14 @@ export function useDeleteCrmView(ownerId?: string) {
       readonly id: string;
       readonly idempotencyKey?: string;
     }) => {
-      await assistantJson(`${CRM_VIEWS_PATH}/${encodeURIComponent(id)}`, {
-        method: "DELETE",
-        headers: mutationHeaders(idempotencyKey),
-        body: ownerBody({}, context.owner, context.actor),
-      });
-      return id;
+      const response = parseCrmViewDeleteResponse(
+        await assistantJson(`${CRM_VIEWS_PATH}/${encodeURIComponent(id)}`, {
+          method: "DELETE",
+          headers: mutationHeaders(idempotencyKey),
+          body: ownerBody({}, context.owner, context.actor),
+        }),
+      );
+      return response.id;
     },
     onSuccess: (id) => context.invalidate(id),
   });

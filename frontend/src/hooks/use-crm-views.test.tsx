@@ -134,7 +134,7 @@ describe("CRM saved-view hooks", () => {
   it("sends one Idempotency-Key for create and delete actions", async () => {
     mockAssistantJson
       .mockResolvedValueOnce(savedView)
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({ id: "view-1", deleted: true });
     const created = renderHook(() => useCreateCrmView(), {
       wrapper: wrapper(),
     });
