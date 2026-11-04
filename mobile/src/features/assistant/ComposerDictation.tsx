@@ -1,31 +1,18 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Keyboard,
-  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Check, Globe, Mic, Square, X } from "lucide-react-native";
+import { Check, Mic, Square, X } from "lucide-react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
-import { LinearGradient } from "expo-linear-gradient";
-import { ExpoSpeechRecognitionModule as Recognizer } from "expo-speech-recognition";
-import { usePopupMenu } from "../../components/settings/SettingsList";
 import { formatElapsed } from "./voice/dictationLevel";
-import { dictationLocale } from "./voice/dictationLocale";
-import {
-  languageLabel,
-  languageOptions,
-  saveDictationLanguage,
-  savedDictationLanguage,
-} from "./voice/dictationLanguage";
 import type { ComposerDictationState } from "./useComposerDictation";
 
 const BAR_PITCH = 5;
@@ -39,292 +26,54 @@ export function ComposerDictationButton({
 }) {
   const { colors } = useTheme();
   const held = useRef(false);
-  const [intro, setIntro] = useState(false);
-  const language = useDictationLanguage(intro);
   const busy =
     dictation.phase === "permission" ||
     dictation.phase === "connecting" ||
     dictation.phase === "stopping";
   return (
-    <>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={
-          dictation.recording ? "Stop dictation" : "Dictate message"
-        }
-        accessibilityHint="Writes what you say into your message. Nothing is sent until you tap Send."
-        accessibilityState={{ disabled: !!disabled || busy, busy }}
-        disabled={disabled || busy}
-        onLongPress={() => {
-          if (!dictation.active) {
-            held.current = true;
-            Keyboard.dismiss();
-            void dictation.start();
-          }
-        }}
-        onPressOut={() => {
-          if (held.current) {
-            held.current = false;
-            dictation.stop();
-          }
-        }}
-        onPress={() => {
-          if (dictation.recording) dictation.stop();
-          else {
-            Keyboard.dismiss();
-            // Once speech recognition is allowed, a tap dictates straight into
-            // the composer. Before that, the first tap explains dictation once;
-            // a held press is already a deliberate push-to-talk and starts at once.
-            void readyToDictate().then((ready) => {
-              if (ready) void dictation.start();
-              else setIntro(true);
-            });
-          }
-        }}
-        style={({ pressed }) => [
-          styles.target,
-          { opacity: disabled || busy ? 0.4 : pressed ? 0.65 : 1 },
-        ]}
-      >
-        {busy ? (
-          <ActivityIndicator size="small" color={colors.textSecondary} />
-        ) : dictation.recording ? (
-          <Square size={17} color={colors.danger} fill={colors.danger} />
-        ) : (
-          <Mic size={21} color={colors.textPrimary} />
-        )}
-      </Pressable>
-      <DictationIntro
-        visible={intro}
-        language={language}
-        onClose={() => setIntro(false)}
-        onStart={() => {
-          setIntro(false);
-          void AsyncStorage.setItem(INTRO_KEY, "1").catch(() => {});
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={
+        dictation.recording ? "Stop dictation" : "Dictate message"
+      }
+      accessibilityHint="Writes what you say into your message. Nothing is sent until you tap Send."
+      accessibilityState={{ disabled: !!disabled || busy, busy }}
+      disabled={disabled || busy}
+      onLongPress={() => {
+        if (!dictation.active) {
+          held.current = true;
+          Keyboard.dismiss();
           void dictation.start();
-        }}
-      />
-    </>
-  );
-}
-
-const INTRO_KEY = "nyxid.dictation_intro_seen";
-async function readyToDictate() {
-  try {
-    const permission = await Recognizer.getPermissionsAsync();
-    if (permission.granted) return true;
-  } catch {
-    // Fall back to the intro flag; start() still asks for permission.
-  }
-  try {
-    return (await AsyncStorage.getItem(INTRO_KEY)) === "1";
-  } catch {
-    return true;
-  }
-}
-
-/**
- * The dictation language: the person's choice when the recognizer supports
- * it, else the iPhone's. Changing it applies from the next recording.
- */
-function useDictationLanguage(active: boolean) {
-  const [saved, setSaved] = useState<string>();
-  const [supported, setSupported] = useState<readonly string[]>([]);
-  useEffect(() => {
-    if (!active) return;
-    let live = true;
-    void savedDictationLanguage().then((value) => {
-      if (live) setSaved(value);
-    });
-    void Recognizer.getSupportedLocales({})
-      .then((result) => {
-        if (live) setSupported(result.locales);
-      })
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [active]);
-  let phone: string | undefined;
-  try {
-    phone = Intl.DateTimeFormat().resolvedOptions().locale;
-  } catch {
-    phone = undefined;
-  }
-  const automatic = phone ? dictationLocale(phone, supported) ?? phone : undefined;
-  const current =
-    saved && (!supported.length || supported.includes(saved)) ? saved : automatic;
-  return {
-    value: saved ?? AUTOMATIC,
-    label: current ? languageLabel(current) : "Your iPhone's language",
-    options: [
-      {
-        value: AUTOMATIC,
-        label: "iPhone language",
-        detail: automatic ? languageLabel(automatic) : undefined,
-      },
-      ...languageOptions(supported),
-    ],
-    choose: (value: string) => {
-      const next = value === AUTOMATIC ? undefined : value;
-      setSaved(next);
-      void saveDictationLanguage(next);
-    },
-  };
-}
-const AUTOMATIC = "automatic";
-
-/** "Current language: English. Tap to change", opening the language menu. */
-function LanguageLine({
-  language,
-}: {
-  language: ReturnType<typeof useDictationLanguage>;
-}) {
-  const { colors } = useTheme();
-  const menu = usePopupMenu({
-    options: language.options,
-    value: language.value,
-    onChange: language.choose,
-  });
-  return (
-    <View ref={menu.anchor} collapsable={false}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`Speech language, ${language.label}`}
-        accessibilityHint="Opens a menu to choose the dictation language"
-        hitSlop={8}
-        onPress={menu.open}
-      >
-        <Text
-          style={[styles.languageLine, { color: colors.textSecondary }]}
-        >
-          Current language:{" "}
-          <Text style={{ color: colors.primary }}>{language.label}</Text>.
-          Tap to change
-        </Text>
-      </Pressable>
-      {menu.popup}
-    </View>
-  );
-}
-
-/**
- * One-time explanation as a floating card over the chat (the mockup's
- * "Speech to Text" card): what it does, microphone access, language, Start.
- */
-function DictationIntro({
-  visible,
-  language,
-  onClose,
-  onStart,
-}: {
-  visible: boolean;
-  language: ReturnType<typeof useDictationLanguage>;
-  onClose: () => void;
-  onStart: () => void;
-}) {
-  const { colors, mode } = useTheme();
-  const insets = useSafeAreaInsets();
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="slide"
-      onRequestClose={onClose}
+        }
+      }}
+      onPressOut={() => {
+        if (held.current) {
+          held.current = false;
+          dictation.stop();
+        }
+      }}
+      onPress={() => {
+        if (dictation.recording) dictation.stop();
+        else {
+          // Dictation runs in this composer; iOS asks for microphone and
+          // speech recognition access itself the first time.
+          Keyboard.dismiss();
+          void dictation.start();
+        }
+      }}
+      style={({ pressed }) => [
+        styles.target,
+        { opacity: disabled || busy ? 0.4 : pressed ? 0.65 : 1 },
+      ]}
     >
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Dismiss"
-        onPress={onClose}
-        style={[styles.introBackdrop, { backgroundColor: colors.sheetScrim }]}
-      />
-      <View
-        accessibilityViewIsModal
-        style={[styles.introFloat, { marginBottom: Math.max(insets.bottom, 12) + 4 }]}
-      >
-        <LinearGradient
-          colors={mode === "dark" ? ["#26242C", "#1D1B22"] : ["#FFFFFF", "#F2EFF5"]}
-          style={styles.intro}
-        >
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-            onPress={onClose}
-            hitSlop={8}
-            style={[styles.introClose, { backgroundColor: colors.card }]}
-          >
-            <X size={18} color={colors.textPrimary} />
-          </Pressable>
-          <View style={styles.introHead}>
-            <Mic size={34} color={colors.textPrimary} />
-            <Text
-              accessibilityRole="header"
-              style={[styles.introTitle, { color: colors.textPrimary }]}
-            >
-              Speech to Text
-            </Text>
-            <Text style={[styles.introLead, { color: colors.textSecondary }]}>
-              Speak instead of typing to write faster. You review the text
-              before it goes into your message.
-            </Text>
-          </View>
-          <View style={[styles.introCard, { backgroundColor: colors.card }]}>
-            <View style={styles.introRow}>
-              <Mic size={18} color={colors.textMuted} />
-              <View style={styles.introRowText}>
-                <Text
-                  style={[styles.introRowTitle, { color: colors.textPrimary }]}
-                >
-                  Access permission
-                </Text>
-                <Text
-                  style={[styles.introRowDetail, { color: colors.textSecondary }]}
-                >
-                  Allow microphone and speech recognition access to turn your
-                  voice into text. Speech is recognized on your iPhone when
-                  available.
-                </Text>
-              </View>
-            </View>
-            <View
-              style={[
-                styles.introRow,
-                {
-                  borderTopWidth: StyleSheet.hairlineWidth,
-                  borderTopColor: colors.borderSoft,
-                },
-              ]}
-            >
-              <Globe size={18} color={colors.textMuted} />
-              <View style={styles.introRowText}>
-                <Text
-                  style={[styles.introRowTitle, { color: colors.textPrimary }]}
-                >
-                  Speech language
-                </Text>
-                <LanguageLine language={language} />
-              </View>
-            </View>
-          </View>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Start dictation"
-            onPress={onStart}
-            style={({ pressed }) => [
-              styles.introStart,
-              {
-                backgroundColor: colors.textPrimary,
-                opacity: pressed ? 0.75 : 1,
-              },
-            ]}
-          >
-            <Text style={[styles.introStartLabel, { color: colors.bg }]}>
-              Let's Start
-            </Text>
-          </Pressable>
-        </LinearGradient>
-      </View>
-    </Modal>
+      {busy ? (
+        <ActivityIndicator size="small" color={colors.textSecondary} />
+      ) : dictation.recording ? (
+        <Square size={17} color={colors.danger} fill={colors.danger} />
+      ) : (
+        <Mic size={21} color={colors.textPrimary} />
+      )}
+    </Pressable>
   );
 }
 
@@ -601,63 +350,6 @@ const styles = StyleSheet.create({
   noticeActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   status: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
-  introBackdrop: { flex: 1 },
-  // A floating card inset from the screen edges, as in the mockup.
-  introFloat: {
-    marginHorizontal: 12,
-    borderRadius: 34,
-    shadowColor: "#1A1530",
-    shadowOpacity: 0.18,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 10 },
-  },
-  intro: {
-    borderRadius: 34,
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 20,
-    gap: 20,
-    overflow: "hidden",
-  },
-  introRowText: { flex: 1, gap: 3 },
-  introClose: {
-    alignSelf: "flex-end",
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  introHead: { alignItems: "center", gap: 10, paddingHorizontal: 8 },
-  introTitle: { fontFamily: fonts.displaySemi, fontSize: 26, lineHeight: 32 },
-  introLead: {
-    fontFamily: fonts.bodyRegular,
-    fontSize: 15,
-    lineHeight: 21,
-    textAlign: "center",
-  },
-  introCard: { borderRadius: 14, overflow: "hidden" },
-  introRow: {
-    flexDirection: "row",
-    gap: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    alignItems: "flex-start",
-  },
-  introRowTitle: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 20 },
-  introRowDetail: {
-    fontFamily: fonts.bodyRegular,
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  introStart: {
-    minHeight: 52,
-    borderRadius: 26,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  introStartLabel: { fontFamily: fonts.bodySemi, fontSize: 16 },
-  languageLine: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   wave: {
     flex: 1,
     flexDirection: "row",

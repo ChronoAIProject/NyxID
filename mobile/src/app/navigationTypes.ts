@@ -120,7 +120,8 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   UsageCredits: UsageCreditsRouteParams | undefined;
   NotificationSettings: undefined;
   DisplaySettings: undefined;
-  VoiceSettings: undefined;
+  /** `voice` false: only dictation settings (no live voice for this account). */
+  VoiceSettings: { voice?: boolean } | undefined;
   PrivacySettings: undefined;
   ProfileEdit: { field: "display_name" | "avatar_url" };
   SessionDetail: { sessionId: string };

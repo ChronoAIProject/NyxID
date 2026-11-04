@@ -188,12 +188,14 @@ test("live scaling refreshes only text leaves and keeps the title heading", () =
   env.harness.unmount();
 });
 
-test("Voice appears in Preferences only when live voice is enabled for the account", () => {
+test("Preferences always offers dictation; it is Voice only when live voice is enabled", () => {
   const off = setupSettingsScreen(
     "./AccountSettingsScreen.tsx",
     "AccountSettingsScreen",
   );
   assert.throws(() => off.row("Voice"));
+  off.row("Dictation").props.onPress();
+  assert.equal(JSON.stringify(off.pushes.at(-1)), '["VoiceSettings",{"voice":false}]');
   off.harness.unmount();
   const on = setupSettingsScreen(
     "./AccountSettingsScreen.tsx",
@@ -201,6 +203,6 @@ test("Voice appears in Preferences only when live voice is enabled for the accou
     { voiceEnabled: true },
   );
   on.row("Voice").props.onPress();
-  assert.deepEqual(on.pushes.at(-1), ["VoiceSettings"]);
+  assert.equal(JSON.stringify(on.pushes.at(-1)), '["VoiceSettings",{"voice":true}]');
   on.harness.unmount();
 });

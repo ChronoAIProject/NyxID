@@ -368,13 +368,14 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
             label="Display"
             onPress={() => navigation.push("DisplaySettings")}
           />
-          {voiceEnabled ? (
-            <SettingsRow
-              icon={AudioLines}
-              label="Voice"
-              onPress={() => navigation.push("VoiceSettings")}
-            />
-          ) : null}
+          {/* Dictation is available to everyone; live voice only with its flag. */}
+          <SettingsRow
+            icon={AudioLines}
+            label={voiceEnabled ? "Voice" : "Dictation"}
+            onPress={() =>
+              navigation.push("VoiceSettings", { voice: voiceEnabled })
+            }
+          />
           <SettingsRow
             icon={Lock}
             label="Privacy"

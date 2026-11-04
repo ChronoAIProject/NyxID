@@ -1,8 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Switch } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AudioLines, Bell, Mic } from "lucide-react-native";
+import { AudioLines, Bell, Languages, Mic } from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { SkeletonRows } from "../../components/Skeleton";
 import {
@@ -17,9 +16,8 @@ import { nativeVoiceEnvironment } from "../../lib/api/assistantVoiceApi";
 import { useTheme } from "../../theme/ThemeContext";
 import type { VoicePreferences } from "../assistant/voice/voiceContracts";
 import { voiceTariff } from "../assistant/voice/voiceSelection";
+import { useDictationLanguage } from "../assistant/voice/useDictationLanguage";
 import { voiceSettingsView } from "./voiceSettingsModel";
-
-export const DICTATION_INTRO_KEY = "nyxid.dictation_intro_seen";
 
 const MODES = [
   {
@@ -38,12 +36,15 @@ const message = (error: unknown) =>
   error instanceof Error ? error.message : "Voice settings could not be loaded.";
 
 /**
- * Settings › Voice: how live voice conversations sound and listen. The voice
- * source is chosen automatically, as in a call; only what the person can
- * really change is offered (no language until providers receive it).
+ * Settings › Voice: how live voice conversations sound and listen, and the
+ * composer's dictation language. The voice source is chosen automatically, as
+ * in a call; only what the person can really change is offered. Accounts
+ * without live voice see only Dictation.
  */
-export function VoiceSettingsScreen(_props: SheetScreenProps<"VoiceSettings">) {
+export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">) {
   const { colors } = useTheme();
+  const voiceEnabled = route?.params?.voice ?? true;
+  const language = useDictationLanguage(true);
   const queryClient = useQueryClient();
   const { isConnected } = useNetworkStatus();
   const environment = useMemo(() => {
@@ -57,13 +58,13 @@ export function VoiceSettingsScreen(_props: SheetScreenProps<"VoiceSettings">) {
   const options = useQuery({
     queryKey: ["workspace", "voice-options", "settings", environment?.epoch],
     queryFn: ({ signal }) => environment!.api.options(undefined, signal),
-    enabled: !!environment && isConnected,
+    enabled: voiceEnabled && !!environment && isConnected,
     retry: false,
   });
   const settings = useQuery({
     queryKey: settingsKey,
     queryFn: ({ signal }) => environment!.api.settings(signal),
-    enabled: !!environment && isConnected,
+    enabled: voiceEnabled && !!environment && isConnected,
     retry: false,
   });
   const save = useMutation({
@@ -71,7 +72,6 @@ export function VoiceSettingsScreen(_props: SheetScreenProps<"VoiceSettings">) {
       environment!.api.savePreferences(preferences),
     onSuccess: (data) => queryClient.setQueryData(settingsKey, data),
   });
-  const [introReset, setIntroReset] = useState(false);
   const view =
     options.data && settings.data
       ? voiceSettingsView(options.data.options, settings.data.voice)
@@ -80,15 +80,16 @@ export function VoiceSettingsScreen(_props: SheetScreenProps<"VoiceSettings">) {
     if (!view || save.isPending) return;
     save.mutate({ ...view.preferences, ...change });
   };
-  const loading = (options.isPending || settings.isPending) && isConnected;
+  const loading =
+    voiceEnabled && (options.isPending || settings.isPending) && isConnected;
   const error = options.error ?? settings.error;
   const voices = view?.option.voice.voices ?? [];
   return (
     <SettingsPage>
-      {!isConnected && (
+      {voiceEnabled && !isConnected && (
         <Notice message="You're offline. Reconnect to change voice settings." />
       )}
-      {loading ? (
+      {!voiceEnabled ? null : loading ? (
         <SkeletonRows rows={3} title accessibilityLabel="Loading voice settings" />
       ) : error || !environment ? (
         <>
@@ -160,18 +161,14 @@ export function VoiceSettingsScreen(_props: SheetScreenProps<"VoiceSettings">) {
       ) : null}
       <SettingsGroup
         title="Dictation"
-        footer="Speech to Text uses your iPhone's speech recognition in your iPhone's language, on the device when available. You review the text before sending."
-        inset={false}
+        footer="The microphone in the message field uses your iPhone's speech recognition, on the device when available. The words appear in your message, where you can edit them before sending."
       >
-        <SettingsRow
-          tone="action"
-          label={introReset ? "Intro will show next time" : "Show Speech to Text Intro Again"}
-          disabled={introReset}
-          onPress={() => {
-            void AsyncStorage.removeItem(DICTATION_INTRO_KEY)
-              .then(() => setIntroReset(true))
-              .catch(() => {});
-          }}
+        <SettingsMenuRow
+          icon={Languages}
+          label="Language"
+          value={language.value}
+          options={language.options}
+          onChange={language.choose}
         />
       </SettingsGroup>
     </SettingsPage>

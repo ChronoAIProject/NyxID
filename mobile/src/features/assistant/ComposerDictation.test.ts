@@ -147,21 +147,13 @@ function setup({ introSeen = true, granted = false } = {}) {
       draft?: string;
     }) => Element | null;
   };
-  /** The mic button itself; the button renders beside its intro sheet. */
-  const mic = () =>
-    components
-      .ComposerDictationButton({ dictation })
-      .props.children.find((child: Element) => child.type === "Pressable");
-  const intro = () =>
-    components
-      .ComposerDictationButton({ dictation })
-      .props.children.find((child: Element) => child.type !== "Pressable");
+  /** The mic button is the whole control: no intro sheet or window. */
+  const mic = () => components.ComposerDictationButton({ dictation });
   return {
     h,
     dictation,
     events,
     mic,
-    intro,
     storage,
     levelListeners,
     menus,
@@ -361,57 +353,6 @@ test("the first tap after a released long press starts dictation again", async (
   ]);
 });
 
-test("once speech recognition is allowed, a tap dictates without the intro", async () => {
-  const x = setup({ introSeen: false, granted: true });
-  x.h.mount(() => x.ComposerDictationButton({ dictation: x.dictation }));
-  const mic = () =>
-    (x.h.value().props.children as Element[]).find(
-      (child) => child.type === "Pressable",
-    )!;
-  mic().props.onPress();
-  await x.h.settle();
-  assert.deepEqual(x.events, ["keyboard", "start"]);
-});
-
-test("the first tap explains dictation once; Start begins it and a held press skips the intro", async () => {
-  const x = setup({ introSeen: false });
-  x.h.mount(() => x.ComposerDictationButton({ dictation: x.dictation }));
-  const children = () => x.h.value().props.children as Element[];
-  const mic = () => children().find((child) => child.type === "Pressable")!;
-  const sheet = () =>
-    render(children().find((child) => child.type !== "Pressable")) as Element;
-  const find = (label: string) =>
-    all(sheet()).find((node) => node.props.accessibilityLabel === label)!;
-  assert.equal(sheet().props.visible, false);
-  assert.equal(sheet().props.transparent, true, "a compact sheet over the chat");
-  mic().props.onPress();
-  await x.h.settle();
-  assert.deepEqual(x.events, ["keyboard"], "nothing records before Start");
-  assert.equal(sheet().props.visible, true);
-  find("Close").props.onPress();
-  x.h.flush();
-  assert.equal(sheet().props.visible, false);
-  assert.deepEqual(x.events, ["keyboard"], "closing starts nothing");
-  mic().props.onPress();
-  await x.h.settle();
-  find("Start dictation").props.onPress();
-  await x.h.settle();
-  assert.deepEqual([...x.events].sort(), [
-    "intro-saved",
-    "keyboard",
-    "keyboard",
-    "start",
-  ]);
-  assert.equal(x.storage.get("nyxid.dictation_intro_seen"), "1");
-  const held = setup({ introSeen: false });
-  held.mic().props.onLongPress();
-  assert.deepEqual(
-    held.events,
-    ["keyboard", "start"],
-    "push-to-talk starts at once",
-  );
-});
-
 test("the meter draws native volume levels as bars and stops listening when capture ends", () => {
   const x = setup();
   x.dictation.phase = "listening";
@@ -442,46 +383,15 @@ test("the meter draws native volume levels as bars and stops listening when capt
   assert.equal(x.levelListeners.size, 0, "unsubscribed on unmount");
 });
 
-test("copy says recognition happens on the iPhone in its language, not on a server", () => {
+test("the first tap dictates in the composer at once; no intro sheet or window opens", async () => {
   const x = setup({ introSeen: false });
-  const intro = all(render(x.intro()) as Element);
-  const words = intro
-    .filter((node) => node.type === "Text")
-    .flatMap((node) => [node.props.children].flat())
-    .join(" ");
-  assert.match(words, /recognized on your iPhone when available/);
-  assert.match(words, /Current language/);
-  assert.match(words, /Tap to change/);
-  assert.doesNotMatch(words, /server|automatically/i);
-});
-
-test("the language line names the current language and saves a new choice for the next recording", async () => {
-  const x = setup({ introSeen: false });
-  x.h.mount(() => x.ComposerDictationButton({ dictation: x.dictation }));
-  x.mic().props.onPress();
-  await x.h.settle();
-  const sheet = () =>
-    render(
-      (x.h.value().props.children as Element[]).find(
-        (child) => child.type !== "Pressable",
-      ),
-    ) as Element;
-  const line = all(sheet()).find((node) =>
-    String(node.props.accessibilityLabel ?? "").startsWith("Speech language"),
-  )!;
-  assert.ok(line, "the intro offers the language");
-  assert.ok(x.menus.length > 0, "tapping opens the shared pop-up menu");
-  const menu = x.menus.at(-1)!;
-  assert.equal(
-    (menu.options as { value: string }[])[0]!.value,
-    "automatic",
-    "following the iPhone comes first",
-  );
-  menu.onChange("fr-FR");
-  await x.h.settle();
-  assert.ok(x.events.includes("language:fr-FR"));
-  menu.onChange("automatic");
-  await x.h.settle();
-  assert.ok(x.events.includes("language:auto"));
-  x.h.unmount();
+  const button = x.mic();
+  assert.equal(button.type, "Pressable");
+  assert.match(button.props.accessibilityHint, /Nothing is sent until you tap Send/);
+  button.props.onPress();
+  await tick();
+  assert.deepEqual(x.events, ["keyboard", "start"]);
+  const held = setup({ introSeen: false });
+  held.mic().props.onLongPress();
+  assert.deepEqual(held.events, ["keyboard", "start"], "push-to-talk starts at once");
 });
