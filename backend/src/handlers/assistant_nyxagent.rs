@@ -18,10 +18,11 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     convert::Infallible,
-    sync::LazyLock,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, broadcast};
+#[cfg(test)]
+use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -132,6 +133,8 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
 pub struct AttachmentResponse {
     expired: bool,
     image_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_input_reason: Option<String>,
     origin: String,
     pages: Option<usize>,
     id: String,
@@ -144,6 +147,7 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
         Self {
             expired: false,
             image_input: row.image_input,
+            image_input_reason: row.image_input_reason,
             origin: row.origin,
             pages: row.pages,
             id: row.id,
@@ -1520,9 +1524,32 @@ pub struct ModelResponse {
     available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_modalities: Option<Vec<String>>,
 }
-type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
-static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+use crate::services::assistant_nyxagent_model_cache::{MODELS, ModelInfo};
+impl From<ModelInfo> for ModelResponse {
+    fn from(row: ModelInfo) -> Self {
+        Self {
+            id: row.id,
+            label: row.label,
+            available: row.available,
+            description: row.description,
+            input_modalities: row.input_modalities,
+        }
+    }
+}
+impl From<ModelResponse> for ModelInfo {
+    fn from(row: ModelResponse) -> Self {
+        Self {
+            id: row.id,
+            label: row.label,
+            available: row.available,
+            description: row.description,
+            input_modalities: row.input_modalities,
+        }
+    }
+}
 
 /// Keep upstream display metadata; the routing alias is not a model name.
 fn model_response(row: &Value) -> Option<ModelResponse> {
@@ -1545,11 +1572,35 @@ fn model_response(row: &Value) -> Option<ModelResponse> {
             .into(),
         available: row["available"].as_bool() != Some(false),
         description: row["description"].as_str().map(str::to_owned),
+        input_modalities: input_modalities(row),
     })
 }
 
+// Malformed optional metadata is unknown, never proof that images are unsupported.
+fn input_modalities(row: &Value) -> Option<Vec<String>> {
+    let values = row["input_modalities"]
+        .as_array()
+        .filter(|values| values.len() <= 16)?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= 32
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                })
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// The models NyxAgent currently offers this owner, or `None` when its list
-/// cannot be read. Cached per owner for a minute: availability follows the
+/// cannot be read. Successes and failures are cached per owner for a minute:
+/// repeated UI polls must not hammer an unavailable upstream. Availability follows the
 /// owner's assistant credential, so owners never share an entry.
 pub(crate) async fn live_models(
     state: &AppState,
@@ -1561,7 +1612,9 @@ pub(crate) async fn live_models(
     if let Some((time, models)) = MODELS.lock().await.get(&cache_key)
         && time.elapsed() < Duration::from_secs(60)
     {
-        return Some(models.clone());
+        return models
+            .clone()
+            .map(|rows| rows.into_iter().map(ModelResponse::from).collect());
     }
     let loaded: AppResult<Vec<ModelResponse>> = async {
         let credential = credentials::load_existing(&state.db, &state.encryption_keys, &user_id)
@@ -1574,7 +1627,7 @@ pub(crate) async fn live_models(
                 auth,
                 &credential,
                 "GET",
-                "v1/models",
+                "v1/models?include_capabilities=true",
                 None,
                 None,
                 policy,
@@ -1607,13 +1660,28 @@ pub(crate) async fn live_models(
         Ok(rows)
     }
     .await;
-    let rows = loaded.ok()?;
+    let rows = loaded.ok();
     let mut cache = MODELS.lock().await;
     if cache.len() >= 64 {
         cache.retain(|_, (time, _)| time.elapsed() < Duration::from_secs(60));
+        if cache.len() >= 64
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (time, _))| *time)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
     }
-    cache.insert(cache_key, (Instant::now(), rows.clone()));
-    Some(rows)
+    cache.insert(
+        cache_key,
+        (
+            Instant::now(),
+            rows.clone()
+                .map(|rows| rows.into_iter().map(ModelInfo::from).collect()),
+        ),
+    );
+    rows
 }
 
 /// Validate a model selection against the live list. When NyxAgent's list is
@@ -1651,6 +1719,7 @@ pub async fn models(
                 label: "Default model".into(),
                 available: true,
                 description: None,
+                input_modalities: None,
             }]
         }),
     ))
@@ -1705,9 +1774,17 @@ async fn proxy_raw(
         .transpose()
         .map_err(|_| AppError::Internal("Assistant request encoding failed".into()))?
         .unwrap_or_default();
+    // Both parts are server-authored. Never forward the caller's URI or query.
+    let (path, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
+    let uri = query.map_or_else(
+        || "/api/v1/assistant/nyxagent/turns".to_owned(),
+        |query| format!("/api/v1/assistant/nyxagent/turns?{query}"),
+    );
     let mut request = Request::builder()
         .method(method)
-        .uri("/api/v1/assistant/nyxagent/turns")
+        .uri(uri)
         .header("content-type", "application/json")
         .header(
             "accept",
@@ -1757,6 +1834,31 @@ pub(crate) fn http_egress(
 
 #[async_trait::async_trait]
 impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    async fn model_image_input(
+        &self,
+        authority: &crate::services::platform_manager_contract::NyxAgentExecutionContext,
+        model: &str,
+        policy: Option<BillingRoutePolicy>,
+    ) -> Option<bool> {
+        let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+            user_id,
+            ..
+        } = authority
+        else {
+            return None;
+        };
+        if user_id != &self.auth.user_id.to_string() {
+            return None;
+        }
+        live_models(&self.state, &self.auth, policy)
+            .await?
+            .iter()
+            .find(|row| row.id == model)?
+            .input_modalities
+            .as_ref()
+            .map(|modalities| modalities.iter().any(|value| value == "image"))
+    }
+
     async fn preload_skills(
         &self,
         row: &AssistantConversation,

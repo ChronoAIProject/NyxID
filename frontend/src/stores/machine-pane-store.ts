@@ -1,14 +1,13 @@
 /**
- * The machine column beside a chat: its share of the content area (one for
- * every chat in this browser, set by dragging the divider) and the threads
- * where the user hid it. Persisted per browser and validated on load, like
- * the display preferences.
+ * The shared preview column's width across chats and the threads where the
+ * user hid the machine card. The existing storage key preserves both choices.
+ * Persisted per browser and validated on load, like the display preferences.
  */
 
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-/** The machine column's share of the content area, in percent. */
+/** The preview column's share of the content area, in percent. */
 export const MACHINE_PANE_PERCENT = { min: 25, max: 75, default: 50 } as const;
 
 /** Earlier builds saved a preset name; keep the user's choice. */

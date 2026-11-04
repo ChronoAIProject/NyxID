@@ -791,7 +791,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Change NyxBot settings only when the owner asks. Automatic continuations preserve context and the same logical task; higher limits may use more credits."
         }
         "settings_link" => {
-            "For add_service with a named catalog, return nyx__connect_service guidance; without a name open Plugins. Never send /keys for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
+            "add_service never returns a page: it returns nyx__connect_service guidance (name the service first). Never send /keys or Plugins for connecting. Link the user to the exact NyxID page for a configuration you cannot or should not \
             do in chat: creating an agent key (its secret is shown there), security (password, \
             MFA), profile, sessions, MCP, display, privacy, billing, usage, NyxBot settings (nyxbot_settings), organizations, automations, machines, saved_logins, developer apps, devices \
             and more. Account settings, NyxBot settings, billing and usage open as panels over the current assistant view; automations, machines and saved logins live in the assistant workspace; triggers opens developer secrets and replay. Webhook prefill defaults to dedicated threads; choose home only with \

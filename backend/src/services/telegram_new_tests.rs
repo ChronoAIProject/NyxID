@@ -1466,6 +1466,72 @@ async fn telegram_new_creation_webhook_completes_without_consent_or_browser_conn
     state.db.drop().await.unwrap();
 }
 
+/// After a domain move the manager and child webhooks registered at Telegram
+/// still name the previous API host, which is now a configured alias. Managed
+/// creation must keep connecting (it used to retry forever on an exact match).
+#[tokio::test]
+async fn telegram_new_creation_completes_when_webhooks_use_a_configured_api_alias() {
+    let (mut state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 200).await;
+    state.config.base_url = "https://api.moved.test".into();
+    state.config.domain_aliases.base_urls = vec!["https://api.nyxid.test".into()];
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    let connected = service.get(&actor, &pending.id).await.unwrap();
+    assert_eq!(connected.status, Status::Connected);
+    let saved = state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .find_one(doc! {"_id": &pending.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.status, "active");
+    assert!(saved.webhook_registered);
+    // The new canonical callback is what gets registered.
+    let set = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("setWebhook"))
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find(|body| {
+            body["url"]
+                .as_str()
+                .is_some_and(|url| url.contains(&pending.id))
+        })
+        .expect("child webhook registration");
+    assert_eq!(
+        set["url"],
+        format!(
+            "https://api.moved.test/api/v1/webhooks/channel/telegram-new/{}",
+            pending.id
+        )
+    );
+    state.db.drop().await.unwrap();
+}
+
+/// A manager webhook on a host that is not a configured API origin still
+/// blocks automatic connection.
+#[tokio::test]
+async fn telegram_new_creation_still_refuses_an_unconfigured_manager_host() {
+    let (mut state, actor, server) = fixture().await;
+    let pending = automatic_request(&state, &actor, &server, true).await;
+    provider_connection(&server, &pending.id, 200).await;
+    state.config.base_url = "https://api.moved.test".into();
+    state.config.domain_aliases.base_urls = Vec::new();
+    let base = server.uri();
+    let service = service(&state, &base);
+    service.complete_pending_creations().await.unwrap();
+    let request = service.get(&actor, &pending.id).await.unwrap();
+    assert_ne!(request.status, Status::Connected);
+    assert!(request.connection_error.is_some());
+    state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn telegram_new_automatic_connection_waits_for_management_delivery() {
     let (state, actor, server) = fixture().await;

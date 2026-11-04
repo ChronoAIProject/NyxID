@@ -126,9 +126,10 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
                 doc! {"$set": {"relay_attempted_at": recheck}}).await?;
         } else {
             let outcome = Box::pin(move_to_direct(state, &row)).await;
+            let checked = load_channel(state, &row.user_id, &row.id).await?;
             audit(state, &row.user_id, "nyxbot_channel_transport_checked",
-                json!({"channel_agent_id": row.id, "platform": row.platform,
-                    "moved_to_direct": outcome.is_ok(), "error_code": outcome.err()})).await;
+                gateway_diagnostic_audit(json!({"channel_agent_id": row.id, "platform": row.platform,
+                    "moved_to_direct": outcome.is_ok(), "error_code": outcome.err()}), &checked)).await;
             return Ok(()); // At most one attempted move per sweep, either way.
         }
     }
@@ -159,12 +160,16 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
             .await?;
         tracing::info!(code, platform = %row.platform, "NyxBot channel stays on NyxID's relay");
     }
+    let checked = load_channel(state, &row.user_id, &row.id).await?;
     audit(
         state,
         &row.user_id,
         "nyxbot_channel_transport_checked",
-        json!({"channel_agent_id": row.id, "platform": row.platform,
+        gateway_diagnostic_audit(
+            json!({"channel_agent_id": row.id, "platform": row.platform,
             "moved_to_gateway": outcome.is_ok(), "error_code": outcome.err()}),
+            &checked,
+        ),
     )
     .await;
     Ok(())
@@ -242,6 +247,7 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     let mut set = doc! {"transport":"direct","gateway_no_progress":false,"route_api_key_id":&next.id,"updated_at":bson::DateTime::now()};
     if row.gateway_source.is_some() {
         set.insert("gateway_native_activation", "relay_draining");
+        set.insert("gateway_native_activation_detail", bson::Bson::Null);
     }
     let update = doc! {"$set": set,
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",

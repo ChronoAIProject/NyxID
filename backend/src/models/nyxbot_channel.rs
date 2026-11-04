@@ -66,6 +66,9 @@ pub struct NyxbotChannel {
     pub gateway_native_phase: Option<String>,
     #[serde(default)]
     pub gateway_native_activation: Option<String>,
+    /// Bounded gateway problem code only; never upstream error prose.
+    #[serde(default)]
+    pub gateway_native_activation_detail: Option<String>,
     #[serde(default)]
     pub gateway_native_delivery: Option<String>,
     #[serde(default)]

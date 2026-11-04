@@ -118,6 +118,7 @@ async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> T
         pages: None,
         chat_delivery: Some(!machine),
         image_input: None,
+        image_input_reason: None,
         image_inspection: None,
     };
     f.state

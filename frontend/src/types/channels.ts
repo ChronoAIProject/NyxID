@@ -1,3 +1,5 @@
+import type { ChannelBotGateway } from "@/schemas/channel-bot-health";
+
 /** Platform identifiers are supplied by the server catalog. */
 export type ChannelPlatform = string;
 
@@ -32,7 +34,7 @@ export type ContentType =
   | "sticker"
   | "unknown";
 
-export interface ChannelBotItem {
+export interface ChannelBotItem extends Readonly<ChannelBotGateway> {
   readonly credential_source?: "user" | "platform" | "connection" | "telegram_manager";
   readonly managed_setup?: ManagedBotSetup | null;
   readonly id: string;
