@@ -23,6 +23,8 @@ const state = vi.hoisted(() => ({
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
+  expiredCard: false,
+  send: vi.fn(async () => undefined),
   agentLoaded: true,
   desktop: true,
   voice: false,
@@ -45,7 +47,7 @@ const conversation = {
 const staleCard: NyxAgentAcknowledgement = {
   id: "old-card", kind: "action", status: "pending", summary: "Publish legacy draft", decider: "user", decided_by: null,
   reason: null, service_slug: null, service_name: null, tool_name: "nyxid__draft_agent_skill",
-  created_at: "2026-10-14T00:00:00Z", decided_at: null, expires_at: "2026-10-14T00:15:00Z",
+  created_at: "2026-10-14T00:00:00Z", decided_at: null, expires_at: "2099-10-14T00:15:00Z",
 };
 vi.mock("@tanstack/react-router", async (original) => ({
   ...await original<typeof import("@tanstack/react-router")>(),
@@ -70,8 +72,8 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   conversation: state.search.c ? conversation : undefined,
   session: { title: "Thread", messages: state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
-  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [staleCard] : [], approvals: [], conversations: [], threadsLoaded: false,
-  send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
+  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: [], conversations: [], threadsLoaded: false,
+  send: state.send, stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
   getConversation: (id?: string) => id && state.agentLoaded ? conversation : undefined,
@@ -117,6 +119,8 @@ beforeEach(() => {
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
+  state.expiredCard = false;
+  state.send.mockClear();
   state.agentLoaded = true;
   state.desktop = true;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
@@ -330,4 +334,19 @@ it("first voice use opens account settings without capture or a call", async () 
   expect(await screen.findByLabelText("Mock voice settings")).toBeInTheDocument();
   expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
   expect(state.voiceMounts).toBe(0);
+});
+
+
+it("2072 expired card requests a fresh owner turn without deciding or replaying the old action", async () => {
+  state.search = { c: conversation.id };
+  state.mode = "ask_every_time";
+  state.staleCard = true;
+  state.expiredCard = true;
+  mount();
+  expect(screen.getByRole("status")).toHaveTextContent("Expired");
+  expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Ask for a new confirmation" }));
+  await waitFor(() => expect(state.send).toHaveBeenCalledExactlyOnceWith(
+    "Please request a new confirmation for expired request old-card. Recheck the current state and permissions first; do not reuse the expired confirmation.",
+  ));
 });
