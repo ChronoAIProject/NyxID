@@ -959,7 +959,8 @@ async fn native_voice_token_hold_and_reported_checkpoint_settle_once_after_reloa
             BillingMetric::Tokens,
             None,
             false,
-        );
+        )
+        .with_platform_metering(false);
         super::super::responses::reserve(&state, &mut call, &ctx)
             .await
             .unwrap();

@@ -442,7 +442,7 @@ async fn specialist_voice_discovery_enforces_operation_denial_and_openai_origin(
             flags::set_platform_override(&f.state.db, flag, &flags::FlagTarget::Global, true, &f.owner).await.unwrap();
         }
         f.state.db.collection::<bson::Document>(SERVICES).update_one(doc! {"_id":&service.id},
-            doc! {"$set":{"base_url":"https://api.x.ai/v1","inference.voice.protocol":"xai_realtime","inference.voice.usage_source":"server_measured"}}).await.unwrap();
+            doc! {"$set":{"base_url":"https://api.x.ai/v1","inference.voice.protocol":"xai_realtime","inference.voice.usage_source":"server_measured"},"$unset":{"inference.voice.delegation_model":""}}).await.unwrap();
         f.state.db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
             .update_many(doc! {"catalog_service_id":&service.id},doc! {"$set":{"url":"https://api.x.ai/v1"}}).await.unwrap();
         let grok = options(&f).await;

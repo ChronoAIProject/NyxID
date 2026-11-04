@@ -1076,7 +1076,7 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
             assert_eq!(platform["available"], false);
             assert_eq!(platform["unavailable_reason"], "provider_rollout_pending");
         }
-        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"}}).await.unwrap();
+        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"},"$unset":{"inference.voice.delegation_model":""}}).await.unwrap();
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
         flags::set_platform_override(&state.db, flags::VOICE_GROK_FLAG_KEY, &flags::FlagTarget::Global, true, &thread.user_id).await.unwrap();
         // A protocol switch cannot redirect credentials to the old provider origin.
