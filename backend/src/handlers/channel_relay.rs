@@ -3993,6 +3993,7 @@ mod tests {
             .expect("encrypt test bot token");
 
         let api_key = ApiKey {
+            permission_policy_id: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             name: "agent".to_string(),

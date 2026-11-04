@@ -940,6 +940,7 @@ mod tests {
     ) -> ApiKey {
         let now = chrono::Utc::now() - chrono::Duration::minutes(5);
         ApiKey {
+            permission_policy_id: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             name: name.to_string(),

@@ -5530,6 +5530,7 @@ mod wave4_effect_tests {
         let mode = ApprovalMode::PerRequest;
         let default_effect = ApprovalEffect::RequireApproval;
         let rules = vec![ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/*".to_string(),
             verbs: vec![ApprovalVerb::Write],

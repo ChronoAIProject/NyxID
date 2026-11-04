@@ -75,6 +75,8 @@ pub struct ApprovalRequestsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalGrantItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionPermissionItem>,
     pub id: String,
     pub service_id: String,
     pub service_name: String,
@@ -102,6 +104,8 @@ pub struct ApprovalGrantItem {
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalGrantAuthorizationEvidenceResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionPermissionItem>,
     pub id: String,
     pub service_id: String,
     pub requester_id: String,
@@ -115,6 +119,7 @@ pub struct ApprovalGrantAuthorizationEvidenceResponse {
 impl ApprovalGrantAuthorizationEvidenceResponse {
     fn from_grant_item(item: &ApprovalGrantItem) -> Self {
         Self {
+            execution: item.execution.clone(),
             id: item.id.clone(),
             service_id: item.service_id.clone(),
             requester_id: item.requester_id.clone(),
@@ -123,6 +128,52 @@ impl ApprovalGrantAuthorizationEvidenceResponse {
             revoked: item.revoked,
             org_scoped: item.org_scoped,
             org_id: item.org_id.clone(),
+        }
+    }
+}
+
+/// Display effective permission validity, not the legacy TTL sentinel. Never
+/// expose prepared inputs, resource rules, or execution-authority digests.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutionPermissionItem {
+    pub version: u32,
+    pub supported: bool,
+    pub validity: Option<&'static str>,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub actor_user_id: Option<String>,
+    pub connection_id: Option<String>,
+    pub revision: Option<i64>,
+}
+
+impl ExecutionPermissionItem {
+    fn from_permission(value: &crate::models::execution_permission::ExecutionPermission) -> Self {
+        use crate::models::execution_permission::{VERSION, Validity};
+        let contract = value.v1.as_ref().filter(|_| value.version == VERSION);
+        let (validity, valid_from, valid_until) = match contract.map(|c| &c.validity) {
+            Some(Validity::Operation { expires_at, .. }) => {
+                (Some("operation"), None, Some(expires_at.to_rfc3339()))
+            }
+            Some(Validity::Task { hard_deadline, .. }) => {
+                (Some("task"), None, Some(hard_deadline.to_rfc3339()))
+            }
+            Some(Validity::Window { starts_at, ends_at }) => (
+                Some("window"),
+                Some(starts_at.to_rfc3339()),
+                Some(ends_at.to_rfc3339()),
+            ),
+            Some(Validity::Persistent) => (Some("persistent"), None, None),
+            None => (None, None, None),
+        };
+        Self {
+            version: value.version,
+            supported: contract.is_some(),
+            validity,
+            valid_from,
+            valid_until,
+            actor_user_id: contract.map(|c| c.subject.actor_user_id.clone()),
+            connection_id: contract.map(|c| c.binding.connection_id.clone()),
+            revision: contract.map(|c| c.revision),
         }
     }
 }
@@ -225,6 +276,10 @@ fn to_approval_grant_item(
     };
     let resolved_org_name = if org_scoped { org_name } else { None };
     ApprovalGrantItem {
+        execution: grant
+            .execution
+            .as_ref()
+            .map(ExecutionPermissionItem::from_permission),
         id: grant.id,
         service_id: grant.service_id,
         service_name: grant.service_name,
@@ -1946,6 +2001,62 @@ mod tests {
     }
 
     #[test]
+    fn execution_grant_listing_uses_effective_validity_and_redacts_bindings() {
+        use crate::models::execution_permission::Validity;
+        let mut row = crate::services::execution_permission::tests::fixture();
+        let at = row.granted_at;
+        for (validity, kind, end) in [
+            (Validity::Persistent, "persistent", None),
+            (
+                Validity::Window {
+                    starts_at: at,
+                    ends_at: at + chrono::Duration::hours(1),
+                },
+                "window",
+                Some((at + chrono::Duration::hours(1)).to_rfc3339()),
+            ),
+            (
+                Validity::Task {
+                    task: crate::models::execution_permission::TaskRef {
+                        root_kind: crate::models::execution_permission::TaskRootKind::Message,
+                        root_id: "root".into(),
+                    },
+                    hard_deadline: at,
+                },
+                "task",
+                Some(at.to_rfc3339()),
+            ),
+        ] {
+            row.execution
+                .as_mut()
+                .unwrap()
+                .v1
+                .as_mut()
+                .unwrap()
+                .validity = validity;
+            let item = ExecutionPermissionItem::from_permission(row.execution.as_ref().unwrap());
+            assert!(item.supported);
+            assert_eq!(item.validity, Some(kind));
+            assert_eq!(item.valid_until, end);
+            let json = serde_json::to_string(&item).unwrap();
+            for hidden in [
+                "authority_digest",
+                "credential_id",
+                "operations",
+                "resource_policy",
+                "9999",
+            ] {
+                assert!(!json.contains(hidden));
+            }
+        }
+        row.execution.as_mut().unwrap().version = 99;
+        let unknown = ExecutionPermissionItem::from_permission(row.execution.as_ref().unwrap());
+        assert!(!unknown.supported);
+        assert!(unknown.validity.is_none());
+        assert!(unknown.actor_user_id.is_none());
+    }
+
+    #[test]
     fn ensure_request_owned_by_user_allows_owner() {
         let result = ensure_request_owned_by_user("user_1", "user_1");
         assert!(result.is_ok());
@@ -2020,6 +2131,7 @@ mod tests {
     fn to_approval_grant_item_stamps_org_fields_when_org_scoped() {
         use crate::models::approval_grant::ApprovalGrant;
         let grant = ApprovalGrant {
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "org_abc".to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -2046,6 +2158,7 @@ mod tests {
     fn to_approval_grant_item_omits_org_fields_for_personal_grants() {
         use crate::models::approval_grant::ApprovalGrant;
         let grant = ApprovalGrant {
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "user_1".to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -2159,6 +2272,7 @@ mod tests {
     #[test]
     fn approval_grant_item_skip_serializing_none_fields() {
         let item = ApprovalGrantItem {
+            execution: None,
             id: "g1".to_string(),
             service_id: "svc_1".to_string(),
             service_name: "OpenAI".to_string(),
