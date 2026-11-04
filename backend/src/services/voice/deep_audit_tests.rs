@@ -165,7 +165,7 @@ async fn audit_device_voice_cannot_decide_an_owner_action_but_owner_can() {
 }
 
 #[tokio::test]
-async fn audit_explicit_deny_blocks_native_and_proxy_voice_without_requesting_approval() {
+async fn audit_explicit_deny_blocks_voice_service_without_requesting_approval() {
     Box::pin(async {
         use axum::{body::Body, http::Request};
         use tower::ServiceExt;
@@ -178,20 +178,17 @@ async fn audit_explicit_deny_blocks_native_and_proxy_voice_without_requesting_ap
         assert!(matches!(keys::authorize(&f.state.db,&device,&f.row.id).await,Err(crate::errors::AppError::Forbidden(_))));
         let (_, router) = crate::routes::build_router_with_state(f.state.clone());
         let app = router.with_state(f.state.clone());
-        for uri in ["/api/v1/assistant/nyxagent/voice/sessions".into(),
-            format!("/api/v1/proxy/s/{}/voice/sessions",identity.service.slug)] {
+        {
+            let uri = format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions");
             let response = app.clone().oneshot(Request::builder().method("POST").uri(&uri)
                 .header("authorization",format!("Bearer {raw}")).header("content-type","application/json")
                 .body(Body::from(serde_json::json!({"service_id":service,"client_request_id":Uuid::new_v4(),
                     "preferences":platform(&provider),"sdp_offer":"invalid"}).to_string())).unwrap()).await.unwrap();
             assert_eq!(response.status(),403,"Deny must precede provider admission: {uri}");
         }
-        let response = app.oneshot(Request::builder().uri("/api/v1/assistant/nyxagent/voice/agents")
+        let response = app.oneshot(Request::builder().uri(format!("/api/v1/proxy/nyxbot-voice/{service}/voice/agents"))
             .header("authorization",format!("Bearer {raw}")).body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(response.status(),200);
-        let bytes=axum::body::to_bytes(response.into_body(),128*1024).await.unwrap();
-        let discovery:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
-        assert!(discovery["agents"].as_array().unwrap().is_empty());
+        assert_eq!(response.status(),403,"An explicitly denied service cannot be discovered through its ingress");
         assert_eq!(f.state.db.collection::<bson::Document>("approval_requests").count_documents(doc!{}).await.unwrap(),0);
         f.state.db.drop().await.unwrap();
     }).await;
@@ -364,7 +361,7 @@ async fn audit_device_revocation_ends_audio_but_only_stop_cancels_accepted_bot_w
 }
 
 #[tokio::test]
-async fn audit_proxy_only_key_executes_mounted_voice_but_cannot_publish_or_manage() {
+async fn audit_proxy_only_key_executes_voice_service_but_cannot_publish_or_manage() {
     Box::pin(async {
         use axum::{body::Body, http::Request};
         use tower::ServiceExt;
@@ -375,7 +372,7 @@ async fn audit_proxy_only_key_executes_mounted_voice_but_cannot_publish_or_manag
             .collection::<bson::Document>("api_keys")
             .update_one(
                 doc! {"_id":device.api_key_id.as_deref().unwrap()},
-                doc! {"$set":{"scopes":"read proxy"}},
+                doc! {"$set":{"scopes":"proxy"}},
             )
             .await
             .unwrap();
@@ -386,7 +383,9 @@ async fn audit_proxy_only_key_executes_mounted_voice_but_cannot_publish_or_manag
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/assistant/nyxagent/voice/sessions")
+                    .uri(format!(
+                        "/api/v1/proxy/nyxbot-voice/{service}/voice/sessions"
+                    ))
                     .header("authorization", format!("Bearer {raw}"))
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -403,14 +402,11 @@ async fn audit_proxy_only_key_executes_mounted_voice_but_cannot_publish_or_manag
             .await
             .unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_ne!(
-            status, 403,
-            "The mounted execution route must admit a proxy-only key: {body}"
+        assert_eq!(
+            status, 400,
+            "A proxy-only key must reach the Voice transport validator: {body}"
         );
-        assert!(
-            status.is_client_error() || status.is_server_error(),
-            "Invalid SDP must fail before a provider call succeeds"
-        );
+        assert_eq!(body["details"]["stage"], "transport");
         for (method, uri) in [
             ("POST", "/api/v1/keys".to_owned()),
             (

@@ -633,7 +633,7 @@ async fn voice_connection_preserves_catalog_operations_without_service_approval(
 #[tokio::test]
 async fn voice_notifications_keep_exact_child_and_live_grant_authority() {
     Box::pin(async {
-        let (f, voice, _, raw) = setup("voice_notice_child").await;
+        let (f, voice, service, raw) = setup("voice_notice_child").await;
         let parent_auth = auth(&f, &raw).await;
         let parent = parent_auth.api_key_id.as_deref().unwrap();
         f.state
@@ -704,7 +704,7 @@ async fn voice_notifications_keep_exact_child_and_live_grant_authority() {
                     Request::builder()
                         .method("POST")
                         .uri(format!(
-                            "/api/v1/assistant/nyxagent/voice/sessions/{}/announcements",
+                            "/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements",
                             call.id
                         ))
                         .header("authorization", format!("Bearer {credential}"))
@@ -874,9 +874,8 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
         ).await.unwrap();
         let (_, private) = crate::routes::build_router_with_state(f.state.clone());
         let app = private.with_state(f.state.clone());
-        for uri in ["/api/v1/assistant/nyxagent/voice/agents".into(),
-            format!("/api/v1/proxy/s/{}/voice/agents", identity.service.slug),
-            format!("/api/v1/assistant/nyxagent/voice/options?conversation_id={}", f.row.id)] {
+        for uri in [format!("/api/v1/proxy/nyxbot-voice/{service}/voice/agents"),
+            format!("/api/v1/proxy/nyxbot-voice/{service}/voice/options?conversation_id={}", f.row.id)] {
             let response = app.clone().oneshot(Request::builder().uri(&uri)
                 .header("authorization", format!("Bearer {secret}"))
                 .body(Body::empty()).unwrap()).await.unwrap();
@@ -884,10 +883,10 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             let bytes = to_bytes(response.into_body(), 128*1024).await.unwrap();
             assert_eq!(status, 200, "{uri}: {}", String::from_utf8_lossy(&bytes));
         }
-        // Both HTTP start entry points reach the existing transport validator
+        // The HTTP service entry reaches the existing transport validator
         // under restrictive service-approval settings, without provider I/O.
-        for uri in ["/api/v1/assistant/nyxagent/voice/sessions".into(),
-            format!("/api/v1/proxy/nyxbot-voice/{}/voice/sessions", service)] {
+        {
+            let uri = format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions");
             let response = app.clone().oneshot(Request::builder().method("POST").uri(uri)
                 .header("authorization", format!("Bearer {secret}"))
                 .header("content-type", "application/json")
@@ -931,9 +930,9 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             .await.unwrap();
         let notice_id = Uuid::new_v4().to_string();
         for (path, data) in [
-            (format!("/api/v1/assistant/nyxagent/voice/sessions/{}/control", started.session.id),
+            (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id),
                 json!({"command_id":Uuid::new_v4(),"expected_revision":0,"action":"mute"})),
-            (format!("/api/v1/proxy/s/{}/voice/sessions/{}/announcements", identity.service.slug, started.session.id),
+            (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id),
                 json!({"request_id":notice_id,"text":"hello"})),
         ] {
             let response = app.clone().oneshot(Request::builder().method("POST").uri(path)
@@ -952,7 +951,7 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             }
         }).await.expect("the sideband must dispatch without a service approval");
         let response = app.oneshot(Request::builder().method("POST")
-            .uri(format!("/api/v1/proxy/s/{}/voice/sessions/{}/control", identity.service.slug, started.session.id))
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id))
             .header("authorization", format!("Bearer {secret}"))
             .header("content-type", "application/json")
             .body(Body::from(json!({"command_id":Uuid::new_v4(),"expected_revision":1,"action":"end"})
@@ -1202,13 +1201,18 @@ async fn voice_service_preserves_exact_binding_and_ignores_retargeting_input() {
         assert_eq!(value["agents"].as_array().unwrap().len(),1);
         assert_eq!(value["agents"][0]["agent_id"],identity.agent.id);
         for uri in [format!("/api/v1/proxy/nyxbot-voice/{}/voice/sessions",service),
-            "/api/v1/assistant/nyxagent/voice/sessions".into()] {
+            format!("/api/v1/assistant/nyxagent/conversations/{}/voice-sessions", f.row.id)] {
             let response=app.clone().oneshot(Request::builder().method("POST").uri(uri)
                 .header("authorization",format!("Bearer {raw}")).header("content-type","application/json")
                 .body(Body::from(serde_json::json!({"service_id":service,"agent_id":other_agent.id,
                     "client_request_id":Uuid::new_v4(),"preferences":platform(&voice),"sdp_offer":"fixture"}).to_string())).unwrap()).await.unwrap();
             assert_eq!(response.status(),403,"The body cannot retarget the authorized connection");
         }
+        let response = app.clone().oneshot(Request::builder().method("POST")
+            .uri("/api/v1/assistant/nyxagent/voice/sessions")
+            .header("authorization", format!("Bearer {raw}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), 404, "The retired device alias must not be mounted");
         for body in ["[]", "null", "true", "42", "\"invalid\"", "{}"] {
             let response = app.clone().oneshot(Request::builder().method("POST")
                 .uri(format!("/api/v1/proxy/nyxbot-voice/{}/voice/sessions", service))
