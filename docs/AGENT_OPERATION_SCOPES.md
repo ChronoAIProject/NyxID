@@ -55,6 +55,14 @@ body, so a body limit refuses them. Authoring is through the API or CLI
 (`--inputs`); the UI shows a "Value limits" mark and preserves saved limits for
 operations that stay selected.
 
+Native `nyxid__set_agent_operations` and `nyxid__request_agent_operations`
+validate the `selection.inputs` dictionary before reading or changing scope
+state. Malformed entries return a bounded field path such as
+`selection.inputs.<endpoint-id>.body: expected path/query/body rules`; the
+error names only the rule location and never echoes rule values. A failed
+validation leaves the existing permission unchanged. The body vocabulary above
+is NyxID's tagged `JsonShape` form, rather than standard JSON Schema.
+
 The **contract digest** (`contract_digest`) is a SHA-256 over the compiled
 catalog identity and operations, excluding the revision. A selection that
 carries `contract_digest` fails with a conflict if it now compiles differently.
