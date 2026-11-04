@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { AlertCircle, Loader2 } from "lucide-react";
 
 interface ErrorBannerProps {
@@ -9,14 +9,16 @@ interface ErrorBannerProps {
 export function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
   const [retrying, setRetrying] = useState(false);
 
+  useEffect(() => {
+    if (!retrying) return;
+    const timeout = setTimeout(() => setRetrying(false), 1500);
+    return () => clearTimeout(timeout);
+  }, [retrying]);
+
   const handleRetry = useCallback(() => {
     if (!onRetry || retrying) return;
     setRetrying(true);
-    try {
-      onRetry();
-    } finally {
-      setTimeout(() => setRetrying(false), 1500);
-    }
+    onRetry();
   }, [onRetry, retrying]);
 
   return (
