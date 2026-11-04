@@ -52,9 +52,10 @@ explicitly pinned again; an old successful pin cache cannot revive work after
 unpin/repin.
 
 On desktop CMA joins the existing preview-card stack. Machine and CMA cards
-share one scrolling column, its saved width, and its resize divider. The CMA
-card uses the machine card's docked surface, spacing, shadow, and rounded left
-corners; it does not create another column. Below the `lg` breakpoint, cards use
+share one scrolling column, its saved width, and its resize divider. Each CMA
+card aligns left within its container, fills the available width up to 500px,
+and uses the machine card's surface, spacing, and shadow with rounded corners;
+it does not create another column. Below the `lg` breakpoint, cards use
 the machine's inline border and surface and sit above chat in a scrolling area
 whose height shrinks when the keyboard opens; the
 conversation and composer remain available. **Minimise** retains the title,

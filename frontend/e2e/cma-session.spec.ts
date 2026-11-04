@@ -295,7 +295,10 @@ test("automatically shows running CMA, streams while minimised, restores, and re
     .getByRole("complementary", { name: "Preview", exact: true })
     .boundingBox())!;
   expect(bounds!.x).toBeCloseTo(preview.x + 12, 0);
-  expect(bounds!.x + bounds!.width).toBeCloseTo(main!.x + main!.width, 0);
+  expect(bounds!.width).toBeCloseTo(Math.min(500, preview.width - 12), 0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(
+    preview.x + preview.width,
+  );
   expect(
     (await composerInput(page).boundingBox())!.x +
       (await composerInput(page).boundingBox())!.width,
@@ -547,7 +550,10 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   const machineBounds = (await machine.boundingBox())!;
   const cmaBounds = (await panel.boundingBox())!;
   expect(cmaBounds.x).toBeCloseTo(machineBounds.x - 12, 0);
-  expect(cmaBounds.width).toBeCloseTo(machineBounds.width + 24, 0);
+  expect(cmaBounds.width).toBeCloseTo(
+    Math.min(500, machineBounds.width + 24),
+    0,
+  );
   expect(cmaBounds.y).toBeGreaterThan(machineBounds.y + machineBounds.height);
   await expect(
     preview.getByRole("complementary", { name: "CMA sessions", exact: true }),
@@ -561,6 +567,13 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   await divider.focus();
   await page.keyboard.press("ArrowLeft");
   await expect(divider).toHaveAttribute("aria-valuenow", "52");
+  const resizedPreview = (await preview.boundingBox())!;
+  const resizedCmaBounds = (await panel.boundingBox())!;
+  expect(resizedCmaBounds.width).toBeCloseTo(
+    Math.min(500, resizedPreview.width - 12),
+    0,
+  );
+  expect(resizedCmaBounds.x).toBeCloseTo(resizedPreview.x + 12, 0);
   await expect(composerInput(page)).toBeInViewport({ ratio: 1 });
   await panel.getByRole("button", { name: "Minimise CMA session" }).click();
   await expect(machine).toBeVisible();

@@ -186,7 +186,7 @@ function CmaSessionCard({
       aria-label={`CMA session: ${state.title}`}
       data-private="true"
       data-ph-no-capture
-      className="flex max-h-[min(440px,40dvh)] min-h-0 shrink-0 flex-col gap-2 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-12 lg:max-h-[480px] lg:rounded-l-2xl lg:rounded-r-none lg:border-0 lg:shadow-sm"
+      className="flex max-h-[min(440px,40dvh)] min-h-0 w-full max-w-[500px] shrink-0 flex-col self-start gap-2 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-12 lg:max-h-[480px] lg:rounded-2xl lg:border-0 lg:shadow-sm"
     >
       <div className="flex shrink-0 items-center gap-2">
         <CmaGlyph

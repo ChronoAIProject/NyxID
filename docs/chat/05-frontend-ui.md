@@ -433,8 +433,9 @@ supplied callback. Pinning makes a card available across chats and every page;
 unpinning restores source-only visibility. Account-bound pin/minimise preferences
 survive reload and clear on account changes. One app-level provider owns streams.
 
-Cards reuse the shared resizable preview column alongside machine cards; on
-narrow screens they sit above chat while retaining composer space. Other pages
+Cards align left within their container and fill the available width up to
+500px. They reuse the shared resizable preview column alongside machine cards;
+on narrow screens they sit above chat while retaining composer space. Other pages
 show pinned cards in a bounded floating stack. Automatic discovery uses only
 server-verified personal connection receipts, never account inventory or the
 current route as origin evidence. Status-filtered active inventory is joined to
