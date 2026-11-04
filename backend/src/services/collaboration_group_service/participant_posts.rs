@@ -54,6 +54,7 @@ pub async fn try_post(
             message.mentioned_participant_ids=people.ids;
             message.author_display_name=access.participants.iter().find(|p|p.id==actor).map(|p|p.display_name.clone());
             db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME).replace_one(doc! {"_id":&message.id},&message).session(&mut *session).await?;
+            notifications::enqueue(db, &access.group, &message, session).await?;
             for agent in mentions {
                 if access.agent(&agent).and_then(AgentIdentity::authority).is_none() {
                     append(db, &access.group, actor, REFUSAL, Some(&agent), session).await?;

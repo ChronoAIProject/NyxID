@@ -151,6 +151,7 @@ pub(crate) async fn erase_person(db: &Database, owner: &str) -> AppResult<bool> 
             if group.user_id==owner {membership::delete(db,&group,session).await?;} else {
                 let previous=marker(&group)?.membership_revision;
                 group.participant_user_ids.retain(|id|id!=owner);
+                notifications::depart(db,&group.id,owner,session).await?;
                 invalidate(db,&group.id,session).await?;
                 if db.collection::<AssistantGroup>(GROUPS).update_one(doc! {"_id":&group.id,"collaboration.membership_revision":previous},
                     doc! {"$set":{"participant_user_ids":group.participant_user_ids},"$unset":{format!("last_recipient_ids_by_actor.{owner}"):""},"$inc":{"collaboration.membership_revision":1}}).session(&mut *session).await?.matched_count!=1 {return Err(stale());}

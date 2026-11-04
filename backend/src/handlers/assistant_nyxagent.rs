@@ -506,8 +506,104 @@ pub struct TurnFailureReasonResponse {
     nyxid_error_code: Option<u32>,
 }
 
+/// Presentation derived only from durable activity evidence, never model text.
+/// A completed call is not a promise about all of its downstream effects.
+#[derive(Serialize)]
+pub struct ActionOutcomeResponse {
+    summary: String,
+    complete: bool,
+    actions: Vec<ActionOutcomeItem>,
+    retry_warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ActionOutcomeItem {
+    activity_id: String,
+    label: String,
+    status: &'static str,
+    summary: String,
+}
+
+impl ActionOutcomeResponse {
+    fn from_message(row: &AssistantMessage) -> Option<Self> {
+        if row.role != "assistant" || row.status != "failed" {
+            return None;
+        }
+        // Old writers did not retain a completeness counter. An empty legacy
+        // list proves nothing; preserve the old UI rather than claiming no work.
+        if row.activity_count.is_none() && row.activities.is_empty() {
+            return None;
+        }
+        let complete = row.error_code.as_deref() != Some("outcome_unknown")
+            && row.activity_count == Some(row.activities.len() as i64)
+            && row.activity_total <= row.activities.len() as i64;
+        let actions: Vec<_> = row
+            .activities
+            .iter()
+            .map(|activity| {
+                let completed = activity.status == "completed";
+                let duplicate = activity
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.kind == engine::RETRY_DUPLICATE_ACTION);
+                let summary = if duplicate {
+                    format!("Previously completed; not repeated: {}", activity.label)
+                } else if completed && activity.label == "nyxid__create_schedule" {
+                    "Created a scheduled automation".into()
+                } else if completed {
+                    format!("Completed tool call: {}", activity.label)
+                } else {
+                    format!("Outcome uncertain: {}", activity.label)
+                };
+                ActionOutcomeItem {
+                    activity_id: activity.id.clone(),
+                    label: activity.label.clone(),
+                    status: if completed { "completed" } else { "uncertain" },
+                    summary,
+                }
+            })
+            .collect();
+        let none = complete && actions.is_empty();
+        let uncertain = !complete || actions.iter().any(|a| a.status == "uncertain");
+        let summary = if none {
+            "No actions were taken."
+        } else if uncertain {
+            "Some actions may have taken effect. Review their results before trying again."
+        } else {
+            "These actions completed before the reply failed."
+        }
+        .into();
+        let retry_warning = if none {
+            None
+        } else if uncertain {
+            Some("Some actions may already have taken effect. Retrying may repeat them.".into())
+        } else {
+            let mut completed = actions
+                .iter()
+                .take(3)
+                .map(|a| a.summary.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if actions.len() > 3 {
+                completed.push_str("; and other recorded calls");
+            }
+            Some(format!(
+                "This request already did the following: {completed}. Retrying may repeat it."
+            ))
+        };
+        Some(Self {
+            summary,
+            complete,
+            actions,
+            retry_warning,
+        })
+    }
+}
+
 #[derive(Serialize)]
 pub struct MessageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_outcome: Option<ActionOutcomeResponse>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
@@ -547,6 +643,7 @@ pub struct AutomationRunResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            action_outcome: ActionOutcomeResponse::from_message(&row),
             platform_origin: row
                 .platform_origin
                 .as_ref()

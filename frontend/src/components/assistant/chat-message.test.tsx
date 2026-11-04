@@ -297,7 +297,7 @@ describe("canonical chat presentation", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  it("exposes Retry for a failed reply", async () => {
+  it("keeps legacy failed replies unchanged without inventing an action outcome", async () => {
     const retry = vi.fn();
     render(
       <ChatMessageBubble
@@ -305,8 +305,47 @@ describe("canonical chat presentation", () => {
         onRetry={retry}
       />,
     );
+    expect(screen.queryByText("No actions were taken.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying may repeat/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows proven empty actions without a retry warning", () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Timed out",
+      actionOutcome: { summary: "No actions were taken.", complete: true, actions: [], retry_warning: null },
+    }} onRetry={retry} />);
+    expect(screen.getByText("No actions were taken.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows completed actions and requires confirmation before retry", () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, content: "", status: "error", error: "Timed out",
+      actionOutcome: { summary: "These actions completed before the reply failed.", complete: true,
+        actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+        retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+      },
+    }} onRetry={retry} />);
+    expect(screen.getByText("Created a scheduled automation")).toBeVisible();
+    expect(screen.getByText(/Retrying may repeat it/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry anyway" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("does not describe uncertain or missing evidence as no actions", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Timed out",
+      actionOutcome: { summary: "Some actions may have taken effect. Review their results before trying again.", complete: false,
+        actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "uncertain", summary: "Outcome uncertain: nyxid__create_schedule" }],
+        retry_warning: "Some actions may already have taken effect. Retrying may repeat them.",
+      },
+    }} />);
+    expect(screen.getByText("The action record may be incomplete.")).toBeVisible();
+    expect(screen.queryByText("No actions were taken.")).not.toBeInTheDocument();
   });
 
   it("shows a rejected retry beside its Retry button", async () => {

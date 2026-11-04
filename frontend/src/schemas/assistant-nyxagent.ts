@@ -163,7 +163,16 @@ const turnMetadataSchema = z.object({
   failure_reason: nyxAgentFailureReasonSchema.nullish(),
   channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
 });
+export const nyxAgentActionOutcomeSchema = z.object({
+  summary: z.string(),
+  complete: z.boolean(),
+  actions: z.array(z.object({
+    activity_id: z.string(), label: z.string(), status: z.string(), summary: z.string(),
+  })),
+  retry_warning: z.string().nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
+  action_outcome: nyxAgentActionOutcomeSchema.nullish(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
