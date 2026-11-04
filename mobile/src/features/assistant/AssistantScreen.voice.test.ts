@@ -1243,7 +1243,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   x.harness.unmount();
 });
 
-test("the real transcript inserts a context-reset note at its boundary and renders continuations as system lines", () => {
+test("the real transcript keeps recovery notes outside user bubbles, timestamps and copy payloads", () => {
   const x = setup(A, false);
   const messages = [
     {
@@ -1262,8 +1262,8 @@ test("the real transcript inserts a context-reset note at its boundary and rende
       id: "after",
       seq: 2,
       turn_id: "t2",
-      role: "assistant",
-      text: "Later",
+      role: "user",
+      text: "Please continue with the remaining actions.",
       status: "completed",
       error_code: null,
       created_at: "2026-10-28T00:00:00Z",
@@ -1274,7 +1274,7 @@ test("the real transcript inserts a context-reset note at its boundary and rende
   Object.assign(x.assistant.history!, { messages });
   Object.assign(x.assistant.history!.conversation, {
     context_reset_at: "2026-10-27T12:00:00Z",
-    context_reset_reason: "model_changed",
+    context_reset_reason: "turn_failed",
   });
   x.harness.render();
   const render = x.all().find((node) => node.type === "FlatList")!.props
@@ -1291,12 +1291,109 @@ test("the real transcript inserts a context-reset note at its boundary and rende
       (node) => node.props.accessibilityLabel === "Conversation context reset",
     ),
   );
+  const bubble = later.find(
+    (node) =>
+      node.type === "View" &&
+      [node.props.style]
+        .flat(Infinity)
+        .some((style) => style?.alignSelf === "flex-end"),
+  )!;
+  assert.ok(bubble, "the user's message retains its own bubble");
+  assert.equal(
+    elements(bubble).some(
+      (node) => node.props.accessibilityLabel === "Conversation context reset",
+    ),
+    false,
+    "the recovery explanation is a separate system note",
+  );
+  const note = later.find(
+    (node) => node.props.accessibilityLabel === "Conversation context reset",
+  )!;
+  assert.match(note.props.children.join(""), /^The last turn failed/);
+  assert.equal(note.props.selectable, undefined);
+  assert.equal(
+    elements(note).some((node) => node.type === "AssistantMessageFooter"),
+    false,
+    "system notices do not inherit a user's timestamp or copy action",
+  );
+  const footers = later.filter(
+    (node) => node.type === "AssistantMessageFooter",
+  );
+  assert.equal(footers.length, 1);
+  assert.equal(footers[0]!.props.text, messages[1]!.text);
+  assert.equal(footers[0]!.props.timestamp, messages[1]!.created_at);
+  assert.equal(footers[0]!.props.user, true);
   const continuation = expand(
     render({ item: { ...messages[1], continuation_of: "ack" }, index: 1 }),
   );
   assert.equal(
     continuation.props.children.join(""),
     "Continuing after your decision",
+  );
+  x.harness.unmount();
+});
+
+test("context-reset boundaries preserve user-authored system-like text and appear once across reloads", () => {
+  const x = setup(A, false);
+  const text =
+    "The last turn failed... is the text I saw.\n\nConversation context reset\nPlease explain this message.";
+  const messages = [
+    {
+      id: "user",
+      seq: 1,
+      turn_id: "turn-1",
+      role: "user",
+      text,
+      status: "completed",
+      error_code: null,
+      created_at: "2026-10-28T00:00:00Z",
+      activities: [],
+      attachments: [],
+    },
+  ];
+  Object.assign(x.assistant.history!, { messages });
+  Object.assign(x.assistant.history!.conversation, {
+    context_reset_at: "2026-10-28T00:00:00Z",
+    context_reset_reason: "stopped",
+  });
+  for (const resetAt of [
+    "2026-10-28T00:00:00Z",
+    "2026-10-27T23:59:59Z",
+    "2026-10-27T23:59:59Z",
+    undefined,
+  ]) {
+    x.assistant.history!.conversation.context_reset_at = resetAt;
+    x.harness.render();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    const message = expand(
+      list.props.renderItem({ item: messages[0], index: 0 }),
+    );
+    const all = [
+      ...elements(message),
+      ...elements(expand(list.props.ListFooterComponent)),
+    ];
+    assert.equal(
+      all.filter(
+        (node) =>
+          node.props.accessibilityLabel === "Conversation context reset",
+      ).length,
+      resetAt ? 1 : 0,
+      "the reset has one independent transcript location, including at the tail",
+    );
+    const body = all.find(
+      (node) => node.type === "Text" && node.props.selectable,
+    )!;
+    assert.equal(body.props.children.join(""), text);
+    assert.equal(
+      all.find((node) => node.type === "AssistantMessageFooter")!.props.text,
+      text,
+      "copy preserves the original user text without parsing system-like phrases",
+    );
+  }
+  assert.equal(
+    messages[0]!.text,
+    text,
+    "rendering does not modify stored history",
   );
   x.harness.unmount();
 });

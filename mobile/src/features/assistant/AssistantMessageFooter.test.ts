@@ -138,10 +138,12 @@ test("private and crew reply footers contain only compact Copy and date, 8pt apa
     x.h.unmount();
   }
 });
-test("human footer keeps time-before-Copy order with the same compact spacing", () => {
+test("human footer keeps time-before-Copy order and copies only the original user text", async () => {
+  const text =
+    "The last turn failed... is what I saw.\n\nPlease explain Conversation context reset.";
   const x = setup({
     user: true,
-    text: "Human",
+    text,
     timestamp: "2026-10-27T01:00:00Z",
   });
   assert.equal(x.h.value().props.children[0].props.accessibilityRole, "text");
@@ -151,14 +153,28 @@ test("human footer keeps time-before-Copy order with the same compact spacing", 
   );
   assert.equal(x.h.value().props.style[0].gap, 8);
   assert.equal(x.h.value().props.children[1].props.hitSlop.left, 4);
+  x.h.value().props.children[1].props.onPress();
+  await x.h.settle();
+  assert.deepEqual(x.copied, [text]);
   x.h.unmount();
 });
 test("user bubble dates and copy icons use the supplied foreground", () => {
-  const x = setup({ text: "Hello", timestamp: "2026-10-27T01:00:00Z", user: true, foreground: "#FFFFFF" });
+  const x = setup({
+    text: "Hello",
+    timestamp: "2026-10-27T01:00:00Z",
+    user: true,
+    foreground: "#FFFFFF",
+  });
   const date = x.all().find((node) => node.type === "Text");
   assert.ok(date);
-  assert.equal(Object.assign({}, ...[date.props.style].flat()).color, "#FFFFFF");
-  assert.equal(x.all().find((node) => node.type === "Copy")?.props.color, "#FFFFFF");
+  assert.equal(
+    Object.assign({}, ...[date.props.style].flat()).color,
+    "#FFFFFF",
+  );
+  assert.equal(
+    x.all().find((node) => node.type === "Copy")?.props.color,
+    "#FFFFFF",
+  );
   x.h.unmount();
 });
 
