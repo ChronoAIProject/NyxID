@@ -452,6 +452,10 @@ mod tests {
                     | "/lcd/image"
                     | "/lcd/text"
                     | "/lcd/clear"
+                    | "/lcd/default-image"
+                    | "/lcd/brightness"
+                    | "/config/audio"
+                    | "/voice/input-mode"
                     | "/voice"
                     | "/voice/open"
                     | "/voice/agents"
@@ -467,6 +471,14 @@ mod tests {
                 "Device routing belongs to the connection"
             );
         }
+        assert_eq!(endpoints.len(), 27);
+        let mode = endpoints
+            .iter()
+            .find(|e| e.name == "set_voice_input_mode")
+            .unwrap();
+        let schema = mode.request_body_schema.as_ref().unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"].get("agent_id").is_none());
         assert!(spec_for_slug("nyx-panel").is_none());
     }
 

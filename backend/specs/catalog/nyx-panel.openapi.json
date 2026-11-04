@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Nyx Panel Daily API",
-    "version": "1.0.0",
-    "description": "Daily operations of a Nyx Panel node service. Mount this contract on the individual connection; each instance routes through its own NyxID node. Camera images are captured on demand. Configuration, credentials, persistent images and system management belong to the separately authorized management service."
+    "version": "1.1.0",
+    "description": "Daily operations of a Nyx Panel node service. Mount this contract on the individual connection; each instance routes through its own NyxID node. Includes on-demand camera photos, display and persistent fallback, calls, audio output, input mode and brightness. Selecting the Bot, credentials, network and system management require the separately authorized management service. Voice uses the panel's own Key and the selected Bot's existing grants."
   },
   "paths": {
     "/status": {
@@ -635,6 +635,273 @@
             "description": "1 presses talk; 0 releases it."
           }
         ]
+      }
+    },
+    "/config/audio": {
+      "get": {
+        "operationId": "get_audio_settings",
+        "summary": "Read saved hardware volume, playback gain and live voice state.",
+        "x-aevatar-tool": {
+          "name": "get_audio_settings",
+          "description": "Read saved hardware volume, playback gain and live voice state.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "set_audio_output",
+        "summary": "Adjust and persist exactly one field: volume (integer 0..100) or playback_gain (integer 1..8). Can be adjusted during a call. Does not select a Bot.",
+        "x-aevatar-tool": {
+          "name": "set_audio_output",
+          "description": "Adjust and persist exactly one field: volume (integer 0..100) or playback_gain (integer 1..8). Can be adjusted during a call. Does not select a Bot.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "volume": {
+                    "type": "integer",
+                    "description": "Hardware output volume, 0..100."
+                  },
+                  "playback_gain": {
+                    "type": "integer",
+                    "description": "Digital playback gain, 1..8."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/input-mode": {
+      "post": {
+        "operationId": "set_voice_input_mode",
+        "summary": "Set saved automatic or push_to_talk input mode while idle (409 during a call). Does not select a Bot or change grants.",
+        "x-aevatar-tool": {
+          "name": "set_voice_input_mode",
+          "description": "Set saved automatic or push_to_talk input mode while idle (409 during a call). Does not select a Bot or change grants.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "input_mode"
+                ],
+                "properties": {
+                  "input_mode": {
+                    "type": "string",
+                    "enum": [
+                      "automatic",
+                      "push_to_talk"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lcd/brightness": {
+      "get": {
+        "operationId": "get_screen_brightness",
+        "summary": "Read saved screen brightness, 0..100.",
+        "x-aevatar-tool": {
+          "name": "get_screen_brightness",
+          "description": "Read saved screen brightness, 0..100.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "set_screen_brightness",
+        "summary": "Set and persist screen brightness (integer 0..100), preserving other display settings. Zero turns off the backlight.",
+        "x-aevatar-tool": {
+          "name": "set_screen_brightness",
+          "description": "Set and persist screen brightness (integer 0..100), preserving other display settings. Zero turns off the backlight.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "brightness"
+                ],
+                "properties": {
+                  "brightness": {
+                    "type": "integer",
+                    "description": "Backlight brightness, 0..100."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lcd/default-image": {
+      "get": {
+        "operationId": "get_default_image",
+        "summary": "Read persistent fallback image metadata, source, dimensions and byte count.",
+        "x-aevatar-tool": {
+          "name": "get_default_image",
+          "description": "Read persistent fallback image metadata, source, dimensions and byte count.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "set_default_image",
+        "summary": "Save a persistent fullscreen fallback JPEG used whenever no temporary image is visible. Up to 65536 bytes and 800x1280 pixels; survives reboot. Leaves a current temporary image visible.",
+        "x-aevatar-tool": {
+          "name": "set_default_image",
+          "description": "Save a persistent fullscreen fallback JPEG used whenever no temporary image is visible. Up to 65536 bytes and 800x1280 pixels; survives reboot. Leaves a current temporary image visible.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "description": "Raw JPEG bytes."
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "restore_default_image",
+        "summary": "Remove the saved fallback and restore the bundled NyxBot image. Keeps current temporary images and captions.",
+        "x-aevatar-tool": {
+          "name": "restore_default_image",
+          "description": "Remove the saved fallback and restore the bundled NyxBot image. Keeps current temporary images and captions.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

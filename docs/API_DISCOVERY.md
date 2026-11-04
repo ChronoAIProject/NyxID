@@ -258,7 +258,11 @@ The `nyx-panel` overlay is an instance-mounted device contract, without a
 seeded catalog connection. Panels register its hosted URL on their daily
 `UserEndpoint.openapi_spec_url`; each connection retains its own node route
 and service grants. It exposes on-demand camera JPEGs, display images/captions and
-voice controls, and excludes configuration and system management. Tool-returned
+voice controls, audio output, input mode, screen brightness and persistent fallback
+images. Bot selection, credentials, network and system management remain on the
+separate management service. Daily parameter endpoints reject unknown or combined
+fields; they cannot change the selected Bot. Daily preferences and persistent
+fallback operations require panel firmware v0.6.15 or later. Tool-returned
 images use the ordinary NyxAgent image pipeline; voice tasks use the selected
 Bot's existing service grants. No camera transport or device-specific executor
 is added to Voice.
