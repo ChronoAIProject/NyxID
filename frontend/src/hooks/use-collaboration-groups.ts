@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { assistantJson } from "@/lib/assistant/assistant-http";
@@ -20,6 +21,9 @@ const mutationSchema = z.object({
   invite: groupInviteSchema.nullable(),
 });
 export const collaborationApi = {
+  async markRead(group: string, lastSeenSeq: number) {
+    await assistantJson(`${path(group)}/read`, { method: "POST", body: { last_seen_seq: lastSeenSeq } });
+  },
   async askOwner(group: string, agent: string) {
     return guestAccessRequestSchema.parse(
       await assistantJson(
@@ -129,4 +133,30 @@ export function useCollaborationDecision(group: string) {
     onSettled: () =>
       client.invalidateQueries({ queryKey: nyxBotGroupKeys.all(user) }),
   });
+}
+
+
+/** Reading is explicit: background polling and pagination do not mark unseen messages. */
+export function useCollaborationRead(group: string, seq: number, enabled: boolean) {
+  const user = useAuthStore((s) => s.user?.id);
+  const client = useQueryClient();
+  const sharingEnabled = useFeature(FEATURE_FLAG.SHARED_AGENTS);
+  const sent = useRef({ key: "", seq: 0 });
+  useEffect(() => {
+    const key = `${user}:${group}`;
+    let disposed = false;
+    const read = () => {
+      if (!enabled || !sharingEnabled || !user || seq <= 0 || document.visibilityState === "hidden") return;
+      if (sent.current.key === key && sent.current.seq >= seq) return;
+      sent.current = { key, seq };
+      void collaborationApi.markRead(group, seq).then(() => {
+        if (!disposed) void client.invalidateQueries({ queryKey: [...nyxBotGroupKeys.all(user), "list"] });
+      }).catch(() => {
+        if (sent.current.key === key && sent.current.seq === seq) sent.current = { key, seq: 0 };
+      });
+    };
+    read();
+    document.addEventListener("visibilitychange", read);
+    return () => { disposed = true; document.removeEventListener("visibilitychange", read); };
+  }, [client, enabled, group, seq, sharingEnabled, user]);
 }

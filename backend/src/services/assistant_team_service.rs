@@ -2410,6 +2410,53 @@ pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -
     Ok(())
 }
 
+/// Write, replace or (with `None`) remove one NyxID-authored note on the
+/// owner's NyxBot, under a fixed ID. The owner sees and can delete it like any
+/// note. A memory that is full without it keeps its notes and skips the write.
+pub async fn set_nyxbot_fixed_note(
+    db: &Database,
+    owner: &str,
+    note_id: &str,
+    text: Option<&str>,
+) -> AppResult<()> {
+    let nyxbot = ensure_nyxbot(db, owner).await?;
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": &nyxbot.id, "user_id": owner};
+    // Remove any current copy. A replacement is pushed to the end: instructions
+    // keep the newest notes within their budget, so a fresh answer must not
+    // age out first.
+    let mut pull = filter.clone();
+    pull.insert("memory.id", note_id);
+    collection
+        .update_one(pull, doc! {"$pull": {"memory": {"id": note_id}}})
+        .await?;
+    let Some(text) = text else {
+        return Ok(());
+    };
+    let now = Utc::now();
+    let note = MemoryNote {
+        id: note_id.into(),
+        text: text.into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut push = filter;
+    push.insert("destroyed_at", bson::Bson::Null);
+    push.insert("memory.id", doc! {"$ne": note_id});
+    push.insert(
+        format!("memory.{}", MAX_MEMORY_NOTES - 1),
+        doc! {"$exists": false},
+    );
+    collection
+        .update_one(
+            push,
+            doc! {"$push": {"memory": bson::to_bson(&note)
+            .map_err(|_| AppError::Internal("Memory encoding failed".into()))?}},
+        )
+        .await?;
+    Ok(())
+}
+
 /// The agent's memory as an instructions note, newest kept within a budget.
 pub fn memory_note(agent: &AssistantAgent) -> String {
     if agent.memory.is_empty() {

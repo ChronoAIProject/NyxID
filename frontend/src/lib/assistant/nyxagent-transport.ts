@@ -614,6 +614,7 @@ export class NyxAgentTransport {
       if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
+        actionOutcome: message.action_outcome,
         recovery: message.recovery,
         id: message.id,
         feedback: message.feedback ?? undefined,
@@ -677,6 +678,7 @@ export class NyxAgentTransport {
         const cached = streaming ? undefined : this.liveViews.get(message);
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
+          actionOutcome: settled?.action_outcome,
           recovery: settled?.recovery,
           id: message.id,
           role: settled?.role ?? message.role,

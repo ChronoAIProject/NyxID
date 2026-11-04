@@ -190,6 +190,7 @@ pub(super) async fn enqueue_with_uploads_ready(
                 message.author_display_name=access.participants.iter().find(|p|p.id==actor).map(|p|p.display_name.clone());
                 message.attachments=svc::assistant_upload_service::bind(db,actor,group_id,&message.id,uploads,session).await?;
                 db.collection::<GroupMessage>(MESSAGES).update_one(doc! {"_id":&message.id},doc! {"$set":{"attachments":bson::to_bson(&message.attachments).map_err(|e|AppError::Internal(e.to_string()))?,"mentioned_participant_ids":&message.mentioned_participant_ids,"author_display_name":&message.author_display_name}}).session(&mut *session).await?;
+                notifications::enqueue(db, &access.group, &message, session).await?;
                 let mut authorities = BTreeMap::new();
                 // A recipient-picker edit does not make an unavailable mention
                 // disappear. Record its refusal without adding a recipient or

@@ -59,6 +59,8 @@ export type MobileDialogId =
   | 'profile_edit'
   | 'change_password'
   | 'delete_account_confirm'
+  | 'nyxbot_intro'
+  | 'nyxbot_tour'
   | 'other';
 
 // --- The discriminated union ----------------------------------------

@@ -2512,6 +2512,19 @@ it.each(["model_route_unavailable", "model_connection_unavailable", "credits_una
 });
 
 
+it("carries the server action outcome from failed history to the message view", async () => {
+  const page = history();
+  const outcome = {
+    summary: "These actions completed before the reply failed.", complete: true,
+    actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+    retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+  };
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "first_byte_timeout", action_outcome: outcome };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.actionOutcome).toEqual(outcome);
+});
 it("2072 restores a pending card on reload and keeps its expired terminal card visible after polling", async () => {
   const page = history();
   const card = { ...creationReceipt(page.messages[1]!.turn_id), status: "pending" as const };

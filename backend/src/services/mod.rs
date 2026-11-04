@@ -306,6 +306,7 @@ pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
 pub mod assistant_nyxagent_runtime;
+pub mod assistant_onboarding_service;
 pub mod assistant_platform_reply_decision;
 pub mod assistant_profile_routing;
 pub mod assistant_service_execution;

@@ -681,6 +681,7 @@ function CreateAgentMenu({
         <DropdownMenuTrigger asChild>
           {compact ? (
             <button data-icon-button=""
+              data-tour="create-agent"
               type="button"
               aria-label="Create new agent"
               title="Create new agent"
@@ -695,6 +696,7 @@ function CreateAgentMenu({
               // The dialogs are rendered by this sidebar; closing the mobile
               // drawer would unmount them.
               data-keep-drawer-open=""
+              data-tour="create-agent"
               className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
             >
               <Plus aria-hidden="true" className="h-4 w-4 shrink-0 text-text-tertiary" />
@@ -761,6 +763,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={3} ring="ring-sidebar group-hover:ring-sidebar-hover" />
                   <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                  <GroupUnread group={group} />
                   {working ? (
                     <span
                       aria-hidden="true"
@@ -974,6 +977,7 @@ export function AssistantSidebar({
           <Link
             key={item.view}
             to={item.to}
+            data-tour={item.view}
             aria-current={activeView === item.view ? "page" : undefined}
             className={cn(
               "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors",
@@ -1020,6 +1024,7 @@ export function AssistantSidebar({
         ) : null}
         <Link
           to="/assistant/approvals"
+          data-tour="approvals"
           aria-current={approvalsActive ? "page" : undefined}
           className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
             approvalsActive
@@ -1262,6 +1267,7 @@ function SidebarRail({
             <RailItem key={item.view} label={item.label}>
               <Link
                 to={item.to}
+                data-tour={item.view}
                 aria-label={item.label}
                 aria-current={activeView === item.view ? "page" : undefined}
                 className={linkClass(activeView === item.view)}
@@ -1273,6 +1279,7 @@ function SidebarRail({
           <RailItem label={pendingApprovals ? `Approvals (${String(pendingApprovals)} waiting)` : "Approvals"}>
             <Link
               to="/assistant/approvals"
+          data-tour="approvals"
               aria-label={pendingApprovals ? `Approvals, ${String(pendingApprovals)} waiting` : "Approvals"}
               aria-current={activeView === "approvals" ? "page" : undefined}
               className={linkClass(activeView === "approvals")}
@@ -1317,6 +1324,7 @@ function SidebarRail({
                   className={linkClass(selected)}
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={2} ring="ring-sidebar" />
+                  <GroupUnread group={group} compact />
                 </button>
               </RailItem>
             );
@@ -1506,5 +1514,30 @@ function RailAgentChats({
         </button>
       ) : null}
     </div>
+  );
+}
+function GroupUnread({ group, compact = false }: {
+  readonly group: AssistantGroup;
+  readonly compact?: boolean;
+}) {
+  const unread = group.collaboration?.unread_count ?? 0;
+  const mentions = group.collaboration?.mention_count ?? 0;
+  return (
+    <>
+      {unread > 0 ? (
+        <span
+          aria-label="Unread messages"
+          className={cn("h-1.5 w-1.5 shrink-0 rounded-full bg-primary", compact && "absolute top-0.5 right-0.5")}
+        />
+      ) : null}
+      {mentions > 0 ? (
+        <span
+          aria-label={`${mentions} mentions`}
+          className={cn("rounded-full bg-primary/10 px-1.5 text-11 text-primary", compact && "absolute -bottom-0.5 right-0 bg-primary px-1 text-primary-foreground")}
+        >
+          @{mentions > 99 ? "99+" : mentions}
+        </span>
+      ) : null}
+    </>
   );
 }
