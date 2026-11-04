@@ -38,12 +38,15 @@ export function FirstRunIntro({
   visible,
   state,
   entryPoint,
+  online,
   onClose,
   onStart,
 }: {
   visible: boolean;
   state: Onboarding;
   entryPoint: "first_run" | "home";
+  /** Next steps need a connection; offline they stay visible but disabled. */
+  online: boolean;
   onClose: () => void;
   onStart: (step: NextStep) => void;
 }) {
@@ -98,7 +101,9 @@ export function FirstRunIntro({
         duration_ms: Date.now() - openedAt.current,
       },
     });
-    void persist(index === LAST ? "completed" : "skipped");
+    // Closing a replay early keeps an earlier completion.
+    const finished = index === LAST || state.profile?.outcome === "completed";
+    void persist(finished ? "completed" : "skipped");
     onClose();
   }
 
@@ -242,7 +247,7 @@ export function FirstRunIntro({
                 body="One tap and NyxBot takes it from there. These stay on your home page until you're done with them."
               />
               {steps ? (
-                <NextStepList steps={steps} onStart={start} />
+                <NextStepList steps={steps} onStart={start} disabled={!online} />
               ) : (
                 <ActivityIndicator color={colors.primary} />
               )}

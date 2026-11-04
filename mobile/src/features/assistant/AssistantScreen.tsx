@@ -1055,8 +1055,11 @@ export function AssistantScreen({
               });
             }}
             onStartNextStep={(step) => {
-              if (newChatDisabled || running || uploads.session.sending) return;
-              void assistant.send(step.prompt);
+              if (newChatDisabled || running || uploads.session.sending) {
+                setLocalError("NyxBot is busy. Start this step once it finishes.");
+                return;
+              }
+              void perform(() => assistant.send(step.prompt));
             }}
             onOpenCrew={(groupId) =>
               navigation.navigate("GroupChat", { groupId })

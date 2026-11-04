@@ -119,8 +119,22 @@ export function GuidedTour({
     card.current?.focus({ preventScroll: true });
   }, [index]);
 
+  // Modal: the app behind the tour is inert, so focus and typing stay here.
+  useEffect(() => {
+    const app = document.getElementById("root");
+    if (!app || app.contains(card.current)) return;
+    app.inert = true;
+    return () => {
+      app.inert = false;
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) {
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         finish(false);

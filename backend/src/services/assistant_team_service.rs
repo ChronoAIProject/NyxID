@@ -2412,7 +2412,7 @@ pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -
 
 /// Write, replace or (with `None`) remove one NyxID-authored note on the
 /// owner's NyxBot, under a fixed ID. The owner sees and can delete it like any
-/// note. A full memory keeps its notes and skips the write.
+/// note. A memory that is full without it keeps its notes and skips the write.
 pub async fn set_nyxbot_fixed_note(
     db: &Database,
     owner: &str,
@@ -2422,27 +2422,18 @@ pub async fn set_nyxbot_fixed_note(
     let nyxbot = ensure_nyxbot(db, owner).await?;
     let collection = db.collection::<AssistantAgent>(AGENTS);
     let filter = doc! {"_id": &nyxbot.id, "user_id": owner};
+    // Remove any current copy. A replacement is pushed to the end: instructions
+    // keep the newest notes within their budget, so a fresh answer must not
+    // age out first.
+    let mut pull = filter.clone();
+    pull.insert("memory.id", note_id);
+    collection
+        .update_one(pull, doc! {"$pull": {"memory": {"id": note_id}}})
+        .await?;
     let Some(text) = text else {
-        let mut pull = filter;
-        pull.insert("memory.id", note_id);
-        collection
-            .update_one(pull, doc! {"$pull": {"memory": {"id": note_id}}})
-            .await?;
         return Ok(());
     };
     let now = Utc::now();
-    let mut replace = filter.clone();
-    replace.insert("memory.id", note_id);
-    let replaced = collection
-        .update_one(
-            replace,
-            doc! {"$set": {"memory.$.text": text,
-            "memory.$.updated_at": bson::DateTime::from_chrono(now)}},
-        )
-        .await?;
-    if replaced.matched_count == 1 {
-        return Ok(());
-    }
     let note = MemoryNote {
         id: note_id.into(),
         text: text.into(),

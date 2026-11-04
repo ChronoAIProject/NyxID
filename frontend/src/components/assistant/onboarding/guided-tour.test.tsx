@@ -57,3 +57,19 @@ it("Escape ends the tour", async () => {
   await user.keyboard("{Escape}");
   expect(onClose).toHaveBeenCalledTimes(1);
 });
+
+it("arrow keys typed into a field do not move the tour", async () => {
+  const user = userEvent.setup();
+  const targets = (
+    <>
+      <input aria-label="Field" />
+      <div data-tour="composer">composer</div>
+      <a data-tour="approvals" href="/assistant/approvals">Approvals</a>
+    </>
+  );
+  const { rerender } = render(targets);
+  rerender(<>{targets}<GuidedTour steps={steps} onClose={vi.fn()} /></>);
+  screen.getByRole("textbox", { name: "Field" }).focus();
+  await user.keyboard("{ArrowRight}");
+  expect(screen.getByRole("dialog", { name: "Ask NyxBot anything" })).toBeTruthy();
+});

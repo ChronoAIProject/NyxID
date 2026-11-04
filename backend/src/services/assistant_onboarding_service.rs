@@ -418,7 +418,7 @@ pub async fn load_signals(db: &Database, owner: &str) -> AppResult<Signals> {
     let schedule = async {
         Ok::<_, AppError>(
             db.collection::<Document>(crate::models::trigger::COLLECTION_NAME)
-                .find_one(doc! {"user_id": owner, "source": "schedule"})
+                .find_one(doc! {"user_id": owner, "source": "schedule", "status": "active"})
                 .projection(doc! {"_id": 1})
                 .await?
                 .is_some(),
@@ -443,6 +443,33 @@ pub async fn load_signals(db: &Database, owner: &str) -> AppResult<Signals> {
     })
 }
 
+/// Upsert the owner's row behind the personal-erasure fence, so a request in
+/// flight cannot recreate it after erasure.
+async fn fenced_upsert(db: &Database, owner: &str, update: Document) -> AppResult<Document> {
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result: AppResult<Document> = async {
+        super::erasure_admission::fence_in_session(db, owner, &mut session).await?;
+        db.collection::<Document>(COLLECTION_NAME)
+            .find_one_and_update(doc! {"_id": owner}, update)
+            .upsert(true)
+            .return_document(mongodb::options::ReturnDocument::After)
+            .session(&mut session)
+            .await?
+            .ok_or_else(|| AppError::Internal("Onboarding state unavailable".into()))
+    }
+    .await;
+    super::org_membership_authority::finish(session, result).await
+}
+
+fn encode<T: serde::Serialize>(value: &T) -> AppResult<bson::Bson> {
+    bson::to_bson(value).map_err(|_| AppError::Internal("Onboarding encoding failed".into()))
+}
+
 pub async fn get(db: &Database, owner: &str) -> AppResult<Option<AssistantOnboarding>> {
     let Some(raw) = db
         .collection::<Document>(COLLECTION_NAME)
@@ -456,16 +483,17 @@ pub async fn get(db: &Database, owner: &str) -> AppResult<Option<AssistantOnboar
         .map_err(|_| AppError::Internal("Onboarding state unavailable".into()))
 }
 
-/// Whether the first-run intro should open: never finished or skipped, and
-/// the owner has no NyxBot thread yet (people who already use NyxBot are not
+/// Whether the first-run intro should open: a revised intro the owner has not
+/// seen, or never finished or skipped while the owner has no NyxBot thread yet (people who already use NyxBot are not
 /// interrupted; they can replay the intro from the account menu).
 pub async fn should_show_intro(
     db: &Database,
     owner: &str,
     profile: Option<&AssistantOnboarding>,
 ) -> AppResult<bool> {
-    if profile.is_some() {
-        return Ok(false);
+    if let Some(profile) = profile {
+        // A revised intro (a bumped INTRO_VERSION) shows once more.
+        return Ok(profile.intro_version < INTRO_VERSION);
     }
     Ok(db
         .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -497,28 +525,23 @@ pub async fn save(db: &Database, owner: &str, answers: Answers) -> AppResult<Ass
         .work_style
         .filter(|style| *style != WorkStyle::Unsupported);
     let now = bson::DateTime::from_chrono(Utc::now());
-    let row = db
-        .collection::<AssistantOnboarding>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! {"_id": owner},
-            doc! {
-                "$set": {
-                    "intro_version": INTRO_VERSION,
-                    "outcome": bson::to_bson(&answers.outcome)
-                        .map_err(|_| AppError::Internal("Onboarding encoding failed".into()))?,
-                    "topics": bson::to_bson(&topics)
-                        .map_err(|_| AppError::Internal("Onboarding encoding failed".into()))?,
-                    "work_style": bson::to_bson(&work_style)
-                        .map_err(|_| AppError::Internal("Onboarding encoding failed".into()))?,
-                    "updated_at": now,
-                },
-                "$setOnInsert": {"created_at": now, "dismissed_recommendations": []},
+    let row = fenced_upsert(
+        db,
+        owner,
+        doc! {
+            "$set": {
+                "intro_version": INTRO_VERSION,
+                "outcome": encode(&answers.outcome)?,
+                "topics": encode(&topics)?,
+                "work_style": encode(&work_style)?,
+                "updated_at": now,
             },
-        )
-        .upsert(true)
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Internal("Onboarding state unavailable".into()))?;
+            "$setOnInsert": {"created_at": now, "dismissed_recommendations": []},
+        },
+    )
+    .await?;
+    let row: AssistantOnboarding = bson::from_document(row)
+        .map_err(|_| AppError::Internal("Onboarding state unavailable".into()))?;
     let note = memory_note(&row.topics, row.work_style);
     if let Err(error) = super::assistant_team_service::set_nyxbot_fixed_note(
         db,
@@ -547,23 +570,22 @@ pub async fn dismiss(db: &Database, owner: &str, recommendation_id: &str) -> App
     }
     let now = bson::DateTime::from_chrono(Utc::now());
     // Dismissing before the intro was ever answered records a skipped intro.
-    db.collection::<Document>(COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": owner},
-            doc! {
-                "$addToSet": {"dismissed_recommendations": recommendation_id},
-                "$set": {"updated_at": now},
-                "$setOnInsert": {
-                    "intro_version": INTRO_VERSION,
-                    "outcome": "skipped",
-                    "topics": [],
-                    "work_style": bson::Bson::Null,
-                    "created_at": now,
-                },
+    fenced_upsert(
+        db,
+        owner,
+        doc! {
+            "$addToSet": {"dismissed_recommendations": recommendation_id},
+            "$set": {"updated_at": now},
+            "$setOnInsert": {
+                "intro_version": INTRO_VERSION,
+                "outcome": "skipped",
+                "topics": [],
+                "work_style": bson::Bson::Null,
+                "created_at": now,
             },
-        )
-        .upsert(true)
-        .await?;
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -727,9 +749,7 @@ mod tests {
     #[tokio::test]
     async fn answers_drive_intro_gate_memory_note_and_dismissals() {
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
-        let db = crate::test_utils::connect_test_database("assistant_onboarding")
-            .await
-            .expect("database");
+        let db = crate::test_utils::connect_transaction_test_database("assistant_onboarding").await;
         let owner = "12345678-1234-4123-8123-123456789abc";
         db.collection(USERS)
             .insert_one(crate::test_utils::test_user(owner, UserType::Person))
@@ -770,6 +790,50 @@ mod tests {
                 .contains("email & inbox, research & news; works solo")
         );
 
+        // A revised intro shows once more.
+        let older = AssistantOnboarding {
+            intro_version: INTRO_VERSION - 1,
+            ..row.clone()
+        };
+        assert!(should_show_intro(&db, owner, Some(&older)).await.unwrap());
+
+        // A retake moves the note after newer notes, so it stays in the budget.
+        super::super::assistant_team_service::remember(
+            &db,
+            owner,
+            &nyxbot.id,
+            "Prefers short replies",
+            None,
+        )
+        .await
+        .unwrap();
+        save(
+            &db,
+            owner,
+            Answers {
+                outcome: OnboardingOutcome::Completed,
+                topics: vec![InterestTopic::Inbox],
+                work_style: None,
+            },
+        )
+        .await
+        .unwrap();
+        let nyxbot = super::super::assistant_team_service::ensure_nyxbot(&db, owner)
+            .await
+            .unwrap();
+        assert_eq!(
+            nyxbot.memory.last().map(|note| note.id.as_str()),
+            Some(MEMORY_NOTE_ID)
+        );
+        assert_eq!(
+            nyxbot
+                .memory
+                .iter()
+                .filter(|note| note.id == MEMORY_NOTE_ID)
+                .count(),
+            1
+        );
+
         // Retaking replaces the note; no answers remove it.
         save(
             &db,
@@ -806,9 +870,9 @@ mod tests {
 
     #[tokio::test]
     async fn existing_nyxbot_users_skip_the_intro_and_dismissing_first_records_a_skip() {
-        let db = crate::test_utils::connect_test_database("assistant_onboarding_existing")
-            .await
-            .expect("database");
+        let db =
+            crate::test_utils::connect_transaction_test_database("assistant_onboarding_existing")
+                .await;
         let owner = "22345678-1234-4123-8123-123456789abc";
         db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
             .insert_one(doc! {"_id": "nyxa-existing", "user_id": owner})

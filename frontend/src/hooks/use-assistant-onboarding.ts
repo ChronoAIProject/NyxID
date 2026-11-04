@@ -48,11 +48,16 @@ export function useDismissNextStep() {
   });
 }
 
-/** Opens the intro again from the account menu. */
+/**
+ * A request to open the intro again, from the account menu on any assistant
+ * page. The chat page consumes it once it is showing.
+ */
 export const useIntroReplay = create<{
-  readonly requested: number;
+  readonly pending: boolean;
   readonly replay: () => void;
+  readonly consume: () => void;
 }>((set) => ({
-  requested: 0,
-  replay: () => set((state) => ({ requested: state.requested + 1 })),
+  pending: false,
+  replay: () => set({ pending: true }),
+  consume: () => set({ pending: false }),
 }));

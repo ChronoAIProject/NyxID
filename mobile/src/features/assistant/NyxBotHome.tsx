@@ -195,6 +195,7 @@ export function NyxBotHome({
           visible
           state={onboarding.data}
           entryPoint={intro}
+          online={online}
           onClose={() => setIntro(undefined)}
           onStart={onStartNextStep}
         />

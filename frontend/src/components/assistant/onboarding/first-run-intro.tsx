@@ -88,7 +88,9 @@ export function FirstRunIntro({
       name: "ui.dialog_abandoned",
       props: { dialog_id: "nyxbot_intro", final_step: index, duration_ms: Date.now() - openedAt.current },
     });
-    void persist(index === LAST ? "completed" : "skipped");
+    // Closing a replay early keeps an earlier completion.
+    const finished = index === LAST || state.profile?.outcome === "completed";
+    void persist(finished ? "completed" : "skipped");
     onOpenChange(false);
   }
 

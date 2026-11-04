@@ -875,36 +875,45 @@ function NyxAgentThreadPage() {
   // home, so a step started elsewhere returns home first.
   const onboarding = useAssistantOnboarding(onChatRoute && !search.mock);
   const dismissNextStep = useDismissNextStep();
-  const replayRequested = useIntroReplay((state) => state.requested);
+  const replayPending = useIntroReplay((state) => state.pending);
+  const consumeReplay = useIntroReplay((state) => state.consume);
   const [intro, setIntro] = useState<"first_run" | "account_menu">();
   const [touring, setTouring] = useState(false);
   const introShown = useRef(false);
-  const pendingStep = useRef<NextStep | undefined>(undefined);
+  const pendingStep = useRef<{ readonly step: NextStep; readonly at: number } | undefined>(undefined);
   useEffect(() => {
     if (onboarding.data?.show_intro && home && !introShown.current) {
       introShown.current = true;
       setIntro("first_run");
     }
   }, [onboarding.data?.show_intro, home]);
-  const seenReplay = useRef(replayRequested);
   useEffect(() => {
-    if (replayRequested === seenReplay.current) return;
-    seenReplay.current = replayRequested;
+    if (!replayPending || !home || !onboarding.data) return;
+    consumeReplay();
     setIntro("account_menu");
-  }, [replayRequested]);
+  }, [replayPending, home, onboarding.data, consumeReplay]);
   function startNextStep(step: NextStep) {
-    if (home && !chat.isStreaming) {
+    if (chat.isStreaming) {
+      toast.info("NyxBot is still replying", {
+        description: "Start this step once the current reply finishes.",
+      });
+      return;
+    }
+    if (home) {
       void sendMessage(step.prompt).catch(() => undefined);
       return;
     }
-    pendingStep.current = step;
+    pendingStep.current = { step, at: Date.now() };
     navigateTo({});
   }
+  // Only a step started moments ago follows the navigation home; a later
+  // visit home never sends it.
   useEffect(() => {
-    const step = pendingStep.current;
-    if (!step || !home || chat.isStreaming) return;
+    const pending = pendingStep.current;
+    if (!pending || !home || chat.isStreaming) return;
     pendingStep.current = undefined;
-    void sendMessage(step.prompt).catch(() => undefined);
+    if (Date.now() - pending.at > 10_000) return;
+    void sendMessage(pending.step.prompt).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [home, chat.isStreaming]);
 

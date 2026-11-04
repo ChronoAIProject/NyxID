@@ -95,6 +95,8 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
             onSelect={() => {
               dismissDrawer();
               replayIntro();
+              // The intro opens over the NyxBot home.
+              void navigate({ to: "/assistant" });
             }}
           >
             <Sparkles aria-hidden="true" />Replay intro
