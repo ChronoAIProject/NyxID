@@ -2850,6 +2850,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             put(handlers::collaboration_group::guest_access),
         )
         .route(
+            "/nyxagent/groups/{id}/read",
+            post(handlers::collaboration_group::mark_read),
+        )
+        .route(
             "/nyxagent/groups/{id}/membership",
             post(handlers::collaboration_group::membership),
         )

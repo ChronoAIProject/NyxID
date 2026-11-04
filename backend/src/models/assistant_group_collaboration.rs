@@ -168,3 +168,33 @@ pub struct GuestAccessRequest {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }
+
+pub const READ_STATES: &str = "assistant_group_read_states";
+pub const MENTION_NOTIFICATIONS: &str = "assistant_group_mention_notifications";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReadState {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub group_id: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub last_seen_seq: i64,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_push_at: Option<DateTime<Utc>>,
+}
+
+/// Durable, text-free delivery intent. Claimed once before an external effect.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MentionNotification {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub group_id: String,
+    pub user_id: String,
+    pub message_id: String,
+    pub seq: i64,
+    #[serde(default)]
+    pub claimed: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+}

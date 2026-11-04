@@ -12182,6 +12182,7 @@ mod proxy_resolution_integration_tests {
             approval_timeout_secs: timeout_secs,
             grant_expiry_days: 30,
             approval_required: Some(false),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: now,
