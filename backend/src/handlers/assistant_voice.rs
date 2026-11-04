@@ -191,7 +191,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         }).await;
         if result
             .as_ref()
-            .is_err_and(|error| crate::errors::access_denial::permanent_authority_failure(error))
+            .is_err_and(crate::errors::access_denial::permanent_authority_failure)
             || request.expires_at <= chrono::Utc::now()
         {
             voice::cancel(
