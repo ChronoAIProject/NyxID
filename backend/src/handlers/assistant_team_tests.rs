@@ -4257,7 +4257,8 @@ async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hoste
         assert_eq!(value["service_slug"], catalog.slug);
         assert!(value.get("url").is_none());
     }
-    let (plugins, error) = execute_tool(
+    // Without a named service there is still no page link: connect guidance only.
+    let (unnamed, error) = execute_tool(
         &state,
         &chat,
         "nyxid__settings_link",
@@ -4265,12 +4266,8 @@ async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hoste
     )
     .await;
     assert!(!error);
-    assert!(
-        plugins["url"]
-            .as_str()
-            .unwrap()
-            .ends_with("/assistant/plugins")
-    );
+    assert_eq!(unnamed["action"], "connect_service");
+    assert!(unnamed.get("url").is_none(), "{unnamed}");
     state
         .db
         .collection::<bson::Document>(SERVICES)

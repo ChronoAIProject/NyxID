@@ -72,6 +72,8 @@ pub struct CatalogConnectInfo {
     pub service_name: String,
     pub auth_method: String,
     pub auth_key_name: String,
+    pub token_exchange_credential_fields:
+        Option<Vec<crate::models::downstream_service::CredentialFieldSpec>>,
     pub provider_id: Option<String>,
     pub provider_type: Option<String>,
     pub credential_mode: Option<String>,
@@ -1372,6 +1374,9 @@ async fn catalog_info(
         service_name: service.name,
         auth_method: service.auth_method,
         auth_key_name: service.auth_key_name,
+        token_exchange_credential_fields: service
+            .token_exchange_config
+            .map(|config| config.credential_fields),
         provider_id: provider.as_ref().map(|provider| provider.id.clone()),
         provider_type: provider
             .as_ref()
@@ -1552,6 +1557,96 @@ mod tests {
             .await
             .expect("insert catalog service");
         service
+    }
+
+    #[tokio::test]
+    async fn hosted_token_exchange_preview_fields_and_completion_preserve_the_entered_app_credentials()
+     {
+        let db =
+            crate::test_utils::connect_transaction_test_database("hosted_structured_credential")
+                .await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (owner, created) = create_test_link(&db, "structured").await;
+        db.collection("users")
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let config = crate::services::channel_adapters::lark::lark_family_token_exchange_config();
+        db.collection::<bson::Document>(DOWNSTREAM_SERVICES).update_one(
+            doc! {"_id":&created.link.service_id},
+            doc! {"$set":{"auth_method":"token_exchange", "auth_key_name":"", "token_exchange_config":bson::to_bson(&config).unwrap()}},
+        ).await.unwrap();
+        let view = preview(&db, &created.raw_token).await.unwrap();
+        let fields = view.service.token_exchange_credential_fields.unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["app_id", "app_secret"]
+        );
+        assert!(!fields[0].secret);
+        assert!(fields[1].secret);
+        let credential = r#"{"app_id":"cli_app","app_secret":"independent-bot-secret"}"#;
+        let completed = complete(
+            &db,
+            &keys,
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some(credential),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let CompleteResult::Completed(view) = completed else {
+            panic!("structured API-key setup completes without an OAuth exchange");
+        };
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {"_id":view.link.completed_user_service_id.unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        let key = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! {"_id":service.api_key_id.unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            super::super::credential_record_service::CredentialRecord::key(&key)
+                .text(
+                    &keys,
+                    "credential_encrypted",
+                    key.credential_encrypted.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .as_str(),
+            credential
+        );
+        assert!(matches!(
+            complete(
+                &db,
+                &keys,
+                &owner,
+                &created.raw_token,
+                CompleteInput {
+                    credential: Some(credential),
+                    ..Default::default()
+                },
+                false
+            )
+            .await,
+            Err(AppError::ConnectLinkAlreadyCompleted)
+        ));
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
