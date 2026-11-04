@@ -22,6 +22,19 @@ pub struct ReserveSandboxWindow {
 }
 
 impl BillingService {
+    pub async fn sandbox_evidence_cursor(
+        &self,
+        producer: &ProducerAuthority,
+        sandbox: &str,
+    ) -> AppResult<Option<SandboxBillingCursor>> {
+        sandbox_id(sandbox)?;
+        Ok(self
+            .db
+            .collection::<SandboxBillingCursor>(CURSOR_COLLECTION)
+            .find_one(doc! {"producer_id": &producer.id, "sandbox_id": sandbox})
+            .await?)
+    }
+
     /// Read-before-admission is intentional: an ambiguous committed request
     /// remains recoverable after the provider fails or new admission is disabled.
     pub async fn sandbox_window_receipt(
@@ -90,10 +103,7 @@ impl BillingService {
             .find_one(doc! {"_id":service_id,"is_active":true})
             .await?
             .ok_or_else(|| unavailable("CMA service is unavailable"))?;
-        if service.slug != quote.service_slug
-            || prices::selected_prices(&service.id, &service.slug, service.billing.as_ref())?
-                != quote.prices
-        {
+        if service.slug != quote.service_slug {
             return Err(conflict(
                 "CMA service prices changed; a new quote is required",
             ));
@@ -183,7 +193,8 @@ impl BillingService {
                 }).session(&mut session).await? != 0 {
                 return Err(conflict("Prior Sandbox generation requires complete usage evidence"));
             }
-            let until = window_until(from, input.seconds)?;
+            let until = super::super::sandbox_rates::coverage_limit(&self.db, &mut session,
+                &quote.rate_card_id, from, window_until(from, input.seconds)?).await?;
             let quantities = sandbox_runtime_math::finite_quantities(units(&input.allocation), until - from).map_err(invalid)?;
             let mut window = SandboxBillingWindow {
                 id:Uuid::new_v4().to_string(), producer_id:producer.id.clone(), request_id:input.request_id.clone(),
@@ -210,7 +221,10 @@ impl BillingService {
             self.db.collection::<SandboxBillingQuote>(QUOTE_COLLECTION).replace_one(doc! {"_id":&accepted.id}, &accepted).session(&mut session).await?;
             let next = SandboxBillingCursor { id:cursor.as_ref().map(|c| c.id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string()),
                 producer_id:producer.id.clone(), sandbox_id:quote.sandbox_id.clone(), owner_id:quote.owner_id.clone(), quote_id:quote.id.clone(),
-                runtime_generation:input.runtime_generation, covered_until:until, last_window_id:window.id.clone(), updated_at:now };
+                runtime_generation:input.runtime_generation, covered_until:until, last_window_id:window.id.clone(),
+                last_evidence_revision:cursor.as_ref().and_then(|c| c.last_evidence_revision),
+                evidence_covered_until:cursor.as_ref().and_then(|c| c.evidence_covered_until),
+                last_evidence_window_id:cursor.as_ref().and_then(|c| c.last_evidence_window_id.clone()), updated_at:now };
             if let Some(previous) = cursor {
                 let changed = self.db.collection::<SandboxBillingCursor>(CURSOR_COLLECTION)
                     .replace_one(doc! {"_id":&previous.id,"last_window_id":&previous.last_window_id}, &next).session(&mut session).await?;
@@ -345,6 +359,9 @@ mod tests {
             runtime_generation: 1,
             covered_until: 120,
             last_window_id: "prior".into(),
+            last_evidence_revision: None,
+            evidence_covered_until: None,
+            last_evidence_window_id: None,
             updated_at: Utc::now(),
         }
     }

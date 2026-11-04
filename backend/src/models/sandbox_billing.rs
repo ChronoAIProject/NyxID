@@ -1,4 +1,4 @@
-//! CMA lifecycle receipts. Prices remain authored on the existing catalog service.
+//! CMA lifecycle receipts bound to immutable configured rate cards.
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,7 @@ pub struct SandboxUsageQuantity {
     pub disk_gib_seconds: i64,
 }
 
-/// Accepted evidence of an ordinary service price; never another price authority.
+/// Exact accepted price and immutable provider code, frozen with the quote.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxPriceSnapshot {
     pub metric: BillingMetric,
@@ -49,6 +49,8 @@ pub struct SandboxBillingQuote {
     pub plan_code: String,
     pub maximum_allocation: SandboxAllocation,
     pub prices: Vec<SandboxPriceSnapshot>,
+    pub rate_card_id: String,
+    pub rate_card_version: i64,
     pub accepted_operation_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -103,6 +105,15 @@ pub struct SandboxBillingCursor {
     pub runtime_generation: i64,
     pub covered_until: i64,
     pub last_window_id: String,
+    /// Last retained CMA ledger revision durably ingested in funded-window order
+    /// for this producer/Sandbox. This is a billing cursor, independent of the CMA UI
+    /// listing and Agent conversation sequence counters.
+    #[serde(default)]
+    pub last_evidence_revision: Option<i64>,
+    #[serde(default)]
+    pub evidence_covered_until: Option<i64>,
+    #[serde(default)]
+    pub last_evidence_window_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }

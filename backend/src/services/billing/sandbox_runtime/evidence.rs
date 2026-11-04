@@ -69,6 +69,19 @@ impl BillingService {
             }).collect::<Vec<_>>();
             let quantities = sandbox_runtime_math::evidenced_quantities(window.covered_from, window.covered_until,
                 units(&window.allocation), &intervals).map_err(invalid)?;
+            let cursor = self.db.collection::<SandboxBillingCursor>(CURSOR_COLLECTION)
+                .find_one(doc! {"producer_id": &producer.id, "sandbox_id": &window.sandbox_id, "owner_id": &window.owner_id})
+                .session(&mut session).await?
+                .ok_or_else(|| conflict("Sandbox evidence cursor is missing"))?;
+            let earliest = self.db.collection::<SandboxBillingWindow>(WINDOW_COLLECTION)
+                .find_one(doc! {"producer_id": &producer.id, "sandbox_id": &window.sandbox_id, "evidence_digest": bson::Bson::Null})
+                .sort(doc! {"covered_from": 1})
+                .session(&mut session).await?
+                .ok_or_else(|| conflict("Sandbox evidence window is missing"))?;
+            if earliest.id != window.id {
+                return Err(conflict("Submit evidence for earlier funded Sandbox windows first"));
+            }
+            validate_evidence_cursor(&cursor, &window, &input.intervals)?;
             let usage_at = chrono::DateTime::from_timestamp(window.covered_until - 1, 0)
                 .ok_or_else(|| invalid("Invalid Sandbox usage timestamp"))?;
             let quote = self.db.collection::<SandboxBillingQuote>(QUOTE_COLLECTION)
@@ -105,6 +118,18 @@ impl BillingService {
                     .session(&mut session).await?;
                 if changed.matched_count != 1 { return Err(conflict("Sandbox usage finalization raced")); }
                 component.finalized_quantity = Some(quantity);
+            }
+            // The cursor and usage finalization commit together. Both admission
+            // and consumption write this row, fencing concurrent replicas.
+            let changed = self.db.collection::<Document>(CURSOR_COLLECTION)
+                .update_one(doc! {"_id": &cursor.id}, doc! {"$set": {
+                    "last_evidence_revision": input.intervals.last().map(|interval| interval.revision),
+                    "evidence_covered_until": window.covered_until,
+                    "last_evidence_window_id": &window.id,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }}).session(&mut session).await?;
+            if changed.matched_count != 1 {
+                return Err(conflict("Sandbox evidence cursor changed"));
             }
             window.evidence_digest = Some(evidence_digest.clone());
             window.first_usage_revision = input.intervals.first().map(|interval| interval.revision);
@@ -190,6 +215,36 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
             "Sandbox settled usage differs from its accepted quote",
         ));
     }
-    prices::verify_provider(lago, &quote).await?;
+    if let Err(error) = prices::verify_provider(lago, &quote).await {
+        super::super::sandbox_rates::request_resync(db, &quote.rate_card_id).await?;
+        return Err(error);
+    }
     Ok(Some(quote.lago_subscription_id))
+}
+
+fn validate_evidence_cursor(
+    cursor: &SandboxBillingCursor,
+    window: &SandboxBillingWindow,
+    intervals: &[SandboxIntervalEvidence],
+) -> AppResult<()> {
+    let Some(last_revision) = cursor.last_evidence_revision else {
+        return Ok(());
+    };
+    let first = intervals
+        .first()
+        .ok_or_else(|| invalid("Sandbox evidence is empty"))?;
+    if first.revision < last_revision {
+        return Err(conflict("Sandbox evidence precedes its durable cursor"));
+    }
+    if cursor.evidence_covered_until == Some(window.covered_from)
+        && first.revision != last_revision
+        && last_revision.checked_add(1) != Some(first.revision)
+    {
+        return Err(conflict(
+            "Sandbox evidence skips retained revisions between funded windows",
+        ));
+    }
+    // A single retained interval may span adjacent funded windows. Its digest
+    // is checked below before the cursor can reuse that boundary revision.
+    Ok(())
 }

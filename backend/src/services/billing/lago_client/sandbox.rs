@@ -30,6 +30,20 @@ impl LagoClient {
             .await?
             .ok_or_else(invalid)?;
         let snapshot = subscription_prices(&value, subscription_id, metric_codes)?;
+        let customer = self
+            .get_one_by_external_id(
+                "customers",
+                "customer",
+                &snapshot.subscription.external_customer_id,
+            )
+            .await?
+            .ok_or_else(invalid)?;
+        if customer.get("external_id").and_then(Value::as_str)
+            != Some(snapshot.subscription.external_customer_id.as_str())
+            || customer.get("timezone").and_then(Value::as_str) != Some("UTC")
+        {
+            return Err(invalid());
+        }
         for code in metric_codes {
             let path = format!("billable_metrics/{}", urlencoding::encode(code));
             let value = self
@@ -60,6 +74,7 @@ fn subscription_prices(
         || subscription.external_customer_id.trim().is_empty()
         || subscription.external_customer_id.trim() != subscription.external_customer_id
         || subscription.status != "active"
+        || value.get("billing_time").and_then(Value::as_str) != Some("calendar")
     {
         return Err(invalid());
     }
@@ -67,6 +82,7 @@ fn subscription_prices(
     if plan.get("code").and_then(Value::as_str) != Some(subscription.plan_code.as_str())
         || subscription.plan_code.is_empty()
         || plan.get("amount_currency").and_then(Value::as_str) != Some("USD")
+        || plan.get("interval").and_then(Value::as_str) != Some("monthly")
     {
         return Err(invalid());
     }
@@ -145,6 +161,15 @@ mod tests {
         let server = MockServer::start().await;
         let (subscription, codes) = fixture();
         Mock::given(method("GET"))
+            .and(path("/api/v1/customers/owner"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"customer": {
+                    "external_id": "owner", "timezone": "UTC"
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/api/v1/subscriptions/sub"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"subscription":subscription})),
@@ -170,6 +195,15 @@ mod tests {
         server.reset().await;
         let (subscription, codes) = fixture();
         Mock::given(method("GET"))
+            .and(path("/api/v1/customers/owner"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"customer": {
+                    "external_id": "owner", "timezone": "UTC"
+                }})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
             .and(path("/api/v1/subscriptions/sub"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(json!({"subscription":subscription})),
@@ -181,6 +215,41 @@ mod tests {
                 "code":"cpu","aggregation_type":"sum_agg","field_name":"quantity","recurring":true
             }}))).mount(&server).await;
         assert!(client.sandbox_subscription("sub", &codes).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_unproven_customer_invoice_timezone_before_metric_reads() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let client = LagoClient::new(server.uri(), "test-only".into()).unwrap();
+        let (subscription, codes) = fixture();
+        for customer in [
+            json!({"external_id":"owner"}),
+            json!({"external_id":"owner","timezone":"America/New_York"}),
+            json!({"external_id":"other","timezone":"UTC"}),
+            Value::Null,
+        ] {
+            server.reset().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/subscriptions/sub"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"subscription":subscription})),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/customers/owner"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"customer":customer})),
+                )
+                .mount(&server)
+                .await;
+            assert!(client.sandbox_subscription("sub", &codes).await.is_err());
+            assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        }
     }
 
     fn fixture() -> (Value, Vec<String>) {
@@ -197,7 +266,7 @@ mod tests {
             .collect();
         (
             json!({"external_id":"sub","external_customer_id":"owner","plan_code":"starter",
-            "status":"active","plan":{"code":"starter","amount_currency":"USD","charges":charges}}),
+            "status":"active","billing_time":"calendar","plan":{"code":"starter","interval":"monthly","amount_currency":"USD","charges":charges}}),
             codes,
         )
     }
@@ -217,6 +286,7 @@ mod tests {
         for (key, replacement) in [
             ("external_id", json!("other")),
             ("status", json!("terminated")),
+            ("billing_time", json!("anniversary")),
             ("plan", Value::Null),
         ] {
             let mut changed = value.clone();
@@ -226,6 +296,11 @@ mod tests {
         let mut changed = value.clone();
         changed["plan"]["code"] = json!("different");
         assert!(subscription_prices(&changed, "sub", &codes).is_err());
+        for interval in [json!("yearly"), json!("weekly"), Value::Null] {
+            let mut changed = value.clone();
+            changed["plan"]["interval"] = interval;
+            assert!(subscription_prices(&changed, "sub", &codes).is_err());
+        }
         let mut changed = value;
         changed["plan"]["charges"] = json!([]);
         assert!(subscription_prices(&changed, "sub", &codes).is_err());

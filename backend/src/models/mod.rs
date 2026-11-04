@@ -204,6 +204,7 @@ pub mod catalog_icon;
 
 pub mod machine_runtime_billing;
 pub mod sandbox_billing;
+pub mod sandbox_rate_card;
 
 pub mod machine_oauth_consent_request;
 

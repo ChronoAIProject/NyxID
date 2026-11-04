@@ -74,6 +74,19 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// Per-person rollout for CMA's prepaid Sandbox allocation billing. This is
+/// deliberately separate from the general billing flag so operators can
+/// enable CMA for a pilot owner independently of other metered traffic. The
+/// operational `CMA_BILLING_ENABLED` setting remains a fleet-wide admission
+/// gate; both gates must allow new Sandbox coverage.
+pub const CMA_SANDBOX_BILLING_FLAG_KEY: &str = "experimental:cma-sandbox-billing";
+
+const CMA_SANDBOX_BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMA_SANDBOX_BILLING_FLAG_KEY,
+    description: "Enable prepaid CMA Sandbox allocation billing for the selected global, organization, or personal rollout audience.",
+    default_enabled: false,
+};
+
 /// Personal rollout for new hosted Machine admission and runtime-rate writes.
 /// Existing management, runtime accounting and cleanup remain available.
 pub const REMOTE_MACHINES_FLAG_KEY: &str = "experimental:remote-machines";
@@ -398,6 +411,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
+    CMA_SANDBOX_BILLING_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -445,6 +459,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
+    CMA_SANDBOX_BILLING_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -2983,6 +2998,7 @@ mod tests {
                 "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
+                "experimental:cma-sandbox-billing",
                 "experimental:remote-machines",
                 "services:monitoring",
                 "experimental:aevatar-chat-wire-log",

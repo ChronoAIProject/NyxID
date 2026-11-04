@@ -3,23 +3,22 @@ use super::super::lago_client::*;
 use super::*;
 use crate::{
     config::AppConfig,
-    models::{
-        downstream_service::DownstreamService,
-        service_billing::{LanePriceComponent, LanePricing, ServiceBilling},
-        user::UserType,
-    },
+    models::{downstream_service::DownstreamService, user::UserType},
 };
 use async_trait::async_trait;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 struct Provider {
     owner: String,
     plan: String,
-    rates: Vec<PlanRate>,
+    rates: Mutex<Vec<PlanRate>>,
     available: AtomicBool,
+    lost_ack: AtomicBool,
+    attempts: AtomicUsize,
+    events: Mutex<std::collections::BTreeMap<String, LagoEvent>>,
 }
 #[async_trait]
 impl LagoApi for Provider {
@@ -29,7 +28,33 @@ impl LagoApi for Provider {
     async fn ensure_subscription(&self, _: &str, _: &str) -> AppResult<String> {
         panic!("must not provision")
     }
+    async fn sync_standard_charge(&self, _: &str, input: &ServicePriceSync) -> AppResult<()> {
+        if !self.available.load(Ordering::SeqCst) {
+            return Err(unavailable("Test provider unavailable"));
+        }
+        let pico =
+            i64::try_from(input.credits_per_unit.parse::<Credits>().unwrap().pico()).unwrap();
+        let mut rates = self.rates.lock().unwrap();
+        rates.retain(|r| r.lago_metric_code != input.metric_code);
+        rates.push(PlanRate {
+            lago_metric_code: input.metric_code.clone(),
+            credits_per_unit_pico: Some(pico),
+            credits_per_unit_micros: pico / 1_000_000,
+        });
+        Ok(())
+    }
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        let mut events = self.events.lock().unwrap();
+        if events.contains_key(&event.transaction_id) {
+            return Err(LagoError::duplicate(
+                "Retained transaction already accepted",
+            ));
+        }
+        events.insert(event.transaction_id.clone(), event.clone());
+        if self.lost_ack.swap(false, Ordering::SeqCst) {
+            return Err(LagoError::retry("Accepted event response was lost"));
+        }
         Ok(LagoAck {
             transaction_id: event.transaction_id.clone(),
         })
@@ -38,10 +63,10 @@ impl LagoApi for Provider {
         panic!("unused")
     }
     async fn current_usage(&self, _: &str, _: &str) -> AppResult<LagoUsage> {
-        panic!("unused")
+        Err(unavailable("Usage read unavailable in this fixture"))
     }
     async fn wallet_balance(&self, _: &str) -> AppResult<i64> {
-        panic!("must use existing wallet")
+        Err(unavailable("Balance refresh unavailable in this fixture"))
     }
     async fn entitlements(&self, _: &str) -> AppResult<Vec<Entitlement>> {
         Ok(vec![Entitlement {
@@ -67,7 +92,7 @@ impl LagoApi for Provider {
                 plan_code: self.plan.clone(),
                 status: "active".into(),
             },
-            rates: self.rates.clone(),
+            rates: self.rates.lock().unwrap().clone(),
         })
     }
 }
@@ -109,6 +134,15 @@ async fn fixture(name: &str) -> Fixture {
     )
     .await
     .unwrap();
+    crate::services::feature_flag_service::set_platform_override(
+        &db,
+        crate::services::feature_flag_service::CMA_SANDBOX_BILLING_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(owner.clone()),
+        true,
+        &owner,
+    )
+    .await
+    .unwrap();
     let now = bson::DateTime::now();
     db.collection::<Document>(WALLETS).insert_one(doc! {
         "_id":Uuid::new_v4().to_string(),"owner_id":&owner,"lago_customer_id":&owner,
@@ -131,55 +165,23 @@ async fn fixture(name: &str) -> Fixture {
     }).await.unwrap();
     let mut service = crate::test_utils::test_auto_connected_catalog_service();
     service.slug = "cma-test".into();
-    service.billing = Some(ServiceBilling {
-        platform_key_pricing: Some(LanePricing {
-            metric: METRICS[0],
-            credits_per_unit: "0.00000001".into(),
-            lago_metric_code: String::new(),
-            sync_status: PricingSyncStatus::Pending,
-            sync_error: None,
-            operations: vec![],
-            components: METRICS[1..]
-                .iter()
-                .map(|metric| LanePriceComponent {
-                    metric: *metric,
-                    credits_per_unit: "0.00000001".into(),
-                    lago_metric_code: String::new(),
-                    sync_status: PricingSyncStatus::Pending,
-                    sync_error: None,
-                })
-                .collect(),
-        }),
-        ..Default::default()
-    });
-    super::super::pricing::normalize_lane_pricing(
-        &service.slug,
-        None,
-        service.billing.as_mut().unwrap(),
-    )
-    .unwrap();
-    let lane = service
-        .billing
-        .as_mut()
-        .unwrap()
-        .platform_key_pricing
-        .as_mut()
-        .unwrap();
-    lane.sync_status = PricingSyncStatus::Synced;
-    for component in &mut lane.components {
-        component.sync_status = PricingSyncStatus::Synced;
-    }
-    let prices =
-        prices::selected_prices(&service.id, &service.slug, service.billing.as_ref()).unwrap();
+    let prices = METRICS
+        .into_iter()
+        .map(|metric| SandboxPriceSnapshot {
+            metric,
+            lago_metric_code: format!("cma_{}_v1", metric.as_str()),
+            credits_per_unit: "0.00000001".parse().unwrap(),
+        })
+        .collect::<Vec<_>>();
     let mut rates = vec![];
-    for price in prices {
+    for price in &prices {
         let pico = i64::try_from(price.credits_per_unit.pico()).unwrap();
         db.collection::<Document>("billing_rate_cache").insert_one(doc! {
             "_id":format!("{}:*",price.lago_metric_code),"lago_metric_code":&price.lago_metric_code,
             "credits_per_unit_pico":pico,"credits_per_unit_micros":pico/1_000_000,"synced_at":now,
         }).await.unwrap();
         rates.push(PlanRate {
-            lago_metric_code: price.lago_metric_code,
+            lago_metric_code: price.lago_metric_code.clone(),
             credits_per_unit_pico: Some(pico),
             credits_per_unit_micros: pico / 1_000_000,
         });
@@ -198,9 +200,30 @@ async fn fixture(name: &str) -> Fixture {
     let provider = Arc::new(Provider {
         owner: owner.clone(),
         plan: config.lago_plan_code.clone(),
-        rates,
+        rates: Mutex::new(rates),
         available: AtomicBool::new(true),
+        lost_ack: AtomicBool::new(false),
+        attempts: AtomicUsize::new(0),
+        events: Mutex::new(Default::default()),
     });
+    super::super::sandbox_rates::ensure_indexes(&db)
+        .await
+        .unwrap();
+    db.collection::<crate::models::sandbox_rate_card::SandboxRateCard>(
+        crate::models::sandbox_rate_card::COLLECTION_NAME,
+    )
+    .insert_one(crate::models::sandbox_rate_card::SandboxRateCard {
+        id: Uuid::new_v4().to_string(),
+        version: 1,
+        effective_from: Utc::now() - Duration::days(1),
+        plan_code: config.lago_plan_code.clone(),
+        prices,
+        sync_status: PricingSyncStatus::Synced,
+        created_by: None,
+        created_at: Utc::now(),
+    })
+    .await
+    .unwrap();
     let billing = BillingService::new_with_lago(db.clone(), config, provider.clone());
     let producer = authorize_producer(&db, Some(&producer_id), &producer_id, WRITE_SCOPE, &jti)
         .await
@@ -564,7 +587,7 @@ async fn incomplete_future_or_wrong_identity_evidence_cannot_release_holds() {
 }
 
 #[tokio::test]
-async fn catalog_price_drift_and_expired_quote_do_not_admit_usage() {
+async fn catalog_identity_drift_and_expired_quote_do_not_admit_usage() {
     let f = fixture("sandbox_price_drift").await;
     let input = request(&f, 60).await;
     f.db.collection::<Document>(QUOTE_COLLECTION).update_one(doc! {"_id":&input.quote_id},doc! {"$set":{"accept_before":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
@@ -578,7 +601,7 @@ async fn catalog_price_drift_and_expired_quote_do_not_admit_usage() {
     f.db.collection::<Document>("downstream_services")
         .update_one(
             doc! {"_id":&f.service.id},
-            doc! {"$set":{"billing.platform_key_pricing.credits_per_unit":"0.00000002"}},
+            doc! {"$set":{"slug":"changed-catalog-identity"}},
         )
         .await
         .unwrap();
@@ -588,3 +611,8 @@ async fn catalog_price_drift_and_expired_quote_do_not_admit_usage() {
     ));
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
 }
+
+mod ingestion;
+mod routes;
+
+mod rates;

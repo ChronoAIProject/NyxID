@@ -140,6 +140,7 @@ impl BillingReconciler {
         .await?;
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
+        stats.service_price_syncs += runtime_billing.retry_sandbox_rate_cards().await?;
         stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
         // Price synchronization invalidates affected profiles. Refresh those
         // within this pass; admissions also refresh individually on demand.

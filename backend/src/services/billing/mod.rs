@@ -19,6 +19,7 @@ pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
+pub mod sandbox_rates;
 pub mod sandbox_runtime;
 mod sandbox_runtime_math;
 pub mod schedules;

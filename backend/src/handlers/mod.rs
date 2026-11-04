@@ -14,6 +14,7 @@ pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
+pub mod admin_sandbox_rates;
 pub mod admin_service_accounts;
 pub mod admin_upload_retention;
 pub mod admin_usage;

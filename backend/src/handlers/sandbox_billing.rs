@@ -1,4 +1,4 @@
-//! Trusted producer API for existing service prices and finite prepaid windows.
+//! Trusted producer API for configured CMA rates and finite prepaid windows.
 use crate::{
     AppState,
     errors::{AppError, AppResult},
@@ -22,6 +22,7 @@ pub fn router() -> Router<AppState> {
         .route("/quotes", post(quote))
         .route("/windows", post(reserve))
         .route("/receipts/{request_id}", get(receipt))
+        .route("/cursors/{sandbox_id}", get(cursor))
         .route("/windows/{window_id}/evidence", post(evidence))
         .layer(DefaultBodyLimit::max(512 * 1024))
 }
@@ -90,6 +91,8 @@ pub struct QuoteResponse {
     maximum_allocation: Allocation,
     prices: Vec<PriceResponse>,
     accept_before: String,
+    rate_card_id: String,
+    rate_card_version: i64,
 }
 impl From<SandboxBillingQuote> for QuoteResponse {
     fn from(quote: SandboxBillingQuote) -> Self {
@@ -100,6 +103,8 @@ impl From<SandboxBillingQuote> for QuoteResponse {
             service_id: quote.service_id,
             maximum_allocation: quote.maximum_allocation.into(),
             accept_before: quote.accept_before.to_rfc3339(),
+            rate_card_id: quote.rate_card_id,
+            rate_card_version: quote.rate_card_version,
             prices: quote
                 .prices
                 .into_iter()
@@ -164,6 +169,7 @@ pub struct WindowResponse {
     allocation: Allocation,
     components: Vec<ComponentResponse>,
     evidence_accepted: bool,
+    last_evidence_revision: Option<i64>,
 }
 impl From<SandboxBillingWindow> for WindowResponse {
     fn from(window: SandboxBillingWindow) -> Self {
@@ -178,6 +184,7 @@ impl From<SandboxBillingWindow> for WindowResponse {
             covered_until: window.covered_until,
             allocation: window.allocation.into(),
             evidence_accepted: window.evidence_digest.is_some(),
+            last_evidence_revision: window.last_usage_revision,
             components: window
                 .components
                 .into_iter()
@@ -230,6 +237,41 @@ async fn receipt(
         .await?
         .ok_or_else(|| AppError::NotFound("Sandbox funding receipt not found".into()))?;
     Ok(Json(window.into()))
+}
+
+#[derive(Serialize)]
+pub struct CursorResponse {
+    owner_id: String,
+    sandbox_id: String,
+    runtime_generation: i64,
+    last_window_id: String,
+    covered_until: i64,
+    last_evidence_revision: Option<i64>,
+    evidence_covered_until: Option<i64>,
+    last_evidence_window_id: Option<String>,
+}
+
+async fn cursor(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(sandbox_id): Path<String>,
+) -> AppResult<Json<CursorResponse>> {
+    let producer = authorize(&state, &auth).await?;
+    let cursor = state
+        .billing
+        .sandbox_evidence_cursor(&producer, &sandbox_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Sandbox billing cursor not found".into()))?;
+    Ok(Json(CursorResponse {
+        owner_id: cursor.owner_id,
+        sandbox_id: cursor.sandbox_id,
+        runtime_generation: cursor.runtime_generation,
+        last_window_id: cursor.last_window_id,
+        covered_until: cursor.covered_until,
+        last_evidence_revision: cursor.last_evidence_revision,
+        evidence_covered_until: cursor.evidence_covered_until,
+        last_evidence_window_id: cursor.last_evidence_window_id,
+    }))
 }
 
 #[derive(Deserialize)]

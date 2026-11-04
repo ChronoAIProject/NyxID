@@ -1378,6 +1378,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
         .route(
+            "/billing/cma-rate-cards",
+            get(handlers::admin_sandbox_rates::list).post(handlers::admin_sandbox_rates::publish),
+        )
+        .route(
             "/remote-machines/platform",
             get(handlers::admin_remote_machine_platform::get),
         )

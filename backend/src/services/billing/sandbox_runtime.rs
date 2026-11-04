@@ -1,4 +1,4 @@
-//! Finite CMA receipts use ordinary service prices and the shared funding ledger.
+//! Finite CMA receipts use immutable configured rates and the shared funding ledger.
 use chrono::{Duration, Utc};
 use mongodb::{
     ClientSession, Database,
@@ -260,6 +260,13 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
         .create_index(
             IndexModel::builder()
                 .keys(doc! {"producer_id":1,"sandbox_id":1,"finalized_at":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(WINDOW_COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"producer_id":1,"sandbox_id":1,"evidence_digest":1,"covered_from":1})
                 .build(),
         )
         .await?;

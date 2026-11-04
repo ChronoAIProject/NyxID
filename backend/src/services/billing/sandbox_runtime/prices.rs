@@ -1,7 +1,6 @@
 use super::super::{BillingIngress, BillingRouteContext, NodeIntent};
 use super::*;
 use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
-use crate::models::service_billing::ServiceBilling;
 use crate::models::usage_meter::CredentialClass;
 
 impl BillingService {
@@ -45,7 +44,15 @@ impl BillingService {
             .find_one(doc! {"_id":service_id,"is_active":true})
             .await?
             .ok_or_else(|| unavailable("CMA catalog service is unavailable"))?;
-        let prices = selected_prices(&service.id, &service.slug, service.billing.as_ref())?;
+        let card = super::super::sandbox_rates::effective(&self.db, Utc::now()).await?;
+        if card.sync_status != PricingSyncStatus::Synced
+            || card.plan_code != self.config.lago_plan_code
+        {
+            return Err(unavailable(
+                "CMA rate card is not synchronized with the configured plan",
+            ));
+        }
+        let prices = card.prices;
         for price in &prices {
             let cache =
                 super::super::reservation::find_rate(&self.db, &price.lago_metric_code, None)
@@ -84,6 +91,8 @@ impl BillingService {
             plan_code: self.config.lago_plan_code.clone(),
             maximum_allocation: allocation,
             prices,
+            rate_card_id: card.id,
+            rate_card_version: card.version,
             accepted_operation_id: None,
             created_at: now,
             accept_before: now + Duration::minutes(15),
@@ -125,7 +134,10 @@ impl BillingService {
             .lago
             .as_deref()
             .ok_or_else(|| unavailable("Billing provider is unavailable"))?;
-        verify_provider(lago, quote).await?;
+        if let Err(error) = verify_provider(lago, quote).await {
+            super::super::sandbox_rates::request_resync(&self.db, &quote.rate_card_id).await?;
+            return Err(error);
+        }
         let entitlements = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             lago.entitlements(&quote.lago_subscription_id),
@@ -156,6 +168,12 @@ impl BillingService {
                 &self.db, &owner,
             )
             .await?
+            || !crate::services::feature_flag_service::personal_flag_enabled(
+                &self.db,
+                owner_id,
+                crate::services::feature_flag_service::CMA_SANDBOX_BILLING_FLAG_KEY,
+            )
+            .await?
         {
             return Err(unavailable("Sandbox owner is outside the billing rollout"));
         }
@@ -181,91 +199,6 @@ impl BillingService {
         }
         Ok(wallet)
     }
-}
-
-pub(super) fn selected_prices(
-    service_id: &str,
-    slug: &str,
-    billing: Option<&ServiceBilling>,
-) -> AppResult<Vec<SandboxPriceSnapshot>> {
-    let billing = billing.ok_or_else(|| unavailable("CMA service pricing is missing"))?;
-    let lane = billing
-        .platform_key_pricing
-        .as_ref()
-        .ok_or_else(|| unavailable("CMA platform pricing is missing"))?;
-    if lane.sync_status != PricingSyncStatus::Synced
-        || lane.components.len() != 2
-        || !lane.operations.is_empty()
-        || lane
-            .components
-            .iter()
-            .any(|c| c.sync_status != PricingSyncStatus::Synced)
-    {
-        return Err(unavailable(
-            "CMA requires three synchronized allocation prices",
-        ));
-    }
-    let context = BillingRouteContext::new(
-        BillingIngress::Proxy,
-        String::new(),
-        String::new(),
-        String::new(),
-        None,
-        None,
-        Some(service_id.into()),
-        Some(slug.into()),
-        NodeIntent::Direct,
-        "service_account".into(),
-        CredentialClass::NyxidManagedMaster,
-        BillingMetric::Requests,
-        Some(billing),
-        false,
-    );
-    let selected = context.platform_specs().collect::<Vec<_>>();
-    let authored = std::iter::once((lane.metric, &lane.lago_metric_code, &lane.credits_per_unit))
-        .chain(
-            lane.components
-                .iter()
-                .map(|c| (c.metric, &c.lago_metric_code, &c.credits_per_unit)),
-        )
-        .collect::<Vec<_>>();
-    let mut out = Vec::with_capacity(3);
-    for metric in METRICS {
-        let matching = authored
-            .iter()
-            .filter(|(m, _, _)| *m == metric)
-            .collect::<Vec<_>>();
-        if matching.len() != 1 {
-            return Err(unavailable("CMA service allocation units are incomplete"));
-        }
-        let (_, code, price) = matching[0];
-        if code.is_empty()
-            || selected
-                .iter()
-                .filter(|(m, c)| *m == metric && *c == code.as_str())
-                .count()
-                != 1
-        {
-            return Err(unavailable(
-                "CMA price selection differs from ordinary billing",
-            ));
-        }
-        let normalized = super::super::pricing::normalize_price(price)?;
-        let credits = normalized
-            .parse::<Credits>()
-            .map_err(|_| unavailable("CMA price is invalid"))?;
-        if credits <= Credits::ZERO {
-            return Err(unavailable(
-                "Prepaid Sandbox prices must be positive; zero-price trials remain outside paid admission",
-            ));
-        }
-        out.push(SandboxPriceSnapshot {
-            metric,
-            lago_metric_code: (*code).clone(),
-            credits_per_unit: credits,
-        });
-    }
-    Ok(out)
 }
 
 pub(super) async fn verify_provider(
