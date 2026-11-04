@@ -3521,6 +3521,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/openai-apps-challenge",
             get(handlers::oidc_discovery::openai_apps_challenge),
+        )
+        .route(
+            "/apple-app-site-association",
+            get(handlers::oidc_discovery::apple_app_site_association),
         );
 
     let public_oauth = Router::new()
