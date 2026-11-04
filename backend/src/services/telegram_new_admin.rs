@@ -326,7 +326,10 @@ impl TelegramNewService<'_> {
 
     async fn remove_manager_webhook(&self, token: &str) -> AppResult<()> {
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"] == self.manager_callback() {
+        if webhook["url"]
+            .as_str()
+            .is_some_and(|url| self.config.same_base_url(url, &self.manager_callback()))
+        {
             self.api
                 .call(
                     token,
