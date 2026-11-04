@@ -3863,6 +3863,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(approval_required),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: now,

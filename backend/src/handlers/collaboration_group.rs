@@ -116,6 +116,7 @@ pub(crate) async fn settled(
     let Some(binding) = &row.collaboration else {
         return;
     };
+    notify_mentions(state, Some(&binding.group_id));
     if error.is_none() && !text.trim().is_empty() {
         let result: AppResult<()> = async {
             let admission = groups::requests::settled_admission(&state.db, binding).await?;
@@ -148,6 +149,7 @@ pub(crate) async fn settled(
 }
 
 pub(crate) async fn sweep(state: &AppState) {
+    notify_mentions(state, None);
     if groups::cleanup::sweep(&state.db).await.is_err() {
         tracing::debug!("Collaboration cleanup deferred");
     }
@@ -299,10 +301,12 @@ pub(crate) async fn response(
         })
         .cloned()
         .collect();
+    let unread = groups::notifications::counts(&state.db, actor, &group.id).await?;
     Ok(GroupResponse {
         collaboration: Some(
             json!({"version":1,"creator_user_id":group.user_id,"membership_revision":group.collaboration.as_ref().expect("validated").membership_revision,
             "history_disclosure":groups::HISTORY_DISCLOSURE,"guest_access":guest_settings,"your_request_ids":active_requests,
+            "unread_count":unread.unread_count,"mention_count":unread.mention_count,"last_seen_seq":unread.last_seen_seq,
             "can_manage":creator,"transfer_to_user_id":transfers.map(|t|t.to_user_id),
             "proposals":proposals.iter().map(|p|json!({"id":p.id,"agent_id":p.agent_id,"proposed_by":p.proposed_by})).collect::<Vec<_>>(),
             "invites":invites.iter().map(|i|json!({"id":i.id,"expires_at":i.expires_at})).collect::<Vec<_>>()}),
@@ -431,6 +435,7 @@ pub(crate) async fn post(
     if let Some(message) =
         groups::participant_posts::try_post(&state.db, actor, id, text, recipients, uploads).await?
     {
+        notify_mentions(state, Some(id));
         let agents = groups::roster(&state.db, actor, id).await?;
         return Ok(
             json!({"message":public_message_response(state,actor,id,message,&agents).await?,
@@ -446,6 +451,7 @@ pub(crate) async fn post(
         .find(|m| m.seq == request.message_seq)
         .ok_or_else(|| AppError::NotFound("Group message not found".into()))?;
     let agents = groups::roster(&state.db, actor, id).await?;
+    notify_mentions(state, Some(id));
     let selected = message.recipient_agent_ids.clone();
     Box::pin(advance(state, Some(id))).await?;
     Ok(
@@ -1075,5 +1081,32 @@ pub async fn cancel_guest_request(
 ) -> AppResult<StatusCode> {
     let actor = human(&state, &auth).await?;
     groups::guest_requests::cancel(&state.db, &actor, &group, &agent, &request).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn notify_mentions(state: &AppState, group: Option<&str>) {
+    let state = state.clone();
+    let group = group.map(str::to_owned);
+    tokio::spawn(async move {
+        if groups::notifications::deliver(&state, group.as_deref())
+            .await
+            .is_err()
+        {
+            tracing::debug!("Group mention delivery deferred");
+        }
+    });
+}
+#[derive(Deserialize)]
+pub struct ReadRequest {
+    pub last_seen_seq: i64,
+}
+pub async fn mark_read(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<ReadRequest>,
+) -> AppResult<StatusCode> {
+    let actor = human(&state, &auth).await?;
+    groups::notifications::mark_read(&state.db, &actor, &id, body.last_seen_seq).await?;
     Ok(StatusCode::NO_CONTENT)
 }
