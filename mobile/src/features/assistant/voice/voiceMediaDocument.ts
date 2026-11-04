@@ -49,7 +49,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     node.smoothingTimeConstant = 0;
     return node;
   }
-  // Same -50..-10 dBFS window as the dictation meter (dictationLevel.ts).
+  // Maps -50..-10 dBFS to 0..1.
   function loudness(node) {
     if (!node) return 0;
     if (!meterSamples || meterSamples.length !== node.fftSize) meterSamples = new Float32Array(node.fftSize);
@@ -308,39 +308,6 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     emit({ type: 'diagnostic', stage: 'loopback_connected', name: 'ready' });
     return '';
   }
-  async function dictation(id, processor) {
-    atStage('audio_context');
-    if (!window.AudioWorkletNode || !window.AudioContext) throw new Error('unsupported');
-    const localContext = new AudioContext();
-    context = localContext;
-    await localContext.resume();
-    assertAlive(id);
-    if (!localContext.audioWorklet) throw new Error('unsupported');
-    atStage('audio_worklet');
-    const url = URL.createObjectURL(new Blob([processor], { type: 'text/javascript' }));
-    try { await localContext.audioWorklet.addModule(url); }
-    finally { URL.revokeObjectURL(url); }
-    assertAlive(id);
-    const localWorklet = new AudioWorkletNode(localContext, 'nyx-grok-audio', {
-      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
-    });
-    worklet = localWorklet;
-    source = localContext.createMediaStreamSource(media);
-    source.connect(localWorklet);
-    // The processor outputs silence without a playback queue. Keep it running
-    // for PCM24k capture without monitoring or recording the microphone.
-    localWorklet.connect(localContext.destination);
-    localWorklet.port.onmessage = ({ data }) => {
-      if (!alive(id) || !capturing || data.generation !== captureGeneration || data.type !== 'pcm') return;
-      if (!(data.bytes instanceof ArrayBuffer) || data.bytes.byteLength !== 960 || pendingPCM.size >= 100) {
-        fail('Voice audio connection is too slow. Please reconnect.'); return;
-      }
-      const sequence = ++pcmSequence;
-      pendingPCM.add(sequence);
-      emit({ type: 'pcm', sequence, bytes: encode(data.bytes) });
-    };
-    return '';
-  }
   async function prepare(protocol, id, processor) {
     cleanup();
     generation = id;
@@ -367,7 +334,6 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     if (!alive(id)) { localMedia.getTracks().forEach((track) => track.stop()); throw new Error('cancelled'); }
     media = localMedia;
     localMedia.getAudioTracks().forEach((track) => { track.enabled = false; });
-    if (protocol === 'dictation') return dictation(id, processor);
     if (protocol === 'xai_realtime') return grok(id, processor);
     if (protocol !== 'openai_live') throw new Error('unsupported');
     const localPeer = new RTCPeerConnection();

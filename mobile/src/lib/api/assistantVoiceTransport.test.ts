@@ -476,22 +476,3 @@ test("real transport never turns an invalid start identity into authority to end
   assert.deepEqual(f.mediaEvents, ["close"]);
 });
 
-test("dictation discovers the web's private-thread endpoint without creating a conversational call", async () => {
-  const calls: { path: string; options: RequestOptions | undefined }[] = [];
-  const api = createAssistantVoiceApi(async (path, options) => {
-    calls.push({ path, options });
-    return { options: [] };
-  }, origin);
-  const controller = new AbortController();
-  assert.deepEqual(await api.dictationOptions(thread, controller.signal), {
-    options: [],
-  });
-  assert.deepEqual(calls, [
-    {
-      path: `/assistant/nyxagent/dictation/options?conversation_id=${thread}`,
-      options: { signal: controller.signal },
-    },
-  ]);
-  await assert.rejects(api.dictationOptions("crew-id"));
-  assert.equal(calls.length, 1);
-});

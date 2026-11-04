@@ -602,15 +602,18 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Assistant prose stays unboxed. All chat composers share a filled 26pt pill:
   full-width text sits above a toolbar with Attach, optional mentions, dictation
   and a trailing Send/Stop circle inside a 44pt target. Attach offers Camera,
-  Photos and Files through their native pickers. Dictation requires review before text is
+  Photos and Files through their native pickers. Dictation uses Apple's speech
+  recognizer (on-device when the iPhone supports it) in the iPhone's language;
+  no audio goes to NyxID. It requires review before text is
   inserted into the draft and never sends a message automatically. The first
-  tap opens a compact intro sheet once (what it does, microphone access,
-  language, Start); a long press starts directly. While it runs it fills the
+  tap opens a compact intro sheet once (what it does, microphone and speech
+  recognition access, on-iPhone recognition, language, Start); a long press
+  starts directly. While it runs it fills the
   screen: Discard, a “Speech to Text” title with a live dot, status and mono
   timer, the transcript as the page at 30/40pt with interim words in tertiary,
-  a microphone level meter (3pt bars, peak per 90ms) and one filled Finish pill,
-  which becomes Insert in review. Idle errors stay a compact notice above the
-  field. Chat pages
+  a microphone level meter (3pt bars, one per ~90ms native volume sample) and
+  one filled Finish pill, which becomes Insert in review. Idle errors stay a
+  compact notice above the field. Chat pages
   use an edge-to-edge transcript viewport within the system safe area, so its
   scroll indicator sits at the window edge. The centered transcript content
   retains 12pt horizontal padding and the configured column maximum; composers

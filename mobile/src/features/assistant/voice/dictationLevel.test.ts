@@ -1,26 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatElapsed, pcmLevel } from "./dictationLevel";
+import { formatElapsed, volumeLevel } from "./dictationLevel";
 
-function packet(amplitude: number) {
-  const view = new DataView(new ArrayBuffer(960));
-  for (let i = 0; i < 480; i++)
-    view.setInt16(
-      i * 2,
-      Math.round((i % 2 ? -1 : 1) * amplitude * 32767),
-      true,
-    );
-  return view.buffer;
-}
-
-test("PCM level maps silence to zero and loud speech toward one", () => {
-  assert.equal(pcmLevel(new ArrayBuffer(0)), 0);
-  assert.equal(pcmLevel(packet(0)), 0);
-  assert.equal(pcmLevel(packet(0.001)), 0);
-  const quiet = pcmLevel(packet(0.01));
-  const loud = pcmLevel(packet(0.3));
-  assert.ok(quiet > 0 && quiet < loud, `${quiet} < ${loud}`);
-  assert.equal(pcmLevel(packet(1)), 1);
+test("recognizer volume maps inaudible input to zero and full scale to one", () => {
+  assert.equal(volumeLevel(-2), 0);
+  assert.equal(volumeLevel(-0.5), 0);
+  assert.equal(volumeLevel(0), 0);
+  assert.equal(volumeLevel(5), 0.5);
+  assert.equal(volumeLevel(10), 1);
+  assert.equal(volumeLevel(12), 1);
+  assert.equal(volumeLevel(Number.NaN), 0);
 });
 
 test("elapsed time reads as minutes and padded seconds", () => {

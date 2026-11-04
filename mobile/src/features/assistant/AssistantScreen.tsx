@@ -361,12 +361,9 @@ export function AssistantScreen({
       !uploads.session.sending &&
       !openingVoice &&
       !voiceThread &&
-      NATIVE_VOICE_ENTRY_ENABLED &&
-      voiceFeatures.data?.includes("assistant:voice") === true &&
-      !conversation?.channel &&
-      conversation?.role !== "subagent" &&
+      // Apple's recognizer only fills the composer: no NyxID voice service,
+      // feature flag or thread eligibility is involved.
       !destroyed,
-    getThread: () => uploads.session.ensureConversation(),
     onInsert: (text) => updateDraft(appendDictation(draft, text)),
   });
   const canSend =

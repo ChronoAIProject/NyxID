@@ -60,10 +60,6 @@ export function assistantVoiceStreamPath(
   return `${assistantVoiceSessionsPath(conversationId)}/${localId.parse(sessionId)}/stream`;
 }
 
-export function assistantDictationPath(conversationId: string): string {
-  return `${ROOT}/conversations/${conversationIdSchema.parse(conversationId)}/dictation`;
-}
-
 /** The human-session HTTP implementation is injected; no tokens enter media. */
 export function createAssistantVoiceApi(
   request: JsonRequest,
@@ -111,14 +107,6 @@ export function createAssistantVoiceApi(
           : `?conversation_id=${conversationIdSchema.parse(conversationId)}`;
       return voiceOptionsSchema.parse(
         await request(`${ROOT}/voice/options${query}`, { signal }),
-      );
-    },
-    async dictationOptions(conversationId: string, signal?: AbortSignal) {
-      const id = conversationIdSchema.parse(conversationId);
-      return voiceOptionsSchema.parse(
-        await request(`${ROOT}/dictation/options?conversation_id=${id}`, {
-          signal,
-        }),
       );
     },
     async start(

@@ -1,16 +1,10 @@
-/** Loudness of one 16-bit little-endian PCM packet, mapped from -50..-10 dBFS to 0..1. */
-export function pcmLevel(bytes: ArrayBuffer): number {
-  const samples = Math.floor(bytes.byteLength / 2);
-  if (!samples) return 0;
-  const view = new DataView(bytes);
-  let sum = 0;
-  for (let i = 0; i < samples; i++) {
-    const value = view.getInt16(i * 2, true) / 32768;
-    sum += value * value;
-  }
-  const rms = Math.sqrt(sum / samples);
-  if (rms <= 0) return 0;
-  return Math.min(1, Math.max(0, (20 * Math.log10(rms) + 50) / 40));
+/**
+ * The iOS recognizer reports peak input as -2..10 (-60..0 dBFS, below 0 is
+ * inaudible). The meter shows -50..0 dBFS as 0..1.
+ */
+export function volumeLevel(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value / 10));
 }
 
 export function formatElapsed(ms: number): string {

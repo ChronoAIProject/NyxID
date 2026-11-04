@@ -11,19 +11,22 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Check, Globe, Mic, ShieldCheck, Square, X } from "lucide-react-native";
+import {
+  Check,
+  Globe,
+  Mic,
+  ShieldCheck,
+  Smartphone,
+  Square,
+  X,
+} from "lucide-react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
-import {
-  VoiceMediaBridge,
-  type NativeVoiceMedia,
-} from "./voice/VoiceMediaBridge";
-import { formatElapsed, pcmLevel } from "./voice/dictationLevel";
+import { formatElapsed } from "./voice/dictationLevel";
 import type { ComposerDictationState } from "./useComposerDictation";
 
 const BAR_PITCH = 5;
-const BAR_INTERVAL_MS = 90;
 
 export function ComposerDictationButton({
   dictation,
@@ -132,12 +135,17 @@ function DictationIntro({
       Icon: ShieldCheck,
       title: "Microphone access",
       detail:
-        "iOS asks the first time you start. Recording stops when you tap Finish.",
+        "iOS asks for microphone and speech recognition access the first time. Recording stops when you tap Finish.",
+    },
+    {
+      Icon: Smartphone,
+      title: "Recognized on your iPhone",
+      detail: "Speech is recognized on your iPhone when available.",
     },
     {
       Icon: Globe,
       title: "Speech language",
-      detail: "Detected automatically from what you say.",
+      detail: "Uses your iPhone's language.",
     },
   ];
   return (
@@ -300,7 +308,7 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
     phase === "permission"
       ? "Waiting for microphone…"
       : phase === "connecting"
-        ? "Connecting…"
+        ? "Starting…"
         : phase === "stopping"
           ? "Finishing…"
           : phase === "review"
@@ -324,9 +332,6 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
           },
         ]}
       >
-        {dictation.media && dictation.origin && (
-          <VoiceMediaBridge media={dictation.media} origin={dictation.origin} />
-        )}
         <View style={styles.panelHeader}>
           <Pressable
             accessibilityRole="button"
@@ -414,7 +419,9 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
           </Label>
         ) : null}
         <View style={[styles.meter, { backgroundColor: colors.groupedFill }]}>
-          {capturing && <DictationWaveform media={dictation.media} />}
+          {capturing && (
+            <DictationWaveform subscribe={dictation.subscribeLevel} />
+          )}
         </View>
         <View style={styles.controls}>
           {phase === "review" ? (
@@ -438,7 +445,7 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
         <Text style={[styles.footnote, { color: colors.textTertiary }]}>
           {phase === "review"
             ? "Edit after inserting · Nothing is sent until you tap Send"
-            : "Language detected automatically"}
+            : "Language: your iPhone's language"}
         </Text>
       </View>
     </Modal>
@@ -488,32 +495,27 @@ function PillButton({
   );
 }
 
-/** Peak microphone level per 90ms, newest bar at the trailing edge. */
-function DictationWaveform({ media }: { media: NativeVoiceMedia | null }) {
+/** One bar per recognizer volume sample (about 90ms), newest at the trailing edge. */
+function DictationWaveform({
+  subscribe,
+}: {
+  subscribe: ComposerDictationState["subscribeLevel"];
+}) {
   const { colors } = useTheme();
   const [width, setWidth] = useState(0);
   const [levels, setLevels] = useState<number[]>([]);
   const count = Math.max(0, Math.floor(width / BAR_PITCH));
   const capacity = useRef(count);
   capacity.current = count;
-  useEffect(() => {
-    if (!media) return;
-    let peak = 0;
-    const unsubscribe = media.subscribe((event) => {
-      if (event.type === "pcm") peak = Math.max(peak, pcmLevel(event.bytes));
-    });
-    const timer = setInterval(() => {
-      const value = peak;
-      peak = 0;
-      setLevels((previous) =>
-        [...previous, value].slice(-Math.max(1, capacity.current)),
-      );
-    }, BAR_INTERVAL_MS);
-    return () => {
-      unsubscribe();
-      clearInterval(timer);
-    };
-  }, [media]);
+  useEffect(
+    () =>
+      subscribe((level) =>
+        setLevels((previous) =>
+          [...previous, level].slice(-Math.max(1, capacity.current)),
+        ),
+      ),
+    [subscribe],
+  );
   const bars = [
     ...Array<number>(Math.max(0, count - levels.length)).fill(0),
     ...levels.slice(-count),

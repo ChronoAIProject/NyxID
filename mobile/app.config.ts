@@ -111,6 +111,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       "expo-web-browser",
       "expo-sharing",
       [
+        "expo-speech-recognition",
+        {
+          microphonePermission:
+            "Allow NyxID to use your microphone for dictation and voice conversations.",
+          speechRecognitionPermission:
+            "Allow NyxID to turn your speech into text for messages. Recognition runs on your iPhone when available.",
+        },
+      ],
+      [
         "expo-camera",
         {
           cameraPermission: "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",

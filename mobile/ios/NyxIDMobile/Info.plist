@@ -39,11 +39,11 @@
       </dict>
     </array>
     <key>CFBundleVersion</key>
-    <string>36</string>
-    <key>ITSAppUsesNonExemptEncryption</key>
-    <false/>
+    <string>41</string>
     <key>EXDefaultScreenOrientationMask</key>
     <string>UIInterfaceOrientationMaskPortrait</string>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSRequiresIPhoneOS</key>
@@ -61,12 +61,14 @@
     </array>
     <key>NSCameraUsageDescription</key>
     <string>Allow NyxID to scan login approval QR codes and take photos to attach in chats.</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Allow NyxID to use your microphone for dictation and voice conversations.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your Face ID biometric data.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Expo Dev Launcher uses the local network to discover and connect to development servers running on your computer.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Allow NyxID to use your microphone for dictation and voice conversations.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>Allow NyxID to turn your speech into text for messages. Recognition runs on your iPhone when available.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
     <key>UIBackgroundModes</key>

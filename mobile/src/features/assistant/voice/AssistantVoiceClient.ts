@@ -29,10 +29,7 @@ export type VoiceMediaEvent =
 
 /** Ephemeral device media only; this adapter never receives account credentials. */
 export interface VoiceMediaAdapter {
-  prepare(
-    protocol: VoiceProtocol | "dictation",
-    signal: AbortSignal,
-  ): Promise<string>;
+  prepare(protocol: VoiceProtocol, signal: AbortSignal): Promise<string>;
   answer(sdp: string): Promise<void>;
   setInput(enabled: boolean): void;
   hold(pressed: boolean): void;

@@ -879,34 +879,6 @@ test("the WebView is inaccessible, blocks later navigation, and closes on unmoun
   assert.equal(closed, 1);
 });
 
-test("dictation captures PCM24k without a conversational peer or microphone playback", async () => {
-  const e = engine();
-  e.command({
-    type: "prepare",
-    protocol: "dictation",
-    generation: 1,
-    requestId: 1,
-  });
-  await settle();
-  assert.equal(e.peers.length, 0);
-  assert.equal(e.worklets.length, 1);
-  assert.equal(e.tracks[0]!.enabled, false);
-  e.command({ type: "input", enabled: true, generation: 1 });
-  assert.equal(e.tracks[0]!.enabled, true);
-  const worklet = e.worklets[0];
-  worklet.port.onmessage({
-    data: { type: "pcm", bytes: new ArrayBuffer(960), generation: 1 },
-  });
-  assert.equal(e.messages.filter((m) => m.type === "pcm").length, 1);
-  e.command({ type: "close", generation: 1 });
-  assert.equal(e.tracks[0]!.stopped, true);
-  assert.equal(e.contexts[0]!.closed, true);
-  worklet.port.onmessage({
-    data: { type: "pcm", bytes: new ArrayBuffer(960), generation: 1 },
-  });
-  assert.equal(e.messages.filter((m) => m.type === "pcm").length, 1);
-});
-
 const levels = (messages: Record<string, any>[]) =>
   messages
     .filter((m) => m.type === "level")
@@ -968,20 +940,6 @@ test("Grok meters its microphone source and playback worklet without a second ou
   output.amplitude = 1;
   e.tick();
   assert.deepEqual(levels(e.messages), [{ input: 0, output: 1 }]);
-});
-
-test("dictation keeps its PCM-only path and sends no loudness events", async () => {
-  const e = engine({ analysers: true });
-  e.command({
-    type: "prepare",
-    protocol: "dictation",
-    generation: 1,
-    requestId: 1,
-  });
-  await settle();
-  assert.equal(e.analysers.length, 0);
-  e.tick();
-  assert.deepEqual(levels(e.messages), []);
 });
 
 test("a runtime without analysers still starts calls, with no loudness events", async () => {

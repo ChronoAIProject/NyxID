@@ -160,7 +160,7 @@ export function VoiceSettingsScreen(_props: SheetScreenProps<"VoiceSettings">) {
       ) : null}
       <SettingsGroup
         title="Dictation"
-        footer="Speech to Text turns what you say into text you review before sending."
+        footer="Speech to Text uses your iPhone's speech recognition in your iPhone's language, on the device when available. You review the text before sending."
         inset={false}
       >
         <SettingsRow

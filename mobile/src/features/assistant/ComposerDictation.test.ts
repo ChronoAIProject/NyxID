@@ -8,6 +8,7 @@ type Element = { type: string; props: Record<string, any> };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 function setup({ introSeen = true } = {}) {
   const events: string[] = [];
+  const levelListeners = new Set<(level: number) => void>();
   const storage = new Map<string, string>(
     introSeen ? [["nyxid.dictation_intro_seen", "1"]] : [],
   );
@@ -18,8 +19,12 @@ function setup({ introSeen = true } = {}) {
     interim: "",
     error: undefined,
     permissionDenied: false,
-    media: null,
-    origin: undefined,
+    subscribeLevel: (listener) => {
+      levelListeners.add(listener);
+      return () => {
+        levelListeners.delete(listener);
+      };
+    },
     openSettings: () => events.push("settings"),
     active: false,
     recording: false,
@@ -56,7 +61,6 @@ function setup({ introSeen = true } = {}) {
         },
       },
     },
-    "./voice/VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
     "react-native-safe-area-context": {
       useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
     },
@@ -74,6 +78,7 @@ function setup({ introSeen = true } = {}) {
       Check: "Check",
       Globe: "Globe",
       ShieldCheck: "ShieldCheck",
+      Smartphone: "Smartphone",
       Mic: "Mic",
       Square: "Square",
       X: "X",
@@ -117,7 +122,16 @@ function setup({ introSeen = true } = {}) {
     components
       .ComposerDictationButton({ dictation })
       .props.children.find((child: Element) => child.type !== "Pressable");
-  return { h, dictation, events, mic, intro, storage, ...components };
+  return {
+    h,
+    dictation,
+    events,
+    mic,
+    intro,
+    storage,
+    levelListeners,
+    ...components,
+  };
 }
 // Expands local function components and Pressable render-prop children so the
 // assertions see the native tree a person would.
@@ -348,5 +362,59 @@ test("the first tap explains dictation once; Start begins it and a held press sk
     held.events,
     ["keyboard", "start"],
     "push-to-talk starts at once",
+  );
+});
+
+test("the meter draws native volume levels as bars and stops listening when capture ends", () => {
+  const x = setup();
+  x.dictation.phase = "listening";
+  x.dictation.active = true;
+  x.dictation.recording = true;
+  const tree = () =>
+    all(
+      render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
+    );
+  x.h.mount(() => tree() as unknown as Element);
+  const wave = () =>
+    (x.h.value() as unknown as Element[]).find(
+      (node) => node.props.importantForAccessibility === "no-hide-descendants",
+    )!;
+  wave().props.onLayout({ nativeEvent: { layout: { width: 15 } } });
+  x.h.flush();
+  assert.equal(x.levelListeners.size, 1, "subscribed while capturing");
+  for (const listener of x.levelListeners) {
+    listener(0.5);
+    listener(1);
+  }
+  x.h.flush();
+  const heights = all(wave())
+    .filter((node) => node.type === "View" && node !== wave())
+    .map((node) => node.props.style[1].height);
+  assert.deepEqual(heights, [3, 3 + 0.5 * 33, 3 + 33]);
+  x.h.unmount();
+  assert.equal(x.levelListeners.size, 0, "unsubscribed on unmount");
+});
+
+test("copy says recognition happens on the iPhone in its language, not on a server", () => {
+  const x = setup({ introSeen: false });
+  const intro = all(render(x.intro()) as Element);
+  const words = intro
+    .filter((node) => node.type === "Text")
+    .flatMap((node) => [node.props.children].flat())
+    .join(" ");
+  assert.match(words, /recognized on your iPhone when available/);
+  assert.match(words, /Uses your iPhone's language/);
+  assert.doesNotMatch(words, /server|automatically/i);
+  x.dictation.phase = "listening";
+  x.dictation.active = true;
+  const panel = all(
+    render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
+  );
+  assert.ok(
+    panel.some(
+      (node) =>
+        node.type === "Text" &&
+        node.props.children === "Language: your iPhone's language",
+    ),
   );
 });

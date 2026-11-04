@@ -292,7 +292,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   }
 
   async prepare(
-    protocol: "openai_live" | "xai_realtime" | "dictation",
+    protocol: "openai_live" | "xai_realtime",
     signal: AbortSignal,
   ): Promise<string> {
     this.close();

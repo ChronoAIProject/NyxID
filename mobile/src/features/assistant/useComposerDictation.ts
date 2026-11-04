@@ -1,17 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppState, Linking } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
-import { Camera } from "expo-camera";
-import * as Crypto from "expo-crypto";
+import {
+  ExpoSpeechRecognitionModule as Recognizer,
+  type ExpoSpeechRecognitionErrorCode,
+} from "expo-speech-recognition";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
-import { nativeVoiceEnvironment } from "../../lib/api/assistantVoiceApi";
-import {
-  AssistantDictationClient,
-  type DictationText,
-} from "./voice/AssistantDictationClient";
-import { NativeVoiceMedia } from "./voice/VoiceMediaBridge";
-import { chooseVoiceOption } from "./voice/voiceSelection";
+import { volumeLevel } from "./voice/dictationLevel";
+import { dictationLocale } from "./voice/dictationLocale";
 import { waitForVoiceForeground } from "./voice/voicePermission";
 
 type Phase =
@@ -22,51 +19,128 @@ type Phase =
   | "stopping"
   | "review";
 
+const NO_SPEECH = "No speech was detected. Try again.";
+const DENIED =
+  "Allow microphone and speech recognition access in Settings to dictate. You can keep typing.";
+/** A stopped recognizer that never reports `end` still releases the microphone. */
+const STOP_TIMEOUT_MS = 8000;
+/** How long a new attempt waits for an aborted one's `end`. */
+const RELEASE_TIMEOUT_MS = 1500;
+
+function dictationError(code: ExpoSpeechRecognitionErrorCode) {
+  switch (code) {
+    case "aborted":
+      return undefined;
+    case "not-allowed":
+      return DENIED;
+    case "no-speech":
+    case "speech-timeout":
+      return NO_SPEECH;
+    case "language-not-supported":
+      return "Dictation isn't available in your iPhone's language. You can keep typing.";
+    case "network":
+      return "Speech recognition needs a connection for your language. Check your connection and try again.";
+    case "service-not-allowed":
+      return "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.";
+    case "audio-capture":
+      return "The microphone couldn't record. Close other apps using it and try again.";
+    case "interrupted":
+      return "Dictation was interrupted.";
+    case "busy":
+      return "Speech recognition is busy. Try again in a moment.";
+    default:
+      return "Dictation stopped unexpectedly. You can keep typing.";
+  }
+}
+
+/**
+ * The recognizer is one shared native session whose abort reports `end`
+ * asynchronously. A new attempt waits for that, so a stale `end` can never
+ * close it.
+ */
+let releasing: Promise<void> | undefined;
+function release() {
+  const done = new Promise<void>((resolve) => {
+    const finish = () => {
+      subscription.remove();
+      clearTimeout(timer);
+      if (releasing === done) releasing = undefined;
+      resolve();
+    };
+    const subscription = Recognizer.addListener("end", finish);
+    const timer = setTimeout(finish, RELEASE_TIMEOUT_MS);
+  });
+  releasing = done;
+  Recognizer.abort();
+}
+
+async function recognitionLanguage() {
+  let phone: string | undefined;
+  try {
+    phone = Intl.DateTimeFormat().resolvedOptions().locale;
+  } catch {
+    return undefined;
+  }
+  try {
+    return dictationLocale(
+      phone,
+      (await Recognizer.getSupportedLocales({})).locales,
+    );
+  } catch {
+    return phone;
+  }
+}
+
+function supportsOnDevice() {
+  try {
+    return Recognizer.supportsOnDeviceRecognition();
+  } catch {
+    return false;
+  }
+}
+
+function levelSource() {
+  const listeners = new Set<(level: number) => void>();
+  return {
+    emit: (level: number) => listeners.forEach((listener) => listener(level)),
+    /** Live microphone level, 0..1, about every 90ms while listening. */
+    subscribe: (listener: (level: number) => void) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+/**
+ * Composer dictation on Apple's speech recognizer (on-device when the iPhone
+ * supports it). Text stays in local review; nothing reaches NyxID until the
+ * person inserts it and sends the message themselves.
+ */
 export function useComposerDictation({
   scope,
   enabled,
-  getThread,
   onInsert,
 }: {
   scope: string;
   enabled: boolean;
-  getThread: () => Promise<string>;
   onInsert: (text: string) => void;
 }) {
   const focused = useIsFocused();
   const { sheetOpen } = useWorkspaceAccessibility();
   enabled = enabled && !sheetOpen;
   const epoch = getAuthEpoch();
-  const setup = useMemo(() => {
-    try {
-      return { environment: nativeVoiceEnvironment() };
-    } catch {
-      return {
-        error:
-          "Dictation needs the configured NyxID server. You can keep typing.",
-      };
-    }
-  }, [epoch]);
   const [phase, setPhase] = useState<Phase>("idle");
-  const [caption, setCaption] = useState<DictationText>({
-    final: "",
-    interim: "",
-  });
+  const [caption, setCaption] = useState({ final: "", interim: "" });
   const [error, setError] = useState<string>();
   const [permissionDenied, setPermissionDenied] = useState(false);
-  const [media, setMedia] = useState<NativeVoiceMedia | null>(null);
+  const [levels] = useState(levelSource);
   const review = useRef<
     { scope: string; epoch: number; text: string } | undefined
   >(undefined);
-  const current = useRef({
-    scope,
-    epoch,
-    enabled,
-    focused,
-    getThread,
-    onInsert,
-  });
-  current.current = { scope, epoch, enabled, focused, getThread, onInsert };
+  const current = useRef({ scope, epoch, enabled, focused, onInsert });
+  current.current = { scope, epoch, enabled, focused, onInsert };
   const operation = useRef<{ cancel(): void; stop(): void } | undefined>(
     undefined,
   );
@@ -75,7 +149,6 @@ export function useComposerDictation({
     review.current = undefined;
     operation.current?.cancel();
     operation.current = undefined;
-    setMedia(null);
     setPhase("idle");
     setCaption({ final: "", interim: "" });
     setError(undefined);
@@ -101,17 +174,20 @@ export function useComposerDictation({
       return;
     setError(undefined);
     setPermissionDenied(false);
-    if (!setup.environment) {
-      setError(setup.error);
-      return;
-    }
-    const environment = setup.environment;
     const controller = new AbortController();
     const identity = { scope, epoch };
     let permission = true;
-    let client: AssistantDictationClient | undefined;
-    let nextMedia: NativeVoiceMedia | undefined;
+    /** Recognition was started and has not reported `end`: the mic may be on. */
+    let native = false;
+    let listening = false;
+    let stopping = false;
     let finalText = "";
+    let interimText = "";
+    let failure: string | undefined;
+    let subscriptions: { remove(): void }[] = [];
+    let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    const spoken = () =>
+      [finalText.trim(), interimText.trim()].filter(Boolean).join(" ");
     const valid = () =>
       operation.current === attempt &&
       !controller.signal.aborted &&
@@ -120,26 +196,53 @@ export function useComposerDictation({
       getAuthEpoch() === epoch &&
       current.current.enabled &&
       current.current.focused;
+    const detach = () => {
+      for (const subscription of subscriptions) subscription.remove();
+      subscriptions = [];
+      appState.remove();
+      clearTimeout(stopTimer);
+    };
     const cancel = () => {
       controller.abort();
-      subscription.remove();
-      client?.cancel();
-      nextMedia?.close();
+      detach();
+      if (native) {
+        native = false;
+        release();
+      }
+    };
+    /** The recognizer ended: review what was heard, or explain why nothing was. */
+    const settle = () => {
+      detach();
+      operation.current = undefined;
+      const text = spoken();
+      review.current = text ? { ...identity, text } : undefined;
+      setCaption({ final: text, interim: "" });
+      setPhase(text ? "review" : "idle");
+      if (!text) setError((previous) => previous ?? failure ?? NO_SPEECH);
     };
     const attempt = {
       cancel,
       stop: () => {
-        if (!valid()) return;
-        if (client) client.stop();
-        else {
+        if (!valid() || stopping) return;
+        if (!listening) {
+          // Released before the microphone opened: nothing to review.
           cancel();
           operation.current = undefined;
           setPhase("idle");
-          setMedia(null);
+          return;
         }
+        stopping = true;
+        setPhase("stopping");
+        Recognizer.stop();
+        stopTimer = setTimeout(() => {
+          if (!valid()) return;
+          native = false;
+          release();
+          settle();
+        }, STOP_TIMEOUT_MS);
       },
     };
-    const subscription = AppState.addEventListener("change", (state) => {
+    const appState = AppState.addEventListener("change", (state) => {
       if (
         !valid() ||
         state === "active" ||
@@ -153,79 +256,78 @@ export function useComposerDictation({
     setCaption({ final: "", interim: "" });
     setPhase("permission");
     try {
-      const result = await Camera.requestMicrophonePermissionsAsync();
+      const result = await Recognizer.requestPermissionsAsync();
       if (!valid()) return;
       if (!result.granted) {
         setPermissionDenied(true);
         throw new Error(
-          "Allow microphone access in Settings to dictate. You can keep typing.",
+          result.restricted
+            ? "Speech recognition is restricted on this iPhone in Screen Time. You can keep typing."
+            : DENIED,
         );
       }
       await waitForVoiceForeground(AppState, controller.signal, valid);
       permission = false;
       if (!valid()) return;
       setPhase("connecting");
-      // Same upload draft as web; permission denial never creates a conversation.
-      const thread = await current.current.getThread();
+      const lang = await recognitionLanguage();
       if (!valid()) return;
-      const options = await environment.api.dictationOptions(
-        thread,
-        controller.signal,
-      );
+      await releasing;
       if (!valid()) return;
-      const option = chooseVoiceOption(options.options);
-      if (!option)
-        throw new Error(
-          "Dictation is unavailable on this server. You can keep typing.",
-        );
-      nextMedia = new NativeVoiceMedia();
-      client = new AssistantDictationClient({
-        media: nextMedia,
-        createSocket: environment.createSocket,
-        randomId: Crypto.randomUUID,
-        onText: (value) => {
-          if (valid()) {
-            finalText = value.final;
-            setCaption(value);
-          }
-        },
-        onError: (message) => {
-          if (valid()) setError(message);
-        },
-        onPhase: (value) => {
+      const show = () =>
+        setCaption({ final: finalText.trim(), interim: interimText.trim() });
+      subscriptions = [
+        Recognizer.addListener("start", () => {
           if (!valid()) return;
-          if (value === "review") {
-            subscription.remove();
-            review.current = finalText.trim()
-              ? { ...identity, text: finalText.trim() }
-              : undefined;
-            operation.current = undefined;
-            setMedia(null);
-            setCaption({ final: finalText, interim: "" });
-            setPhase(finalText.trim() ? "review" : "idle");
-            if (!finalText.trim())
-              setError(
-                (previous) => previous ?? "No speech was captured. Try again.",
-              );
-          } else setPhase(value);
-        },
-      });
-      setMedia(nextMedia);
-      await client.start(thread, {
-        service_id: option.service_id,
-        connection_id: null,
-        key_source: "platform",
-        model: option.model,
-        voice: null,
-        language: null,
-        input_mode: "push_to_talk",
-        notify_on_completion: false,
+          listening = true;
+          setPhase("listening");
+        }),
+        Recognizer.addListener("result", (event) => {
+          if (!valid()) return;
+          // Each final segment is appended (the recognizer supplies spacing);
+          // the interim tail is replaced until it settles.
+          const transcript = event.results[0]?.transcript ?? "";
+          if (event.isFinal) {
+            finalText += transcript;
+            interimText = "";
+          } else interimText = transcript;
+          show();
+        }),
+        Recognizer.addListener("volumechange", (event) => {
+          if (valid()) levels.emit(volumeLevel(event.value));
+        }),
+        Recognizer.addListener("nomatch", () => {
+          if (valid()) failure ??= NO_SPEECH;
+        }),
+        Recognizer.addListener("error", (event) => {
+          if (!valid()) return;
+          const message = dictationError(event.error);
+          if (!message || (message === NO_SPEECH && spoken())) return;
+          if (event.error === "not-allowed") setPermissionDenied(true);
+          failure = message;
+          setError(message);
+        }),
+        Recognizer.addListener("end", () => {
+          if (!valid()) return;
+          native = false;
+          settle();
+        }),
+      ];
+      native = true;
+      Recognizer.start({
+        ...(lang ? { lang } : {}),
+        interimResults: true,
+        continuous: true,
+        addsPunctuation: true,
+        maxAlternatives: 1,
+        iosTaskHint: "dictation",
+        requiresOnDeviceRecognition: supportsOnDevice(),
+        volumeChangeEventOptions: { enabled: true, intervalMillis: 90 },
       });
     } catch (cause) {
       if (!valid()) return;
       cancel();
       operation.current = undefined;
-      setMedia(null);
       setPhase("idle");
       setError(
         cause instanceof Error
@@ -238,13 +340,12 @@ export function useComposerDictation({
   return {
     phase,
     text,
-    /** Settled words and the provider's still-changing tail, for display only. */
+    /** Settled words and the recognizer's still-changing tail, for display only. */
     final: caption.final,
     interim: caption.interim,
     error,
     permissionDenied,
-    media,
-    origin: setup.environment?.origin,
+    subscribeLevel: levels.subscribe,
     active: phase !== "idle",
     recording: phase === "listening" || phase === "stopping",
     start,
@@ -252,7 +353,9 @@ export function useComposerDictation({
     discard,
     openSettings: () => {
       void Linking.openSettings().catch(() =>
-        setError("Open your device Settings to allow microphone access."),
+        setError(
+          "Open your iPhone Settings to allow microphone and speech recognition access.",
+        ),
       );
     },
     insert: () => {
