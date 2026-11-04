@@ -2506,6 +2506,9 @@ impl AgentSummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestSummary {
+    pub status: String,
+    pub code: String,
+    pub review_path: String,
     pub request_id: String,
     pub agent: String,
     pub agent_id: Option<String>,
@@ -2523,7 +2526,21 @@ pub fn request_summary(
     row: &AssistantAcknowledgement,
     agent: Option<&AssistantAgent>,
 ) -> RequestSummary {
+    let presentation = super::assistant_acknowledgement_service::refusal(row);
     RequestSummary {
+        status: presentation["status"]
+            .as_str()
+            .unwrap_or("unavailable")
+            .into(),
+        code: presentation["code"]
+            .as_str()
+            .unwrap_or("acknowledgement_unavailable")
+            .into(),
+        review_path: super::assistant_links::AssistantPage::ReviewCard {
+            conversation: &row.conversation_id,
+            card: &row.id,
+        }
+        .path(),
         request_id: row.id.clone(),
         agent: agent.map(|agent| agent.name.clone()).unwrap_or_default(),
         agent_id: agent.map(|agent| agent.id.clone()),

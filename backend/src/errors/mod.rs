@@ -1722,7 +1722,7 @@ impl AppError {
                     approve_url,
                     ..
                 } => {
-                    format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
+                    format!("Approval failed: {reason}. Review the approval request and its history at {approve_url}")
                 }
                 AppError::SkillDraftValidation(diagnostic)
                     if diagnostic.rule == "ornn_format_rejected" && diagnostic.ornn_rules.is_empty() =>
@@ -3361,7 +3361,7 @@ mod tests {
         assert_eq!(json["approve_url"], "https://app.example.com/approvals");
         assert_eq!(
             json["message"],
-            "Approval failed: rejected. Review pending approvals at https://app.example.com/approvals"
+            "Approval failed: rejected. Review the approval request and its history at https://app.example.com/approvals"
         );
     }
 

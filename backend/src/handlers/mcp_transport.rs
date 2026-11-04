@@ -2774,14 +2774,18 @@ async fn dispatch_tools_call(
         };
         match Box::pin(gate).await {
             Ok(Some(refusal)) => {
-                return tool_result(request.id.clone(), &refusal.to_string(), true);
-            }
-            Err(_) => {
                 return tool_result(
                     request.id.clone(),
-                    "Confirmation could not be checked",
+                    &crate::services::assistant_access_policy::with_frontend(
+                        refusal,
+                        &state.config.frontend_url,
+                    )
+                    .to_string(),
                     true,
                 );
+            }
+            Err(_) => {
+                return tool_result(request.id.clone(), &acks::unavailable().to_string(), true);
             }
             Ok(None) => {}
         }
@@ -3706,10 +3710,10 @@ async fn authorize_mcp_operation(
         pending.resolution.from_org_policy,
     )
     .await
-    .map_err(|e| {
+    .map_err(|_| {
         tool_result(
             request_id.clone(),
-            &format!("Approval request failed: {e}"),
+            &serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string(),
             true,
         )
     })?;
@@ -3718,12 +3722,9 @@ async fn authorize_mcp_operation(
     approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
         .await
         .map_err(|error| {
-            let mapped = approval_service::map_wait_for_decision_error(
-                error,
-                &req_id,
-                &state.config.frontend_url,
-            );
-            tool_result(request_id.clone(), &format!("{mapped}"), true)
+            let outcome =
+                approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
+            tool_result(request_id.clone(), &outcome.to_string(), true)
         })?;
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
@@ -4126,7 +4127,11 @@ async fn webhook_service_gate(
         {
             return Ok::<_, crate::errors::AppError>(Err(tool_result(
                 request_id.clone(),
-                &refusal.to_string(),
+                &crate::services::assistant_access_policy::with_frontend(
+                    refusal,
+                    &state.config.frontend_url,
+                )
+                .to_string(),
                 true,
             )));
         }
@@ -4136,7 +4141,7 @@ async fn webhook_service_gate(
         Ok(result) => result,
         Err(_) => Err(tool_result(
             request_id,
-            "Confirmation could not be checked",
+            &acks::unavailable().to_string(),
             true,
         )),
     }

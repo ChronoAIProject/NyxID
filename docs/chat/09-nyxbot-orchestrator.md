@@ -188,6 +188,20 @@ when present, and granted calls add no maintainer reads. Ordinary action
 confirmations still belong to the acting person and do not expand grants or
 allow an organization agent to access the person's account.
 
+Card locations and outcomes (#2072): a specialist, crew, collaboration member or
+channel assignment keeps the card in its source conversation. `report_to`
+routes the notification, not the card or authority. Request summaries (including
+`wait_for_subagents`) expose the current presentation `status`, stable `code`,
+and exact `review_path`; routed creation notices include the full owner-review
+URL and explicitly are not evidence that a request is still pending. The owner
+can open that link even when viewing NyxBot's receiving conversation. Existing
+history authorization, live routing/membership checks, guest restrictions,
+one-use consumption and Full-access receipts remain unchanged. If the request
+expired or failed, report that outcome and ask before creating a fresh one;
+never tell the owner to click an invisible or terminal Allow/Deny card. Proxy
+approvals link to `/assistant/approvals`, not to a specialist's owner-action
+card. See the engine's Acknowledgements section for history and expiry behavior.
+
 ### Specialist skill permission decisions
 
 Skill permission is advisory: allowing `request_agent_skills` does not attach

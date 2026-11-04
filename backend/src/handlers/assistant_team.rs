@@ -646,8 +646,13 @@ pub(crate) async fn permission_requested(
         ),
         _ => "read-only account access".into(),
     };
+    let review = crate::services::assistant_links::AssistantPage::ReviewCard {
+        conversation: &request.conversation_id,
+        card: &request.id,
+    }
+    .url(&state.config.frontend_url);
     let note = format!(
-        "Specialist {} requests {target_name} (request_id {}). It was working on: {} \
+        "Specialist {} requested {target_name} (request_id {}). Owner review: {review}. This notice records creation, not current pending status; check pending_requests before describing it as waiting. It was working on: {} \
         Decide with nyxid__decide_permission: allow only what the user's request needs.",
         identifier(&chat.agent_name),
         request.id,
