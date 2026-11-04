@@ -146,7 +146,10 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
             crate::models::voice_responses::ResponsesState::Disabled
         ));
         assert!(legacy.client_key.is_none());
-        assert_eq!(legacy.created_at, call.created_at);
+        assert_eq!(
+            legacy.created_at.timestamp_millis(),
+            call.created_at.timestamp_millis()
+        );
         let other = session::admit(
             db,
             &call.user_id,
