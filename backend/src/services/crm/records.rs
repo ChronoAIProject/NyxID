@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::time::Duration as StdDuration;
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
@@ -22,9 +23,10 @@ use crate::models::{
     crm_record::{COLLECTION_NAME as RECORDS, CrmActor, CrmRecord},
 };
 
-use super::{fields, objects, validation_result};
+use super::{fields, validation_result};
 
 const RECEIPT_TTL_DAYS: i64 = 7;
+const QUERY_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const GENERIC_LINK_ERROR: &str =
     "one or more related records are unavailable for this owner and object type";
 
@@ -123,14 +125,14 @@ pub fn receipt_context<T: Serialize>(
             "must contain 1 to 128 visible ASCII characters",
         ));
     }
-    let canonical = serde_json::json!({
+    let canonical = crate::services::mcp_service::canonical_json(serde_json::json!({
         "method": method,
         "route": route_template,
         "path": path_ids.iter().copied().collect::<BTreeMap<_, _>>(),
         "owner_id": owner_id,
         "actor_id": actor_id,
         "body": serde_json::to_value(body).map_err(|error| AppError::Internal(error.to_string()))?,
-    });
+    }));
     let request_digest = hex::encode(Sha256::digest(
         serde_json::to_vec(&canonical).expect("canonical mutation input is serializable"),
     ));
@@ -171,7 +173,6 @@ pub async fn create(
     input: CreateRecordInput,
     receipt: Option<ReceiptContext>,
 ) -> AppResult<RecordResponse> {
-    objects::ensure_seeded(db, owner_id).await?;
     let context = (
         db.clone(),
         owner_id.to_owned(),
@@ -184,6 +185,7 @@ pub async fn create(
         &context,
         |tx, (db, owner, actor, input, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return response_from_value(response);
                 }
@@ -255,6 +257,7 @@ pub async fn patch(
         &context,
         |tx, (db, owner, record_id, actor, input, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return response_from_value(response);
                 }
@@ -354,6 +357,7 @@ pub async fn set_archived(
         &context,
         |tx, (db, owner, record_id, actor, input, archived, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return response_from_value(response);
                 }
@@ -435,6 +439,7 @@ pub async fn move_stage(
         &context,
         |tx, (db, owner, record_id, actor, input, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return response_from_value(response);
                 }
@@ -833,7 +838,81 @@ pub(crate) async fn hydrate_record(
     record: &CrmRecord,
     tx: &mut ClientSession,
 ) -> AppResult<RecordResponse> {
-    let object = object_in_session(db, &record.owner_id, &record.object_key, tx).await?;
+    hydrate_records(db, std::slice::from_ref(record), tx)
+        .await?
+        .pop()
+        .ok_or_else(|| AppError::Internal("CRM record hydration returned no row".into()))
+}
+
+pub(crate) async fn hydrate_records(
+    db: &Database,
+    records: &[CrmRecord],
+    tx: &mut ClientSession,
+) -> AppResult<Vec<RecordResponse>> {
+    let Some(first) = records.first() else {
+        return Ok(vec![]);
+    };
+    if records
+        .iter()
+        .any(|record| record.owner_id != first.owner_id)
+    {
+        return Err(AppError::Internal(
+            "CRM record hydration crossed owner boundaries".into(),
+        ));
+    }
+    let objects: Vec<CrmObject> = db
+        .collection(crate::models::crm_object::COLLECTION_NAME)
+        .find(doc! {"owner_id": &first.owner_id})
+        .max_time(QUERY_TIMEOUT)
+        .session(&mut *tx)
+        .await?
+        .stream(&mut *tx)
+        .try_collect()
+        .await?;
+    let objects: HashMap<_, _> = objects
+        .into_iter()
+        .map(|object| (object.key.clone(), object))
+        .collect();
+    let target_ids: Vec<String> = records
+        .iter()
+        .flat_map(|record| record.refs.values())
+        .filter_map(Bson::as_array)
+        .flatten()
+        .filter_map(Bson::as_str)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let targets: Vec<CrmRecord> = if target_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<CrmRecord>(RECORDS)
+            .find(doc! {"_id": {"$in": &target_ids}, "owner_id": &first.owner_id})
+            .max_time(QUERY_TIMEOUT)
+            .session(&mut *tx)
+            .await?
+            .stream(&mut *tx)
+            .try_collect()
+            .await?
+    };
+    let targets: HashMap<_, _> = targets
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect();
+    records
+        .iter()
+        .map(|record| hydrate_loaded_record(record, &objects, &targets))
+        .collect()
+}
+
+fn hydrate_loaded_record(
+    record: &CrmRecord,
+    objects: &HashMap<String, CrmObject>,
+    target_rows: &HashMap<String, CrmRecord>,
+) -> AppResult<RecordResponse> {
+    let object = objects
+        .get(&record.object_key)
+        .ok_or_else(|| AppError::NotFound("CRM object not found".into()))?;
     let mut values = BTreeMap::new();
     for field in &object.fields {
         if matches!(field.kind, CrmFieldKind::Record { .. }) {
@@ -860,28 +939,16 @@ pub(crate) async fn hydrate_record(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let target_object = object_in_session(db, &record.owner_id, target, tx).await?;
+        let target_object = objects
+            .get(target)
+            .ok_or_else(|| AppError::NotFound("CRM object not found".into()))?;
         let label_field = target_object.fields.iter().find(|candidate| {
             candidate.required && matches!(candidate.kind, CrmFieldKind::Text { .. })
         });
-        let rows: Vec<CrmRecord> = if ids.is_empty() {
-            vec![]
-        } else {
-            db.collection::<CrmRecord>(RECORDS)
-                .find(
-                    doc! {"_id": {"$in": &ids}, "owner_id": &record.owner_id, "object_key": target},
-                )
-                .session(&mut *tx)
-                .await?
-                .stream(&mut *tx)
-                .try_collect()
-                .await?
-        };
-        let by_id: HashMap<_, _> = rows.into_iter().map(|row| (row.id.clone(), row)).collect();
         let projected = ids
             .into_iter()
             .map(|id| {
-                let row = by_id.get(&id);
+                let row = target_rows.get(&id).filter(|row| row.object_key == *target);
                 let archived = row.is_some_and(|row| row.archived_at.is_some());
                 let label = if archived {
                     "(archived)".into()
@@ -1084,6 +1151,7 @@ where
         &context,
         |tx, (db, receipt, response)| {
             Box::pin(async move {
+                super::fence_owner(db, &receipt.owner_id, tx).await?;
                 if let Some(stored) = receipt_in_session(db, Some(receipt), tx).await? {
                     return Ok(stored);
                 }
@@ -1106,6 +1174,7 @@ fn response_from_value(value: Value) -> AppResult<RecordResponse> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::crm::objects;
     use serde_json::json;
 
     #[test]
@@ -1442,7 +1511,7 @@ mod tests {
         assert_eq!(current["key"], "company");
         assert_eq!(current["schema_revision"], 1);
 
-        objects::patch_field(
+        let company = objects::patch_field(
             &db,
             &owner,
             "company",
@@ -1458,6 +1527,14 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(!company.default_columns.iter().any(|key| key == "domain"));
+        let domain = company
+            .fields
+            .iter()
+            .find(|field| field.key == "domain")
+            .unwrap();
+        assert!(domain.archived);
+        assert!(!domain.required);
         let archived = create(
             &db,
             &owner,

@@ -1,5 +1,4 @@
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -11,6 +10,7 @@ use mongodb::{
 use regex::escape;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::errors::{AppError, AppResult, CrmValidationIssue};
 use crate::models::{
@@ -18,7 +18,7 @@ use crate::models::{
     crm_record::{COLLECTION_NAME as RECORDS, CrmRecord},
 };
 
-use super::records::{RecordResponse, hydrate_record};
+use super::records::{RecordResponse, hydrate_records};
 use super::{fields, objects, objects::ObjectApi, validation_result};
 
 const MAX_FILTERS: usize = 20;
@@ -26,6 +26,7 @@ const MAX_PAGE_SIZE: u32 = 200;
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_GROUPS: usize = 50;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -61,7 +62,7 @@ pub struct CrmSort {
     pub direction: SortDirection,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDirection {
     Asc,
@@ -80,7 +81,7 @@ pub struct CrmAggregateQuery {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AggregateMeasure {
     Count,
     Sum { field: String },
@@ -119,12 +120,6 @@ pub struct AggregatePoint {
     pub label: String,
     pub value: Value,
     pub archived: bool,
-    #[serde(skip, default)]
-    count: u64,
-    #[serde(skip, default)]
-    measure_count: u64,
-    #[serde(skip, default)]
-    measure_sum: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -136,7 +131,7 @@ pub struct AggregateUnit {
 
 pub async fn table(db: &Database, owner_id: &str, query: &CrmTableQuery) -> AppResult<TableResult> {
     let validated = validate_table(db, owner_id, query).await?;
-    let offset = decode_cursor(query.cursor.as_deref())?;
+    let cursor = decode_table_cursor(query)?;
     let total_count = db
         .collection::<CrmRecord>(RECORDS)
         .count_documents(validated.filter.clone())
@@ -153,11 +148,15 @@ pub async fn table(db: &Database, owner_id: &str, query: &CrmTableQuery) -> AppR
         );
     }
     sort.insert("_id", 1);
+    let filter = if let Some(cursor) = &cursor {
+        doc! {"$and": [validated.filter.clone(), keyset_filter(query, cursor)?]}
+    } else {
+        validated.filter.clone()
+    };
     let mut records: Vec<CrmRecord> = db
         .collection::<CrmRecord>(RECORDS)
-        .find(validated.filter)
+        .find(filter)
         .sort(sort)
-        .skip(offset)
         .limit(i64::from(query.page_size) + 1)
         .max_time(QUERY_TIMEOUT)
         .await?
@@ -165,24 +164,27 @@ pub async fn table(db: &Database, owner_id: &str, query: &CrmTableQuery) -> AppR
         .await?;
     let has_more = records.len() > query.page_size as usize;
     records.truncate(query.page_size as usize);
+    let next_cursor = has_more
+        .then(|| records.last())
+        .flatten()
+        .map(|record| encode_table_cursor(query, record))
+        .transpose()?;
     let selected: Option<HashSet<&str>> = query
         .select
         .as_ref()
         .map(|fields| fields.iter().map(String::as_str).collect());
     let mut session = db.client().start_session().await?;
-    let mut rows = Vec::with_capacity(records.len());
-    for record in records {
-        let mut row = hydrate_record(db, &record, &mut session).await?;
+    let mut rows = hydrate_records(db, &records, &mut session).await?;
+    for row in &mut rows {
         if let Some(selected) = &selected {
             row.values.retain(|key, _| selected.contains(key.as_str()));
             row.links.retain(|key, _| selected.contains(key.as_str()));
         }
-        rows.push(row);
     }
     Ok(TableResult {
         object: validated.object.into(),
         rows,
-        next_cursor: has_more.then(|| encode_cursor(offset + u64::from(query.page_size))),
+        next_cursor,
         total_count,
     })
 }
@@ -193,7 +195,7 @@ pub async fn aggregate(
     query: &CrmAggregateQuery,
 ) -> AppResult<AggregateResult> {
     let validated = validate_aggregate(db, owner_id, query).await?;
-    let (accumulator, unit) = measure_accumulator(&validated.object, &query.measure)?;
+    let (_, unit) = measure_accumulator(&validated.object, &query.measure)?;
     let group_id = match &query.group_by {
         Some(key) => {
             let field = field(&validated.object, key).expect("validated group field");
@@ -205,65 +207,84 @@ pub async fn aggregate(
         }
         None => Bson::Null,
     };
-    let mut group = doc! {"_id": group_id, "value": accumulator, "count": {"$sum": 1_i64}};
-    if matches!(query.measure, AggregateMeasure::Avg { .. }) {
-        if let Some(measure_field) = measure_field(&query.measure) {
-            group.insert("sum", doc! {"$sum": format!("$values.{measure_field}")});
-            group.insert(
-                "measure_count",
-                doc! {"$sum": {"$cond": [
-                    {"$ne": [{"$type": format!("$values.{measure_field}")}, "missing"]},
-                    1_i64,
-                    0_i64,
-                ]}},
-            );
-        }
-    }
-    let pipeline = vec![
+    let mut pipeline = vec![
         doc! {"$match": validated.filter.clone()},
-        doc! {"$group": group},
+        doc! {"$group": aggregate_group(&validated.object, &query.measure, group_id)?},
     ];
-    let raw_points: Vec<Document> = db
+    append_group_labels(
+        db,
+        owner_id,
+        &validated.object,
+        query.group_by.as_deref(),
+        &mut pipeline,
+    )
+    .await?;
+    if matches!(query.order, AggregateOrder::ValueDesc) {
+        pipeline.push(doc! {"$set": {
+            "sort_value": aggregate_value_expression(&query.measure),
+        }});
+    }
+    pipeline.push(doc! {"$sort": aggregate_sort(query)});
+    pipeline.push(doc! {"$facet": {
+        "points": [{"$limit": MAX_GROUPS as i64}],
+        "remainder": [
+            {"$skip": MAX_GROUPS as i64},
+            {"$group": aggregate_summary_group(&query.measure, true)},
+        ],
+        "total": [
+            {"$group": aggregate_summary_group(&query.measure, false)},
+        ],
+    }});
+    let result = db
         .collection::<CrmRecord>(RECORDS)
         .aggregate(pipeline)
         .max_time(QUERY_TIMEOUT)
         .await?
-        .try_collect()
-        .await?;
-    let total = aggregate_total(db, &validated.filter, &query.measure, &unit).await?;
-    let mut points = Vec::with_capacity(raw_points.len());
-    for raw in raw_points {
-        let key = raw.get("_id").cloned().unwrap_or(Bson::Null);
-        let count = bson_u64(raw.get("count")).unwrap_or(0);
-        let raw_value = raw.get("value").cloned().unwrap_or(Bson::Null);
-        let value = format_measure_value(&raw_value, &unit, &query.measure);
-        let measure_count = bson_u64(raw.get("measure_count")).unwrap_or(0);
-        let measure_sum = raw.get("sum").map(bson_json);
-        let (label, archived) = group_label(
-            db,
-            owner_id,
-            &validated.object,
-            query.group_by.as_deref(),
-            &key,
-        )
-        .await?;
+        .try_next()
+        .await?
+        .ok_or_else(|| AppError::Internal("CRM aggregate returned no facet result".into()))?;
+    let raw_points = result
+        .get_array("points")
+        .map_err(|_| AppError::Internal("CRM aggregate points are invalid".into()))?;
+    let mut points = raw_points
+        .iter()
+        .map(|point| {
+            point
+                .as_document()
+                .ok_or_else(|| AppError::Internal("CRM aggregate point is invalid".into()))
+                .and_then(|point| aggregate_point(point, &query.measure, &unit))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let remainder = result
+        .get_array("remainder")
+        .ok()
+        .and_then(|rows| rows.first())
+        .and_then(Bson::as_document);
+    let truncated = remainder.is_some_and(|row| bson_u64(row.get("group_count")).unwrap_or(0) > 0);
+    if let Some(remainder) = remainder.filter(|_| truncated) {
         points.push(AggregatePoint {
-            key: bson_json(&key),
-            label,
-            value,
-            archived,
-            count,
-            measure_count,
-            measure_sum,
+            key: json!("__other__"),
+            label: "Other".into(),
+            value: aggregate_output(remainder, &query.measure, &unit)?,
+            archived: false,
         });
     }
-    sort_points(&mut points, &validated.object, query)?;
-    let truncated = points.len() > MAX_GROUPS;
-    if truncated {
-        let remainder = points.split_off(MAX_GROUPS);
-        let other = combine_other(remainder, &query.measure, &unit);
-        points.push(other);
-    }
+    let total_row = result
+        .get_array("total")
+        .ok()
+        .and_then(|rows| rows.first())
+        .and_then(Bson::as_document);
+    let total = match total_row {
+        Some(row) => aggregate_output(row, &query.measure, &unit)?,
+        None if matches!(
+            query.measure,
+            AggregateMeasure::Count | AggregateMeasure::Sum { .. }
+        ) =>
+        {
+            json!(0)
+        }
+        None => Value::Null,
+    };
     Ok(AggregateResult {
         points,
         unit,
@@ -339,10 +360,12 @@ async fn validate_table(
             Some(_) => {}
         }
     }
-    if let Some(cursor) = query.cursor.as_deref()
-        && decode_cursor(Some(cursor)).is_err()
-    {
-        errors.push(issue("cursor", "is invalid"));
+    match decode_table_cursor(query) {
+        Ok(Some(cursor)) if !cursor_matches_query(&object, query, &cursor) => {
+            errors.push(issue("cursor", "is invalid"));
+        }
+        Err(_) => errors.push(issue("cursor", "is invalid")),
+        _ => {}
     }
     validation_result(errors)?;
     let filter = build_filter(owner_id, &object, &query.filters, query.include_archived)?;
@@ -497,6 +520,386 @@ fn build_filter(
     Ok(doc! {"$and": clauses})
 }
 
+fn aggregate_group(
+    object: &CrmObject,
+    measure: &AggregateMeasure,
+    group_id: Bson,
+) -> AppResult<Document> {
+    let mut group = doc! {
+        "_id": group_id,
+        "count": {"$sum": 1_i64},
+    };
+    let Some(field_key) = measure_field(measure) else {
+        return Ok(group);
+    };
+    let metadata = field(object, field_key).expect("measure field was validated");
+    let path = format!("$values.{field_key}");
+    let present = doc! {"$and": [
+        {"$ne": [{"$type": &path}, "missing"]},
+        {"$ne": [&path, Bson::Null]},
+    ]};
+    let numeric = if matches!(metadata.kind, CrmFieldKind::Currency { .. }) {
+        Bson::Document(doc! {"$toDecimal": &path})
+    } else {
+        Bson::String(path)
+    };
+    let zero = if matches!(metadata.kind, CrmFieldKind::Currency { .. }) {
+        Bson::Document(doc! {"$toDecimal": 0_i64})
+    } else {
+        Bson::Double(0.0)
+    };
+    let present_numeric = Bson::Document(doc! {"$cond": [present.clone(), numeric.clone(), zero]});
+    match measure {
+        AggregateMeasure::Sum { .. } => {
+            group.insert("sum", doc! {"$sum": present_numeric});
+        }
+        AggregateMeasure::Avg { .. } => {
+            group.insert("sum", doc! {"$sum": present_numeric});
+            group.insert(
+                "measure_count",
+                doc! {"$sum": {"$cond": [present, 1_i64, 0_i64]}},
+            );
+        }
+        AggregateMeasure::Min { .. } => {
+            group.insert(
+                "value",
+                doc! {"$min": {"$cond": [present, numeric, Bson::Null]}},
+            );
+        }
+        AggregateMeasure::Max { .. } => {
+            group.insert(
+                "value",
+                doc! {"$max": {"$cond": [present, numeric, Bson::Null]}},
+            );
+        }
+        AggregateMeasure::Count => {}
+    }
+    Ok(group)
+}
+
+async fn append_group_labels(
+    db: &Database,
+    owner_id: &str,
+    object: &CrmObject,
+    group_by: Option<&str>,
+    pipeline: &mut Vec<Document>,
+) -> AppResult<()> {
+    let Some(group_by) = group_by else {
+        pipeline.push(doc! {"$set": {"label": "Total", "archived": false}});
+        return Ok(());
+    };
+    let field = field(object, group_by).expect("group field was validated");
+    match &field.kind {
+        CrmFieldKind::Select { options } => {
+            let label_branches: Vec<Bson> = options
+                .iter()
+                .map(|option| {
+                    Bson::Document(doc! {
+                        "case": {"$eq": ["$_id", &option.value]},
+                        "then": &option.label,
+                    })
+                })
+                .collect();
+            let archived_branches: Vec<Bson> = options
+                .iter()
+                .map(|option| {
+                    Bson::Document(doc! {
+                        "case": {"$eq": ["$_id", &option.value]},
+                        "then": option.archived,
+                    })
+                })
+                .collect();
+            let values: Vec<Bson> = options
+                .iter()
+                .map(|option| Bson::String(option.value.clone()))
+                .collect();
+            pipeline.push(doc! {"$set": {
+                "label": {"$cond": [
+                    {"$eq": ["$_id", Bson::Null]},
+                    "None",
+                    {"$switch": {
+                        "branches": label_branches,
+                        "default": {"$toString": "$_id"},
+                    }},
+                ]},
+                "archived": {"$cond": [
+                    {"$eq": ["$_id", Bson::Null]},
+                    false,
+                    {"$switch": {"branches": archived_branches, "default": true}},
+                ]},
+                "option_index": {"$cond": [
+                    {"$eq": ["$_id", Bson::Null]},
+                    i64::MAX,
+                    {"$indexOfArray": [values, "$_id"]},
+                ]},
+            }});
+        }
+        CrmFieldKind::Boolean {} => pipeline.push(doc! {"$set": {
+            "label": {"$switch": {
+                "branches": [
+                    {"case": {"$eq": ["$_id", Bson::Null]}, "then": "None"},
+                    {"case": {"$eq": ["$_id", true]}, "then": "True"},
+                ],
+                "default": "False",
+            }},
+            "archived": false,
+        }}),
+        CrmFieldKind::User {} => {
+            pipeline.push(doc! {"$lookup": {
+                "from": crate::models::user::COLLECTION_NAME,
+                "localField": "_id",
+                "foreignField": "_id",
+                "as": "label_row",
+            }});
+            pipeline.push(doc! {"$set": {
+                "label": {"$cond": [
+                    {"$eq": ["$_id", Bson::Null]},
+                    "None",
+                    {"$ifNull": [{"$arrayElemAt": ["$label_row.display_name", 0_i64]}, "Deleted user"]},
+                ]},
+                "archived": false,
+            }});
+        }
+        CrmFieldKind::Record { target, .. } => {
+            let target_object = objects::get(db, owner_id, target).await?;
+            let label_field = target_object
+                .fields
+                .iter()
+                .find(|field| field.required && matches!(field.kind, CrmFieldKind::Text { .. }))
+                .map(|field| format!("$label_row.values.{}", field.key));
+            pipeline.push(doc! {"$lookup": {
+                "from": RECORDS,
+                "let": {"group_id": "$_id"},
+                "pipeline": [
+                    {"$match": {"$expr": {"$and": [
+                        {"$eq": ["$_id", "$$group_id"]},
+                        {"$eq": ["$owner_id", owner_id]},
+                        {"$eq": ["$object_key", target]},
+                    ]}}},
+                    {"$limit": 1_i64},
+                ],
+                "as": "label_row",
+            }});
+            let live_label = label_field.map_or_else(
+                || Bson::String("(unnamed)".into()),
+                |path| {
+                    Bson::Document(doc! {"$ifNull": [
+                        {"$arrayElemAt": [path, 0_i64]},
+                        "(unnamed)",
+                    ]})
+                },
+            );
+            pipeline.push(doc! {"$set": {
+                "label": {"$cond": [
+                    {"$eq": ["$_id", Bson::Null]},
+                    "None",
+                    {"$cond": [
+                        {"$eq": [{"$size": "$label_row"}, 0_i64]},
+                        "Deleted record",
+                        {"$cond": [
+                            {"$ne": [{"$arrayElemAt": ["$label_row.archived_at", 0_i64]}, Bson::Null]},
+                            "(archived)",
+                            live_label,
+                        ]},
+                    ]},
+                ]},
+                "archived": {"$cond": [
+                    {"$eq": ["$_id", Bson::Null]},
+                    false,
+                    {"$or": [
+                        {"$eq": [{"$size": "$label_row"}, 0_i64]},
+                        {"$ne": [{"$arrayElemAt": ["$label_row.archived_at", 0_i64]}, Bson::Null]},
+                    ]},
+                ]},
+            }});
+        }
+        _ => {
+            return Err(AppError::Internal(
+                "Validated CRM aggregate group was not groupable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_value_expression(measure: &AggregateMeasure) -> Bson {
+    match measure {
+        AggregateMeasure::Count => Bson::String("$count".into()),
+        AggregateMeasure::Sum { .. } => Bson::String("$sum".into()),
+        AggregateMeasure::Avg { .. } => Bson::Document(doc! {"$cond": [
+            {"$gt": ["$measure_count", 0_i64]},
+            {"$divide": ["$sum", "$measure_count"]},
+            Bson::Null,
+        ]}),
+        AggregateMeasure::Min { .. } | AggregateMeasure::Max { .. } => {
+            Bson::String("$value".into())
+        }
+    }
+}
+
+fn aggregate_sort(query: &CrmAggregateQuery) -> Document {
+    match query.order {
+        AggregateOrder::OptionOrder => doc! {"option_index": 1_i64, "_id": 1_i64},
+        AggregateOrder::ValueDesc => {
+            doc! {"sort_value": -1_i64, "label": 1_i64, "_id": 1_i64}
+        }
+        AggregateOrder::LabelAsc => doc! {"label": 1_i64, "_id": 1_i64},
+    }
+}
+
+fn aggregate_summary_group(measure: &AggregateMeasure, group_count: bool) -> Document {
+    let mut summary = doc! {
+        "_id": Bson::Null,
+        "count": {"$sum": "$count"},
+    };
+    if group_count {
+        summary.insert("group_count", doc! {"$sum": 1_i64});
+    }
+    match measure {
+        AggregateMeasure::Count => {}
+        AggregateMeasure::Sum { .. } => {
+            summary.insert("sum", doc! {"$sum": "$sum"});
+        }
+        AggregateMeasure::Avg { .. } => {
+            summary.insert("sum", doc! {"$sum": "$sum"});
+            summary.insert("measure_count", doc! {"$sum": "$measure_count"});
+        }
+        AggregateMeasure::Min { .. } => {
+            summary.insert("value", doc! {"$min": "$value"});
+        }
+        AggregateMeasure::Max { .. } => {
+            summary.insert("value", doc! {"$max": "$value"});
+        }
+    }
+    summary
+}
+
+fn aggregate_point(
+    row: &Document,
+    measure: &AggregateMeasure,
+    unit: &AggregateUnit,
+) -> AppResult<AggregatePoint> {
+    Ok(AggregatePoint {
+        key: row.get("_id").map_or(Value::Null, bson_json),
+        label: row.get_str("label").unwrap_or("None").to_owned(),
+        value: aggregate_output(row, measure, unit)?,
+        archived: row.get_bool("archived").unwrap_or(false),
+    })
+}
+
+fn aggregate_output(
+    row: &Document,
+    measure: &AggregateMeasure,
+    unit: &AggregateUnit,
+) -> AppResult<Value> {
+    if matches!(measure, AggregateMeasure::Count) {
+        return safe_integer_output(i128::from(bson_u64(row.get("count")).unwrap_or(0)));
+    }
+    if unit.format == "currency" {
+        return match measure {
+            AggregateMeasure::Sum { .. } => exact_integer(row.get("sum"))
+                .map(safe_integer_output)
+                .unwrap_or_else(|| Ok(json!(0))),
+            AggregateMeasure::Avg { .. } => {
+                let count = bson_u64(row.get("measure_count")).unwrap_or(0);
+                if count == 0 {
+                    Ok(Value::Null)
+                } else {
+                    let sum = exact_integer(row.get("sum")).ok_or_else(|| {
+                        AppError::Internal("CRM currency aggregate sum is invalid".into())
+                    })?;
+                    safe_integer_output(round_ratio_ties_even_i128(sum, count))
+                }
+            }
+            AggregateMeasure::Min { .. } | AggregateMeasure::Max { .. } => row
+                .get("value")
+                .filter(|value| !matches!(value, Bson::Null))
+                .and_then(|value| exact_integer(Some(value)))
+                .map(safe_integer_output)
+                .unwrap_or_else(|| Ok(Value::Null)),
+            AggregateMeasure::Count => unreachable!(),
+        };
+    }
+    let value = match measure {
+        AggregateMeasure::Sum { .. } => row.get("sum"),
+        AggregateMeasure::Avg { .. } => {
+            let count = bson_u64(row.get("measure_count")).unwrap_or(0);
+            if count == 0 {
+                return Ok(Value::Null);
+            }
+            return Ok(bson_f64(row.get("sum"))
+                .map(|sum| json!(sum / count as f64))
+                .unwrap_or(Value::Null));
+        }
+        AggregateMeasure::Min { .. } | AggregateMeasure::Max { .. } => row.get("value"),
+        AggregateMeasure::Count => unreachable!(),
+    };
+    Ok(value
+        .and_then(|value| bson_f64(Some(value)))
+        .map_or(Value::Null, |value| json!(value)))
+}
+
+fn exact_integer(value: Option<&Bson>) -> Option<i128> {
+    match value {
+        Some(Bson::Int32(value)) => Some(i128::from(*value)),
+        Some(Bson::Int64(value)) => Some(i128::from(*value)),
+        Some(Bson::Decimal128(value)) => parse_decimal_integer(&value.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_decimal_integer(value: &str) -> Option<i128> {
+    let (mantissa, exponent) = if let Some((mantissa, exponent)) = value.split_once(['e', 'E']) {
+        (mantissa, exponent.parse().ok()?)
+    } else {
+        (value, 0_i32)
+    };
+    let negative = mantissa.starts_with('-');
+    let unsigned = mantissa.trim_start_matches(['-', '+']);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let mut digits = format!("{whole}{fraction}");
+    let scale = i32::try_from(fraction.len()).ok()? - exponent;
+    if scale > 0 {
+        let scale = usize::try_from(scale).ok()?;
+        if scale > digits.len() || !digits[digits.len() - scale..].bytes().all(|b| b == b'0') {
+            return None;
+        }
+        digits.truncate(digits.len() - scale);
+    } else if scale < 0 {
+        digits.extend(std::iter::repeat_n('0', usize::try_from(-scale).ok()?));
+    }
+    if digits.is_empty() {
+        digits.push('0');
+    }
+    let parsed = digits.parse::<i128>().ok()?;
+    Some(if negative { -parsed } else { parsed })
+}
+
+fn safe_integer_output(value: i128) -> AppResult<Value> {
+    if value.abs() > MAX_SAFE_INTEGER {
+        Err(super::validation_error(
+            "aggregate",
+            "result exceeds the maximum safe integer 9007199254740991",
+        ))
+    } else {
+        Ok(Value::from(value as i64))
+    }
+}
+
+fn round_ratio_ties_even_i128(sum: i128, count: u64) -> i128 {
+    let count = i128::from(count);
+    let quotient = sum / count;
+    let remainder = sum % count;
+    let twice_remainder = remainder.abs() * 2;
+    if twice_remainder < count || (twice_remainder == count && quotient % 2 == 0) {
+        quotient
+    } else if sum.is_negative() {
+        quotient - 1
+    } else {
+        quotient + 1
+    }
+}
+
 fn measure_accumulator(
     object: &CrmObject,
     measure: &AggregateMeasure,
@@ -534,261 +937,6 @@ fn measure_accumulator(
             Ok((doc! {operator: format!("$values.{field_key}")}.into(), unit))
         }
     }
-}
-
-async fn aggregate_total(
-    db: &Database,
-    filter: &Document,
-    measure: &AggregateMeasure,
-    unit: &AggregateUnit,
-) -> AppResult<Value> {
-    let accumulator = match measure {
-        AggregateMeasure::Count => doc! {"$sum": 1_i64},
-        AggregateMeasure::Sum { field } => doc! {"$sum": format!("$values.{field}")},
-        AggregateMeasure::Avg { field } => doc! {"$avg": format!("$values.{field}")},
-        AggregateMeasure::Min { field } => doc! {"$min": format!("$values.{field}")},
-        AggregateMeasure::Max { field } => doc! {"$max": format!("$values.{field}")},
-    };
-    let row = db
-        .collection::<CrmRecord>(RECORDS)
-        .aggregate(vec![
-            doc! {"$match": filter},
-            doc! {"$group": {"_id": Bson::Null, "value": accumulator}},
-        ])
-        .max_time(QUERY_TIMEOUT)
-        .await?
-        .try_next()
-        .await?;
-    let value = row
-        .as_ref()
-        .and_then(|row| row.get("value"))
-        .cloned()
-        .unwrap_or_else(|| match measure {
-            AggregateMeasure::Count | AggregateMeasure::Sum { .. } => Bson::Int64(0),
-            _ => Bson::Null,
-        });
-    let currency_measure =
-        unit.format == "currency" && matches!(measure, AggregateMeasure::Avg { .. });
-    Ok(if currency_measure {
-        round_numeric_json(&value)
-    } else {
-        bson_json(&value)
-    })
-}
-
-fn format_measure_value(value: &Bson, unit: &AggregateUnit, measure: &AggregateMeasure) -> Value {
-    if unit.format == "currency" && matches!(measure, AggregateMeasure::Avg { .. }) {
-        round_numeric_json(value)
-    } else {
-        bson_json(value)
-    }
-}
-
-fn round_numeric_json(value: &Bson) -> Value {
-    bson_f64(Some(value))
-        .map(|value| json!(value.round_ties_even() as i64))
-        .unwrap_or(Value::Null)
-}
-
-async fn group_label(
-    db: &Database,
-    owner_id: &str,
-    object: &CrmObject,
-    group_by: Option<&str>,
-    key: &Bson,
-) -> AppResult<(String, bool)> {
-    if key == &Bson::Null {
-        return Ok(("None".into(), false));
-    }
-    let Some(group_by) = group_by else {
-        return Ok(("Total".into(), false));
-    };
-    let field = field(object, group_by).expect("group field was validated");
-    match &field.kind {
-        CrmFieldKind::Select { options } => {
-            let value = key.as_str().unwrap_or_default();
-            Ok(options
-                .iter()
-                .find(|option| option.value == value)
-                .map(|option| (option.label.clone(), option.archived))
-                .unwrap_or_else(|| (value.to_owned(), true)))
-        }
-        CrmFieldKind::Boolean {} => Ok((
-            if key.as_bool().unwrap_or(false) {
-                "True"
-            } else {
-                "False"
-            }
-            .into(),
-            false,
-        )),
-        CrmFieldKind::User {} => {
-            let id = key.as_str().unwrap_or_default();
-            let user = db
-                .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
-                .find_one(doc! {"_id": id, "user_type": "person"})
-                .await?;
-            Ok((
-                user.and_then(|user| user.display_name)
-                    .unwrap_or_else(|| "Deleted user".into()),
-                false,
-            ))
-        }
-        CrmFieldKind::Record { target, .. } => {
-            let id = key.as_str().unwrap_or_default();
-            let record = db
-                .collection::<CrmRecord>(RECORDS)
-                .find_one(doc! {"_id": id, "owner_id": owner_id, "object_key": target})
-                .await?;
-            let Some(record) = record else {
-                return Ok(("Deleted record".into(), true));
-            };
-            if record.archived_at.is_some() {
-                return Ok(("(archived)".into(), true));
-            }
-            let target_object = objects::get(db, owner_id, target).await?;
-            let label = target_object
-                .fields
-                .iter()
-                .find(|field| field.required && matches!(field.kind, CrmFieldKind::Text { .. }))
-                .and_then(|field| record.values.get_str(&field.key).ok())
-                .unwrap_or("(unnamed)")
-                .to_owned();
-            Ok((label, false))
-        }
-        _ => Ok((bson_json(key).to_string(), false)),
-    }
-}
-
-fn sort_points(
-    points: &mut [AggregatePoint],
-    object: &CrmObject,
-    query: &CrmAggregateQuery,
-) -> AppResult<()> {
-    match query.order {
-        AggregateOrder::LabelAsc => points.sort_by(|left, right| left.label.cmp(&right.label)),
-        AggregateOrder::ValueDesc => points.sort_by(|left, right| {
-            json_f64(&right.value)
-                .partial_cmp(&json_f64(&left.value))
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| left.label.cmp(&right.label))
-        }),
-        AggregateOrder::OptionOrder => {
-            let field = field(
-                object,
-                query.group_by.as_deref().expect("validated option order"),
-            )
-            .expect("validated option field");
-            let CrmFieldKind::Select { options } = &field.kind else {
-                return Err(AppError::Internal(
-                    "Validated option order is not a select".into(),
-                ));
-            };
-            let positions: HashMap<&str, usize> = options
-                .iter()
-                .enumerate()
-                .map(|(index, option)| (option.value.as_str(), index))
-                .collect();
-            points.sort_by_key(|point| {
-                point
-                    .key
-                    .as_str()
-                    .and_then(|key| positions.get(key).copied())
-                    .unwrap_or(usize::MAX)
-            });
-        }
-    }
-    Ok(())
-}
-
-fn combine_other(
-    points: Vec<AggregatePoint>,
-    measure: &AggregateMeasure,
-    unit: &AggregateUnit,
-) -> AggregatePoint {
-    let count: u64 = points.iter().map(|point| point.count).sum();
-    let values: Vec<f64> = points.iter().map(|point| json_f64(&point.value)).collect();
-    let value = match measure {
-        AggregateMeasure::Count | AggregateMeasure::Sum { .. } => {
-            if unit.format == "number" {
-                let sum: f64 = values.iter().sum();
-                json!(sum)
-            } else {
-                integer_sum(points.iter().map(|point| &point.value))
-            }
-        }
-        AggregateMeasure::Avg { .. } => {
-            let measure_count: u64 = points.iter().map(|point| point.measure_count).sum();
-            if measure_count == 0 {
-                Value::Null
-            } else if unit.format == "currency" {
-                let sum = points
-                    .iter()
-                    .filter_map(|point| point.measure_sum.as_ref())
-                    .filter_map(Value::as_i64)
-                    .map(i128::from)
-                    .sum::<i128>();
-                round_ratio_ties_even(sum, measure_count)
-            } else {
-                let sum: f64 = points
-                    .iter()
-                    .filter_map(|point| point.measure_sum.as_ref())
-                    .map(json_f64)
-                    .sum();
-                json!(sum / measure_count as f64)
-            }
-        }
-        AggregateMeasure::Min { .. } if unit.format == "currency" => points
-            .iter()
-            .filter_map(|point| point.value.as_i64())
-            .min()
-            .map_or(Value::Null, Value::from),
-        AggregateMeasure::Max { .. } if unit.format == "currency" => points
-            .iter()
-            .filter_map(|point| point.value.as_i64())
-            .max()
-            .map_or(Value::Null, Value::from),
-        AggregateMeasure::Min { .. } => values
-            .into_iter()
-            .reduce(f64::min)
-            .map_or(Value::Null, Value::from),
-        AggregateMeasure::Max { .. } => values
-            .into_iter()
-            .reduce(f64::max)
-            .map_or(Value::Null, Value::from),
-    };
-    AggregatePoint {
-        key: json!("__other__"),
-        label: "Other".into(),
-        value,
-        archived: false,
-        count,
-        measure_count: 0,
-        measure_sum: None,
-    }
-}
-
-fn integer_sum<'a>(values: impl Iterator<Item = &'a Value>) -> Value {
-    let sum = values
-        .filter_map(Value::as_i64)
-        .map(i128::from)
-        .sum::<i128>();
-    i64::try_from(sum).map_or(Value::Null, Value::from)
-}
-
-fn round_ratio_ties_even(sum: i128, count: u64) -> Value {
-    let count = i128::from(count);
-    let quotient = sum / count;
-    let remainder = sum % count;
-    let twice_remainder = remainder.abs() * 2;
-    let rounded = if twice_remainder < count || (twice_remainder == count && quotient % 2 == 0) {
-        quotient
-    } else if sum.is_negative() {
-        quotient - 1
-    } else {
-        quotient + 1
-    };
-    i64::try_from(rounded).map_or(Value::Null, Value::from)
 }
 
 fn field<'a>(object: &'a CrmObject, key: &str) -> Option<&'a CrmField> {
@@ -840,10 +988,6 @@ fn bson_f64(value: Option<&Bson>) -> Option<f64> {
     }
 }
 
-fn json_f64(value: &Value) -> f64 {
-    value.as_f64().unwrap_or(0.0)
-}
-
 fn issue(path: impl Into<String>, message: impl Into<String>) -> CrmValidationIssue {
     CrmValidationIssue {
         path: path.into(),
@@ -851,21 +995,125 @@ fn issue(path: impl Into<String>, message: impl Into<String>) -> CrmValidationIs
     }
 }
 
-fn encode_cursor(offset: u64) -> String {
-    URL_SAFE_NO_PAD.encode(offset.to_be_bytes())
+#[derive(Debug, Deserialize, Serialize)]
+struct TableCursor {
+    digest: String,
+    direction: SortDirection,
+    is_null: bool,
+    value: Option<Bson>,
+    id: String,
 }
 
-fn decode_cursor(cursor: Option<&str>) -> AppResult<u64> {
-    let Some(cursor) = cursor else {
-        return Ok(0);
+fn query_digest(query: &CrmTableQuery) -> AppResult<String> {
+    let mut canonical = query.clone();
+    canonical.cursor = None;
+    let bytes = serde_json::to_vec(&canonical)
+        .map_err(|error| AppError::Internal(format!("CRM query digest failed: {error}")))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn cursor_direction(query: &CrmTableQuery) -> SortDirection {
+    query
+        .sort
+        .as_ref()
+        .map_or(SortDirection::Asc, |sort| sort.direction)
+}
+
+fn encode_table_cursor(query: &CrmTableQuery, record: &CrmRecord) -> AppResult<String> {
+    let value = query
+        .sort
+        .as_ref()
+        .and_then(|sort| record.values.get(&sort.field))
+        .filter(|value| !matches!(value, Bson::Null))
+        .cloned();
+    let cursor = TableCursor {
+        digest: query_digest(query)?,
+        direction: cursor_direction(query),
+        is_null: value.is_none(),
+        value,
+        id: record.id.clone(),
+    };
+    bson::to_vec(&cursor)
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|_| super::validation_error("cursor", "is invalid"))
+}
+
+fn decode_table_cursor(query: &CrmTableQuery) -> AppResult<Option<TableCursor>> {
+    let Some(cursor) = query.cursor.as_deref() else {
+        return Ok(None);
     };
     let bytes = URL_SAFE_NO_PAD
         .decode(cursor)
         .map_err(|_| super::validation_error("cursor", "is invalid"))?;
-    let bytes: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| super::validation_error("cursor", "is invalid"))?;
-    Ok(u64::from_be_bytes(bytes))
+    let cursor: TableCursor =
+        bson::from_slice(&bytes).map_err(|_| super::validation_error("cursor", "is invalid"))?;
+    if cursor.digest != query_digest(query)?
+        || cursor.direction != cursor_direction(query)
+        || cursor.is_null != cursor.value.is_none()
+        || cursor.id.is_empty()
+    {
+        return Err(super::validation_error("cursor", "is invalid"));
+    }
+    Ok(Some(cursor))
+}
+
+fn cursor_matches_query(object: &CrmObject, query: &CrmTableQuery, cursor: &TableCursor) -> bool {
+    if uuid::Uuid::parse_str(&cursor.id).is_err() {
+        return false;
+    }
+    let Some(sort) = &query.sort else {
+        return cursor.is_null;
+    };
+    let Some(value) = cursor.value.as_ref() else {
+        return cursor.is_null;
+    };
+    let Some(field) = field(object, &sort.field) else {
+        return false;
+    };
+    match (&field.kind, value) {
+        (
+            CrmFieldKind::Text { .. } | CrmFieldKind::Date {} | CrmFieldKind::Select { .. },
+            Bson::String(_),
+        ) => true,
+        (CrmFieldKind::Number { .. }, Bson::Double(value)) => value.is_finite(),
+        (CrmFieldKind::Currency { .. }, Bson::Int64(_)) => true,
+        (CrmFieldKind::Boolean {}, Bson::Boolean(_)) => true,
+        (CrmFieldKind::Datetime {}, Bson::DateTime(_)) => true,
+        _ => false,
+    }
+}
+
+fn keyset_filter(query: &CrmTableQuery, cursor: &TableCursor) -> AppResult<Document> {
+    let Some(sort) = &query.sort else {
+        return Ok(doc! {"_id": {"$gt": &cursor.id}});
+    };
+    let path = format!("values.{}", sort.field);
+    if cursor.is_null {
+        return Ok(match sort.direction {
+            SortDirection::Asc => doc! {"$or": [
+                {&path: Bson::Null, "_id": {"$gt": &cursor.id}},
+                {&path: {"$exists": true, "$ne": Bson::Null}},
+            ]},
+            SortDirection::Desc => {
+                doc! {&path: Bson::Null, "_id": {"$gt": &cursor.id}}
+            }
+        });
+    }
+    let value = cursor
+        .value
+        .as_ref()
+        .ok_or_else(|| super::validation_error("cursor", "is invalid"))?;
+    Ok(match sort.direction {
+        SortDirection::Asc => doc! {"$or": [
+            {&path: {"$gt": value}},
+            {&path: value, "_id": {"$gt": &cursor.id}},
+        ]},
+        SortDirection::Desc => doc! {"$or": [
+            {&path: {"$lt": value}},
+            {&path: value, "_id": {"$gt": &cursor.id}},
+            {&path: Bson::Null},
+        ]},
+    })
 }
 
 #[cfg(test)]
@@ -912,57 +1160,130 @@ mod tests {
     }
 
     #[test]
-    fn cursor_round_trip_is_opaque() {
-        let cursor = encode_cursor(1234);
-        assert_eq!(decode_cursor(Some(&cursor)).unwrap(), 1234);
-        assert!(decode_cursor(Some("bad")).is_err());
+    fn table_cursor_binds_query_sort_value_null_state_and_id() {
+        let object = CrmObject {
+            id: "object".into(),
+            owner_id: "owner".into(),
+            key: "company".into(),
+            label: "Company".into(),
+            plural_label: "Companies".into(),
+            schema_revision: 1,
+            fields: vec![CrmField {
+                key: "name".into(),
+                label: "Name".into(),
+                required: true,
+                archived: false,
+                kind: CrmFieldKind::Text { max_length: 100 },
+            }],
+            pipeline: None,
+            default_columns: vec!["name".into()],
+            seeded: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut query = CrmTableQuery {
+            object: "company".into(),
+            select: None,
+            filters: vec![],
+            sort: Some(CrmSort {
+                field: "name".into(),
+                direction: SortDirection::Asc,
+            }),
+            page_size: 10,
+            cursor: None,
+            include_archived: false,
+        };
+        let record = CrmRecord {
+            id: "00000000-0000-4000-8000-000000000001".into(),
+            owner_id: "owner".into(),
+            object_id: "object".into(),
+            object_key: "company".into(),
+            revision: 1,
+            values: doc! {"name": "Acme"},
+            refs: Document::new(),
+            overrides: vec![],
+            created_by: crate::models::crm_record::CrmActor::human("owner"),
+            updated_by: crate::models::crm_record::CrmActor::human("owner"),
+            archived_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        query.cursor = Some(encode_table_cursor(&query, &record).unwrap());
+        let cursor = decode_table_cursor(&query).unwrap().unwrap();
+        assert_eq!(cursor.value, Some(Bson::String("Acme".into())));
+        assert!(!cursor.is_null);
+        assert_eq!(cursor.id, "00000000-0000-4000-8000-000000000001");
+        assert!(cursor_matches_query(&object, &query, &cursor));
+
+        let invalid_value = TableCursor {
+            value: Some(Bson::Boolean(true)),
+            ..cursor
+        };
+        assert!(!cursor_matches_query(&object, &query, &invalid_value));
+
+        query.page_size = 11;
+        assert!(decode_table_cursor(&query).is_err());
+        query.cursor = Some("bad".into());
+        assert!(decode_table_cursor(&query).is_err());
     }
 
     #[test]
     fn currency_average_uses_half_even_rounding_for_both_signs() {
-        assert_eq!(round_ratio_ties_even(5, 2), json!(2));
-        assert_eq!(round_ratio_ties_even(7, 2), json!(4));
-        assert_eq!(round_ratio_ties_even(-5, 2), json!(-2));
-        assert_eq!(round_ratio_ties_even(-7, 2), json!(-4));
+        assert_eq!(round_ratio_ties_even_i128(5, 2), 2);
+        assert_eq!(round_ratio_ties_even_i128(7, 2), 4);
+        assert_eq!(round_ratio_ties_even_i128(-5, 2), -2);
+        assert_eq!(round_ratio_ties_even_i128(-7, 2), -4);
     }
 
     #[test]
     fn truncated_currency_extrema_stay_integer_minor_units() {
-        let point = |value: i64| AggregatePoint {
-            key: json!(value),
-            label: value.to_string(),
-            value: json!(value),
-            archived: false,
-            count: 1,
-            measure_count: 0,
-            measure_sum: None,
-        };
         let unit = AggregateUnit {
             format: "currency".into(),
             currency: Some("USD".into()),
         };
         assert_eq!(
-            combine_other(
-                vec![point(9_007_199_254_740_991), point(7)],
+            aggregate_output(
+                &doc! {"value": 7_i64},
                 &AggregateMeasure::Min {
                     field: "amount".into(),
                 },
                 &unit,
             )
-            .value,
+            .unwrap(),
             json!(7)
         );
         assert_eq!(
-            combine_other(
-                vec![point(9_007_199_254_740_991), point(7)],
+            aggregate_output(
+                &doc! {"value": 9_007_199_254_740_991_i64},
                 &AggregateMeasure::Max {
                     field: "amount".into(),
                 },
                 &unit,
             )
-            .value,
+            .unwrap(),
             json!(9_007_199_254_740_991_i64)
         );
+        assert_eq!(
+            aggregate_output(
+                &doc! {"value": Bson::Null},
+                &AggregateMeasure::Min {
+                    field: "amount".into(),
+                },
+                &unit,
+            )
+            .unwrap(),
+            Value::Null
+        );
+        assert!(matches!(
+            aggregate_output(
+                &doc! {"sum": Bson::Decimal128("9007199254740992".parse().unwrap())},
+                &AggregateMeasure::Sum {
+                    field: "amount".into(),
+                },
+                &unit,
+            ),
+            Err(AppError::CrmValidationFailed(_))
+        ));
     }
 
     #[tokio::test]
@@ -974,7 +1295,7 @@ mod tests {
         let other_owner = uuid::Uuid::new_v4().to_string();
         objects::ensure_seeded(&db, &owner).await.unwrap();
         objects::ensure_seeded(&db, &other_owner).await.unwrap();
-        let options: Vec<crate::models::crm_object::CrmSelectOption> = (0..51)
+        let options: Vec<crate::models::crm_object::CrmSelectOption> = (0..52)
             .map(|index| crate::models::crm_object::CrmSelectOption {
                 value: format!("option_{index:02}"),
                 label: format!("Option {index:02}"),
@@ -1063,6 +1384,8 @@ mod tests {
                 updated_at: now,
             })
             .collect();
+        rows[50].values.insert("score", -5.0);
+        rows[51].values.remove("score");
         rows.push(CrmRecord {
             id: uuid::Uuid::new_v4().to_string(),
             owner_id: owner.clone(),
@@ -1111,22 +1434,53 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(grouped.total, json!(51));
+        assert_eq!(grouped.total, json!(52));
         assert!(grouped.truncated);
         assert_eq!(grouped.points.len(), 51);
         assert_eq!(grouped.points[0].key, json!("option_00"));
         assert_eq!(grouped.points[0].value, json!(1));
         assert!(grouped.points[0].archived);
         assert_eq!(grouped.points[50].key, json!("__other__"));
-        assert_eq!(grouped.points[50].value, json!(1));
+        assert_eq!(grouped.points[50].value, json!(2));
         assert_eq!(
             grouped
                 .points
                 .iter()
                 .map(|point| point.value.as_i64().unwrap())
                 .sum::<i64>(),
-            51
+            52
         );
+
+        for (measure, expected_total) in [
+            (
+                AggregateMeasure::Min {
+                    field: "score".into(),
+                },
+                -5.0,
+            ),
+            (
+                AggregateMeasure::Max {
+                    field: "score".into(),
+                },
+                49.5,
+            ),
+        ] {
+            let extrema = aggregate(
+                &db,
+                &owner,
+                &CrmAggregateQuery {
+                    object: "company".into(),
+                    filters: vec![],
+                    group_by: Some("bucket".into()),
+                    measure,
+                    order: AggregateOrder::OptionOrder,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(extrema.points[50].value, json!(-5.0));
+            assert_eq!(extrema.total, json!(expected_total));
+        }
 
         let average = aggregate(
             &db,
@@ -1144,6 +1498,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(average.unit.format, "number");
-        assert_eq!(average.total, json!(25.5));
+        let average = average.total.as_f64().unwrap();
+        assert!((average - (1245.0 / 51.0)).abs() < f64::EPSILON);
     }
 }

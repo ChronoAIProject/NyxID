@@ -1,8 +1,12 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::{ClientSession, Database, bson::doc};
+use mongodb::{
+    ClientSession, Database,
+    bson::{self, doc},
+};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -16,6 +20,7 @@ use crate::models::{
 use super::records::{ReceiptContext, insert_receipt, receipt_in_session, recover_duplicate};
 
 const PAGE_SIZE: i64 = 50;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -98,22 +103,37 @@ pub async fn list(
     record_id: &str,
     cursor: Option<&str>,
 ) -> AppResult<ActivityPage> {
-    let offset = decode_cursor(cursor)?;
+    let cursor = decode_cursor(cursor)?;
     ensure_record(db, owner_id, record_id).await?;
+    let mut filter = doc! {"owner_id": owner_id, "record_id": record_id};
+    if let Some(cursor) = &cursor {
+        filter.insert(
+            "$or",
+            vec![
+                doc! {"created_at": {"$lt": cursor.created_at}},
+                doc! {"created_at": cursor.created_at, "_id": {"$lt": &cursor.id}},
+            ],
+        );
+    }
     let mut rows: Vec<CrmActivity> = db
         .collection::<CrmActivity>(ACTIVITIES)
-        .find(doc! {"owner_id": owner_id, "record_id": record_id})
+        .find(filter)
         .sort(doc! {"created_at": -1, "_id": -1})
-        .skip(offset)
         .limit(PAGE_SIZE + 1)
+        .max_time(QUERY_TIMEOUT)
         .await?
         .try_collect()
         .await?;
     let has_more = rows.len() > PAGE_SIZE as usize;
     rows.truncate(PAGE_SIZE as usize);
+    let next_cursor = has_more
+        .then(|| rows.last().map(ActivityCursor::from))
+        .flatten()
+        .map(|cursor| encode_cursor(&cursor))
+        .transpose()?;
     Ok(ActivityPage {
         activities: rows.into_iter().map(Into::into).collect(),
-        next_cursor: has_more.then(|| encode_cursor(offset + PAGE_SIZE as u64)),
+        next_cursor,
     })
 }
 
@@ -144,6 +164,7 @@ pub async fn add_note(
         &context,
         |tx, (db, owner, record_id, actor, input, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(value) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return serde_json::from_value(value).map_err(|_| {
                         AppError::Internal("Stored CRM note response is invalid".into())
@@ -185,6 +206,7 @@ async fn ensure_record(db: &Database, owner_id: &str, record_id: &str) -> AppRes
     if db
         .collection::<CrmRecord>(crate::models::crm_record::COLLECTION_NAME)
         .find_one(doc! {"_id": record_id, "owner_id": owner_id})
+        .max_time(QUERY_TIMEOUT)
         .await?
         .is_none()
     {
@@ -193,21 +215,40 @@ async fn ensure_record(db: &Database, owner_id: &str, record_id: &str) -> AppRes
     Ok(())
 }
 
-fn encode_cursor(offset: u64) -> String {
-    URL_SAFE_NO_PAD.encode(offset.to_be_bytes())
+#[derive(Debug, Deserialize, Serialize)]
+struct ActivityCursor {
+    created_at: bson::DateTime,
+    id: String,
 }
 
-fn decode_cursor(cursor: Option<&str>) -> AppResult<u64> {
+impl From<&CrmActivity> for ActivityCursor {
+    fn from(activity: &CrmActivity) -> Self {
+        Self {
+            created_at: bson::DateTime::from_chrono(activity.created_at),
+            id: activity.id.clone(),
+        }
+    }
+}
+
+fn encode_cursor(cursor: &ActivityCursor) -> AppResult<String> {
+    bson::to_vec(cursor)
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|_| super::validation_error("cursor", "is invalid"))
+}
+
+fn decode_cursor(cursor: Option<&str>) -> AppResult<Option<ActivityCursor>> {
     let Some(cursor) = cursor else {
-        return Ok(0);
+        return Ok(None);
     };
     let bytes = URL_SAFE_NO_PAD
         .decode(cursor)
         .map_err(|_| super::validation_error("cursor", "is invalid"))?;
-    let bytes: [u8; 8] = bytes
-        .try_into()
-        .map_err(|_| super::validation_error("cursor", "is invalid"))?;
-    Ok(u64::from_be_bytes(bytes))
+    let cursor: ActivityCursor =
+        bson::from_slice(&bytes).map_err(|_| super::validation_error("cursor", "is invalid"))?;
+    if uuid::Uuid::parse_str(&cursor.id).is_err() {
+        return Err(super::validation_error("cursor", "is invalid"));
+    }
+    Ok(Some(cursor))
 }
 
 #[allow(dead_code)]
@@ -222,4 +263,29 @@ async fn _record_in_session(
         .session(tx)
         .await?
         .ok_or_else(|| AppError::NotFound("CRM record not found".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_cursor_round_trip_binds_timestamp_and_id() {
+        let cursor = ActivityCursor {
+            created_at: bson::DateTime::from_millis(1_700_000_000_000),
+            id: Uuid::new_v4().to_string(),
+        };
+        let encoded = encode_cursor(&cursor).unwrap();
+        let decoded = decode_cursor(Some(&encoded)).unwrap().unwrap();
+        assert_eq!(decoded.created_at, cursor.created_at);
+        assert_eq!(decoded.id, cursor.id);
+        assert!(decode_cursor(Some("bad")).is_err());
+
+        let invalid_id = encode_cursor(&ActivityCursor {
+            created_at: cursor.created_at,
+            id: "not-a-uuid".into(),
+        })
+        .unwrap();
+        assert!(decode_cursor(Some(&invalid_id)).is_err());
+    }
 }

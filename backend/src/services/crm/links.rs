@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
@@ -6,11 +7,13 @@ use serde::Serialize;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::{
-    crm_link::{COLLECTION_NAME as LINKS, CrmLink},
+    crm_link::COLLECTION_NAME as LINKS,
     crm_record::{COLLECTION_NAME as RECORDS, CrmRecord},
 };
 
-use super::records::{RecordResponse, hydrate_record};
+use super::records::{RecordResponse, hydrate_records};
+
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Serialize)]
 pub struct RelatedResponse {
@@ -33,20 +36,48 @@ pub async fn related(
     if db
         .collection::<CrmRecord>(RECORDS)
         .find_one(doc! {"_id": target_record_id, "owner_id": owner_id})
+        .max_time(QUERY_TIMEOUT)
         .await?
         .is_none()
     {
         return Err(AppError::NotFound("CRM record not found".into()));
     }
-    let links: Vec<CrmLink> = db
-        .collection::<CrmLink>(LINKS)
-        .find(doc! {"owner_id": owner_id, "target_record_id": target_record_id})
+    let grouped: Vec<mongodb::bson::Document> = db
+        .collection::<mongodb::bson::Document>(LINKS)
+        .aggregate(vec![
+            doc! {"$match": {"owner_id": owner_id, "target_record_id": target_record_id}},
+            doc! {"$lookup": {
+                "from": RECORDS,
+                "localField": "source_record_id",
+                "foreignField": "_id",
+                "as": "source",
+            }},
+            doc! {"$unwind": "$source"},
+            doc! {"$match": {
+                "source.owner_id": owner_id,
+                "source.archived_at": mongodb::bson::Bson::Null,
+            }},
+            doc! {"$group": {
+                "_id": {"object_key": "$source_object", "field_key": "$field_key"},
+                "count": {"$sum": 1_i64},
+                "source_ids": {"$topN": {
+                    "n": 50_i64,
+                    "sortBy": {"source_record_id": 1_i64},
+                    "output": "$source_record_id",
+                }},
+            }},
+            doc! {"$sort": {"_id.object_key": 1_i64, "_id.field_key": 1_i64}},
+        ])
+        .max_time(QUERY_TIMEOUT)
         .await?
         .try_collect()
         .await?;
-    let source_ids: Vec<String> = links
+    let source_ids: Vec<String> = grouped
         .iter()
-        .map(|link| link.source_record_id.clone())
+        .filter_map(|group| group.get_array("source_ids").ok())
+        .flatten()
+        .filter_map(mongodb::bson::Bson::as_str)
+        .map(str::to_owned)
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
@@ -59,40 +90,42 @@ pub async fn related(
                 "owner_id": owner_id,
                 "archived_at": mongodb::bson::Bson::Null,
             })
+            .max_time(QUERY_TIMEOUT)
             .await?
             .try_collect()
             .await?
     };
-    let live_ids: HashSet<&str> = source_rows.iter().map(|row| row.id.as_str()).collect();
-    let by_id: HashMap<_, _> = source_rows
-        .iter()
-        .map(|row| (row.id.as_str(), row))
-        .collect();
-    let mut grouped: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for link in links {
-        if live_ids.contains(link.source_record_id.as_str()) {
-            grouped
-                .entry((link.source_object, link.field_key))
-                .or_default()
-                .push(link.source_record_id);
-        }
-    }
     let mut session = db.client().start_session().await?;
+    let responses = hydrate_records(db, &source_rows, &mut session).await?;
+    let by_id: HashMap<_, _> = responses
+        .into_iter()
+        .map(|record| (record.id.clone(), record))
+        .collect();
     let mut groups = Vec::with_capacity(grouped.len());
-    for ((object_key, field_key), ids) in grouped {
-        let mut unique: Vec<String> = ids
-            .into_iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
+    for group in grouped {
+        let key = group
+            .get_document("_id")
+            .map_err(|_| AppError::Internal("Invalid CRM related group".into()))?;
+        let object_key = key
+            .get_str("object_key")
+            .map_err(|_| AppError::Internal("Invalid CRM related object".into()))?
+            .to_owned();
+        let field_key = key
+            .get_str("field_key")
+            .map_err(|_| AppError::Internal("Invalid CRM related field".into()))?
+            .to_owned();
+        let count = group
+            .get_i64("count")
+            .ok()
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or_else(|| AppError::Internal("Invalid CRM related count".into()))?;
+        let records = group
+            .get_array("source_ids")
+            .map_err(|_| AppError::Internal("Invalid CRM related ids".into()))?
+            .iter()
+            .filter_map(mongodb::bson::Bson::as_str)
+            .filter_map(|id| by_id.get(id).cloned())
             .collect();
-        unique.sort();
-        let count = unique.len() as u64;
-        let mut records = Vec::new();
-        for id in unique.iter().take(50) {
-            if let Some(row) = by_id.get(id.as_str()) {
-                records.push(hydrate_record(db, row, &mut session).await?);
-            }
-        }
         groups.push(RelatedGroup {
             object_key,
             field_key,
