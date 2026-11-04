@@ -13,7 +13,7 @@ import type {
 } from "@/schemas/assistant-onboarding";
 import { NextStepCards } from "./next-step-cards";
 import { OnboardingIcon } from "./onboarding-icons";
-import { ControlPreview, ReplayClip } from "./intro-previews";
+import { AccessModesPreview, ReplayClip } from "./intro-previews";
 
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
 type Step = (typeof STEPS)[number];
@@ -238,7 +238,12 @@ export function FirstRunIntro({
                 title="You stay in control"
                 description="NyxBot asks before it does anything sensitive. You choose how often it asks, and you can change it any time in NyxBot settings."
               >
-                <ControlPreview />
+                <ReplayClip
+                  clip="control"
+                  title="NyxBot"
+                  label="Replay: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
+                />
+                <AccessModesPreview />
               </StepHeading>
             ) : (
               <StepHeading

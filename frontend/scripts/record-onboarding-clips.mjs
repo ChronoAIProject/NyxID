@@ -44,6 +44,31 @@ const CLIPS = {
     await page.getByText(/Found 3 urgent issues/).last().waitFor({ timeout: 20_000 });
     await page.waitForTimeout(3500);
   },
+  // A destructive action waits for the owner. Allow while the reply is still
+  // running, so the decision shows as a continuation line.
+  control: async (page) => {
+    await say(page, "Delete agent key ci-bot");
+    const card = page.getByRole("region", { name: /Confirm: Delete agent key/ });
+    await card.waitFor({ timeout: 20_000 });
+    await page.waitForTimeout(1600);
+    const allow = card.getByRole("button", { name: "Allow", exact: true });
+    await allow.hover();
+    await page.waitForTimeout(500);
+    await allow.click();
+    await page.getByText("Deleted agent key ci-bot.").last().waitFor({ timeout: 20_000 });
+    await page.waitForTimeout(3000);
+  },
+};
+
+/**
+ * Fixture switches per clip (the same global the e2e suite uses): no partial
+ * placeholder text, and continuations stored as the server stores them.
+ */
+const DEMO = { nyxagentEnabled: true, partialText: "", markContinuations: true };
+const FAULTS = {
+  "chief-of-staff": DEMO,
+  specialists: DEMO,
+  control: { ...DEMO, progressStallMs: 6000 },
 };
 
 fs.mkdirSync(webOut, { recursive: true });
@@ -57,6 +82,11 @@ for (const [name, run] of Object.entries(CLIPS)) {
     colorScheme: "dark",
   });
   const page = await context.newPage();
+  if (FAULTS[name]) {
+    await page.addInitScript((faults) => {
+      window.__nyxidAssistantHttpFaults = faults;
+    }, FAULTS[name]);
+  }
   await page.goto(`${base}/assistant?mock=1&nyxbot=1`);
   await page.getByRole("textbox", { name: /Message NyxBot/ }).first().waitFor({ timeout: 30_000 });
   await page.waitForTimeout(800);

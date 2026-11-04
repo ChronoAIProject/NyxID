@@ -228,40 +228,10 @@ export function FirstRunIntro({
                 title="You stay in control"
                 body="NyxBot asks before it does anything sensitive. You choose how often it asks in NyxBot settings: Auto, Ask every time or Full access."
               />
-              <Frame>
-                <Label style={styles.strong}>NyxBot wants to send an email</Label>
-                <Label muted style={styles.small}>
-                  To dana@acme.com · Re: Contract redlines
-                </Label>
-                <View style={styles.row}>
-                  <View
-                    style={[
-                      styles.tag,
-                      {
-                        backgroundColor: colors.successTone.bg,
-                        borderColor: colors.successTone.border,
-                      },
-                    ]}
-                  >
-                    <Label style={[styles.small, { color: colors.successTone.text }]}>
-                      Allow
-                    </Label>
-                  </View>
-                  <View
-                    style={[
-                      styles.tag,
-                      {
-                        backgroundColor: colors.dangerTone.bg,
-                        borderColor: colors.dangerTone.border,
-                      },
-                    ]}
-                  >
-                    <Label style={[styles.small, { color: colors.dangerTone.text }]}>
-                      Deny
-                    </Label>
-                  </View>
-                </View>
-              </Frame>
+              <Replay
+                source={require("../../../assets/onboarding/control.gif")}
+                label="Replay: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
+              />
               <Point text="Auto (the default) asks before sensitive or destructive actions." />
               <Point text="Reading never asks." />
             </>
@@ -335,19 +305,6 @@ function Replay({ source, label }: { source: number; label: string }) {
       resizeMode="contain"
       style={[styles.replay, { borderColor: colors.border, borderWidth: 1 }]}
     />
-  );
-}
-
-function Frame({ children }: { children: React.ReactNode }) {
-  const { colors } = useTheme();
-  return (
-    <View
-      accessible={false}
-      importantForAccessibility="no-hide-descendants"
-      style={[styles.frame, { backgroundColor: colors.card, borderColor: colors.border }]}
-    >
-      {children}
-    </View>
   );
 }
 
@@ -451,16 +408,8 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   replay: { width: "100%", aspectRatio: 1280 / 864, borderRadius: 12 },
-  frame: { borderWidth: 1, borderRadius: 12, padding: 12, gap: 12 },
   row: { flexDirection: "row", gap: 8, alignItems: "center" },
-  tag: {
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-  },
   small: { fontSize: 13, lineHeight: 19 },
-  strong: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 19 },
   footer: {
     flexDirection: "row",
     alignItems: "center",

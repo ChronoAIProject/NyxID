@@ -11,12 +11,16 @@ New NyxBot users get a short, skippable intro on web (`/assistant`) and mobile
    payments). Switching the answer drops picks that no longer apply. Every pick
    is optional.
 2. **Three intro screens.**
-   - **Chief of staff and specialists** play recorded replays of the real
-     assistant. The replays are captured in dev mock mode, so they contain
+   - **Chief of staff, specialists and "You stay in control"** play recorded
+     replays of the real assistant. The replays are captured in dev mock mode, so they contain
      fixture data only. Web uses MP4 files in `frontend/public/onboarding/`;
      mobile uses GIFs in `mobile/assets/onboarding/`. To regenerate them after
-     a UI change, run `frontend/scripts/record-onboarding-clips.mjs`.
-   - **You stay in control** renders an action card and the access modes.
+     a UI change, run `frontend/scripts/record-onboarding-clips.mjs`. It turns
+     on two dev-only fixture switches: `partialText` (no placeholder stream)
+     and `markContinuations` (decision continuations render as system lines,
+     as on the server). Neither changes the e2e defaults.
+   - **You stay in control** replays an action card being allowed. On web an
+     access-mode explainer follows it.
    - **Specialists copy:** specialists are presented as people who are great
      at one thing. The owner gives each a fixed role and scope, and works with
      them directly or through NyxBot.
