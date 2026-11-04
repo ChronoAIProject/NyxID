@@ -826,8 +826,8 @@ export function AppNavigator({
   if (isRestoring)
     return (
       <FullScreenLoading
-        title="Restoring session..."
-        subtitle="Validating local secure session"
+        title="Signing you in…"
+        subtitle="Restoring your secure session"
       />
     );
   return (

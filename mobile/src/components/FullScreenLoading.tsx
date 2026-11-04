@@ -1,9 +1,8 @@
-import { useMemo } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { StyleSheet, Text, View } from "react-native";
+import { fonts } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
-import type { ThemeColors } from "../theme/mobileTheme";
-
+import { BrandNebula, BreathingMark } from "./brand/BrandNebula";
+import { PortalMarkLogo } from "./brand/PortalMark";
 import { ScreenContainer } from "./ScreenContainer";
 
 type FullScreenLoadingProps = {
@@ -11,54 +10,49 @@ type FullScreenLoadingProps = {
   subtitle?: string;
 };
 
+/**
+ * The brand splash while the app gets ready (restoring the saved session):
+ * the portal mark breathing on drifting violet light and one quiet line,
+ * no card or spinner chrome.
+ */
 export function FullScreenLoading({
-  title = "Loading...",
-  subtitle = "Syncing the latest data, please wait.",
+  title = "Loading…",
+  subtitle,
 }: FullScreenLoadingProps) {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
-
   return (
     <ScreenContainer>
-      <View style={styles.center}>
-        <View style={styles.card}>
-          <ActivityIndicator size="small" color={colors.primary} />
-          <Text style={styles.title}>{title}</Text>
-          <Text style={styles.subtitle}>{subtitle}</Text>
+      <View
+        accessibilityRole="progressbar"
+        accessibilityLabel={subtitle ? `${title} ${subtitle}` : title}
+        style={styles.center}
+      >
+        <BrandNebula height={520} />
+        <BreathingMark>
+          <PortalMarkLogo size={88} />
+        </BreathingMark>
+        <View style={styles.copy}>
+          <Text style={[styles.title, { color: colors.textPrimary }]}>{title}</Text>
+          {subtitle ? (
+            <Text style={[styles.subtitle, { color: colors.textSecondary }]}>
+              {subtitle}
+            </Text>
+          ) : null}
         </View>
       </View>
     </ScreenContainer>
   );
 }
 
-const createStyles = (c: ThemeColors) =>
-  StyleSheet.create({
-    center: {
-      flex: 1,
-      justifyContent: "center",
-      alignItems: "center",
-      paddingHorizontal: spacing.xxl,
-      paddingBottom: 72,
-    },
-    // DESIGN.md: cards = rounded-xl (12px) with 50%-opacity chrome border.
-    card: {
-      width: "100%",
-      borderRadius: radius.lg,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      backgroundColor: c.card,
-      paddingVertical: spacing.xxl,
-      paddingHorizontal: spacing.xxl,
-      alignItems: "center",
-      gap: spacing.sm,
-    },
-    title: {
-      ...typeScale.bodyStrong,
-      color: c.textPrimary,
-    },
-    subtitle: {
-      ...typeScale.small,
-      color: c.textMuted,
-      textAlign: "center",
-    },
-  });
+const styles = StyleSheet.create({
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 28,
+    paddingBottom: 72,
+  },
+  copy: { alignItems: "center", gap: 6, paddingHorizontal: 32 },
+  title: { fontFamily: fonts.displaySemi, fontSize: 20, lineHeight: 26, textAlign: "center" },
+  subtitle: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18, textAlign: "center" },
+});

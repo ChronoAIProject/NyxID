@@ -674,6 +674,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   tokens are unchanged. Text colors have at least 4.5:1 against the native
   base/card/cardSoft surfaces; essential drawer/composer controls meet 3:1.
 
+Native sign-in and the session-restore splash share a brand backdrop: slow
+drifting violet light (`BrandNebula`) behind the portal mark, which breathes
+on a soft violet glow (`BreathingMark`); both are still under Reduce Motion and
+hidden from VoiceOver. The splash shows only the mark and one quiet line
+("Signing you in…"). Sign-in has no boxed card: a 30pt Space Grotesk welcome
+and a one-line lead, provider rows as 52pt soft filled pills (mark and label
+centred), "or continue with email", 52pt rounded fields and the primary
+gradient Sign in. One-time login codes sit centred in their own panel (mono
+30pt, letter-spaced) with Copy, a live "Expires in m:ss · works once" line and
+the terminal command in a monospace chip.
+
 Native support remains portrait iPhone on iOS and Android phone, with wide
 Android windows as a secondary layout. Eligible private chats expose a
 voice-conversation mode in the trailing composer button when the server enables
