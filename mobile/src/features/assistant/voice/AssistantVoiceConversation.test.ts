@@ -278,7 +278,16 @@ function setup(
         "VolumeX",
       ].map((name) => [name, name]),
     ),
-    "../AssistantLinkHost": { ScopedAssistantLinkHost: "LinkHost" },
+    "../ChatComposer": { ChatComposerFrame: "ComposerFrame" },
+    "../../../components/workspace/ScrollEdgeFades": {
+      ScrollEdgeFades: "ScrollEdgeFades",
+      useScrollEdges: () => ({
+        edges: { start: false, end: false },
+        layout() {},
+        content() {},
+        scroll() {},
+      }),
+    },
     "../../../components/workspace/WorkspaceSheetSurface": {
       WorkspaceSheetSurface: "SheetSurface",
     },
@@ -518,20 +527,15 @@ test("voice never exposes source or configuration selectors, and starts with the
   f.harness.unmount();
 });
 
-test("going back from an active call releases push-to-talk and ends the call", () => {
+test("closing voice releases push-to-talk and ends the call", () => {
   const f = setup({ active: true });
   f.voice.holding = true;
-  f.button("End voice and go back").props.onPress();
+  f.button("End voice and close").props.onPress();
   assert.deepEqual(f.events, [["hold", false], ["end"], ["close"]]);
-  assert.equal(
-    f.all().some((row) => row.props?.accessibilityLabel === "Restore voice call"),
-    false,
-    "no minimized call bar stays behind in the chat",
-  );
   f.harness.unmount();
 });
 
-test("reviewing an approval in chat ends the call and leaves the task running", () => {
+test("reviewing an approval scrolls the chat to it and keeps the call and task running", () => {
   const f = setup({
     active: true,
     snapshot: {
@@ -553,12 +557,10 @@ test("reviewing an approval in chat ends the call and leaves the task running", 
   f.button("Review in chat").props.onPress();
   assert.deepEqual(f.events, [
     ["hold", false],
-    ["end"],
-    ["close"],
     ["review", "ack-1"],
   ]);
   assert.equal(
-    f.events.some(([event]) => event === "stopTask"),
+    f.events.some(([event]) => event === "end" || event === "stopTask"),
     false,
   );
   f.harness.unmount();
@@ -590,9 +592,9 @@ test("a new call gets a fresh media engine while ordinary updates preserve its o
   f.harness.unmount();
 });
 
-test("native Back ends voice and dismisses the full-screen surface", () => {
+test("closing voice before a call returns to the message composer", () => {
   const f = setup();
-  f.modal().onRequestClose();
+  f.button("Close voice").props.onPress();
   assert.deepEqual(f.events, [["end"], ["close"]]);
   f.harness.unmount();
 });
@@ -696,10 +698,8 @@ test("loss of connectivity ends local voice and disables starting until the app 
   f.harness.unmount();
 });
 
-test("the call fills the screen and the aura follows listening, speaking and thinking", () => {
+test("the voice composer's animated bubble follows listening, speaking and thinking", () => {
   const f = setup({ active: true });
-  const modal = f.modal();
-  assert.equal(modal.presentationStyle, "overFullScreen");
   assert.equal(f.levels.media, f.voice.media);
   assert.equal(f.aura().phase, "listening");
   assert.equal(f.aura().input, f.levels.input);
@@ -840,7 +840,6 @@ test("in a call tasks are tucked into a chip that opens the full list", () => {
   assert.match(f.text(), /Agent tasks · 2/);
   assert.ok(f.button("Review in chat"));
   f.button("Stop task").props.onPress();
-  assert.ok(f.button("View in chat"));
   assert.equal(
     f.button("Hide agent tasks").props.accessibilityState.expanded,
     true,
@@ -855,44 +854,23 @@ test("a call without tasks shows no tasks tray", () => {
   f.harness.unmount();
 });
 
-test("the voice page is a pastel wash with the assistant pill and three round controls", () => {
+test("voice is a composer with the animated bubble on top, not a page over the chat", () => {
   const idle = setup();
-  assert.ok(idle.all().some((row) => row.type === "LinearGradient"));
+  assert.equal(idle.all().some((row) => row.type === "Modal"), false);
+  const frame = idle.all().find((row) => row.type === "ComposerFrame")!;
+  assert.ok(frame, "it takes the message composer's place");
+  assert.ok(idle.all().some((row) => row.type === "VoiceAura"), "the animated bubble");
   assert.match(idle.text(), /我的助手/);
-  assert.match(idle.text(), /Hey, what can I do for you today\?/);
   assert.equal(idle.button("Start voice").props.disabled, false);
   idle.harness.unmount();
-  // Hands-free: the microphone in the middle, End on the right. Leaving the
-  // page ends the call, so there is no separate Show chat.
+  // Hands-free: the microphone in the middle, End on the right.
   const f = setup({ active: true });
-  assert.equal(
-    f.all().some((row) => row.props?.accessibilityLabel === "Show chat"),
-    false,
-  );
   f.button("Mute microphone").props.onPress();
   f.button("End voice and close").props.onPress();
   assert.deepEqual(f.events, [["mute", true], ["end"], ["close"]]);
   f.harness.unmount();
 });
 
-test("action cards from the chat appear on the call so they can be decided in place", () => {
-  const card = { type: "ActionCard", props: { children: [] } };
-  const f = setup({ active: true, actions: card, actionCount: 1 });
-  const inline = f
-    .all()
-    .find((row) => row.props?.accessibilityLabel === "我的助手 needs you · 1")!;
-  assert.ok(inline, "the cards sit in the voice chat itself");
-  assert.ok(
-    [inline.props.children].flat(Infinity).some((row: any) => row?.type === "ActionCard"),
-  );
-  f.harness.unmount();
-  const none = setup({ active: true, actionCount: 0 });
-  assert.equal(
-    none.all().some((row) => /needs you/.test(String(row.props?.accessibilityLabel ?? ""))),
-    false,
-  );
-  none.harness.unmount();
-});
 
 test("the call switches between Hands-free and Hold to talk in place and remembers it", async () => {
   const f = setup({ active: true });

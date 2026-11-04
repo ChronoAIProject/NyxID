@@ -649,28 +649,32 @@ test("saved chat opens voice directly without creating a new draft or replacing 
   x.harness.unmount();
 });
 
-test("voice and transcript retain distinct sibling identities for both adopted drafts and saved chats", async () => {
+test("voice slides up in the composer's place and closing it keeps the transcript", async () => {
   for (const initialId of [undefined, A]) {
     const x = setup(initialId);
     x.button("Open voice call")!.props.onPress();
     if (!initialId) x.draft.resolve(A);
     await x.harness.settle();
     const children = x.harness.value().props.children as Element[];
-    const keyed = children.filter((child) => child?.key != null);
-    assert.ok(keyed.some((child) => child.key === "transcript-column"));
     assert.ok(
-      keyed.some((child) => child.type === "AssistantVoiceConversation"),
+      children.some((child) => child?.key === "transcript-column"),
+      "the chat stays on screen above the call",
     );
+    assert.ok(x.voice(), "voice is mounted");
     assert.equal(
-      new Set(keyed.map((child) => child.key)).size,
-      keyed.length,
-      "a transcript and its voice surface share a conversation, but need unique sibling keys",
+      x.all().some((element) => element.props?.accessibilityLabel === "Message to assistant"),
+      false,
+      "the voice composer takes the message composer's place",
     );
     const transcript = x.all().find((element) => element.type === "FlatList")!;
     const originalTranscriptKey = transcript.key;
     x.voice()!.props.onClose();
     x.harness.flush();
     assert.equal(x.voice(), undefined);
+    assert.ok(
+      x.all().some((element) => element.props?.accessibilityLabel === "Message to assistant"),
+      "the message composer returns",
+    );
     assert.equal(
       x.all().find((element) => element.type === "FlatList")!.key,
       originalTranscriptKey,
@@ -1854,36 +1858,3 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
   }
 });
 
-test("a voice call carries the chat's pending action cards so they can be decided without leaving it", async () => {
-  const x = setup(A);
-  const row = acknowledgementSchema.parse({
-    id: "d9428888-122b-41e1-85c5-61cd3cbb3210",
-    kind: "action",
-    status: "pending",
-    summary: "Send the reply",
-    service_name: null,
-    service_slug: null,
-    tool_name: "nyxid__post_to_chat",
-    created_at: "2026-10-16T00:00:00Z",
-    expires_at: "2099-10-16T00:15:00Z",
-  });
-  x.assistant.history!.acknowledgements = [row];
-  const decided: unknown[][] = [];
-  Object.assign(x.assistant, {
-    decide: async (id: string, choice: string) => {
-      decided.push([id, choice]);
-    },
-  });
-  x.button("Open voice call")!.props.onPress();
-  await x.harness.settle();
-  const voice = x.voice()!;
-  assert.equal(voice.props.actionCount, 1);
-  const card = elements(expand(voice.props.actions)).find(
-    (node) => node.type === "AssistantAcknowledgementCard",
-  )!;
-  assert.equal(card.props.row, row);
-  card.props.onDecision("allow");
-  await x.harness.settle();
-  assert.deepEqual(decided, [[row.id, "allow"]]);
-  x.harness.unmount();
-});

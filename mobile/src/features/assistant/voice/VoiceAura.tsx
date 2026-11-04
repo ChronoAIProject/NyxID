@@ -27,6 +27,9 @@ type Props = {
  * the status line carries the state for VoiceOver, so this is hidden from it.
  * Only transforms and opacity animate; the SVG gradients never re-render.
  */
+/** The size the orbit distances in voiceAuraState were designed for. */
+const ORBIT_REFERENCE = 240;
+
 export function VoiceAura({ phase, input, output, reducedMotion, size }: Props) {
   const { mode } = useTheme();
   const target = voiceAuraTargets(phase, reducedMotion);
@@ -35,7 +38,9 @@ export function VoiceAura({ phase, input, output, reducedMotion, size }: Props) 
   const opacity = useSharedValue(target.opacity);
   const scale = useSharedValue(target.scale);
   const gain = useSharedValue(target.gain);
-  const orbit = useSharedValue(target.orbit);
+  // Orbits are tuned for the full-page aura; smaller bubbles travel in proportion.
+  const reach = Math.min(1, size / ORBIT_REFERENCE);
+  const orbit = useSharedValue(target.orbit * reach);
   const breathing = useSharedValue(target.breathe ? 1 : 0);
   const fromOutput = useSharedValue(target.source === "output" ? 1 : 0);
 
@@ -73,7 +78,7 @@ export function VoiceAura({ phase, input, output, reducedMotion, size }: Props) 
     opacity.value = withTiming(target.opacity, ease);
     scale.value = withTiming(target.scale, ease);
     gain.value = withTiming(target.gain, ease);
-    orbit.value = withTiming(target.orbit, { ...ease, duration: 900 });
+    orbit.value = withTiming(target.orbit * reach, { ...ease, duration: 900 });
     breathing.value = withTiming(target.breathe ? 1 : 0, ease);
     fromOutput.value = withTiming(target.source === "output" ? 1 : 0, {
       duration: 200,
@@ -83,6 +88,7 @@ export function VoiceAura({ phase, input, output, reducedMotion, size }: Props) 
     target.scale,
     target.gain,
     target.orbit,
+    reach,
     target.breathe,
     target.source,
     reducedMotion,

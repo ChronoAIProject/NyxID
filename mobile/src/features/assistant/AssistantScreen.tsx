@@ -53,10 +53,6 @@ import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
 import { AssistantReplyBody } from "./AssistantReplyBody";
-import {
-  hasAssistantActionLink,
-  VOICE_REPLY_SKEW_MS,
-} from "./voice/voiceReplyActions";
 import { MoreHorizontal, RotateCcw, SquarePen, X } from "lucide-react-native";
 import type {
   AssistantParams,
@@ -201,9 +197,6 @@ export function AssistantScreen({
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
-  // Replies that arrive during a call and carry an in-app action join the
-  // voice chat, where they can be acted on without leaving the call.
-  const [voiceOpenedAt, setVoiceOpenedAt] = useState(0);
   const [openingVoice, setOpeningVoice] = useState(false);
   const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
@@ -290,14 +283,6 @@ export function AssistantScreen({
         message.turn_id === assistant.live?.turnId && message.role === "user",
     );
   const messages = assistant.history?.messages ?? [];
-  const voiceReplies = voiceThread
-    ? messages.filter(
-        (message) =>
-          message.role === "assistant" &&
-          Date.parse(message.created_at) >= voiceOpenedAt - VOICE_REPLY_SKEW_MS &&
-          hasAssistantActionLink(message.text, firstPartyFrontendUrls()),
-      )
-    : [];
   const stableTranscript =
     messages.length > 0 &&
     !running &&
@@ -476,7 +461,6 @@ export function AssistantScreen({
           openLatest: false,
         });
       }
-      setVoiceOpenedAt(Date.now());
       setVoiceThread(id);
     } catch (cause) {
       if (current())
@@ -1417,58 +1401,28 @@ export function AssistantScreen({
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
       </View>
-      {voiceThread && voiceThread === assistant.conversationId ? (
-        <AssistantVoiceConversation
-          key={`voice:${voiceThread}`}
-          thread={voiceThread}
-          agentName={agentName}
-          onClose={() => setVoiceThread(undefined)}
-          onUpdate={() => void assistant.recover()}
-          // The chat's own live cards, so a call can decide them in place.
-          actionCount={
-            (assistant.history?.acknowledgements.filter(
-              (row) => row.status === "pending",
-            ).length ?? 0) +
-            (assistant.history?.approvals.length ?? 0) +
-            voiceReplies.length
-          }
-          actions={
-            <>
-              {voiceReplies.map((message) => (
-                <AssistantReplyBody
-                  key={message.id}
-                  text={sanitizeAssistantMessageContent(message.text)}
-                  onLinkPress={openSafeLink}
-                />
-              ))}
-              {(assistant.history?.acknowledgements ?? []).map(
-                renderAcknowledgement,
-              )}
-              {assistant.history?.approvals.map((approval) => (
-                <AssistantApprovalCard
-                  key={approval.id}
-                  approval={approval}
-                  disabled={
-                    !assistant.active || !!assistant.deciding || !!destroyed
-                  }
-                  onDecide={(approved) =>
-                    assistant.decideApproval(approval.id, approved)
-                  }
-                />
-              ))}
-            </>
-          }
-          onReview={(acknowledgementId) => {
-            assistant.openConversation(voiceThread, acknowledgementId);
-            navigation.setParams({
-              conversationId: voiceThread,
-              acknowledgementId,
-              openLatest: false,
-            });
-          }}
-        />
-      ) : null}
       <View style={styles.composerInset}>
+        {/* Voice mode slides up in place of the composer; the chat above stays
+            on screen, so its cards and links work during the call. */}
+        {voiceThread && voiceThread === assistant.conversationId ? (
+          <View style={[styles.composer, chatColumn]}>
+            <AssistantVoiceConversation
+              key={`voice:${voiceThread}`}
+              thread={voiceThread}
+              agentName={agentName}
+              onClose={() => setVoiceThread(undefined)}
+              onUpdate={() => void assistant.recover()}
+              onReview={(acknowledgementId) => {
+                assistant.openConversation(voiceThread, acknowledgementId);
+                navigation.setParams({
+                  conversationId: voiceThread,
+                  acknowledgementId,
+                  openLatest: false,
+                });
+              }}
+            />
+          </View>
+        ) : (
         <ChatComposerFrame style={[styles.composer, chatColumn]}>
           {guidance.canSteer ? (
             <Label muted style={styles.composerHint}>
@@ -1649,6 +1603,7 @@ export function AssistantScreen({
             </Label>
           ) : null}
         </ChatComposerFrame>
+        )}
       </View>
 
       <Sheet
