@@ -3117,6 +3117,7 @@ mod tests {
         key_hash: &str,
     ) -> crate::models::api_key::ApiKey {
         crate::models::api_key::ApiKey {
+            permission_policy_id: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             name: "Delegated read fixture".to_string(),
