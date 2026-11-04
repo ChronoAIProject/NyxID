@@ -136,7 +136,7 @@ function PluginCard({
             {item.added && !item.disabled ? (
               <span
                 aria-hidden
-                className="mr-1.5 inline-block size-1.5 rounded-full bg-success"
+                className="mr-1.5 inline-block size-[0.5em] rounded-full bg-success align-middle"
               />
             ) : null}
             {status}

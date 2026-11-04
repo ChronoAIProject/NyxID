@@ -1,4 +1,5 @@
 import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
+import { TEXT_STYLES } from "@/lib/typography";
 import { formatCapacityWait } from "@/lib/assistant/capacity-wait";
 import { storedError } from "@/lib/assistant/nyxagent-transport";
 import { Link, useSearch } from "@tanstack/react-router";
@@ -246,7 +247,7 @@ function AutomationsContent() {
                 className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() => setHistory(row)}
               >
-                <span className="block break-words font-medium">
+                <span data-trigger-title="" className={`block break-words ${TEXT_STYLES.rowTitle}`}>
                   {row.label}
                 </span>
                 <span className="mt-0.5 block text-13 font-normal text-text-tertiary">

@@ -1,4 +1,5 @@
 import { CompactChrome } from "@/components/ui/compact-title";
+import { TEXT_STYLES } from "@/lib/typography";
 import {
   GroupedPage,
   GroupedSheet as Sheet,
@@ -60,7 +61,7 @@ function MachineCard({
     <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
         <Monitor className="h-4 w-4 text-text-tertiary" />
-        <h3 className="min-w-0 flex-1 truncate text-15 font-medium">
+        <h3 data-machine-card-title="" className={`min-w-0 flex-1 truncate ${TEXT_STYLES.cardTitle}`}>
           {node.name}
         </h3>
         {update?.update_available ? (

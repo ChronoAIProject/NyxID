@@ -10,6 +10,7 @@ import {
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
+import { ApprovalAction, ApprovalIdentity } from "@/components/shared/approval-history-fields";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -177,10 +178,10 @@ export function ApprovalHistoryPage() {
                     {isToolApproval(request) ? (
                       <div className="flex items-center gap-1.5">
                         <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <p className="text-15 font-semibold text-foreground truncate">{request.tool_name}</p>
+                        <ApprovalIdentity className="truncate">{request.tool_name}</ApprovalIdentity>
                       </div>
                     ) : (
-                      <p className="text-15 font-semibold text-foreground truncate">{request.service_name}</p>
+                      <ApprovalIdentity className="block truncate">{request.service_name}</ApprovalIdentity>
                     )}
                     <p className="text-13 text-muted-foreground truncate">
                       {request.requester_label ?? request.requester_type}
@@ -188,11 +189,11 @@ export function ApprovalHistoryPage() {
                   </div>
                   {getStatusBadge(request.status)}
                 </div>
-                <p className="mt-1.5 text-13 text-muted-foreground line-clamp-2">
+                <ApprovalAction className="mt-1.5 line-clamp-2">
                   {isToolApproval(request)
                     ? request.tool_arguments ?? "Tool execution approval"
                     : primaryActionLabel(request)}
-                </p>
+                </ApprovalAction>
                 {shouldShowRawIdentityLine(request) && (
                   <p className="mt-1 text-13 text-muted-foreground">
                     {operationIdentityLabel(request)}
@@ -269,9 +270,9 @@ export function ApprovalHistoryPage() {
                         <div className="flex flex-col gap-1">
                           <div className="flex items-center gap-1.5">
                             <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
-                            <span className="font-medium">
+                            <ApprovalIdentity>
                               {request.tool_name}
-                            </span>
+                            </ApprovalIdentity>
                           </div>
                           {request.is_destructive && (
                             <Badge variant="destructive">Destructive</Badge>
@@ -279,9 +280,9 @@ export function ApprovalHistoryPage() {
                         </div>
                       ) : (
                         <div className="flex flex-col gap-0.5">
-                          <span className="font-medium">
+                          <ApprovalIdentity>
                             {request.service_name}
-                          </span>
+                          </ApprovalIdentity>
                           <span className="text-13 text-muted-foreground">
                             {request.service_slug}
                           </span>
@@ -302,9 +303,9 @@ export function ApprovalHistoryPage() {
                       <div className="flex flex-col gap-0.5">
                         {isToolApproval(request) ? (
                           <>
-                            <span>
+                            <ApprovalAction>
                               Tool execution approval
-                            </span>
+                            </ApprovalAction>
                             {request.tool_arguments && (
                               <span className="max-w-[300px] truncate text-13 text-muted-foreground">
                                 {request.tool_arguments}
@@ -313,9 +314,9 @@ export function ApprovalHistoryPage() {
                           </>
                         ) : (
                           <>
-                            <span>
+                            <ApprovalAction>
                               {primaryActionLabel(request)}
-                            </span>
+                            </ApprovalAction>
                             {request.action_description &&
                               request.operation_summary && (
                                 <span className="text-13 text-muted-foreground">

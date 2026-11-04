@@ -2,8 +2,10 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expectReadableToast } from "./contrast";
+import type { QueryClient } from "@tanstack/react-query";
 
 const properties = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap", "rowGap", "minHeight", "minWidth", "lineHeight", "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius", "fontSize", "fontWeight"] as const;
+const fontResponses = new Map<string, Promise<{ body: Buffer; contentType: string }>>();
 
 async function readings(page: Page, selector: string) {
   return page.locator(selector).evaluateAll((elements, properties) => Object.fromEntries(elements.map((element, i) => {
@@ -13,7 +15,30 @@ async function readings(page: Page, selector: string) {
   })), [...properties]);
 }
 
+async function settleLayout(page: Page) {
+  await page.evaluate(async () => {
+    await Promise.all([400, 500, 600, 700].map(weight => document.fonts.load(`${weight} 16px "Mona Sans"`)));
+    await document.fonts.ready;
+    // Flush the font/layout commit and reduced-motion transition frame before
+    // comparing geometry, without depending on wall-clock animation delays.
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
+}
+
 async function openRoute(page: Page, path: string, scale: number, density: number, theme: "light" | "dark", mount = true) {
+  // Each pair must use identical font bytes. Page routing disables the HTTP
+  // cache; refetching optional Google fonts for every navigation can compare
+  // a loaded webfont with a fallback and change flex-row wrapping under load.
+  await page.route(/^https:\/\/fonts\.(googleapis|gstatic)\.com\//, async route => {
+    const url = route.request().url();
+    if (!fontResponses.has(url)) fontResponses.set(url, (async () => {
+      const response = await route.fetch();
+      expect(response.status(), url).toBe(200);
+      return { body: await response.body(), contentType: response.headers()["content-type"]! };
+    })());
+    const { body, contentType } = await fontResponses.get(url)!;
+    await route.fulfill({ body, contentType, headers: { "access-control-allow-origin": "*" } });
+  });
   await page.addInitScript(({ scale, density, theme }) => {
     localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: scale, density, mode: theme, motion: "reduce" }, version: 2 }));
     localStorage.setItem("nyxid.telemetry_consent.v3.test-user", JSON.stringify({ enabled: false, asked: true }));
@@ -21,7 +46,7 @@ async function openRoute(page: Page, path: string, scale: number, density: numbe
   await page.goto(`${path}?mock=1`);
   await expect(page.locator(".shell-page-content")).toBeVisible();
   if (!mount) {
-    await page.evaluate(() => document.fonts.ready);
+    await settleLayout(page);
     return;
   }
   await page.evaluate(async () => {
@@ -30,7 +55,7 @@ async function openRoute(page: Page, path: string, scale: number, density: numbe
   });
   await expect(page.locator('[data-parity="input"]')).toBeVisible();
   await expect(page.locator('[data-parity="hidden-icon"]')).toBeHidden();
-  await page.evaluate(() => document.fonts.ready);
+  await settleLayout(page);
 }
 
 async function navSiblingGaps(page: Page, density: number) {
@@ -76,6 +101,98 @@ async function pluginCardBounds(page: Page) {
   return grids;
 }
 
+async function fieldRole(page: Page, selector: string, text: string) {
+  const field = page.locator(`${selector}:visible`).filter({ hasText: text }).first();
+  await expect(field).toBeVisible();
+  return field.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { size: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, tracking: style.letterSpacing };
+  });
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) for (const scale of [0.5, 1, 1.5, 2]) for (const density of [1, 1.4]) {
+  test(`populated approval pending and History field parity (${theme}, ${width}, text ${scale}×, spacing ${density}×)`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, isMobile: width === 390, hasTouch: width === 390, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    const evidence = [];
+    for (const path of ["/approvals/history", "/assistant/approvals"]) {
+      const assistant = path.startsWith("/assistant");
+      await openRoute(page, path, scale, density, theme, false);
+      const pending = {
+        identity: await fieldRole(page, assistant ? '.assistant-workspace-approval > h3' : '[data-approval-field="identity"]', "Lark"),
+        action: await fieldRole(page, assistant ? '.assistant-workspace-approval > section > div:nth-child(2) > p:first-child' : '[data-approval-field="action"]', "Post the drafted summary"),
+      };
+      if (assistant) await page.getByRole("tab", { name: "History", exact: true }).click();
+      const history = {
+        identity: await fieldRole(page, '[data-approval-field="identity"]', "OpenAI"),
+        action: await fieldRole(page, '[data-approval-field="action"]', "Generate chat completion with gpt-4o"),
+      };
+      for (const fields of [pending, history]) {
+        expect(parseFloat(fields.identity.size)).toBeCloseTo(14 * 0.85 * scale, 2);
+        expect(fields.identity.weight).toBe("500");
+        expect(parseFloat(fields.action.size)).toBeCloseTo(14 * 0.85 * scale, 2);
+        expect(fields.action.weight).toBe("400");
+      }
+      evidence.push({ pending, history });
+      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && [1, 2].includes(scale)) {
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await page.locator('[data-approval-field="identity"]:visible').filter({ hasText: "OpenAI" }).scrollIntoViewIfNeeded();
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${assistant ? "assistant" : "studio"}-history.png`) });
+      }
+    }
+    expect(evidence[1]).toEqual(evidence[0]);
+    expect(errors).toEqual([]);
+    const metrics = JSON.stringify({ theme, width, scale, density, evidence }, null, 2);
+    await test.info().attach("populated-history.json", { body: metrics, contentType: "application/json" });
+    if (process.env.NYX_REVIEW_SHOTS) await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${density}-history.json`), metrics);
+    await context.close();
+  });
+
+  test(`equivalent automation labels and machine summaries (${theme}, ${width}, text ${scale}×, spacing ${density}×)`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, isMobile: width === 390, hasTouch: width === 390, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    await page.route("**/api/v1/machines/updates", route => route.fulfill({ json: [] }));
+    const evidence = [];
+    for (const [studio, assistant, selector, label, token, weight] of [
+      ["/triggers", "/assistant/automations", "[data-trigger-title]", "Shared trigger", 14, "500"],
+      ["/nodes", "/assistant/machines", "[data-machine-card-title]", "Shared machine", 15, "600"],
+    ] as const) {
+      const pair = [];
+      for (const path of [studio, assistant]) {
+        await openRoute(page, path, scale, density, theme, false);
+        await page.evaluate(async () => {
+          const client = (window as Window & { __nyxQueryClient: QueryClient }).__nyxQueryClient;
+          await client.cancelQueries({ queryKey: ["nodes"] });
+          await client.cancelQueries({ queryKey: ["triggers"] });
+          const { getMockResponse } = await import("/src/lib/mock-data.ts");
+          const { nodes } = getMockResponse("/nodes") as import("../src/types/nodes").NodeListResponse;
+          if (nodes?.length) client.setQueryData(["nodes"], [{ ...nodes[0], name: "Shared machine", machine: {
+            version: 1, shell: true, files: true, computer: false, browser: false, os: "linux", arch: "x86_64", roots: ["/workspace"], computer_mode: "standard", cua_version: null, computer_tools: [], computer_ready: false, browser_isolated: false, saved_login_ready: false,
+          } }]);
+          client.setQueryData(["triggers", { orgId: null }], { triggers: [{
+            id: "11111111-1111-4111-8111-111111111111", user_id: "test-user", label: "Shared trigger", source: "webhook", status: "active", user_service_id: null, verification: { mode: "token", location: "bearer" }, delivery: { type: "notification" }, inbound_url: "https://example.test/trigger", created_at: "2026-11-05T00:00:00Z", updated_at: "2026-11-05T00:00:00Z",
+          }] });
+        });
+        const role = await fieldRole(page, selector, label);
+        expect(parseFloat(role.size)).toBeCloseTo(token * 0.85 * scale, 2);
+        expect(role.weight).toBe(weight);
+        pair.push(role);
+      }
+      expect(pair[1]).toEqual(pair[0]);
+      evidence.push({ studio, assistant, pair });
+    }
+    expect(errors).toEqual([]);
+    await test.info().attach("equivalent-list-roles.json", { body: JSON.stringify({ theme, width, scale, density, evidence }, null, 2), contentType: "application/json" });
+    await context.close();
+  });
+}
+
 for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) {
   test(`normal and typed toast text meets contrast in each shell (${theme}, ${width})`, async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" });
@@ -118,14 +235,24 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
       const header = await service.evaluate(element => {
         const title = element.querySelector("[data-service-card-title]")!;
         const text = title.querySelector("button") ?? title;
+        const subtitle = element.querySelector("[data-service-card-subtitle]")!;
+        const headerBox = element.getBoundingClientRect(), titleBox = title.getBoundingClientRect(), subtitleBox = subtitle.getBoundingClientRect();
         const icon = element.querySelector("[data-service-card-icon]")!;
         const style = getComputedStyle(text), box = icon.getBoundingClientRect(), iconStyle = getComputedStyle(icon);
-        return { fontSize: style.fontSize, fontWeight: style.fontWeight, tracking: style.letterSpacing, icon: { width: box.width, height: box.height, radius: iconStyle.borderRadius, padding: iconStyle.padding, background: iconStyle.backgroundColor, border: iconStyle.border } };
+        const range = document.createRange();
+        range.selectNodeContents(text);
+        const glyph = range.getBoundingClientRect();
+        return { fontSize: style.fontSize, fontWeight: style.fontWeight, tracking: style.letterSpacing, titleHeight: titleBox.height, titleOffset: titleBox.top - headerBox.top, textOffset: glyph.top - titleBox.top, subtitleOffset: subtitleBox.top - headerBox.top, subtitleHeight: subtitleBox.height, icon: { width: box.width, height: box.height, radius: iconStyle.borderRadius, padding: iconStyle.padding, background: iconStyle.backgroundColor, border: iconStyle.border } };
       });
       expect(header.fontSize).toBe(`${15 * 0.85 * scale}px`);
       expect(header.fontWeight).toBe("600");
       expect(header.icon.width).toBeCloseTo(40 * density, 1);
       expect(header.icon.height).toBeCloseTo(40 * density, 1);
+      if (!assistant) {
+        const target = (await service.getByRole("button", { name: "GitHub", exact: true }).boundingBox())!;
+        expect(target.height).toBeGreaterThanOrEqual(24);
+        expect(target.width).toBeGreaterThanOrEqual(24);
+      }
       headers.push(header);
       const cards = assistant ? await pluginCardBounds(page) : null;
       if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && (scale === 0.5 || scale === 1)) {
@@ -175,6 +302,17 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
         })).toEqual([]);
       }
       const sample: Record<string, unknown> = { controls: await readings(page, "[data-treatment-fixture] [data-parity]") };
+      if (process.env.NYX_REVIEW_SHOTS) {
+        const layout = await page.locator("[data-treatment-fixture]").evaluate(element => ({
+          width: element.getBoundingClientRect().width,
+          parentWidth: element.parentElement!.getBoundingClientRect().width,
+          fontFamily: getComputedStyle(element).fontFamily,
+          fonts: [...document.fonts].map(font => ({ family: font.family, weight: font.weight, status: font.status })),
+          controls: [...element.querySelectorAll("[data-parity]")].map(control => ({ role: control.getAttribute("data-parity"), width: control.getBoundingClientRect().width, height: control.getBoundingClientRect().height })),
+        }));
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${density}-${path.startsWith("/assistant") ? "assistant" : "studio"}-fixture-layout.json`), JSON.stringify(layout, null, 2));
+      }
       sample.header = await readings(page, "[data-treatment-fixture] [data-page-header], [data-treatment-fixture] [data-page-heading], [data-treatment-fixture] [data-page-heading] :is(h1,h2), [data-treatment-fixture] [data-page-heading] > p, [data-treatment-fixture] [data-title-actions]");
       // Title tag names differ intentionally; compare the roles by stable position.
       sample.header = Object.values(sample.header as object);

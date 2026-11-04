@@ -6,6 +6,7 @@ export const TEXT_STYLES = {
   sectionHeading: "text-20 font-semibold",
   dialogTitle: "text-15 font-semibold",
   cardTitle: "text-15 font-semibold",
+  rowTitle: "text-14 font-medium",
   groupHeading: "text-12 font-medium",
   body: "text-14 font-normal",
   secondary: "text-13 font-normal",

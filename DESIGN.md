@@ -101,6 +101,7 @@ assignments live in `lib/typography.ts`; numeric classes in markup follow this t
 | Card / dialog / sheet title | `text-15` | 600 | 12.75 |
 | Navigation item, inactive / active | `text-15` | 400 / 500 | 12.75 |
 | Body / page description / table cell | `text-14` | 400 | 11.9 |
+| List row identity / approval service / automation label | `text-14` | 500 | 11.9 |
 | Form label / button / action link / tab | `text-14` | 500 | 11.9 |
 | Input / select value / menu item | `text-14` | 400 | 11.9 |
 | Helper / secondary caption / timestamp | `text-13` | 400 | 11.05 |
@@ -162,6 +163,12 @@ Every expanded, collapsed and mobile navigation stack uses `shell-nav-stack`,
 with half a spacing unit between rows. Service cards in Studio and Plugins share
 `ServiceCardHeader`: the card-title role with tight tracking and a ten-spacing-unit
 icon container. Both keep the same icon surface, border, corners and title gap.
+The header owns one visual title line and subtitle offset. An interactive title
+uses a vertically centered hit target outside that line's layout, preserving the
+shared control minimum without pushing the subtitle down. Approval identity and
+action fields share their row-title and body roles in mobile cards, desktop tables
+and NyxBot History. Trigger labels use the row-title role in both lists; machine
+summary cards use the card-title role in both shells.
 Toasts follow the app theme; titles use foreground and descriptions use
 muted-foreground on the actual toast surface, including typed notifications.
 All title, description and action text must meet 4.5:1 contrast.

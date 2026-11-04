@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
+import { TEXT_STYLES } from "@/lib/typography";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   BellRing,
@@ -559,7 +560,7 @@ export function TriggersPage() {
                     <BellRing className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <div className="min-w-0 space-y-2">
-                    <p className="truncate text-15 font-semibold">
+                    <p data-trigger-title="" className={`truncate ${TEXT_STYLES.rowTitle}`}>
                       {trigger.label}
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -597,8 +598,8 @@ export function TriggersPage() {
               <TableBody>
                 {triggers.map((trigger) => (
                   <TableRow key={trigger.id}>
-                    <TableCell className="font-normal">
-                      {trigger.label}
+                    <TableCell>
+                      <span data-trigger-title="" className={TEXT_STYLES.rowTitle}>{trigger.label}</span>
                     </TableCell>
                     <TableCell>{deliveryLabel(trigger)}</TableCell>
                     <TableCell>

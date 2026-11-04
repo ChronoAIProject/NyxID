@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
+import { ApprovalAction, ApprovalIdentity } from "@/components/shared/approval-history-fields";
 import { ServiceIcon } from "@/components/service-icon";
 import { Skeleton } from "@/components/ui/skeleton";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
@@ -106,13 +107,13 @@ function HistorySection({
                   />
                 }
                 title={<>
-                  <p className="text-14 font-medium">{entry.serviceName}</p>
-                  <p
-                    className="mt-1 line-clamp-2 break-words text-14 font-normal text-muted-foreground"
+                  <ApprovalIdentity className="block">{entry.serviceName}</ApprovalIdentity>
+                  <ApprovalAction
+                    className="mt-1 line-clamp-2 break-words"
                     title={entry.block.body}
                   >
                     {entry.block.body}
-                  </p>
+                  </ApprovalAction>
                   <p className="mt-1 text-13 font-normal text-text-tertiary">
                     <span
                       className={

@@ -55,6 +55,7 @@
 .assistant-workspace-approval > section > div:nth-child(2) > p:first-child {
   font-size: var(--text-14);
   font-weight: 400;
+  line-height: 1.5;
 }
 .assistant-workspace-approval > section > div:nth-child(2) > div > span {
   border: 0;

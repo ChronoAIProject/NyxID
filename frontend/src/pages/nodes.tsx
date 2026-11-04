@@ -403,7 +403,7 @@ export function NodesPage() {
                     </Button>
                   </div>
                 )}
-                <p className="pr-10 text-15 font-semibold text-foreground truncate">
+                <p data-machine-card-title="" className="pr-10 text-15 font-semibold text-foreground truncate">
                   {node.name}
                   {node.metadata?.agent_version && (
                     <span className="ml-2 text-13 font-normal text-muted-foreground">
@@ -449,7 +449,7 @@ export function NodesPage() {
                       </Button>
                     </div>
                   )}
-                  <p className="pr-10 text-15 font-semibold text-foreground truncate">
+                  <p data-machine-card-title="" className="pr-10 text-15 font-semibold text-foreground truncate">
                     {node.name}
                     {node.metadata?.agent_version && (
                       <span className="ml-2 text-13 font-normal text-muted-foreground">

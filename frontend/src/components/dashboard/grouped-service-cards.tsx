@@ -366,17 +366,11 @@ function GroupCard({
                 name={group.name}
                 titleId={headingId}
                 icon={<ServiceIcon slug={group.iconSlug} iconUrl={group.iconUrl} size="md" />}
-                title={
-                  <button
-                    type="button"
-                    onClick={() => onToggle(cardRef.current)}
-                    aria-expanded={expanded}
-                    aria-controls={contentId}
-                    className="max-w-full cursor-pointer truncate text-left hover:text-primary-text focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
-                  >
-                    {group.name}
-                  </button>
-                }
+                titleAction={{
+                  onClick: () => onToggle(cardRef.current),
+                  "aria-expanded": expanded,
+                  "aria-controls": contentId,
+                }}
                 subtitle={
                   <>
                     {matchingCount < count
