@@ -671,8 +671,19 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  org_specialist: z
+    .object({
+      org_id: z.string(),
+      guest_enabled: z.boolean(),
+      delegated_service_ids: z.array(z.string()),
+      daily_credits: z.string().nullish(),
+    })
+    .optional(),
   guest_readiness: guestReadinessSchema.nullish(),
-  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
+  follow_readiness: z
+    .enum(["ready", "unavailable"])
+    .catch("unavailable")
+    .optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),

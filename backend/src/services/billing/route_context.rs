@@ -48,6 +48,7 @@ pub enum NodeIntent {
 
 #[derive(Clone, Debug)]
 pub struct BillingRouteContext {
+    pub(crate) org_channel_guest: Option<crate::services::org_channel_service::GuestPayer>,
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
@@ -110,14 +111,21 @@ pub(crate) struct ManagedBillingAdmission {
 
 impl BillingRouteContext {
     /// Called after normal resource authorization/payer resolution, before
-    /// reservation. External guests consume the agent owner's budget even
-    /// when the granted connection is organization-owned. The chat authority
+    /// reservation. Personal-agent guests consume their owner's budget even
+    /// for org connections; the typed org-channel guest instead retains its
+    /// verified org payer and exact binding budget. The chat authority
     /// comes from the live thread key, never a channel sender or request body.
     pub(crate) fn with_assistant_payer(
         mut self,
         chat: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
     ) -> Self {
-        if let Some(chat) = chat.filter(|chat| chat.guest) {
+        self.org_channel_guest = chat
+            .and_then(|c| c.org_agent_access.as_ref())
+            .and_then(|a| a.channel())
+            .and_then(|c| c.guest_payer());
+        if self.org_channel_guest.is_none()
+            && let Some(chat) = chat.filter(|c| c.guest)
+        {
             self.billing_owner_id.clone_from(&chat.user_id);
         }
         self
@@ -236,6 +244,7 @@ impl BillingRouteContext {
             actor_user_id,
             api_key_id,
             assistant_source: Some("other".into()),
+            org_channel_guest: None,
             user_service_id,
             catalog_service_id,
             service_slug,

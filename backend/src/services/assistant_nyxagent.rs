@@ -1584,6 +1584,11 @@ pub(crate) async fn authorize_thread_read(
         // fences the live shared ACL, independent of this metadata marker.
         return Ok(None);
     }
+    if row.channel.is_some()
+        && let Some(access) = super::org_channel_service::conversation_access(db, row).await?
+    {
+        return Ok(Some(access));
+    }
     let user_id = row.user_id.as_str();
     if let Some(owner) = row.agent_owner_id.as_deref() {
         let access = Box::pin(super::org_agent_service::resolve_key_access(
@@ -1623,6 +1628,7 @@ pub async fn list(
     };
     filter.insert("collaboration", bson::Bson::Null);
     filter.insert("guest_model_setup", doc! {"$ne":true});
+    filter.insert("channel.org_execution", doc! {"$exists":false});
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
             .split_once(':')
@@ -2292,6 +2298,41 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.agent_id = Some(agent.id.clone());
         row.role = AgentRole::Orchestrator;
     }
+    if start.origin == TurnOrigin::Channel
+        && let Some(origin) = start.channel.as_ref().filter(|o| o.org_execution.is_some())
+    {
+        if row.channel.as_ref().is_some_and(|old| {
+            old.nyxbot_channel_id != origin.nyxbot_channel_id || old.partition != origin.partition
+        }) {
+            return Err(super::org_channel_service::denied());
+        }
+        // Each new authenticated message carries current sender/link and
+        // source evidence. Reconfirmation must not reuse the prior link's
+        // authority, and a followed reply must bind the current source event.
+        row.channel = Some(origin.clone());
+    }
+    if start
+        .reply_channel
+        .as_ref()
+        .is_some_and(|o| o.org_execution.is_some())
+    {
+        row.reply_channel = start.reply_channel.clone();
+    } else if start.origin == TurnOrigin::User
+        && row
+            .reply_channel
+            .as_ref()
+            .is_some_and(|o| o.org_execution.is_some())
+    {
+        row.reply_channel = None;
+    }
+    // Org channel authority binds the next turn's guest/member lane. A new
+    // conversation starts with guest_turn=false, so project the authenticated
+    // incoming lane before checking its key authority. Keep the old audience
+    // for the context reset below.
+    let previous_guest_turn = row.guest_turn;
+    if super::org_channel_service::origin(&row).is_some() && !row.guest_model_setup {
+        row.guest_turn = start.guest;
+    }
     // Refuses destroyed agents before any write.
     let authority = super::assistant_agent_credential_service::authority_with_access(
         db,
@@ -2506,7 +2547,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     // tool results may hold more than the chat saw): it starts from
     // the transcript alone.
     let guest = start.guest;
-    if guest != row.guest_turn && row.nyxagent_session_id.is_some() {
+    if guest != previous_guest_turn && row.nyxagent_session_id.is_some() {
         row.nyxagent_session_id = None;
         row.nyxagent_instruction_binding = None;
         row.nyxagent_last_response_id = None;
@@ -3019,6 +3060,17 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
         .await?;
     }
+    if start.channel_event_id.is_some() {
+        super::org_channel_service::transcript::publish(
+            db,
+            session,
+            &row,
+            &ids.message_id,
+            &start.text,
+            "user",
+        )
+        .await?;
+    }
     // Bind every accepted destination of this one question in the same turn
     // transaction. The source records retain their independent dispatch claims.
     if let Some(turn) = row.active_turn.as_mut() {
@@ -3377,7 +3429,6 @@ pub async fn begin_turn_with_voice(
     };
     // Every thread belongs to an agent: the requested one for a new thread,
     // otherwise the owner's NyxBot (which also adopts legacy rows).
-    let nyxbot = super::assistant_team_service::ensure_nyxbot(db, user_id).await?;
     let new_agent = match start.agent_id.as_deref() {
         Some(agent_id) if start.conversation_id.is_none() => {
             let agent = super::assistant_team_service::agent(db, user_id, agent_id).await?;
@@ -3388,7 +3439,28 @@ pub async fn begin_turn_with_voice(
             }
             agent
         }
-        _ => nyxbot.clone(),
+        _ if start.conversation_id.is_some()
+            && start
+                .org_access
+                .as_ref()
+                .and_then(|a| a.channel())
+                .is_some_and(|a| a.execution().guest) =>
+        {
+            let row = get(
+                db,
+                user_id,
+                start
+                    .conversation_id
+                    .as_deref()
+                    .expect("existing conversation"),
+            )
+            .await?;
+            // An org-paid guest has no personal NyxBot to use as the legacy
+            // default. Other lanes keep their request-local authority snapshot;
+            // the transaction resolves the existing thread's actual agent.
+            super::assistant_team_service::agent_for_conversation(db, &row).await?
+        }
+        _ => super::assistant_team_service::ensure_nyxbot(db, user_id).await?,
     };
     let learning_epoch = if start.conversation_id.is_none()
         && !start.guest
@@ -4147,6 +4219,15 @@ async fn finish_turn_inner(
                 }
                 if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
+                }
+                if message.status == "completed" && let Some(origin) = super::org_channel_service::origin(&row) {
+                    match Box::pin(super::org_channel_service::validate_in_session(&db,session,origin,&row.user_id,row.agent_id.as_deref().unwrap_or_default(),true)).await {
+                        Ok(_) => super::org_channel_service::transcript::publish(&db,session,&row,&message.id,&message.text,"agent").await?,
+                        Err(e @ AppError::DatabaseError(_)) => return Err(e),
+                        // Lost exposure, membership or wallet readiness stops
+                        // publication, never the turn's ordinary settlement.
+                        Err(_) => {},
+                    }
                 }
                 super::platform_personal_turn_service::settle_saved_reply_in_session(&db, session, &message).await?;
                 if let Some(turn) = settled_turn.as_ref() {
@@ -5684,6 +5765,11 @@ pub(crate) async fn delete_in_session(
             .await?;
         }
         super::assistant_invocation_service::deleted_in_session(db, session, user_id, id).await?;
+        // A member's app turn can clear a former channel reply preference;
+        // transport-owned replay must still be purged with that member home.
+        if row.agent_owner_id.is_some() || super::org_channel_service::origin(row).is_some() {
+            super::org_channel_service::lifecycle::delete_conversation(db, session, id).await?;
+        }
         super::platform_personal_turn_service::clear_thread_in_session(db, session, row).await?;
         if row.channel.as_ref().is_some_and(|o| o.thread.is_some()) {
             super::channel_thread_follow_service::delete_conversation(db, user_id, id, session)
@@ -6545,6 +6631,10 @@ impl TurnError {
             "nyxid_error" => (
                 "nyxid_error",
                 "NyxID could not authorize the assistant operation.",
+            ),
+            "org_channel_guest_unavailable" => (
+                "org_channel_guest_unavailable",
+                super::org_channel_service::UNAVAILABLE,
             ),
             "guest_model_route_required" => (
                 "guest_model_route_required",

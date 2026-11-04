@@ -6248,7 +6248,7 @@ async fn execute_ssh_command_internal(
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             auth.billing_principal_user_id(),
             &user_service.user_id,
             credential_class,

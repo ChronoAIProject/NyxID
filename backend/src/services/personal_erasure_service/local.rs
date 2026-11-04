@@ -685,6 +685,7 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
             .await?;
         return Ok(false);
     }
+    super::super::org_channel_service::lifecycle::erase_person(&db, &job.user_id).await?;
     // Preserve org routes: release only the person's existing NyxBot links via
     // the routing/key lifecycle before deleting their local link record.
     if let Some(link) = db
@@ -692,6 +693,39 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         .find_one(doc! {"user_id":&job.user_id})
         .await?
     {
+        if link.get_document("org_specialist").is_ok() {
+            let id = link
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("Invalid org channel identity".into()))?;
+            let context = (db.clone(), id.to_owned());
+            super::super::transaction_service::run_db_only(&db, &context, |tx, (db, id)| {
+                Box::pin(async move {
+                    super::super::org_channel_service::lifecycle::retire_in_session(
+                        db, tx, id, None,
+                    )
+                    .await
+                })
+            })
+            .await?;
+            if !super::super::org_channel_service::lifecycle::erase_hidden(
+                &db,
+                doc! {"channel.nyxbot_channel_id":id,"channel.org_execution":{"$type":"object"}},
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+            for collection in [
+                crate::models::org_channel::LINKS,
+                crate::models::org_channel::CHALLENGES,
+                crate::models::org_channel::LANES,
+                crate::models::org_channel::MESSAGES,
+            ] {
+                db.collection::<Document>(collection)
+                    .delete_many(doc! {"channel_id":id})
+                    .await?;
+            }
+        }
         if let Ok(org) = link.get_str("bot_owner_id") {
             if let Ok(route) = link.get_str("route_id") {
                 match super::super::channel_routing_service::delete_conversation(&db, route, org)

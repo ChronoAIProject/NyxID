@@ -989,9 +989,8 @@ pub(crate) async fn target_agent(
     }
 }
 
-/// Resolve NyxBot or a personal specialist for a channel target. Readable
-/// organization names are refused without ambiguity selection; organization
-/// profiles resolved by ID are still rejected by the caller's ownership check.
+/// Resolve NyxBot or a specialist ID for a channel target. Org profiles require
+/// an explicit ID, the rollout gate and same-org admin checks at connection.
 pub(crate) async fn channel_target_agent(
     state: &AppState,
     owner: &str,
@@ -1049,9 +1048,10 @@ async fn preflight_channel_target(
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
-    if agent.user_id != owner {
+    if agent.user_id != owner && name == "channel_bot_setup_link" {
         return Err(AppError::organization_agent_channel_unsupported());
     }
+    crate::services::org_channel_service::require_target(&state.db, owner, &agent).await?;
     Ok(())
 }
 

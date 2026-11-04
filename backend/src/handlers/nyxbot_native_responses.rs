@@ -485,7 +485,12 @@ async fn current(
         .await?
         && let (Some(delivery), Some(conversation)) = (&event.delivery, &event.conversation_id)
     {
-        let history = engine::get(&state.db, &row.user_id, conversation).await?;
+        let history = engine::get(
+            &state.db,
+            crate::services::org_channel_service::event_actor(&event),
+            conversation,
+        )
+        .await?;
         if late_delivery::eligible(state, &event, delivery, &history)
             .await?
             .is_none()
@@ -638,7 +643,12 @@ async fn send_update_impl(
     {
         return Err(unavailable());
     }
-    let history = engine::get(&state.db, &row.user_id, conversation).await?;
+    let history = engine::get(
+        &state.db,
+        crate::services::org_channel_service::event_actor(&event),
+        conversation,
+    )
+    .await?;
     if late_delivery::eligible(
         state,
         &event,

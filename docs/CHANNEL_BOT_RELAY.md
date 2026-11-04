@@ -2627,3 +2627,12 @@ Old rows default to no assignment/references; old replicas ignore these additive
 fields and retain text-only delegated results. Upgrade all replicas for complete
 delivery coverage. Source lifetime and the existing v1/v2 rollout restrictions
 above are unchanged.
+
+### Bots linked to organization specialists
+
+The default-off `nyxbot:org-specialist-channels` feature permits a live org admin
+to link a same-org bot and specialist. Transport ownership remains unchanged.
+Verified members execute as themselves; opt-in guests have explicit delegated
+services and an org-paid daily budget. Groups/topics share public transcript
+context while execution keys remain isolated per actor. See
+[the NyxBot contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).

@@ -117,3 +117,15 @@ from its authenticated Discord session. The facts include structured addressing,
 reply evidence and native thread/parent IDs. They grant no gateway capability
 and make no assumption about gateway-side Discord ingress. The CMA owner owns
 that implementation. See [Discord setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).
+
+
+## Organization-specialist bindings
+
+With `nyxbot:org-specialist-channels` and fleet readiness enabled, follow
+partitions keep the transport admin on the channel row and bind an independent
+verified actor in `ChannelOrigin.org_execution`. A group/topic has one org-owned
+public transcript and separate hidden execution lanes per member or guest.
+Only a verified admin records owner presence; ordinary members cannot open the
+guest audience. Follow expiry, stop, exact source targeting and delivery fences
+remain mandatory. Guest exposure, exact daily budget and per-sender limits apply
+to followed turns too. Gateway sender IDs never establish NyxID membership.

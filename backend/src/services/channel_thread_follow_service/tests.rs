@@ -46,6 +46,7 @@ fn child(selection: Selection) -> (NyxbotThread, ThreadTurnBinding) {
 }
 fn origin(child: &NyxbotThread, b: ThreadTurnBinding) -> ChannelOrigin {
     ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "link".into(),
         partition: child.partition.clone(),
@@ -277,7 +278,9 @@ async fn admitted_binding_survives_stop_but_not_relink_or_sender_revocation() {
         )
         .await
         .unwrap();
-    relink(&db, "owner", "link", "replacement").await.unwrap();
+    relink(&db, "owner", "owner", "link", "replacement")
+        .await
+        .unwrap();
     assert!(
         validate_delivery(&db, "owner", &o, conversation)
             .await
@@ -412,7 +415,7 @@ async fn owner_queue_is_bounded_keeps_event_anchors_and_rechecks_authority_after
                 "sender_id":"human","guest":false,"addressed":true,"transport":"direct",
                 "stream_deadline":bson::DateTime::now(),"checked_at":bson::DateTime::now()}}).await.unwrap();
         assert_eq!(
-            super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event)
+            super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
                 .await
                 .unwrap(),
             i < 20
@@ -646,9 +649,15 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
         .await
         .unwrap();
     assert!(
-        !super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event.clone())
-            .await
-            .unwrap()
+        !super::super::channel_turn_delivery::enqueue(
+            &db,
+            "owner",
+            conversation,
+            event.clone(),
+            None
+        )
+        .await
+        .unwrap()
     );
     let refused_child = db
         .collection::<NyxbotThread>(THREADS)
@@ -704,6 +713,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
             "owner",
             conversation,
             &event,
+            None,
             &mut session
         )
         .await
@@ -751,6 +761,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
             "owner",
             conversation,
             &event,
+            None,
             &mut session
         )
         .await
@@ -775,7 +786,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
         .await
         .unwrap();
     assert!(
-        super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event)
+        super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
             .await
             .unwrap()
     );

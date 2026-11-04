@@ -1313,3 +1313,16 @@ channel/key, use `delivery_id` for idempotency, and report closed outcomes
 `confirmed`, `rejected`, or `unknown` (no message text, tool data, tokens or opaque
 event/reply refs). `unknown` must remain terminal for sending. This is a proposed
 cross-service extension, not an endpoint implemented by this change.
+
+### Org-specialist execution behind the provider
+
+Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
+Provider/creator keys stay on the linking admin and route keys stay org-owned;
+CMA source contracts are unchanged. NyxID resolves each verified sender to a
+live org member or an explicitly delegated, budgeted org-paid guest. Optional
+versioned origins carry that actor through replay/queues/async replies. Native
+and relay events use the same authority checks and dedup namespace. There is no
+CMA-provided membership/payer and no fallback to a personal agent. See
+[org-specialist channel rules](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots)
+for verification, public transcript isolation, payer rules and mandatory rollout
+readiness.

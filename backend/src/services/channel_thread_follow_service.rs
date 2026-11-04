@@ -115,9 +115,13 @@ pub fn not_found() -> AppError {
 pub async fn access(db: &Database, owner: &str, channel_id: &str) -> AppResult<NyxbotChannel> {
     let row = db
         .collection::<NyxbotChannel>(CHANNELS)
-        .find_one(doc! {"_id": channel_id, "user_id": owner, "status": "active"})
+        .find_one(doc! {"_id": channel_id, "status": "active"})
         .await?
         .ok_or_else(not_found)?;
+    if row.user_id != owner {
+        let binding = row.org_specialist.as_ref().ok_or_else(not_found)?;
+        super::org_channel_service::require_admin(db, owner, &binding.org_id).await?;
+    }
     super::platform_bot_authority::require_personal_routes(db, &row.channel_bot_id).await?;
     if let Some(org) = &row.bot_owner_id
         && !super::org_service::is_admin(db, owner, org).await?
@@ -250,6 +254,7 @@ pub async fn select(
                 .session(&mut *session).await?.ok_or_else(not_found)?;
             if settings.follow.threads.as_deref().is_some_and(|s| s != "follow") { return Ok(Selection::Legacy); }
             if settings.agent_id.as_deref().or(channel.agent_id.as_deref()).is_some_and(|a| a != agent) { return Err(not_found()); }
+            let (channel, _) = super::org_channel_service::project_sender(db,&channel,sender,target.facts().sender_kind==ThreadSenderKind::Human,agent).await?;
             let Some(guest) = eligible_for_facts(&channel, &settings, target.facts(), sender) else { return Ok(Selection::Quiet); };
             if stop && guest {return Ok(Selection::Quiet);}
             if settings_id!=parent_id {

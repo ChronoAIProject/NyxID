@@ -4342,6 +4342,7 @@ fn memory_remembered_in_one_thread_keeps_another_threads_binding() {
 fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "bot".into(),
         platform: "telegram".into(),
@@ -5060,6 +5061,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
     use crate::models::channel_thread_follow::ThreadTurnBinding;
     fn origin(partition: &str, bound: bool) -> ChannelOrigin {
         ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             nyxbot_channel_id: "channel".into(),
             platform: "telegram-new".into(),
@@ -5203,6 +5205,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
 fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "channel".into(),
         platform: "lark".into(),
@@ -5231,6 +5234,7 @@ fn reply_length_guidance_follows_all_channel_destinations_but_never_app_only() {
     use crate::models::assistant_conversation::PlatformReplyRouting;
     let mut row = stale_test_row(Utc::now());
     let telegram = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "telegram-channel".into(),
         platform: "telegram".into(),
@@ -5399,6 +5403,7 @@ async fn tool_image_chat_resolves_x_public_dm_and_trigger_destinations() {
         "transport":"direct", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
     }).await.unwrap();
     let origin = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "channel".into(),
         platform: "x".into(),
@@ -5714,6 +5719,7 @@ async fn in_progress_excludes_other_people_channel_and_guest_threads() {
     channel.id = format!("channel-{}", Uuid::new_v4().simple());
     channel.agent_id = Some("agent".into());
     channel.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
@@ -7342,6 +7348,7 @@ async fn checking_notice_requires_external_work_and_five_seconds_and_claims_once
     turn.started_at = now;
     turn.origin = TurnOrigin::Channel;
     turn.asked_from = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
@@ -7434,6 +7441,7 @@ async fn checking_notice_is_fenced_by_stop_replacement_settlement_and_capacity_n
         turn.external_check_started = true;
         turn.origin = TurnOrigin::Channel;
         turn.asked_from = Some(ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             thread: None,
             nyxbot_channel_id: "channel".into(),

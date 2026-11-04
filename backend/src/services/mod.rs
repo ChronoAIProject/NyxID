@@ -547,3 +547,5 @@ pub mod assistant_connection_service;
 pub mod monitoring_service;
 
 pub mod assistant_delegated_images;
+
+pub mod org_channel_service;

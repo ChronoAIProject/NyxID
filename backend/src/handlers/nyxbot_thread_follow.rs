@@ -401,7 +401,19 @@ pub(super) async fn inbound_impl(
     {
         return Ok(None);
     }
-    let Some(_guest) = follow::eligible_for_facts(row, &settings, facts, sender_id) else {
+    let (projected, _) = crate::services::org_channel_service::project_sender(
+        &state.db,
+        row,
+        sender_id,
+        sender.kind == ThreadSenderKind::Human,
+        settings
+            .agent_id
+            .as_deref()
+            .or(row.agent_id.as_deref())
+            .unwrap_or_default(),
+    )
+    .await?;
+    let Some(_guest) = follow::eligible_for_facts(&projected, &settings, facts, sender_id) else {
         if sender.kind == ThreadSenderKind::Human
             && facts.kind != ThreadKind::Email
             && addressed
@@ -499,6 +511,7 @@ pub(super) async fn inbound_impl(
         return Ok(Some(Inbound::Silent));
     }
     let origin = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: row.id.clone(),
         partition: child.partition.clone(),
@@ -882,12 +895,22 @@ pub(crate) async fn prelude(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(threads::HISTORY_SECONDS);
     let prepare = async {
         let child = follow::validate_delivery(&state.db, &row.user_id, origin, &row.id).await?;
-        let channel = follow::access(&state.db, &row.user_id, &origin.nyxbot_channel_id).await?;
+        let channel = if let Some(access) =
+            crate::services::org_channel_service::conversation_access(&state.db, row).await?
+        {
+            access
+                .channel()
+                .ok_or_else(follow::not_found)?
+                .channel()
+                .clone()
+        } else {
+            follow::access(&state.db, &row.user_id, &origin.nyxbot_channel_id).await?
+        };
         let settings = state
             .db
             .collection::<NyxbotThread>(THREADS)
             .find_one(doc! {"_id": &child.follow.settings_chat_id,
-            "channel_id": &channel.id, "user_id": &row.user_id})
+            "channel_id": &channel.id, "user_id": &channel.user_id})
             .await?
             .ok_or_else(follow::not_found)?;
         let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;

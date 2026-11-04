@@ -418,8 +418,7 @@ pub fn schema(name: &str) -> Value {
             json!({"channel_agent_id": string(64),
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" or one of the user's personal specialist names \
-                    or IDs; organization specialists cannot be linked to channel bots \
-                    or chats"}}),
+                    or IDs; when enabled, an organization specialist ID is allowed only for a bot owned by that same organization and a live admin"}}),
             vec!["channel_agent_id", "agent"],
         ),
         "remember" => (
@@ -470,7 +469,7 @@ pub fn schema(name: &str) -> Value {
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\", one of the user's personal specialist names \
                     or IDs, or \"default\" for the channel bot's agent; organization \
-                    specialists cannot be linked to channel bots or chats"}}),
+                    specialists require an enabled same-org binding managed by a live admin"}}),
             vec!["chat_id"],
         ),
         "update_channel_access" => (
@@ -564,8 +563,7 @@ pub fn schema(name: &str) -> Value {
                     "description": "Optional bot name"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" (default) or one of the user's personal \
-                    specialist names or IDs; organization specialists cannot be linked \
-                    to channel bots or chats"}}),
+                    specialist names or IDs; new-bot setup links create personal bots. Use connect_channel_bot for an existing same-org bot"}}),
             vec!["platform"],
         ),
         "connect_channel_bot" => (
@@ -576,8 +574,7 @@ pub fn schema(name: &str) -> Value {
                     "description": "Deprecated alias of bot"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" (default) or one of the user's personal \
-                    specialist names or IDs; organization specialists cannot be linked \
-                    to channel bots or chats"}}),
+                    specialist names or IDs, or an organization specialist ID with a same-org bot and live admin authority when enabled"}}),
             vec![],
         ),
         "list_channel_agents" => (json!({}), vec![]),
@@ -818,14 +815,13 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
             Telegram, bot creation inside Telegram when available). Secrets are entered on that \
             page, never in chat. Once the bot exists NyxID links it to you or the named \
-            personal specialist automatically and tells you; organization specialists cannot be \
-            linked to channel bots or chats."
+            personal specialist automatically and tells you. For an organization specialist, use an existing same-org bot with connect_channel_bot."
         }
         "connect_channel_bot" => {
             "Link a channel bot to you or to one of the user's personal specialists: the \
             user's own bots and those of organizations they administer \
             (nyxid__list_channel_bots lists both, with each org). Organization \
-            specialists cannot be linked to channel bots or chats. Name it by id or \
+            specialists may be linked to a same-org bot by a live admin when enabled. Each member verifies their own chat account; guests require explicit admin delegation and an org-funded budget. Name it by id or \
             label. The user's Telegram bots use the Agent Event Gateway; other \
             platforms use the selected live transport; a gateway flag alone does not \
             prove platform support. Returns a link the user opens once in the chat app \
@@ -833,8 +829,7 @@ pub(crate) fn description(name: &str) -> &'static str {
         }
         "link_channel_bot" => {
             "Move a connected channel bot to NyxBot or one of the user's personal \
-            specialists; organization specialists cannot be linked to channel bots or \
-            chats."
+            specialists. When enabled, same-org admins may relink an organization binding to another specialist of that org; member links and guest exposure reset. Changing between personal and org targets requires disconnect/reconnect."
         }
         "list_channel_agents" => {
             "List connected channel bots, the agent each one reaches, and status."
@@ -874,7 +869,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             mentions and replies (groups default to mentions); let members other than the user \
             talk to the agent (default once the user has talked to the bot there); allow \
             posting there (per-chat off always overrides the new-chat default); use nyxid__update_channel_access private_chat_posts to allow new customer chats automatically, with apply_to_existing to include existing private chats; or give the chat its own personal specialist. Organization specialists \
-            cannot be linked to channel bots or chats. Guests never act for the user: you \
+            require an enabled same-org binding managed by a live admin. Guests never act for the user: you \
             answer them without tools, and a specialist given the chat uses only its own \
             services, as far as nyxid__set_guest_access lets guests (by default looking up, \
             creating and acting, never changing or deleting what exists), so give a chat a \

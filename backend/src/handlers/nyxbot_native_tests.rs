@@ -30,7 +30,7 @@ use crate::{
     services::nyxbot_response_recovery as recovery,
 };
 
-fn native_channel<'a>(
+pub(super) fn native_channel<'a>(
     state: &'a AppState,
 ) -> futures::future::BoxFuture<'a, (NyxbotChannel, String)> {
     Box::pin(native_channel_impl(state))

@@ -38,6 +38,7 @@ use crate::{
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
+    super::org_channel_service::FLAG,
     "assistant:shared-agents",
     super::collaboration_group_service::READINESS,
     super::shared_agent_transport::READINESS,

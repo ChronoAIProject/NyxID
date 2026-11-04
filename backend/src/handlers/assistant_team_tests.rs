@@ -4388,3 +4388,62 @@ async fn private_posts_2124_tool_refuses_guests_and_specialists_and_keeps_confir
     f.state.db.drop().await.unwrap();
     specialist.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn org_channel_enabled_admin_tools_retain_confirmation_and_members_cannot_link() {
+    use crate::services::{feature_flag_service as flags, org_channel_service as org};
+    let f = crate::services::org_agent_tests::Fixture::new("team_org_channel_enabled").await;
+    let (agent, _) = f.create().await;
+    flags::set_platform_override(
+        &f.state.db,
+        org::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.admin,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.admin,
+        "Link an organization bot",
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for (tool, args) in channel_target_calls(&agent.id) {
+        let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+        assert!(error, "{tool}: {value}");
+        if tool == "nyxid__channel_bot_setup_link" {
+            assert_eq!(value, acks::organization_agent_channel_refusal());
+        } else {
+            assert_eq!(
+                value["error"], "acknowledgement_required",
+                "{tool}: {value}"
+            );
+            assert!(
+                preflight_channel_target(
+                    &f.state,
+                    &f.member,
+                    tool.trim_start_matches("nyxid__"),
+                    &args
+                )
+                .await
+                .is_err()
+            );
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}

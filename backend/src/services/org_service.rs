@@ -343,6 +343,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     let now_bson = bson::DateTime::from_chrono(Utc::now());
     let blocker_specs: Vec<(&str, mongodb::bson::Document, &str)> = vec![
         (
+            crate::models::assistant_conversation::COLLECTION_NAME,
+            doc! {"channel.org_execution.org_id":org_user_id,"active_turn":{"$ne":null}},
+            "active organization channel turns",
+        ),
+        (
+            crate::models::org_channel::HOLDS,
+            doc! {"org_id":org_user_id,"state":"reserved"},
+            "unsettled organization channel usage",
+        ),
+        (
             crate::models::user_service::COLLECTION_NAME,
             // Soft-deleted UserServices stay in the collection with
             // `is_active = false` -- those must NOT block deletion.
@@ -666,6 +676,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
+    super::org_channel_service::lifecycle::erase_org(db, org_user_id).await?;
     // User-provided OAuth client credentials (per-user override of the
     // service-level OAuth app). Hard-deleted, no platform-side cleanup,
     // no DELETE handler that would let the admin clear them ahead of
@@ -1143,6 +1154,15 @@ pub async fn update_membership(
             )
             .await?;
         }
+        if role.is_some_and(|r| !r.can_proxy()) {
+            super::org_channel_service::lifecycle::revoke_member_in_session(
+                db,
+                &mut transaction,
+                &current.org_user_id,
+                &current.member_user_id,
+            )
+            .await?;
+        }
         if role == Some(OrgRole::Admin) {
             super::org_membership_authority::fence_live_member(
                 db,
@@ -1215,6 +1235,13 @@ pub async fn revoke_membership(
                 "Membership changed; reload before removal".into(),
             ));
         }
+        super::org_channel_service::lifecycle::revoke_member_in_session(
+            db,
+            &mut transaction,
+            org_user_id,
+            member_user_id,
+        )
+        .await?;
         Ok(())
     }
     .await;
