@@ -23,10 +23,14 @@ const mobileOut = path.join(root, "..", "mobile", "assets", "onboarding");
 const VIEWPORT = { width: 1000, height: 560 };
 const SCALE = 2;
 
+/** When the first keystroke happens; the clip starts just before it. */
+let typingAt = 0;
+
 async function say(page, text) {
   const composer = page.getByRole("textbox", { name: /Message NyxBot/ }).first();
   await composer.click();
-  await composer.pressSequentially(text, { delay: 45 });
+  typingAt = Date.now() / 1000;
+  await composer.pressSequentially(text, { delay: 32 });
   await page.waitForTimeout(350);
   await page.keyboard.press("Enter");
 }
@@ -36,14 +40,14 @@ const CLIPS = {
   "chief-of-staff": async (page) => {
     await say(page, "Set up a Telegram bot");
     await page.getByText(/Telegram/).last().waitFor();
-    await page.waitForTimeout(3500);
+    await page.waitForTimeout(2500);
   },
   // NyxBot hands work to a specialist, which reports back.
   specialists: async (page) => {
     await say(page, "Ask the researcher for urgent issues");
     await page.getByText("I asked the researcher to find the urgent issues.").waitFor();
     await page.getByText(/Found 3 urgent issues/).last().waitFor({ timeout: 20_000 });
-    await page.waitForTimeout(3500);
+    await page.waitForTimeout(2500);
   },
   // A destructive action waits for the owner. Allow while the reply is still
   // running, so the decision shows as a continuation line.
@@ -51,13 +55,13 @@ const CLIPS = {
     await say(page, "Delete agent key ci-bot");
     const card = page.getByRole("region", { name: /Confirm: Delete agent key/ });
     await card.waitFor({ timeout: 20_000 });
-    await page.waitForTimeout(1600);
+    await page.waitForTimeout(1100);
     const allow = card.getByRole("button", { name: "Allow", exact: true });
     await allow.hover();
     await page.waitForTimeout(500);
     await allow.click();
     await page.getByText("Deleted agent key ci-bot.").last().waitFor({ timeout: 20_000 });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2500);
   },
 };
 
@@ -69,7 +73,7 @@ const DEMO = { nyxagentEnabled: true, partialText: "", markContinuations: true }
 const FAULTS = {
   "chief-of-staff": DEMO,
   specialists: DEMO,
-  control: { ...DEMO, progressStallMs: 6000 },
+  control: { ...DEMO, progressStallMs: 3500 },
 };
 
 fs.mkdirSync(webOut, { recursive: true });
@@ -111,6 +115,9 @@ for (const [name, run] of Object.entries(CLIPS)) {
   recording = false;
   await capture;
   await context.close();
+  // No idle lead-in: the clip opens as the request is being typed.
+  const from = frames.findIndex((frame) => frame.at >= typingAt - 0.25);
+  frames.splice(0, Math.max(from - 1, 0));
   const list = frames
     .map((frame, index) => {
       const next = frames[index + 1]?.at ?? frame.at + 1;

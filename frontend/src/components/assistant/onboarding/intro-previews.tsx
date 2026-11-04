@@ -1,14 +1,6 @@
 import { useState } from "react";
-import controlMp4 from "@/assets/onboarding/control.mp4";
-import controlWebm from "@/assets/onboarding/control.webm";
-import controlPoster from "@/assets/onboarding/control.webp";
-import chiefMp4 from "@/assets/onboarding/chief-of-staff.mp4";
-import chiefWebm from "@/assets/onboarding/chief-of-staff.webm";
-import chiefPoster from "@/assets/onboarding/chief-of-staff.webp";
-import specialistsMp4 from "@/assets/onboarding/specialists.mp4";
-import specialistsWebm from "@/assets/onboarding/specialists.webm";
-import specialistsPoster from "@/assets/onboarding/specialists.webp";
 import { useMediaQuery } from "@/hooks/use-media-query";
+import { CLIPS } from "./replay-clips";
 import { ACCESS_MODE_DESCRIPTION, ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import type { NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
@@ -31,12 +23,6 @@ function WindowBar({ title }: { readonly title: string }) {
     </div>
   );
 }
-
-const CLIPS = {
-  "chief-of-staff": { webm: chiefWebm, mp4: chiefMp4, poster: chiefPoster },
-  specialists: { webm: specialistsWebm, mp4: specialistsMp4, poster: specialistsPoster },
-  control: { webm: controlWebm, mp4: controlMp4, poster: controlPoster },
-} as const;
 
 /**
  * A recorded replay of the real assistant (dev mock mode, fixture data;

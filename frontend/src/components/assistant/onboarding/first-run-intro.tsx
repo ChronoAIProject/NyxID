@@ -23,6 +23,7 @@ import type {
 import { NextStepCards } from "./next-step-cards";
 import { OnboardingIcon } from "./onboarding-icons";
 import { AccessModesPreview, ReplayClip } from "./intro-previews";
+import { preloadReplays } from "./replay-clips";
 
 /** The screens after the greeting; the progress bar counts these. */
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
@@ -79,6 +80,7 @@ export function FirstRunIntro({
 
   useEffect(() => {
     if (!open) return;
+    preloadReplays();
     saved.current = false;
     openedAt.current = Date.now();
     setIndex(0);
