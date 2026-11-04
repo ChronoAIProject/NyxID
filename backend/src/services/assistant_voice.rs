@@ -132,6 +132,8 @@ pub async fn enqueue(
     }
     let request = VoiceRequest {
         client_key: None,
+        progress: None,
+        timing: Default::default(),
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,
@@ -373,6 +375,23 @@ pub(crate) async fn publish_result(
                     }
                 } else { source };
                 let source = settled_result(&current, source);
+                // Timing survives audio closure and fast turns that settle
+                // between coordinator ticks. IDs and timestamps only.
+                if let Some(call) = db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
+                    .find_one(doc!{"_id":&current.session_id,"user_id":&current.user_id})
+                    .projection(doc!{"created_at":1}).session(&mut *session).await?
+                    && let Ok(start)=call.get_datetime("created_at") {
+                    let offset=|at:chrono::DateTime<Utc>|(at-start.to_chrono()).num_milliseconds().max(0);
+                    let mut marks=doc!{"timing.result_ms":offset(source.created_at)};
+                    if let Some(first)=source.activities.iter().map(|a|a.started_at).min() {
+                        marks.insert("timing.first_activity_ms",offset(first));
+                        marks.insert("timing.tool_started_ms",offset(first));
+                    }
+                    if let Some(end)=source.activities.iter().filter_map(|a|a.ended_at).min() {
+                        marks.insert("timing.first_tool_finished_ms",offset(end));
+                    }
+                    requests.update_one(doc!{"_id":&current.id},doc!{"$min":marks}).session(&mut *session).await?;
+                }
                 // Older replicas executed in the visible thread. Adopt their
                 // existing settled reply rather than copying it into that thread twice.
                 if source.conversation_id == current.conversation_id
@@ -403,7 +422,7 @@ pub(crate) async fn publish_result(
                     .await?
                     .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
                 let id = Uuid::new_v4().to_string();
-                let text: String = source.text.chars().take(12_000).collect();
+                let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
                         delegated_images: Default::default(),
@@ -689,9 +708,8 @@ pub(crate) async fn result_message(
         seq: 0,
         turn_id: request.turn_id.clone(),
         role: "assistant".into(),
-        text:
-            "The voice request ended without a recorded result. Check its status before retrying."
-                .into(),
+        text: super::voice::progress::terminal_detail(request.terminal_error_code.as_deref())
+            .into(),
         status: "failed".into(),
         error_code: Some(
             request
@@ -1146,6 +1164,8 @@ pub(crate) async fn continuation(
         db,
         VoiceRequest {
             client_key: parent.client_key.clone(),
+            progress: None,
+            timing: Default::default(),
             started_at: None,
             terminal_error_code: None,
             async_operation_pending: false,

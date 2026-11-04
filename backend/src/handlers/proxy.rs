@@ -4675,7 +4675,14 @@ async fn execute_resolved_proxy_inner<'a>(
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
         request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
-            (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response(),
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(crate::services::assistant_access_policy::with_frontend(
+                    refusal.clone(),
+                    &state.config.frontend_url,
+                )),
+            )
+                .into_response(),
         ));
     }
     if pool_authority.is_none() {

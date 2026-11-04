@@ -20,9 +20,11 @@ pub mod grok_runtime;
 pub mod openai;
 #[cfg(test)]
 mod openai_tests;
+pub mod progress;
 pub mod receipt;
 pub mod runtime;
 pub mod session;
+mod speech;
 #[cfg(test)]
 mod tests;
 mod tokens;

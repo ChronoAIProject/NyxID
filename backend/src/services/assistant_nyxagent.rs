@@ -4310,6 +4310,8 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
 /// A pending proxy approval request raised by this chat's key. The chat renders
 /// it as a card; the decision itself goes through the ordinary approvals API.
 pub struct ChatApproval {
+    pub status: String,
+    pub review_path: String,
     pub id: String,
     pub service_slug: String,
     pub service_name: String,
@@ -4324,10 +4326,30 @@ pub struct ChatApproval {
 /// carry the key's name as `requester_label` (proxy approvals record the API
 /// key name), and the owner is either the request owner or a notified
 /// approver for org-policy requests.
+#[cfg(test)]
 pub async fn pending_approvals(
     db: &Database,
     user_id: &str,
     credential_api_key_id: &str,
+) -> AppResult<Vec<ChatApproval>> {
+    chat_approvals(db, user_id, credential_api_key_id, false).await
+}
+
+/// Keep terminal requests visible after expiry/decision and after a reload.
+/// This is the same owner/key scope as pending cards, never the global inbox.
+pub async fn approval_history(
+    db: &Database,
+    user_id: &str,
+    credential_api_key_id: &str,
+) -> AppResult<Vec<ChatApproval>> {
+    chat_approvals(db, user_id, credential_api_key_id, true).await
+}
+
+async fn chat_approvals(
+    db: &Database,
+    user_id: &str,
+    credential_api_key_id: &str,
+    include_decided: bool,
 ) -> AppResult<Vec<ChatApproval>> {
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS};
     if credential_api_key_id.is_empty() {
@@ -4336,24 +4358,44 @@ pub async fn pending_approvals(
     let Ok(key) = super::key_service::get_api_key(db, user_id, credential_api_key_id).await else {
         return Ok(Vec::new());
     };
-    let rows: Vec<ApprovalRequest> = db
-        .collection::<ApprovalRequest>(APPROVALS)
-        .find(doc! {
-            "status": "pending",
-            "requester_type": "user",
-            "requester_id": user_id,
-            "requester_label": &key.name,
-            "expires_at": {"$gt": bson::DateTime::now()},
-            "$or": [{"user_id": user_id}, {"notify_user_ids": user_id}],
-        })
-        .sort(doc! {"created_at": 1})
+    let scope = doc! {
+        "requester_type":"user", "requester_id":user_id,"requester_label":&key.name,
+        "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+    };
+    let now = Utc::now();
+    let mut pending = scope.clone();
+    pending.extend(doc! {"status":"pending","expires_at":{"$gt":bson::DateTime::from_chrono(now)}});
+    let collection = db.collection::<ApprovalRequest>(APPROVALS);
+    let mut rows: Vec<ApprovalRequest> = collection
+        .find(pending)
+        .sort(doc! {"created_at":1})
         .limit(10)
         .await?
         .try_collect()
         .await?;
+    if include_decided {
+        let terminal = doc! {"$and":[scope, {"$or":[
+            {"status":{"$ne":"pending"}}, {"expires_at":{"$lte":bson::DateTime::from_chrono(now)}},
+        ]}]};
+        let recent: Vec<ApprovalRequest> = collection
+            .find(terminal)
+            .sort(doc! {"created_at":-1})
+            .limit(20)
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(recent);
+        rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    }
     Ok(rows
         .into_iter()
         .map(|row| ChatApproval {
+            status: if row.status == "pending" && row.expires_at <= now {
+                "expired".into()
+            } else {
+                row.status
+            },
+            review_path: super::assistant_links::AssistantPage::Approvals.path(),
             id: row.id,
             service_slug: row.service_slug,
             service_name: row.service_name,

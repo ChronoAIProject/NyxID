@@ -3727,6 +3727,12 @@ async fn draft_tool_result_keeps_its_shape() {
         "proposal_id",
         "agent_id",
         "source",
+        "code",
+        "status",
+        "message",
+        "expires_at",
+        "conversation_id",
+        "review_path",
     ]
     .into();
     assert_eq!(keys, expected);
@@ -3734,6 +3740,8 @@ async fn draft_tool_result_keeps_its_shape() {
     assert!(matches!(review_url.scheme(), "http" | "https"));
     assert!(review_url.host_str().is_some());
     assert_eq!(result["error"], "acknowledgement_required");
+    assert_eq!(result["code"], "acknowledgement_required");
+    assert_eq!(result["status"], "pending");
     assert_eq!(result["kind"], "action");
     assert_eq!(result["source"], "authored");
     assert_eq!(result["agent_id"], f.chat.agent_id.as_str());

@@ -354,6 +354,16 @@ pub fn missing_access(
 }
 
 pub fn with_frontend(mut value: Value, frontend: &str) -> Value {
+    // Only enrich a server-authored exact-card path, never an arbitrary URL.
+    if let (Some(conversation), Some(card)) = (
+        value["conversation_id"].as_str(),
+        value["acknowledgement_id"].as_str(),
+    ) {
+        let page = super::assistant_links::AssistantPage::ReviewCard { conversation, card };
+        if value["review_path"].as_str() == Some(page.path().as_str()) {
+            value["review_url"] = json!(page.url(frontend));
+        }
+    }
     if value["error"] == MISSING_ACCESS
         && let Some(path) = value["grants_path"].as_str()
     {

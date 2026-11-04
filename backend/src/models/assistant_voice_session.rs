@@ -36,6 +36,9 @@ impl std::fmt::Debug for VoiceClientKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// Accepted work suspends user-idle expiry, but never heartbeat or hard limits.
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub last_work_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_key: Option<VoiceClientKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

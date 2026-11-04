@@ -505,6 +505,40 @@ cleared to inherit the workspace mode.
 
 ## Acknowledgements
 
+Card presentation is stateful (#2072). Tool results include `code`, `status`,
+`expires_at` for pending requests, and an `AssistantPage::ReviewCard` link
+(`/assistant?c=<source conversation>&card=<id>`). Only `pending` is a waiting
+request. Expired, denied, allowed, used and unavailable results describe their
+real state; invalid one-use retries keep `acknowledgement_invalid` for older
+consumers and add the specific `code`. A failed creation/check never claims a
+card exists. Creation re-reads the committed card before returning it. Expiry
+also appears in the next turn's server-authored decision note. New deadline
+expirations carry query-only `expiry_reason: "timeout"` metadata; policy-retired
+Full-access asks and legacy unclassified expirations are not retry prompts.
+The model must
+use the latest state and expiry, not an old request or a creation notification.
+
+History restores all pending owner cards, plus bounded terminal history and
+page-linked receipts. Expired ordinary cards remain standalone and visibly
+terminal, including expiry while the page is open. “Ask for a new confirmation”
+sends an explicit owner message asking to recheck the action; it neither reuses
+the expired card nor replays the operation. Authored-skill renewal keeps its
+existing dedicated review flow. Full-access receipts remain receipts.
+
+Proxy approvals are separate from `assistant_acknowledgements`. Their waiting
+call returns `approval_expired`, `approval_denied`, `approval_wait_timed_out`, or
+`approval_unavailable` on failure and links to `/assistant/approvals` (pending
+and history). The web history response adds bounded `approval_history`, scoped
+to the same owner/chat key as before, while `approvals` stays pending-only for
+older clients. New clients render terminal proxy cards after reload; an approval
+receipt says “Approved”, not that execution or delivery succeeded.
+
+The turn summary's “Completed” describes the model turn, “actions” counts tool
+activity, “expired” counts card decisions, and “failed” counts failed activity.
+It is not an execution-success receipt and does not identify which action the
+expired card belonged to. Failed creation has no card: its failed tool activity
+and truthful error remain the evidence, rather than a fabricated pending card.
+
 `assistant_acknowledgements` is a transcript collection with UUID `_id`, owner,
 conversation, credential key, kind (`service`, `account`, `action`, `operations`,
 `skills`, `machine`, `saved_login`), applicable
@@ -529,10 +563,10 @@ never count as pending and are excluded from the model's user-decision note.
 Their metadata-only audit is `assistant_action_auto_allowed`. Cards and receipts
 raised inside a tracked tool call record that call's turn activity ID as optional,
 presentation-only `activity_id` (streamed HTTP receipts capture it before the body
-is drained); it never authorizes, consumes or retries anything. History folds every
-settled decision of a turn into that reply's single turn summary line, beside its
+is drained); it never authorizes, consumes or retries anything. History folds non-expired
+settled decisions of a turn into that reply's single turn summary line, beside its
 tool call when `activity_id` matches and otherwise as one grouped line per identical
-action; denials stay visible on the line. Pending cards and authored-skill reviews
+action; denials stay visible on the line. Pending cards, expired cards and authored-skill reviews
 keep their own transcript rows, and the full receipt text (including the bypassed
 automation, machine/saved-login or service-approval policy) is shown on hover.
 Automation-started messages expose `origin: "trigger"` and, while the run record
@@ -633,7 +667,7 @@ arguments, summaries, secrets and ciphertext are excluded from audit data.
 History includes all pending and the last 20 decided records, exposing only
 `id,kind,status,summary,service_slug,service_name,tool_name,created_at,decided_at,
 expires_at`. The conversation index includes `pending_acknowledgements`. Pending
-cards appear at the transcript tail; decided cards become compact status lines at
+cards appear at the transcript tail; expired cards stay visible and other decided cards become compact status lines at
 the request's timestamp. Allow/Deny are explicit human actions with a 750 ms
 minimum throttle. The selected history refreshes when the owner's live stream
 (`GET /assistant/nyxagent/live`, identifiers only) reports a change to it; while
