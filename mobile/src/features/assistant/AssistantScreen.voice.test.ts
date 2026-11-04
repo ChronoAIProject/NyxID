@@ -1853,3 +1853,37 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
     x.harness.unmount();
   }
 });
+
+test("a voice call carries the chat's pending action cards so they can be decided without leaving it", async () => {
+  const x = setup(A);
+  const row = acknowledgementSchema.parse({
+    id: "d9428888-122b-41e1-85c5-61cd3cbb3210",
+    kind: "action",
+    status: "pending",
+    summary: "Send the reply",
+    service_name: null,
+    service_slug: null,
+    tool_name: "nyxid__post_to_chat",
+    created_at: "2026-10-16T00:00:00Z",
+    expires_at: "2099-10-16T00:15:00Z",
+  });
+  x.assistant.history!.acknowledgements = [row];
+  const decided: unknown[][] = [];
+  Object.assign(x.assistant, {
+    decide: async (id: string, choice: string) => {
+      decided.push([id, choice]);
+    },
+  });
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  const voice = x.voice()!;
+  assert.equal(voice.props.actionCount, 1);
+  const card = elements(expand(voice.props.actions)).find(
+    (node) => node.type === "AssistantAcknowledgementCard",
+  )!;
+  assert.equal(card.props.row, row);
+  card.props.onDecision("allow");
+  await x.harness.settle();
+  assert.deepEqual(decided, [[row.id, "allow"]]);
+  x.harness.unmount();
+});

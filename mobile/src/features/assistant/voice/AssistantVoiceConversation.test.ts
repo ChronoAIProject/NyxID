@@ -106,6 +106,8 @@ function setup(
     error?: string;
     recovery?: VoiceStartRecovery;
     reducedMotion?: boolean;
+    actions?: unknown;
+    actionCount?: number;
   } = {},
 ) {
   const events: unknown[][] = [];
@@ -183,6 +185,8 @@ function setup(
     onReview: (id?: string) => {
       events.push(["review", id]);
     },
+    actions: input.actions,
+    actionCount: input.actionCount,
   };
   const harness = hookHarness<Element>({
     "../../../components/workspace/useNativeSheetDismiss": {
@@ -800,4 +804,15 @@ test("the voice page is a pastel wash with the assistant pill and three round co
     ["close"],
   ]);
   f.harness.unmount();
+});
+
+test("action cards from the chat appear on the call so they can be decided in place", () => {
+  const card = { type: "ActionCard", props: { children: [] } };
+  const f = setup({ active: true, actions: card, actionCount: 1 });
+  assert.match(f.text(), /我的助手 needs you · 1/);
+  assert.ok(f.all().some((row) => row.type === "ActionCard"));
+  f.harness.unmount();
+  const none = setup({ active: true, actionCount: 0 });
+  assert.doesNotMatch(none.text(), /needs you/);
+  none.harness.unmount();
 });

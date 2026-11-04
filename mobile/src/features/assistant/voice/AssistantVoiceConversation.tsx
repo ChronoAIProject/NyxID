@@ -53,6 +53,9 @@ type Props = {
   onClose: () => void;
   onUpdate: () => void;
   onReview: (acknowledgementId?: string) => void;
+  /** The chat's pending action cards and approvals, decided here in place. */
+  actions?: ReactNode;
+  actionCount?: number;
 };
 type Task = VoiceSnapshot["tasks"][number];
 
@@ -111,6 +114,8 @@ function VoiceConversation({
   onClose,
   onUpdate,
   onReview,
+  actions,
+  actionCount = 0,
   environment,
 }: Props & {
   environment: ReturnType<typeof nativeVoiceEnvironment>;
@@ -597,6 +602,30 @@ function VoiceConversation({
               );
             })}
           </ScrollView>
+          {actionCount > 0 ? (
+            // What the chat is waiting on, decided without leaving the call.
+            <View
+              style={[
+                styles.actions,
+                styles.floating,
+                { backgroundColor: surface, maxHeight: dimensions.height * 0.42 },
+              ]}
+            >
+              <Text
+                accessibilityRole="header"
+                accessibilityLiveRegion="polite"
+                style={[styles.trayTitle, styles.actionsTitle, { color: colors.textPrimary }]}
+              >
+                {`${agentName} needs you · ${actionCount}`}
+              </Text>
+              <ScrollView
+                contentContainerStyle={styles.actionsContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                {actions}
+              </ScrollView>
+            </View>
+          ) : null}
           {tasks.length ? (
             <View style={[styles.tray, styles.floating, { backgroundColor: surface }]}>
               <Pressable
@@ -993,6 +1022,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   tray: { borderRadius: 14, paddingHorizontal: 14, paddingBottom: 8 },
+  actions: { borderRadius: 18, paddingTop: 12, paddingHorizontal: 12, paddingBottom: 4 },
+  actionsTitle: { paddingHorizontal: 4, paddingBottom: 8 },
+  actionsContent: { gap: 10, paddingBottom: 8 },
   trayHeader: {
     flexDirection: "row",
     alignItems: "center",

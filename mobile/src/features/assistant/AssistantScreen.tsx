@@ -1374,6 +1374,31 @@ export function AssistantScreen({
           agentName={agentName}
           onClose={() => setVoiceThread(undefined)}
           onUpdate={() => void assistant.recover()}
+          // The chat's own live cards, so a call can decide them in place.
+          actionCount={
+            (assistant.history?.acknowledgements.filter(
+              (row) => row.status === "pending",
+            ).length ?? 0) + (assistant.history?.approvals.length ?? 0)
+          }
+          actions={
+            <>
+              {(assistant.history?.acknowledgements ?? []).map(
+                renderAcknowledgement,
+              )}
+              {assistant.history?.approvals.map((approval) => (
+                <AssistantApprovalCard
+                  key={approval.id}
+                  approval={approval}
+                  disabled={
+                    !assistant.active || !!assistant.deciding || !!destroyed
+                  }
+                  onDecide={(approved) =>
+                    assistant.decideApproval(approval.id, approved)
+                  }
+                />
+              ))}
+            </>
+          }
           onReview={(acknowledgementId) => {
             assistant.openConversation(voiceThread, acknowledgementId);
             navigation.setParams({
