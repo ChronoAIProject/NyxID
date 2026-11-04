@@ -162,7 +162,7 @@ function AssistantShellLayout({
             {sidebarHidden ? (
               // Hidden sidebar: a slim rail with home, the sidebar toggle and
               // search, then the sidebar itself drawn as icons and avatars.
-              <aside className="hidden w-max shrink-0 flex-col items-center bg-sidebar px-2 md:flex">
+              <aside data-tour="sidebar" className="hidden w-max shrink-0 flex-col items-center bg-sidebar px-2 md:flex">
                 <div className="flex shrink-0 flex-col items-center gap-1 pt-2.5 pb-1">
                   <Link
                     to="/assistant"
@@ -182,6 +182,7 @@ function AssistantShellLayout({
               </aside>
             ) : (
               <aside
+                data-tour="sidebar"
                 className="relative hidden shrink-0 flex-col bg-sidebar md:flex"
                 style={{ width: sidebarWidth }}
               >
@@ -258,6 +259,7 @@ function AssistantShellLayout({
                 aria-label="Close chats"
               />
               <aside
+                data-tour="sidebar"
                 className="relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
                 style={{
                   paddingTop: "var(--sat)",

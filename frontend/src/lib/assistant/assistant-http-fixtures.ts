@@ -29,6 +29,10 @@ export interface AssistantHttpFixtureFaults {
   readonly aliasOnFirstSend?: boolean;
   readonly firstEventSilenceMs?: number;
   readonly progressStallMs?: number;
+  /** NyxAgent fixture: the partial text streamed before a reply settles. */
+  readonly partialText?: string;
+  /** NyxAgent fixture: store decision continuations with `continuation_of`, as the server does. */
+  readonly markContinuations?: boolean;
   readonly stateEnvelopeSequence?: readonly unknown[];
   readonly unauthorized?: "coded" | "uncoded";
 }
