@@ -12,8 +12,8 @@ type FullScreenLoadingProps = {
 
 /**
  * The brand splash while the app gets ready (restoring the saved session):
- * the portal mark breathing on drifting violet light and one quiet line,
- * no card or spinner chrome.
+ * the portal mark on a faint halo and one quiet line, no card or spinner
+ * chrome.
  */
 export function FullScreenLoading({
   title = "Loading…",
@@ -27,7 +27,7 @@ export function FullScreenLoading({
         accessibilityLabel={subtitle ? `${title} ${subtitle}` : title}
         style={styles.center}
       >
-        <BrandNebula height={520} />
+        <BrandNebula fill />
         <BreathingMark>
           <PortalMarkLogo size={88} />
         </BreathingMark>

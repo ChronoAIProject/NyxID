@@ -176,6 +176,13 @@ function setup({
     "../../components/brand/BrandNebula": {
       BrandNebula: "BrandNebula",
       BreathingMark: "BreathingMark",
+      RiseIn: "RiseIn",
+    },
+    "lucide-react-native": {
+      Eye: "Eye",
+      EyeOff: "EyeOff",
+      LockKeyhole: "LockKeyhole",
+      Mail: "Mail",
     },
     "../../components/brand/PortalMark": { PortalMarkLogo: "PortalMarkLogo" },
   });

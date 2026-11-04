@@ -674,14 +674,18 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   tokens are unchanged. Text colors have at least 4.5:1 against the native
   base/card/cardSoft surfaces; essential drawer/composer controls meet 3:1.
 
-Native sign-in and the session-restore splash share a brand backdrop: slow
-drifting violet light (`BrandNebula`) behind the portal mark, which breathes
-on a soft violet glow (`BreathingMark`); both are still under Reduce Motion and
-hidden from VoiceOver. The splash shows only the mark and one quiet line
-("Signing you in…"). Sign-in has no boxed card: a 30pt Space Grotesk welcome
-and a one-line lead, provider rows as 52pt soft filled pills (mark and label
-centred), "or continue with email", 52pt rounded fields and the primary
-gradient Sign in. One-time login codes sit centred in their own panel (mono
+Native sign-in and the session-restore splash keep decoration restrained: a
+faint, still violet halo behind the portal mark (`BrandNebula`, hidden from
+VoiceOver) and a neutral soft shadow under the mark; no stars, drifting light
+or coloured glow (user decision 2026-11-04). The splash shows only the mark
+and one quiet line ("Signing you in…"). Sign-in has no boxed card: the hero
+and the sign-in options rise gently into place on arrival (immediate under
+Reduce Motion), a 30pt Space Grotesk "Welcome to NyxID" with NyxID in the
+on-tint violet, a two-line lead, provider rows as 52pt soft filled pills
+(mark and label centred, pressing in slightly), "or continue with email",
+52pt rounded fields with leading mail and lock icons and a show/hide password
+toggle, and Sign in, which stays a quiet neutral button until there is
+something to submit and then takes the primary gradient. One-time login codes sit centred in their own panel (mono
 30pt, letter-spaced) with Copy, a live "Expires in m:ss · works once" line and
 the terminal command in a monospace chip.
 

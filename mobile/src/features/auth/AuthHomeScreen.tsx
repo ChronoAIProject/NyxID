@@ -41,7 +41,8 @@ import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
-import { BrandNebula, BreathingMark } from "../../components/brand/BrandNebula";
+import { BrandNebula, BreathingMark, RiseIn } from "../../components/brand/BrandNebula";
+import { Eye, EyeOff, LockKeyhole, Mail } from "lucide-react-native";
 import { PortalMarkLogo } from "../../components/brand/PortalMark";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 
@@ -106,6 +107,7 @@ function SocialAuthButton({
       style={({ pressed }) => [
         styles.socialAuthButton,
         pressed && styles.socialAuthButtonPressed,
+        pressed && styles.pressed,
         disabled && styles.socialAuthButtonDisabled,
       ]}
     >
@@ -167,6 +169,7 @@ export function AuthHomeScreen({ navigation }: Props) {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [mfaProvider, setMfaProvider] = useState<string | null>(null);
   const [recoveryMode, setRecoveryMode] = useState(false);
   const [mfaChallenge, setMfaChallenge] = useState<MfaChallengeError | null>(null);
@@ -382,6 +385,9 @@ export function AuthHomeScreen({ navigation }: Props) {
 
   const prompt = mfaPrompt(mfaProvider, recoveryMode);
   const isAnyPending = isSocialAuthPending || isEmailAuthPending;
+  // Until there is something to submit, Sign in is a quiet neutral button.
+  const signInBlocked =
+    !isEmailAuthPending && (mfaChallenge ? !mfaCode : !email.trim() || !password);
 
   const openRegistration = async () => {
     if (!loginConfig?.emailAuthEnabled || isAnyPending || mfaChallenge || registrationPending || registrationLock.current) return;
@@ -414,20 +420,23 @@ export function AuthHomeScreen({ navigation }: Props) {
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        {/* Hero: the portal mark breathing on drifting violet light. */}
+        {/* Hero: the portal mark on a faint halo, rising in on arrival. */}
+        <RiseIn>
         <View style={styles.heroWrap}>
           <BreathingMark>
             <PortalMarkLogo size={76} />
           </BreathingMark>
           <Text accessibilityRole="header" style={styles.heroTitle}>
-            Welcome to NyxID
+            Welcome to <Text style={styles.heroBrand}>NyxID</Text>
           </Text>
           <Text style={styles.heroLead}>
-            Your agents, connections and approvals, in one place.
+            Your agents, connections and approvals,{"\n"}in one place.
           </Text>
         </View>
+        </RiseIn>
 
         {/* Social providers follow server config; existing accounts can always sign in. */}
+        <RiseIn delay={140}>
         <View style={styles.panel}>
           {/* Social login */}
           {publicConfig.isPending ? (
@@ -502,6 +511,8 @@ export function AuthHomeScreen({ navigation }: Props) {
               ) : null}
               {prompt.showPasswordFields && (
                 <>
+                  <View style={styles.field}>
+                  <Mail size={18} color={colors.textMuted} />
                   <TextInput
                     style={styles.input}
                     accessibilityLabel="Email"
@@ -514,6 +525,9 @@ export function AuthHomeScreen({ navigation }: Props) {
                     autoCapitalize="none"
                     autoComplete="email"
                   />
+                  </View>
+                  <View style={styles.field}>
+                  <LockKeyhole size={18} color={colors.textMuted} />
                   <TextInput
                     style={styles.input}
                     accessibilityLabel="Password"
@@ -522,9 +536,23 @@ export function AuthHomeScreen({ navigation }: Props) {
                     value={password}
                     onChangeText={(v) => { setPassword(v); setLoginError(null); }}
                     editable={!isAnyPending && !mfaChallenge}
-                    secureTextEntry
+                    secureTextEntry={!showPassword}
                     autoComplete="current-password"
                   />
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={showPassword ? "Hide password" : "Show password"}
+                    hitSlop={8}
+                    onPress={() => setShowPassword((value) => !value)}
+                    style={styles.fieldAction}
+                  >
+                    {showPassword ? (
+                      <EyeOff size={18} color={colors.textSecondary} />
+                    ) : (
+                      <Eye size={18} color={colors.textSecondary} />
+                    )}
+                  </Pressable>
+                  </View>
                 </>
               )}
               {mfaChallenge && <View>
@@ -546,10 +574,18 @@ export function AuthHomeScreen({ navigation }: Props) {
                 onPress={() => void handleEmailLogin()}
                 accessibilityRole="button"
                 disabled={isAnyPending || (mfaChallenge ? !/^(?:\d{6}|[A-Za-z0-9_-]{8}|[a-fA-F0-9]{32})$/.test(mfaCode) : !email.trim() || !password)}
-                style={[styles.signInButtonWrap, (isEmailAuthPending || (mfaChallenge ? !mfaCode : !email.trim() || !password)) && styles.buttonDisabled]}
+                style={({ pressed }) => [
+                  styles.signInButtonWrap,
+                  signInBlocked && styles.signInIdle,
+                  pressed && !signInBlocked && styles.pressed,
+                ]}
               >
                 <ExpoLinearGradient
-                  colors={[colors.gradientStart, colors.gradientEnd]}
+                  colors={
+                    signInBlocked
+                      ? [colors.card, colors.card]
+                      : [colors.gradientStart, colors.gradientEnd]
+                  }
                   start={{ x: 0, y: 0 }}
                   end={{ x: 1, y: 0 }}
                   style={styles.signInButton}
@@ -558,7 +594,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                     {isEmailAuthPending ? (
                       <ActivityIndicator size="small" color={colors.onPrimary} />
                     ) : null}
-                    <Text style={styles.signInButtonText}>{isEmailAuthPending ? "Signing in..." : mfaChallenge ? "Verify & sign in" : "Sign In"}</Text>
+                    <Text style={[styles.signInButtonText, signInBlocked && { color: colors.textMuted }]}>{isEmailAuthPending ? "Signing in..." : mfaChallenge ? "Verify & sign in" : "Sign In"}</Text>
                   </View>
                 </ExpoLinearGradient>
               </Pressable>
@@ -607,6 +643,7 @@ export function AuthHomeScreen({ navigation }: Props) {
             .
           </Text>
         </View>
+        </RiseIn>
 
         {registrationNotice ? <Text accessibilityRole="alert" style={{ color: colors.textSecondary }}>{registrationNotice}</Text> : null}
         {loginError && (
@@ -668,6 +705,22 @@ const createStyles = (c: ThemeColors) =>
       paddingHorizontal: 12,
     },
     panel: { gap: 12 },
+    heroBrand: { color: c.primaryOnTint },
+    field: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      minHeight: 52,
+      paddingLeft: 16,
+      paddingRight: 6,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.borderSoft,
+      backgroundColor: c.card,
+    },
+    fieldAction: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
+    signInIdle: { shadowOpacity: 0 },
+    pressed: { transform: [{ scale: 0.98 }] },
     heroTagline: {
       ...typeScale.caption,
       color: c.textMuted,
@@ -679,13 +732,9 @@ const createStyles = (c: ThemeColors) =>
     },
     // DESIGN.md §Inputs: rounded-lg (8px) with 50%-opacity chrome.
     input: {
-      backgroundColor: c.card,
-      borderColor: c.borderSoft,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderRadius: 14,
-      minHeight: 52,
+      flex: 1,
+      minHeight: 50,
       paddingVertical: 14,
-      paddingHorizontal: 16,
       color: c.textPrimary,
       fontFamily: fonts.body,
       fontSize: 16,

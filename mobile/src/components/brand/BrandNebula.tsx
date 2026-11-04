@@ -2,10 +2,9 @@ import { useEffect, type ReactNode } from "react";
 import { StyleSheet, View } from "react-native";
 import Animated, {
   Easing,
-  cancelAnimation,
   useAnimatedStyle,
   useSharedValue,
-  withRepeat,
+  withDelay,
   withTiming,
 } from "react-native-reanimated";
 import Svg, { Circle, Defs, RadialGradient, Stop } from "react-native-svg";
@@ -13,97 +12,61 @@ import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { useTheme } from "../../theme/ThemeContext";
 
 /**
- * The sign-in backdrop: slow violet light drifting behind the brand mark,
- * purple as identity rather than wallpaper. Decorative and hidden from
- * VoiceOver; Reduce Motion keeps it still.
+ * A faint, still halo behind the brand mark on sign-in and the splash: just
+ * enough light to lift the mark off the page. No motion, no decoration.
  */
-export function BrandNebula({ height = 420 }: { height?: number }) {
+export function BrandNebula({
+  height = 360,
+  fill = false,
+}: {
+  height?: number;
+  /** Centre the halo in the whole parent instead of its top band. */
+  fill?: boolean;
+}) {
   const { mode } = useTheme();
-  const reducedMotion = useReducedMotion();
-  const drift = useSharedValue(0);
-  useEffect(() => {
-    cancelAnimation(drift);
-    drift.value = reducedMotion
-      ? 0
-      : withRepeat(
-          withTiming(1, { duration: 9000, easing: Easing.inOut(Easing.sin) }),
-          -1,
-          true,
-        );
-    return () => cancelAnimation(drift);
-  }, [reducedMotion]);
-  const dark = mode === "dark";
-  const a = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: -40 + drift.value * 60 },
-      { translateY: -20 + drift.value * 24 },
-      { scale: 1 + drift.value * 0.08 },
-    ],
-  }));
-  const b = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: 60 - drift.value * 70 },
-      { translateY: 30 - drift.value * 30 },
-      { scale: 1.08 - drift.value * 0.1 },
-    ],
-  }));
+  const peak = mode === "dark" ? 0.16 : 0.07;
+  const size = 300;
+  const r = size / 2;
   return (
     <View
       pointerEvents="none"
       accessible={false}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
-      style={[styles.wrap, { height }]}
+      style={[styles.wrap, fill ? styles.fill : { height }]}
     >
-      <Animated.View style={[styles.cloud, a]}>
-        <Glow id="nebula-violet" color="#9775FA" peak={dark ? 0.42 : 0.22} size={340} />
-      </Animated.View>
-      <Animated.View style={[styles.cloud, b]}>
-        <Glow id="nebula-deep" color="#5E00F5" peak={dark ? 0.34 : 0.14} size={300} />
-      </Animated.View>
+      <Svg width={size} height={size}>
+        <Defs>
+          <RadialGradient id="brand-halo" cx="50%" cy="50%" r="50%">
+            <Stop offset="0" stopColor="#9775FA" stopOpacity={peak} />
+            <Stop offset="1" stopColor="#9775FA" stopOpacity={0} />
+          </RadialGradient>
+        </Defs>
+        <Circle cx={r} cy={r} r={r} fill="url(#brand-halo)" />
+      </Svg>
     </View>
   );
 }
 
-function Glow({ id, color, peak, size }: { id: string; color: string; peak: number; size: number }) {
-  const r = size / 2;
-  return (
-    <Svg width={size} height={size}>
-      <Defs>
-        <RadialGradient id={id} cx="50%" cy="50%" r="50%">
-          <Stop offset="0" stopColor={color} stopOpacity={peak} />
-          <Stop offset="0.55" stopColor={color} stopOpacity={peak * 0.4} />
-          <Stop offset="1" stopColor={color} stopOpacity={0} />
-        </RadialGradient>
-      </Defs>
-      <Circle cx={r} cy={r} r={r} fill={`url(#${id})`} />
-    </Svg>
-  );
+/** The brand mark with a soft neutral shadow for depth. */
+export function BreathingMark({ children }: { children: ReactNode }) {
+  return <View style={styles.mark}>{children}</View>;
 }
 
-/**
- * The portal mark breathing gently on a soft violet glow; still under Reduce
- * Motion.
- */
-export function BreathingMark({ children }: { children: ReactNode }) {
+/** Content that rises gently into place on arrival; immediate under Reduce Motion. */
+export function RiseIn({ delay = 0, children }: { delay?: number; children: ReactNode }) {
   const reducedMotion = useReducedMotion();
-  const breath = useSharedValue(0);
+  const shown = useSharedValue(reducedMotion ? 1 : 0);
   useEffect(() => {
-    cancelAnimation(breath);
-    breath.value = reducedMotion
-      ? 0
-      : withRepeat(
-          withTiming(1, { duration: 2400, easing: Easing.inOut(Easing.sin) }),
-          -1,
-          true,
-        );
-    return () => cancelAnimation(breath);
-  }, [reducedMotion]);
+    shown.value = reducedMotion
+      ? 1
+      : withDelay(delay, withTiming(1, { duration: 480, easing: Easing.out(Easing.cubic) }));
+  }, []);
   const style = useAnimatedStyle(() => ({
-    transform: [{ scale: 1 + breath.value * 0.035 }],
-    shadowOpacity: 0.35 + breath.value * 0.25,
+    opacity: shown.value,
+    transform: [{ translateY: (1 - shown.value) * 12 }],
   }));
-  return <Animated.View style={[styles.mark, style]}>{children}</Animated.View>;
+  return <Animated.View style={style}>{children}</Animated.View>;
 }
 
 const styles = StyleSheet.create({
@@ -116,11 +79,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     overflow: "hidden",
   },
-  cloud: { position: "absolute" },
+  fill: { bottom: 0 },
   mark: {
-    shadowColor: "#9775FA",
-    shadowRadius: 28,
+    shadowColor: "#000000",
+    shadowRadius: 16,
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.4,
+    shadowOpacity: 0.28,
   },
 });
