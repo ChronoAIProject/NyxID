@@ -1541,6 +1541,7 @@ export class NyxAgentHttpFixtures {
         attachment_ids?: string[];
         text: string;
         model?: string;
+        acknowledgement_id?: string;
       };
       if (request.conversation_id && request.agent_id) {
         return failure(400, "agent_id only applies to new threads");
@@ -1581,6 +1582,9 @@ export class NyxAgentHttpFixtures {
       };
       this.push(row, "user", request.text, turn);
       const userMessage = row.history.messages.at(-1)!;
+      if (request.acknowledgement_id && globalThis.__nyxidAssistantHttpFaults?.markContinuations) {
+        userMessage.continuation_of = request.acknowledgement_id;
+      }
       userMessage.attachments = (request.attachment_ids ?? []).flatMap((attachmentId) => {
         const upload = this.uploads.get(`conversations/${id}/${attachmentId}`);
         return upload ? [upload.item] : [];
@@ -1609,7 +1613,10 @@ export class NyxAgentHttpFixtures {
           if (current.notice) {
             emit("turn.notice", { code: "context_reset", message: "Context reset" });
           }
-          emit("block.delta", { block_id: block, text: "Your connected services" });
+          emit("block.delta", {
+            block_id: block,
+            text: globalThis.__nyxidAssistantHttpFaults?.partialText ?? "Your connected services",
+          });
           timer = setInterval(() => {
             if (current.settleAt && current.settleAt <= Date.now()) this.settle(current);
             if (current.history.conversation.active_turn?.turn_id === turn) return;
