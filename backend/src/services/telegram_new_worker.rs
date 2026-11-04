@@ -31,7 +31,7 @@ impl TelegramNewService<'_> {
             let requests = &requests;
             async move {
             let Some(bot_id) = request.telegram_bot_id else { return };
-            if self.connect_claimed(&request, bot_id).await.is_err() {
+            if let Err(error) = self.connect_claimed(&request, bot_id).await {
                 let delay = 2_i64.pow(request.connection_attempts.min(5));
                 let _ = requests.update_one(
                     doc! {"_id": &request.id, "connection_generation": request.connection_generation, "auto_connect": true, "active": true, "status": {"$in": ["ready", "provisioning"]}},
@@ -40,7 +40,14 @@ impl TelegramNewService<'_> {
                         "connection_error": "Telegram setup is taking longer than usual. We are retrying automatically.",
                     }},
                 ).await;
-                tracing::warn!(request_id = %request.id, "Telegram creation connection will retry");
+                // NyxID-authored error text only: no tokens, URLs or Telegram payloads.
+                tracing::warn!(
+                    request_id = %request.id,
+                    attempts = request.connection_attempts,
+                    error_code = error.error_code(),
+                    error = %error,
+                    "Telegram creation connection will retry"
+                );
             }
             }
         }).await;
