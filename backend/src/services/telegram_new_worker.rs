@@ -40,12 +40,12 @@ impl TelegramNewService<'_> {
                         "connection_error": "Telegram setup is taking longer than usual. We are retrying automatically.",
                     }},
                 ).await;
-                // NyxID-authored error text only: no tokens, URLs or Telegram payloads.
+                // Stable code and key only: error text may carry provider detail.
                 tracing::warn!(
                     request_id = %request.id,
                     attempts = request.connection_attempts,
                     error_code = error.error_code(),
-                    error = %error,
+                    error_key = error.error_key(),
                     "Telegram creation connection will retry"
                 );
             }
