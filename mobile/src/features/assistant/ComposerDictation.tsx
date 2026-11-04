@@ -186,27 +186,8 @@ function DictationInline({
           {dictation.error}
         </Label>
       ) : null}
-      <View style={styles.inlineRow}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Discard dictation"
-          onPress={dictation.discard}
-          style={styles.target}
-        >
-          {({ pressed }) => (
-            <View
-              style={[
-                styles.inlineCircle,
-                {
-                  borderColor: colors.controlBorder,
-                  opacity: pressed ? 0.6 : 1,
-                },
-              ]}
-            >
-              <X size={17} color={colors.textPrimary} />
-            </View>
-          )}
-        </Pressable>
+      {/* The waveform takes the message line; the toolbar keeps its place. */}
+      <View style={styles.inlineWaveRow}>
         <View style={styles.inlineMeter}>
           {capturing ? (
             <DictationWaveform subscribe={dictation.subscribeLevel} height={22} />
@@ -230,6 +211,29 @@ function DictationInline({
             {formatElapsed(now - startedAt)}
           </Text>
         ) : null}
+      </View>
+      <View style={styles.inlineRow}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Discard dictation"
+          onPress={dictation.discard}
+          style={styles.target}
+        >
+          {({ pressed }) => (
+            <View
+              style={[
+                styles.inlineCircle,
+                {
+                  borderColor: colors.controlBorder,
+                  opacity: pressed ? 0.6 : 1,
+                },
+              ]}
+            >
+              <X size={17} color={colors.textPrimary} />
+            </View>
+          )}
+        </Pressable>
+        <View style={styles.inlineSpacer} />
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Finish dictation"
@@ -331,11 +335,19 @@ const styles = StyleSheet.create({
   notice: { paddingHorizontal: 12, paddingTop: 8, gap: 6 },
   inline: { gap: 2 },
   inlineText: { maxHeight: 120 },
-  inlineTextContent: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 4 },
+  inlineTextContent: { paddingHorizontal: 12, paddingTop: 12 },
   inlineBody: { fontFamily: fonts.bodyRegular, fontSize: 14, lineHeight: 20 },
   inlineError: { paddingHorizontal: 12, fontSize: 13 },
-  inlineRow: { flexDirection: "row", alignItems: "center", minHeight: 44 },
-  inlineMeter: { flex: 1, minWidth: 0, justifyContent: "center", paddingHorizontal: 4 },
+  inlineWaveRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    minHeight: 44,
+    paddingHorizontal: 12,
+    gap: 8,
+  },
+  inlineRow: { flexDirection: "row", alignItems: "flex-end", minHeight: 44 },
+  inlineSpacer: { flex: 1 },
+  inlineMeter: { flex: 1, minWidth: 0, justifyContent: "center" },
   inlineStatus: { flexDirection: "row", alignItems: "center", gap: 8 },
   inlineCircle: {
     width: 34,
