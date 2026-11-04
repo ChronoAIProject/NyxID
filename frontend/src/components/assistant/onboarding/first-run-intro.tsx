@@ -431,7 +431,7 @@ function Progress({
   readonly onSelect: (position: number) => void;
 }) {
   return (
-    <nav aria-label="Intro steps" className="flex items-center gap-0.5 pt-1 md:px-5 md:pt-4">
+    <nav aria-label="Intro steps" className="-mx-0.75 flex items-center pt-1 md:mx-0 md:px-5.25 md:pt-4">
       {STEPS.map((step, position) => (
         <button
           key={step}
@@ -440,7 +440,9 @@ function Progress({
           aria-label={`Step ${position + 1} of ${STEPS.length}: ${STEP_LABELS[step]}`}
           aria-current={position === index ? "step" : undefined}
           onClick={() => onSelect(position)}
-          className="group rounded-full px-1 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus"
+          // Bars sit as close as plain dashes: the assistant's minimum pointer
+          // width does not apply; the tall padding keeps them easy to hit.
+          className="group min-w-0! rounded-full px-0.75 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus"
         >
           <span
             aria-hidden="true"
