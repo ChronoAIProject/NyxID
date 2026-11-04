@@ -2840,7 +2840,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
             .unwrap()
             .starts_with(engine::SYSTEM_PROMPT)
     );
-    assert!(first.contains("Chat card decisions the user made since your previous reply"));
+    assert!(first.contains("Chat card states recorded since your previous reply"));
     assert!(first.contains(prepared.binding.marker.as_deref().unwrap()));
     assert!(calls[0].body["conversation"].as_str() == Some(SESSION));
     assert!(first.contains("\n- allowed: service github"));
@@ -2857,7 +2857,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
     assert!(!first.contains("IGNORE") && !first.contains("Summary text"));
     // The next turn does not repeat decisions it has already been told about.
     let second = calls[1].body["input"].as_str().unwrap();
-    assert!(!second.contains("Chat card decisions"));
+    assert!(!second.contains("Chat card states"));
     server.abort();
 }
 

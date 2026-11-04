@@ -54,6 +54,10 @@ pub struct Transcripts {
 impl Transcripts {
     pub fn has_unsealed_user_input(&self) -> bool {
         self.input.is_some()
+            || self
+                .normalized_pending
+                .values()
+                .any(|s| s.speaker == Speaker::User)
     }
 
     pub fn ingest(&mut self, event: &Value, now_ms: i64) -> AppResult<Vec<Segment>> {
@@ -288,6 +292,8 @@ pub async fn delegate(
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
     let request = VoiceRequest {
+        progress: None,
+        timing: Default::default(),
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,

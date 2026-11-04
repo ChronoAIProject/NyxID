@@ -1507,11 +1507,16 @@ impl TelegramNewService<'_> {
         };
         let created_at = event.created_at.filter(|date| durable_review || *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)).ok_or_else(|| conflict("This creation is too old to connect automatically. Use the Telegram bot token option with its current token."))?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"]
-            != self
-                .for_manager(request.manager_bot_id)
-                .await?
-                .manager_callback()
+        // A manager webhook registered before a domain move still names a
+        // configured API alias; readiness (`validate_manager_webhook`) already
+        // accepts it, so delivery verification must too.
+        let manager_callback = self
+            .for_manager(request.manager_bot_id)
+            .await?
+            .manager_callback();
+        if !webhook["url"]
+            .as_str()
+            .is_some_and(|url| self.config.same_base_url(url, &manager_callback))
             || webhook["pending_update_count"].as_i64() != Some(0)
             || webhook["last_error_date"]
                 .as_i64()
@@ -1544,7 +1549,11 @@ impl TelegramNewService<'_> {
             bot.id
         );
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"] != callback {
+        // Our callback may still name a configured API alias after a domain move.
+        if !webhook["url"]
+            .as_str()
+            .is_some_and(|url| self.config.same_base_url(url, &callback))
+        {
             return Ok("retained_external");
         }
         self.api

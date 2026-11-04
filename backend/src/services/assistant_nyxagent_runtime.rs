@@ -1594,6 +1594,13 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.voice_request_id.is_some())
+    {
+        guidance.push_str(crate::services::voice::runtime::TASK_GUIDANCE);
+    }
     if !row.guest_model_setup
         && !row.guest_turn
         && crate::services::assistant_service_execution::instruction::prompt_applies(

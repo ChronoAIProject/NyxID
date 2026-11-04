@@ -2799,14 +2799,18 @@ async fn dispatch_tools_call(
         };
         match Box::pin(gate).await {
             Ok(Some(refusal)) => {
-                return tool_result(request.id.clone(), &refusal.to_string(), true);
-            }
-            Err(_) => {
                 return tool_result(
                     request.id.clone(),
-                    "Confirmation could not be checked",
+                    &crate::services::assistant_access_policy::with_frontend(
+                        refusal,
+                        &state.config.frontend_url,
+                    )
+                    .to_string(),
                     true,
                 );
+            }
+            Err(_) => {
+                return tool_result(request.id.clone(), &acks::unavailable().to_string(), true);
             }
             Ok(None) => {}
         }
@@ -3731,10 +3735,10 @@ async fn authorize_mcp_operation(
         pending.resolution.from_org_policy,
     )
     .await
-    .map_err(|e| {
+    .map_err(|_| {
         tool_result(
             request_id.clone(),
-            &format!("Approval request failed: {e}"),
+            &serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string(),
             true,
         )
     })?;
@@ -3743,12 +3747,9 @@ async fn authorize_mcp_operation(
     approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
         .await
         .map_err(|error| {
-            let mapped = approval_service::map_wait_for_decision_error(
-                error,
-                &req_id,
-                &state.config.frontend_url,
-            );
-            tool_result(request_id.clone(), &format!("{mapped}"), true)
+            let outcome =
+                approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
+            tool_result(request_id.clone(), &outcome.to_string(), true)
         })?;
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
@@ -4151,7 +4152,11 @@ async fn webhook_service_gate(
         {
             return Ok::<_, crate::errors::AppError>(Err(tool_result(
                 request_id.clone(),
-                &refusal.to_string(),
+                &crate::services::assistant_access_policy::with_frontend(
+                    refusal,
+                    &state.config.frontend_url,
+                )
+                .to_string(),
                 true,
             )));
         }
@@ -4161,7 +4166,7 @@ async fn webhook_service_gate(
         Ok(result) => result,
         Err(_) => Err(tool_result(
             request_id,
-            "Confirmation could not be checked",
+            &acks::unavailable().to_string(),
             true,
         )),
     }
@@ -5324,6 +5329,7 @@ async fn handle_meta_connect(
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
 ) -> Response {
+    use crate::services::assistant_connection_service as assistant_connect;
     // Slugs and assistant chat keys resolve through the visibility-checked
     // catalog resolver. Other callers naming a service_id keep the original
     // contract (UUID format, scope check, messages) unchanged.
@@ -5378,16 +5384,36 @@ async fn handle_meta_connect(
         {
             refusal["catalog_service_id"] = serde_json::json!(catalog.id);
             refusal["service_slug"] = serde_json::json!(catalog.slug);
-            if catalog.service_type == "ssh" {
-                refusal["connect_own"] =
-                    serde_json::json!({"supported":false,"reason":"ssh_requires_advanced_setup"});
-                refusal["instructions"] = serde_json::json!(
-                    "Ask the owner to use Plugins → Advanced setup for SSH, then grant this specialist access. Hosted SSH connection is unsupported."
-                );
-            } else {
-                refusal["instructions"] = serde_json::json!(
-                    "Ask the owner to connect their account through NyxBot or Plugins, then grant this specialist access. Completing a link never grants the specialist automatically."
-                );
+            // A denied specialist never gains inventory authority through
+            // connect. Show only connections already in its effective grants.
+            // The effective scope can also contain platform catalog IDs;
+            // ServiceSelection matches UserService._id, never catalog authority.
+            let existing = match assistant_connect::existing_connections(
+                &state.db,
+                &auth.user_id,
+                catalog,
+                (!auth.allow_all_services).then_some(auth.allowed_service_ids.as_slice()),
+            )
+            .await
+            {
+                Ok(existing) => existing,
+                Err(error) => return app_error_to_rpc(request_id, &error),
+            };
+            existing.attach(&mut refusal);
+            match assistant_connect::hosted_connect_ready(&state.db, catalog).await {
+                Ok(Ok(())) if assistant_connect::personal_hosted_connect(catalog) => {
+                    refusal["connect_own"] = serde_json::json!({"supported": true});
+                    refusal["instructions"] = serde_json::json!(
+                        "Mention existing connections in one short line. Specialists cannot mint connect links: ask the owner to have NyxBot send one for this service, then grant this specialist access separately. Never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link. No link or access request was created."
+                    );
+                }
+                Ok(readiness) => {
+                    let reason = readiness.err().unwrap_or("no_separate_account");
+                    refusal["connect_own"] = serde_json::json!({"supported":false,"reason":reason});
+                    refusal["instructions"] =
+                        serde_json::json!(assistant_connect::unavailable_instructions(reason));
+                }
+                Err(error) => return app_error_to_rpc(request_id, &error),
             }
         }
         return tool_result(request_id, &refusal.to_string(), true);
@@ -5465,12 +5491,46 @@ async fn handle_meta_connect(
         .get("use_platform_key")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    // A chat connecting the owner's own credential gets a hosted link with
-    // personal intent. Platform-key and credential-free connections are
-    // outside the organization rule and keep their one-step behavior.
+    let existing = if auth.chat.is_some() {
+        let Some(catalog) = catalog.as_ref() else {
+            return tool_result(
+                request_id,
+                "Catalog entry is required for chat connection setup",
+                true,
+            );
+        };
+        match assistant_connect::existing_connections(&state.db, &auth.user_id, catalog, None).await
+        {
+            Ok(existing) => Some(existing),
+            Err(error) => return app_error_to_rpc(request_id, &error),
+        }
+    } else {
+        None
+    };
+    // Keep external MCP responses and their legacy routing byte-for-byte.
     let personal_hosted = catalog.as_ref().filter(|catalog| {
-        auth.chat.is_some() && !use_platform_key && catalog.requires_user_credential
+        auth.chat.is_some()
+            && !use_platform_key
+            && assistant_connect::personal_hosted_connect(catalog)
     });
+    if let Some(catalog) = catalog
+        .as_ref()
+        .filter(|_| auth.chat.is_some() && !use_platform_key)
+    {
+        let readiness = match assistant_connect::hosted_connect_ready(&state.db, catalog).await {
+            Ok(readiness) => readiness,
+            Err(error) => return app_error_to_rpc(request_id, &error),
+        };
+        if let Err(reason) = readiness {
+            let mut result = serde_json::json!({"error":"connect_unavailable", "reason":reason,
+                "catalog_service_id":catalog.id, "service_slug":catalog.slug,
+                "instructions":assistant_connect::unavailable_instructions(reason)});
+            if let Some(existing) = &existing {
+                existing.attach(&mut result);
+            }
+            return tool_result(request_id, &result.to_string(), true);
+        }
+    }
     let connected = if let Some(catalog) = personal_hosted {
         crate::services::assistant_connection_service::hosted(
             &state.db,
@@ -5501,6 +5561,9 @@ async fn handle_meta_connect(
     };
     match connected {
         Ok(mut result) => {
+            if let Some(existing) = &existing {
+                existing.attach(&mut result);
+            }
             if result.get("status").and_then(|value| value.as_str()) == Some("pending_connection") {
                 // A chat resumes by itself when the user finishes the link.
                 if let (Some(chat), Some(link_id)) = (
@@ -5551,13 +5614,18 @@ async fn handle_meta_connect(
             }
             // Activate the newly connected service. Stateless (API-key,
             // no session) callers skip activation tracking.
+            let activation_id = if auth.chat.is_some() {
+                result["service_id"].as_str().unwrap_or(service_id)
+            } else {
+                service_id
+            };
             let changed = match session_id {
                 Some(sid) => {
                     match state
                         .mcp_sessions
                         .activate_services_and_notify(
                             sid,
-                            &[service_id.to_string()],
+                            &[activation_id.to_string()],
                             tools_list_changed_notification(),
                         )
                         .await
@@ -5584,12 +5652,23 @@ async fn handle_meta_connect(
             );
 
             // Construct response directly with activation note (no mutation)
-            let response_json = serde_json::json!({
+            let mut response_json = serde_json::json!({
                 "status": result.get("status").and_then(|v| v.as_str()).unwrap_or("connected"),
                 "service_name": result.get("service_name").and_then(|v| v.as_str()).unwrap_or(""),
                 "connected_at": result.get("connected_at").and_then(|v| v.as_str()).unwrap_or(""),
                 "note": "Service tools are now available. Your tool list has been updated.",
             });
+            if let Some(existing) = &existing {
+                existing.attach(&mut response_json);
+                for field in ["service_id", "service_slug"] {
+                    if let Some(value) = result.get(field) {
+                        response_json[field] = value.clone();
+                    }
+                }
+                response_json["instructions"] = serde_json::json!(
+                    "The requested connection was created. Mention existing connections in one short line; do not suggest reusing one instead or substitute a page link."
+                );
+            }
             let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
 
             // Embed notification inline for SSE-capable clients
@@ -5608,6 +5687,24 @@ async fn handle_meta_connect(
             }
         }
         Err(e) => {
+            // Only the legacy connector's active-connection conflict means
+            // there is no separate account to add. Preserve other failures.
+            if !use_platform_key
+                && personal_hosted.is_none()
+                && matches!(&e, crate::errors::AppError::Conflict(message) if message == "Already connected to this service")
+                && let Some(existing) = &existing
+            {
+                let mut result = serde_json::json!({
+                    "status": "already_connected",
+                    "catalog_service_id": service_id,
+                    "instructions": "There is no separate account to add for this service. Say it is already connected in one short line, mentioning existing connection facts when present. Do not ask whether to proceed, suggest reusing a connection instead, or substitute a page link.",
+                });
+                if let Some(catalog) = &catalog {
+                    result["service_slug"] = serde_json::json!(catalog.slug);
+                }
+                existing.attach(&mut result);
+                return tool_result(request_id, &result.to_string(), false);
+            }
             tracing::warn!("connect_service failed: {e}");
             let msg = match &e {
                 crate::errors::AppError::Internal(_)
@@ -5616,6 +5713,12 @@ async fn handle_meta_connect(
                 }
                 other => other.to_string(),
             };
+            if let Some(existing) = &existing {
+                let mut result = serde_json::json!({"error":"connect_failed", "reason":e.error_key(),
+                    "message":msg, "instructions":"Explain this connection failure plainly and mention existing connections in one short line. Do not ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link."});
+                existing.attach(&mut result);
+                return tool_result(request_id, &result.to_string(), true);
+            }
             tool_result(request_id, &msg, true)
         }
     }
@@ -7988,13 +8091,16 @@ mod tests {
             .unwrap();
         let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result["result"]["isError"], true);
-        assert!(
-            result["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Approval request was rejected"),
+        // The MCP text is the structured wait outcome (#2072): a truthful,
+        // stable code plus the reviewed state, never a pending-card claim.
+        let outcome: serde_json::Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap())
+                .expect("structured approval outcome");
+        assert_eq!(
+            outcome["code"], "approval_denied",
             "the MCP result must honor the web rejection"
         );
+        assert_eq!(outcome["status"], "rejected");
         assert_eq!(
             db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
                 .count_documents(doc! { "service_id": &service.id })

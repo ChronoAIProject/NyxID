@@ -2525,3 +2525,28 @@ it("carries the server action outcome from failed history to the message view", 
   await transport.history(id);
   expect(transport.session(id).messages[1]?.actionOutcome).toEqual(outcome);
 });
+it("2072 restores a pending card on reload and keeps its expired terminal card visible after polling", async () => {
+  const page = history();
+  const card = { ...creationReceipt(page.messages[1]!.turn_id), status: "pending" as const };
+  page.acknowledgements = [card];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const initial = new NyxAgentTransport();
+  await initial.history(id);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  const rowId = `nyxagent-acknowledgement:${card.id}`;
+  expect(reloaded.session(id).messages.map((m) => m.id)).toContain(rowId);
+  page.acknowledgements = [{ ...card, status: "expired" }];
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages.filter((m) => m.id === rowId)).toHaveLength(1);
+  expect(reloaded.session(id).messages.find((m) => m.id === page.messages[1]!.id)?.decisions).toBeUndefined();
+});
+it("2072 restores terminal proxy approvals without presenting them as a pending turn", async () => {
+  const page = history();
+  page.approval_history = [{ id: "proxy", status: "expired", review_path: "/assistant/approvals", service_slug: "google-sheets", service_name: "Google Sheets", summary: "Update ledger", approval_mode: "per_request", agent_key_prefix: "", created_at: start, expires_at: afterReset }];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toContain("nyxagent-approval:proxy");
+  expect(transport.isRunning(id)).toBe(false);
+});

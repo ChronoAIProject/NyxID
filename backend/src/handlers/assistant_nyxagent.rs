@@ -922,6 +922,8 @@ pub struct HistoryResponse {
     /// Pending proxy approvals raised by this chat's key; decided through
     /// `POST /approvals/requests/{id}/decide`.
     approvals: Vec<ChatApprovalResponse>,
+    /// Additive history; old clients keep receiving pending-only `approvals`.
+    approval_history: Vec<ChatApprovalResponse>,
     /// Things outside the chat this thread is waiting for (a bot being
     /// created, a service being connected, the owner verifying a chat app).
     /// NyxID resumes the thread by itself when each happens.
@@ -946,8 +948,10 @@ pub struct CmaOperationResponse {
     checked_at: Option<DateTime<Utc>>,
     cma_url: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ChatApprovalResponse {
+    status: String,
+    review_path: String,
     id: String,
     service_slug: String,
     service_name: String,
@@ -960,6 +964,8 @@ pub struct ChatApprovalResponse {
 impl From<engine::ChatApproval> for ChatApprovalResponse {
     fn from(row: engine::ChatApproval) -> Self {
         Self {
+            status: row.status,
+            review_path: row.review_path,
             id: row.id,
             service_slug: row.service_slug,
             service_name: row.service_name,
@@ -1012,7 +1018,7 @@ pub async fn history(
         .await?;
     }
     let approvals =
-        engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
+        engine::approval_history(&state.db, &user_id, &conversation.credential_api_key_id).await?;
     // Best effort: the transcript never fails because of the waiting list.
     let waiting = super::nyxbot::waiting(&state, &user_id, &conversation.id)
         .await
@@ -1135,11 +1141,18 @@ pub async fn history(
         attachments.extend(turn.attachments.iter_mut());
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
+    let approval_history: Vec<ChatApprovalResponse> =
+        approvals.into_iter().map(Into::into).collect();
     Ok(Json(HistoryResponse {
         cma_operations,
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
-        approvals: approvals.into_iter().map(Into::into).collect(),
+        approvals: approval_history
+            .iter()
+            .filter(|row| row.status == "pending")
+            .cloned()
+            .collect(),
+        approval_history,
         waiting,
         messages,
         before_seq,
@@ -1302,6 +1315,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    review_path: String,
     connect_own: Option<serde_json::Value>,
     creation_turn_id: Option<String>,
     /// The tool call (turn activity ID) this card or receipt belongs to.
@@ -1334,7 +1348,9 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
     for AcknowledgementResponse
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
+        let status = acknowledgements::presentation_status(&row).to_owned();
         Self {
+            review_path: crate::services::assistant_links::AssistantPage::ReviewCard { conversation: &row.conversation_id, card: &row.id }.path(),
             creation_turn_id: row.creation_turn_id,
             activity_id: row.activity_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
@@ -1342,7 +1358,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
             kind: row.kind,
-            status: row.status,
+            status,
             summary: row.summary,
             link: row.link,
             trigger_run_id: row.trigger_run_id,
