@@ -53,6 +53,10 @@ import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
 import { AssistantReplyBody } from "./AssistantReplyBody";
+import {
+  hasAssistantActionLink,
+  VOICE_REPLY_SKEW_MS,
+} from "./voice/voiceReplyActions";
 import { MoreHorizontal, RotateCcw, SquarePen, X } from "lucide-react-native";
 import type {
   AssistantParams,
@@ -125,7 +129,7 @@ import {
 import { contextResetCopy, steeringNotice } from "./assistantTurnPresentation";
 import { NativeAuthoredSkillReview } from "../plugins/NativeAuthoredSkillReview";
 import { parseAutomationLink } from "../automations/automationLinks";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { NYXID_FRONTEND_URL, firstPartyFrontendUrls } from "../../lib/env";
 import { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 import { AssistantVoiceConversation } from "./voice/AssistantVoiceConversation";
 import {
@@ -197,6 +201,9 @@ export function AssistantScreen({
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
+  // Replies that arrive during a call and carry an in-app action join the
+  // voice chat, where they can be acted on without leaving the call.
+  const [voiceOpenedAt, setVoiceOpenedAt] = useState(0);
   const [openingVoice, setOpeningVoice] = useState(false);
   const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
@@ -283,6 +290,14 @@ export function AssistantScreen({
         message.turn_id === assistant.live?.turnId && message.role === "user",
     );
   const messages = assistant.history?.messages ?? [];
+  const voiceReplies = voiceThread
+    ? messages.filter(
+        (message) =>
+          message.role === "assistant" &&
+          Date.parse(message.created_at) >= voiceOpenedAt - VOICE_REPLY_SKEW_MS &&
+          hasAssistantActionLink(message.text, firstPartyFrontendUrls()),
+      )
+    : [];
   const stableTranscript =
     messages.length > 0 &&
     !running &&
@@ -461,6 +476,7 @@ export function AssistantScreen({
           openLatest: false,
         });
       }
+      setVoiceOpenedAt(Date.now());
       setVoiceThread(id);
     } catch (cause) {
       if (current())
@@ -1412,10 +1428,19 @@ export function AssistantScreen({
           actionCount={
             (assistant.history?.acknowledgements.filter(
               (row) => row.status === "pending",
-            ).length ?? 0) + (assistant.history?.approvals.length ?? 0)
+            ).length ?? 0) +
+            (assistant.history?.approvals.length ?? 0) +
+            voiceReplies.length
           }
           actions={
             <>
+              {voiceReplies.map((message) => (
+                <AssistantReplyBody
+                  key={message.id}
+                  text={sanitizeAssistantMessageContent(message.text)}
+                  onLinkPress={openSafeLink}
+                />
+              ))}
               {(assistant.history?.acknowledgements ?? []).map(
                 renderAcknowledgement,
               )}

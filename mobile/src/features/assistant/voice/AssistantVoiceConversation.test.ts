@@ -272,12 +272,13 @@ function setup(
         "X",
         "Mic",
         "MicOff",
-        "Phone",
+        "Ellipsis",
         "PhoneOff",
         "Volume2",
         "VolumeX",
       ].map((name) => [name, name]),
     ),
+    "../AssistantLinkHost": { ScopedAssistantLinkHost: "LinkHost" },
     "../../../components/workspace/WorkspaceSheetSurface": {
       WorkspaceSheetSurface: "SheetSurface",
     },
@@ -295,7 +296,10 @@ function setup(
     },
     "../../../theme/ThemeContext": {
       useTheme: () => ({
-        colors: { primaryTone: { bg: "pink", border: "pink" } },
+        colors: {
+          primaryTone: { bg: "pink", border: "pink" },
+          warningTone: { bg: "amber", text: "amber-text" },
+        },
       }),
     },
     "../../../theme/designTokens": { fonts: {} },
@@ -544,6 +548,8 @@ test("reviewing an approval in chat ends the call and leaves the task running", 
     },
   });
   f.voice.holding = true;
+  f.button("Show agent tasks").props.onPress();
+  f.harness.render();
   f.button("Review in chat").props.onPress();
   assert.deepEqual(f.events, [
     ["hold", false],
@@ -607,6 +613,8 @@ test("closing the surface ends the call while Stop task calls only the cancellat
       ],
     },
   });
+  f.button("Show agent tasks").props.onPress();
+  f.harness.render();
   f.button("Stop task").props.onPress();
   assert.deepEqual(f.events, [["stopTask", serviceId]]);
   f.button("End voice and close").props.onPress();
@@ -665,7 +673,10 @@ test("hold to talk names itself under the mic, mutes with a mute symbol and runs
       .some((row) => String(row.props?.accessibilityLabel ?? "").startsWith("Call time")),
   );
   assert.ok(phone.all().some((row) => row.type === "PhoneOff"), "End hangs up");
-  assert.match(phone.text(), /Talk any time/);
+  assert.doesNotMatch(phone.text(), /Talk any time|Resume audio/, "no helpers once connected");
+  phone.button("Call options").props.onPress();
+  phone.harness.render();
+  assert.ok(phone.button("No sound? Resume audio"), "helpers live in the ⋯ menu");
   phone.harness.unmount();
 });
 
@@ -795,7 +806,7 @@ test("captions scroll as one live transcript without a Show all toggle", () => {
   f.harness.unmount();
 });
 
-test("the tasks tray shows the task that needs you and expands to all tasks", () => {
+test("in a call tasks are tucked into a chip that opens the full list", () => {
   const f = setup({
     active: true,
     snapshot: {
@@ -818,14 +829,16 @@ test("the tasks tray shows the task that needs you and expands to all tasks", ()
       ],
     },
   });
-  assert.match(f.text(), /Agent tasks · 2/);
+  assert.match(f.text(), /Needs your OK/, "the chip flags the task waiting on you");
+  assert.doesNotMatch(f.text(), /Agent tasks · 2/, "the list stays tucked away");
   assert.equal(
     f.all().some((row) => row.props.label === "Stop task"),
     false,
   );
-  assert.ok(f.button("Review in chat"));
-  f.button("Show all agent tasks").props.onPress();
+  f.button("Show agent tasks").props.onPress();
   f.harness.render();
+  assert.match(f.text(), /Agent tasks · 2/);
+  assert.ok(f.button("Review in chat"));
   f.button("Stop task").props.onPress();
   assert.ok(f.button("View in chat"));
   assert.equal(
@@ -865,11 +878,19 @@ test("the voice page is a pastel wash with the assistant pill and three round co
 test("action cards from the chat appear on the call so they can be decided in place", () => {
   const card = { type: "ActionCard", props: { children: [] } };
   const f = setup({ active: true, actions: card, actionCount: 1 });
-  assert.match(f.text(), /我的助手 needs you · 1/);
-  assert.ok(f.all().some((row) => row.type === "ActionCard"));
+  const inline = f
+    .all()
+    .find((row) => row.props?.accessibilityLabel === "我的助手 needs you · 1")!;
+  assert.ok(inline, "the cards sit in the voice chat itself");
+  assert.ok(
+    [inline.props.children].flat(Infinity).some((row: any) => row?.type === "ActionCard"),
+  );
   f.harness.unmount();
   const none = setup({ active: true, actionCount: 0 });
-  assert.doesNotMatch(none.text(), /needs you/);
+  assert.equal(
+    none.all().some((row) => /needs you/.test(String(row.props?.accessibilityLabel ?? ""))),
+    false,
+  );
   none.harness.unmount();
 });
 

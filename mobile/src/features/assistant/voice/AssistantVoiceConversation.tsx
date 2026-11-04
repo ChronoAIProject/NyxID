@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronUp,
+  Ellipsis,
   Mic,
   MicOff,
   PhoneOff,
@@ -29,6 +30,7 @@ import {
   X,
 } from "lucide-react-native";
 import { WorkspaceSheetSurface } from "../../../components/workspace/WorkspaceSheetSurface";
+import { ScopedAssistantLinkHost } from "../AssistantLinkHost";
 import {
   ActionButton,
   Card,
@@ -149,6 +151,7 @@ function VoiceConversation({
     setTranscriptOverflows(visible > 0 && content > visible + 1);
   };
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [billingOpenError, setBillingOpenError] = useState(false);
@@ -231,6 +234,10 @@ function VoiceConversation({
     Math.max(160, Math.min(dimensions.width * 0.62, dimensions.height * 0.3, 280)),
   );
   const headline = headlineTask(tasks);
+  const running = tasks.some(
+    (task) => task.state === "queued" || task.state === "claimed",
+  );
+  const needsOk = tasks.some((task) => task.state === "awaiting_confirmation");
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -383,6 +390,7 @@ function VoiceConversation({
         presentationStyle="overFullScreen"
         onRequestClose={close}
       >
+        <ScopedAssistantLinkHost scope={`voice:${thread}`}>
         <View
           accessibilityViewIsModal
           style={[
@@ -417,6 +425,18 @@ function VoiceConversation({
               Voice
             </Text>
             {active ? (
+              <View style={styles.topActions}>
+              <RoundButton
+                label={moreOpen ? "Hide call options" : "Call options"}
+                surface={moreOpen ? colors.textPrimary : surface}
+                selected={moreOpen}
+                onPress={() => setMoreOpen((value) => !value)}
+              >
+                <Ellipsis
+                  size={18}
+                  color={moreOpen ? colors.bg : colors.textPrimary}
+                />
+              </RoundButton>
               <RoundButton
                 label={voice.speakerMuted ? "Enable speaker" : "Mute speaker"}
                 surface={voice.speakerMuted ? colors.textPrimary : surface}
@@ -430,10 +450,35 @@ function VoiceConversation({
                   <Volume2 size={18} color={colors.textPrimary} />
                 )}
               </RoundButton>
+              </View>
             ) : (
               <View style={styles.roundSpacer} />
             )}
           </View>
+          {active && moreOpen ? (
+            <View style={[styles.more, styles.floating, { backgroundColor: surface }]}>
+              <Text style={[styles.footnote, styles.moreText, { color: colors.textSecondary }]}>
+                {inputMode === "automatic"
+                  ? "Your microphone is on while unmuted."
+                  : "Audio is sent only while you hold the microphone."}{" "}
+                Use headphones if you hear echo.
+                {option && (option.pricing || option.key_source === "own")
+                  ? ` ${voiceTariff(option)}`
+                  : ""}
+              </Text>
+              <ActionButton
+                label="No sound? Resume audio"
+                variant="secondary"
+                compact
+                disabled={voice.starting}
+                onPress={() => {
+                  setMoreOpen(false);
+                  void voice.resumeAudio();
+                }}
+              />
+            </View>
+          ) : null}
+          {active ? null : (
           <View style={styles.stage}>
             <VoiceAura
               phase={phase}
@@ -443,6 +488,69 @@ function VoiceConversation({
               size={auraSize}
             />
           </View>
+          )}
+          {active ? (
+            // In a call: one compact line, with the task chip tucked at its end.
+            <View style={styles.callLine}>
+              <Text numberOfLines={1} style={[styles.status, styles.fill, { color: colors.textSecondary }]}>
+                <Text style={{ color: colors.textPrimary }}>{agentName}</Text>
+                {" · "}
+                <Text accessibilityLiveRegion="polite">{status}</Text>
+                {inputMode === "automatic" ? (
+                  <Text
+                    accessibilityLabel={`Call time ${duration}`}
+                    style={[styles.elapsed, quiet]}
+                  >
+                    {`  ${duration}`}
+                  </Text>
+                ) : talking ? (
+                  <Text
+                    accessibilityLabel={`Talking for ${talking}`}
+                    style={[styles.elapsed, quiet]}
+                  >
+                    {`  ${talking}`}
+                  </Text>
+                ) : null}
+              </Text>
+              {tasks.length ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    tasksOpen ? "Hide agent tasks" : "Show agent tasks"
+                  }
+                  accessibilityState={{ expanded: tasksOpen }}
+                  onPress={() => setTasksOpen((value) => !value)}
+                  style={[
+                    styles.chip,
+                    {
+                      backgroundColor: needsOk
+                        ? colors.warningTone.bg
+                        : surface,
+                    },
+                  ]}
+                >
+                  {running ? (
+                    <ActivityIndicator size="small" color={colors.textSecondary} />
+                  ) : null}
+                  <Text
+                    style={[
+                      styles.chipText,
+                      { color: needsOk ? colors.warningTone.text : colors.textPrimary },
+                    ]}
+                  >
+                    {needsOk
+                      ? "Needs your OK"
+                      : `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`}
+                  </Text>
+                  {tasksOpen ? (
+                    <ChevronUp size={14} color={colors.textSecondary} />
+                  ) : (
+                    <ChevronDown size={14} color={colors.textSecondary} />
+                  )}
+                </Pressable>
+              ) : null}
+            </View>
+          ) : (
           <View style={styles.speech}>
             <View style={[styles.pill, { backgroundColor: surface }]}>
               <Text numberOfLines={1} style={[styles.pillText, { color: colors.textSecondary }]}>
@@ -497,8 +605,9 @@ function VoiceConversation({
               </View>
             ) : null}
           </View>
+          )}
           <View
-            style={styles.transcriptFrame}
+            style={[styles.transcriptFrame, active && styles.fill]}
             onLayout={({ nativeEvent }) =>
               setTranscriptFrame({
                 x: nativeEvent.layout.x,
@@ -508,7 +617,10 @@ function VoiceConversation({
           >
           <ScrollView
             ref={transcript}
-            style={[styles.transcript, { maxHeight: dimensions.height * 0.34 }]}
+            style={[
+              styles.transcript,
+              active ? styles.fill : { maxHeight: dimensions.height * 0.34 },
+            ]}
             contentContainerStyle={styles.transcriptContent}
             keyboardShouldPersistTaps="handled"
             // The newest words stay in view; scroll up for the rest.
@@ -629,23 +741,42 @@ function VoiceConversation({
               </>
             ) : null}
             {captions.map((caption, index) => {
-              const recent = index >= captions.length - 2;
               const user = caption.speaker === "user";
-              return (
-                <View key={caption.id} style={[styles.caption, recent && styles.captionRecent]}>
-                  <Text style={[styles.speaker, quiet]}>
-                    {user ? "You" : agentName}
-                  </Text>
+              // Like chat: your words in a bubble, NyxBot's as plain text.
+              const named =
+                !user && captions[index - 1]?.speaker !== "assistant";
+              return user ? (
+                <View
+                  key={caption.id}
+                  style={[styles.userBubble, { backgroundColor: surface }]}
+                >
                   <Text
                     selectable
                     style={[
-                      recent ? styles.captionText : styles.captionEarlier,
+                      styles.bubbleText,
                       {
-                        color: !caption.complete
-                          ? colors.textTertiary
-                          : recent && !user
-                            ? colors.textPrimary
-                            : colors.textSecondary,
+                        color: caption.complete
+                          ? colors.textPrimary
+                          : colors.textSecondary,
+                      },
+                    ]}
+                  >
+                    {caption.text}
+                  </Text>
+                </View>
+              ) : (
+                <View key={caption.id} style={styles.agentTurn}>
+                  {named ? (
+                    <Text style={[styles.speaker, quiet]}>{agentName}</Text>
+                  ) : null}
+                  <Text
+                    selectable
+                    style={[
+                      styles.agentText,
+                      {
+                        color: caption.complete
+                          ? colors.textPrimary
+                          : colors.textSecondary,
                       },
                     ]}
                   >
@@ -654,6 +785,30 @@ function VoiceConversation({
                 </View>
               );
             })}
+            {/* What NyxBot is working on, between the words, as in chat. */}
+            {tasks
+              .filter((task) => task.state !== "completed" && task.state !== "cancelled")
+              .map((task) => (
+                <View key={`work:${task.id}`} style={styles.workLine}>
+                  {task.state === "awaiting_confirmation" ? null : (
+                    <ActivityIndicator size="small" color={colors.textTertiary} />
+                  )}
+                  <Text numberOfLines={2} style={[styles.workText, quiet]}>
+                    {TASK_STATE[task.state]}
+                    {" · "}
+                    {task.progress?.detail || task.title || "Agent task"}
+                  </Text>
+                </View>
+              ))}
+            {/* Cards and links NyxBot handed over, acted on in place. */}
+            {actionCount > 0 ? (
+              <View
+                accessibilityLabel={`${agentName} needs you · ${actionCount}`}
+                style={styles.inlineActions}
+              >
+                {actions}
+              </View>
+            ) : null}
           </ScrollView>
           {transcriptOverflows ? (
             <WashFade
@@ -663,31 +818,7 @@ function VoiceConversation({
             />
           ) : null}
           </View>
-          {actionCount > 0 ? (
-            // What the chat is waiting on, decided without leaving the call.
-            <View
-              style={[
-                styles.actions,
-                styles.floating,
-                { backgroundColor: surface, maxHeight: dimensions.height * 0.42 },
-              ]}
-            >
-              <Text
-                accessibilityRole="header"
-                accessibilityLiveRegion="polite"
-                style={[styles.trayTitle, styles.actionsTitle, { color: colors.textPrimary }]}
-              >
-                {`${agentName} needs you · ${actionCount}`}
-              </Text>
-              <ScrollView
-                contentContainerStyle={styles.actionsContent}
-                keyboardShouldPersistTaps="handled"
-              >
-                {actions}
-              </ScrollView>
-            </View>
-          ) : null}
-          {tasks.length ? (
+          {tasks.length && (tasksOpen || !active) ? (
             <View style={[styles.tray, styles.floating, { backgroundColor: surface }]}>
               <Pressable
                 accessibilityRole="button"
@@ -726,6 +857,17 @@ function VoiceConversation({
               ) : headline ? (
                 taskRow(headline)
               ) : null}
+            </View>
+          ) : null}
+          {active ? (
+            <View style={styles.orb}>
+              <VoiceAura
+                phase={phase}
+                input={levels.input}
+                output={levels.output}
+                reducedMotion={reducedMotion}
+                size={72}
+              />
             </View>
           ) : null}
           {/* Grok runs on explicit holds only, so it has no mode to choose. */}
@@ -915,57 +1057,9 @@ function VoiceConversation({
               )}
             </RoundButton>
           </View>
+          {active ? null : (
           <View style={styles.footer}>
-            {active ? (
-              <>
-                {/* Hold to talk labels its own button, so only Hands-free needs a hint. */}
-                {inputMode === "automatic" ? (
-                  <Text style={[styles.hint, { color: colors.textSecondary }]}>
-                    {muted
-                      ? "Muted · tap the microphone to talk"
-                      : "Talk any time · NyxBot answers when you pause"}
-                  </Text>
-                ) : null}
-                {pricingOpen && option ? (
-                  <Text style={[styles.footnote, quiet]}>
-                    {inputMode === "automatic"
-                      ? "Your microphone is on while unmuted."
-                      : "Audio is sent only while you hold the button."}{" "}
-                    Use headphones if you hear echo.
-                    {option.pricing || option.key_source === "own"
-                      ? ` ${voiceTariff(option)}`
-                      : ""}
-                  </Text>
-                ) : null}
-                <View style={styles.footerLinks}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={
-                      pricingOpen ? "Hide call details" : "Show call details"
-                    }
-                    accessibilityState={{ expanded: pricingOpen }}
-                    onPress={() => setPricingOpen((value) => !value)}
-                    style={styles.textButton}
-                  >
-                    <Text style={[styles.footnote, quiet]}>
-                      {pricingOpen ? "Less" : "Details"}
-                    </Text>
-                  </Pressable>
-                  <Text style={[styles.footnote, quiet]}>·</Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel="Resume audio"
-                    disabled={voice.starting}
-                    onPress={() => void voice.resumeAudio()}
-                    style={styles.textButton}
-                  >
-                    <Text style={[styles.footnote, quiet]}>
-                      No sound? Resume audio
-                    </Text>
-                  </Pressable>
-                </View>
-              </>
-            ) : option ? (
+            {option ? (
               <>
                 <Text style={[styles.footnote, quiet]}>
                   {voiceTariff(option)}{" "}
@@ -1008,7 +1102,9 @@ function VoiceConversation({
               </Text>
             )}
           </View>
+          )}
         </View>
+        </ScopedAssistantLinkHost>
       </Modal>
     </>
   );
@@ -1252,6 +1348,49 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   transcriptFrame: { flexShrink: 1 },
+  topActions: { flexDirection: "row", gap: 8 },
+  more: {
+    position: "absolute",
+    top: 64,
+    right: 20,
+    width: 260,
+    zIndex: 10,
+    borderRadius: 16,
+    padding: 14,
+    gap: 10,
+  },
+  moreText: { textAlign: "left" },
+  callLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    minHeight: 32,
+    paddingHorizontal: 4,
+  },
+  chip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    minHeight: 32,
+    borderRadius: 16,
+    paddingHorizontal: 12,
+  },
+  chipText: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 18 },
+  userBubble: {
+    alignSelf: "flex-end",
+    maxWidth: "82%",
+    borderRadius: 18,
+    borderBottomRightRadius: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  bubbleText: { fontFamily: fonts.bodyRegular, fontSize: 16, lineHeight: 22 },
+  agentTurn: { alignSelf: "stretch", gap: 4 },
+  agentText: { fontFamily: fonts.bodyRegular, fontSize: 17, lineHeight: 25 },
+  workLine: { flexDirection: "row", alignItems: "center", gap: 8 },
+  workText: { flex: 1, fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
+  inlineActions: { gap: 10 },
+  orb: { alignItems: "center", justifyContent: "center", height: 84 },
   fade: {
     position: "absolute",
     top: 0,
