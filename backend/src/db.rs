@@ -1529,6 +1529,13 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    // Additive candidate lookup; the existing expires_at TTL remains unchanged.
+    approval_grants.create_index(IndexModel::builder()
+        .keys(doc! {"execution.v1.subject.actor_user_id":1,"execution.v1.subject.principal":1,"execution.v1.binding.connection_id":1})
+        .options(IndexOptions::builder().name("execution_permission_candidates_v1".to_owned())
+            .partial_filter_expression(doc! {"execution.version":{"$exists":true}}).build())
+        .build()).await?;
+
     // ── service_approval_configs ──
     let sac = db.collection::<mongodb::bson::Document>("service_approval_configs");
     sac.create_index(

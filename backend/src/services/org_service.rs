@@ -91,6 +91,7 @@ pub async fn create_org_user_with_id(
         .unwrap_or_else(|| synthetic_org_email(id));
 
     let org = User {
+        execution_permission_enrollment: None,
         id: id.to_string(),
         email,
         password_hash: None,
@@ -1768,6 +1769,7 @@ mod tests {
         use chrono::Utc;
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: "11111111-2222-3333-4444-555555555555".to_string(),
             email: email.to_string(),
             password_hash: None,

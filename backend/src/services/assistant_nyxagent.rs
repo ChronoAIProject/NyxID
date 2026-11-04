@@ -682,6 +682,9 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    /// Copied from a verified person's already-loaded enrollment. Not a client field.
+    pub(crate) execution_enrollment: bool,
+    pub(crate) execution_parent: Option<super::execution_permission_dispatch::tasks::Parent>,
     pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
@@ -854,6 +857,8 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            execution_enrollment: false,
+            execution_parent: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: None,
@@ -2392,6 +2397,26 @@ pub(crate) async fn begin_owner_turn_in_session(
             }
         }
     }
+    if row
+        .pending_events
+        .iter()
+        .any(|event| event.execution_task.is_some())
+    {
+        let before = row.pending_events.len();
+        row.pending_events = super::execution_permission_dispatch::tasks::filter_events(
+            db,
+            session,
+            user_id,
+            std::mem::take(&mut row.pending_events),
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            collection.update_one(owner_filter(user_id,&id)?,doc! {"$set":{"pending_events":bson::to_bson(&row.pending_events).map_err(|_| AppError::Internal("Invalid events".into()))?}}).session(&mut *session).await?;
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     // Every turn drains queued events: an event turn renders them as
     // its message; other turns carry them in their input context.
     if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
@@ -2422,6 +2447,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?
     };
+    let events = super::execution_permission_dispatch::tasks::partition_events(
+        &mut row.pending_events,
+        events,
+        start.origin,
+    );
     if had_queued_media
         && let Some(fresh) = collection
             .find_one(owner_filter(user_id, &id)?)
@@ -2684,6 +2714,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            execution_task: lost.execution_task.clone(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -2891,6 +2922,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        execution_task: retry.as_ref().and_then(|r| r.execution_task.clone()),
         business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),
@@ -3078,6 +3110,28 @@ pub(crate) async fn begin_owner_turn_in_session(
         db, session, &row,
     ))
     .await?;
+    if let Some(acknowledgement_id) = &start.acknowledgement_id {
+        let card = db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
+            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
+            .session(&mut *session)
+            .await?;
+        if let Some(card) = card.as_ref() {
+            row.active_turn.as_mut().expect("turn").execution_task = card.execution_task.clone();
+        }
+        if card.is_none() {
+            return Err(AppError::BadRequest(
+                "Acknowledgement must be your allowed decision in this conversation".into(),
+            ));
+        }
+    }
+    Box::pin(super::execution_permission_dispatch::tasks::admit(
+        db, session, &mut row, start, ids,
+    ))
+    .await?;
     // Chats whose queued messages this turn answers get its reply
     // too, unless it already goes there.
     let answered_here = match start.origin {
@@ -3214,21 +3268,6 @@ pub(crate) async fn begin_owner_turn_in_session(
         &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
     ))
     .await?;
-    if let Some(acknowledgement_id) = &start.acknowledgement_id {
-        let card = db
-            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-                crate::models::assistant_acknowledgement::COLLECTION_NAME,
-            )
-            .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
-            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
-            .session(&mut *session)
-            .await?;
-        if card.is_none() {
-            return Err(AppError::BadRequest(
-                "Acknowledgement must be your allowed decision in this conversation".into(),
-            ));
-        }
-    }
     let mut media_event_ids = if start.guest || start.origin == TurnOrigin::Trigger {
         Vec::new()
     } else {
@@ -3269,6 +3308,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        execution_task: row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.execution_task.clone()),
         delegated_images: Default::default(),
         media_event_ids,
         media_queue_notice_id: None,
@@ -3666,6 +3709,7 @@ pub(crate) async fn request_stop_row(
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
+    super::execution_permission_dispatch::tasks::stop(db, existing).await?;
     if existing_turn.heartbeat_at.is_none() && live_turn(existing, now).is_none() {
         return super::async_service_operation::cancel(db, user_id, id).await;
     }
@@ -4077,6 +4121,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+                    execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,
@@ -4144,6 +4189,7 @@ async fn finish_turn_inner(
                 }
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message)).await?;
+                    Box::pin(super::execution_permission_dispatch::tasks::settle(&db,session,&current,turn,&message)).await?;
                 }
                 if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
@@ -5018,6 +5064,7 @@ const RETRY_NOTE_CHARS: usize = 6000;
 
 /// What an owner Retry inherits from the failed turn it retries.
 pub struct RetryContext {
+    pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
     pub digests: Vec<String>,
     pub attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub note: String,
@@ -5193,6 +5240,10 @@ fn retry_evidence(
     }
     note.push(']');
     Ok(RetryContext {
+        execution_task: input.execution_task.clone().map(|mut task| {
+            task.parent_turn_id = Some(failed.turn_id.clone());
+            task
+        }),
         digests,
         attachments: input.attachments.clone(),
         note: excerpt(&note, RETRY_NOTE_CHARS),

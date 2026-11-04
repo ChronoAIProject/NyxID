@@ -670,6 +670,8 @@ fn selector_is_leading_exact_and_header_binding_excludes_only_control_metadata()
 #[test]
 fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves_pool_projection() {
     let mut target = super::super::proxy_service::ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         service: test_utils::test_auto_connected_catalog_service(),
         base_url: "https://example.invalid".into(),
@@ -987,6 +989,8 @@ fn guest_model_2121_absent_preconditions_preserve_route_fingerprint() {
         voice: None,
     });
     let target = super::super::proxy_service::ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         service,
         base_url: "https://example.invalid".into(),

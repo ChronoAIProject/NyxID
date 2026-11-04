@@ -354,3 +354,10 @@ compiled copies on keys, before rolling back to a binary without this variant.
 
 Scopes contain no person-specific ownership assumptions; execution and billing
 remain the acting person's.
+
+Execution-permission dispatch (default-off #2194 Phase A) can satisfy only the
+three eligible discretionary floors for a fully covered, exact actor/account
+operation. Operation and input scopes remain ceilings and always run first.
+Gaps use the existing cards until #2195. Activation is per-user only and requires
+both execution reader and dispatch readiness; see
+[the execution contract](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-a).

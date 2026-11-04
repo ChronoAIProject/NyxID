@@ -177,6 +177,7 @@ pub async fn create(
     )
     .await?;
     let (input, mut start, digest) = parse(&bytes, &owner)?;
+    start.execution_enrollment = auth.execution_enrolled;
     // Replays bypass limiter/provisioning and retain their receipt after deletion.
     match invocations::get(&state.db, &owner, &input.idempotency_key).await {
         Ok(row) => {

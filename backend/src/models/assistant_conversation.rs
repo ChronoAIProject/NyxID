@@ -49,6 +49,8 @@ pub enum TurnOrigin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_event_ids: Vec<String>,
@@ -328,6 +330,8 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub business_system_success: bool,
     #[serde(default)]

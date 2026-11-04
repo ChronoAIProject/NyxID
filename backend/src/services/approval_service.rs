@@ -1172,6 +1172,7 @@ pub(crate) async fn process_decision_with_access(
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
         let grant = ApprovalGrant {
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: updated.user_id.clone(),
@@ -3978,6 +3979,7 @@ mod tests {
     ) -> ApprovalGrant {
         let now = Utc::now();
         ApprovalGrant {
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),

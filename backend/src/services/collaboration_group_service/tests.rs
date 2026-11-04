@@ -3362,3 +3362,146 @@ mod people_tests;
 
 #[path = "upload_tests.rs"]
 mod upload_tests;
+
+#[tokio::test]
+async fn execution_permission_group_roots_bind_requester_audience_and_cancel_at_egress() {
+    use crate::models::execution_permission::{Audience, ExecutionFloor, TaskRootKind};
+    use svc::execution_permission_dispatch as dispatch;
+    let (f, mut agent, group) = setup("execution_collaboration_roots").await;
+    let group = join(&f, &group, &f.member).await;
+    // The recipient may consent only to their own connection for a catalog
+    // already granted to the shared agent, never an arbitrary custom service.
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.service_category = "connection".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let owner_connection = f.service(&f.admin, "execution-group-owner").await;
+    let connection = f.service(&f.member, "execution-group").await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&owner_connection,&connection]}},
+            doc! {"$set":{"catalog_service_id":&catalog.id,"identity_propagation_mode":"none"}},
+        )
+        .await
+        .unwrap();
+    agent.grants.service_ids.push(owner_connection);
+    f.state
+        .db
+        .collection::<AssistantAgent>("assistant_agents")
+        .replace_one(doc! {"_id":&agent.id}, &agent)
+        .await
+        .unwrap();
+    share(&f, &agent, &[&f.member]).await;
+    f.state
+        .db
+        .collection::<bson::Document>(USERS)
+        .update_many(
+            doc! {"_id":{"$in":[&f.admin,&f.member]}},
+            doc! {"$set":{"execution_permission_enrollment":1_i32}},
+        )
+        .await
+        .unwrap();
+    let owner_turn = runtime_start(&f, &f.admin, &group, &agent).await;
+    let recipient_turn = runtime_start(&f, &f.member, &group, &agent).await;
+    let root = recipient_turn
+        .conversation
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap();
+    assert_eq!(root.task.root_kind, TaskRootKind::GroupRequest);
+    assert_eq!(root.actor_user_id, f.member);
+    assert_eq!(
+        root.audience,
+        Audience::Group {
+            group_id: group.id.clone(),
+            revision: group.collaboration.as_ref().unwrap().membership_revision
+        }
+    );
+    assert_ne!(
+        root.task,
+        owner_turn
+            .conversation
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap()
+            .task
+    );
+    let key = runtime_key(&f, &recipient_turn.conversation).await;
+    let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+        .await
+        .unwrap();
+    let chat = auth.assistant_chat.as_deref().unwrap();
+    assert_eq!(chat.execution_group_id.as_deref(), Some(group.id.as_str()));
+    dispatch::tests::seed_for_chat(&f.state, &auth, &connection, &catalog.id, "POST", "/effect")
+        .await;
+    let target = svc::proxy_service::read_proxy_authority_snapshot_with_access(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &connection,
+        None,
+        auth.org_agent_access.as_deref(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .target;
+    let permit = dispatch::prepare(
+        &f.state.db,
+        &f.state.encryption_keys,
+        auth.execution_permission.as_ref(),
+        Some(chat),
+        &key.id,
+        dispatch::Effect {
+            connection: &connection,
+            owner: &f.member,
+            target: &target,
+            method: "POST",
+            path: "effect",
+            query: None,
+            body: b"",
+            content_type: None,
+            headers: &[],
+            endpoint: None,
+            floors: &[
+                ExecutionFloor::AccessModeRisk,
+                ExecutionFloor::SharedConnectionConsent,
+            ],
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    permit.revalidate(&target).await.unwrap();
+    requests::cancel(&f.state.db, &f.member, &group.id, &root.task.root_id)
+        .await
+        .unwrap();
+    assert!(
+        permit.before_send(&target).await.is_err(),
+        "cancelled original requester cannot use persistent permission"
+    );
+    let owner_key = runtime_key(&f, &owner_turn.conversation).await;
+    let owner_auth = crate::mw::auth::api_key_auth_user(&f.state.db, &owner_key, None, None, None)
+        .await
+        .unwrap();
+    owner_auth
+        .assistant_chat
+        .as_deref()
+        .unwrap()
+        .ensure_live_turn(&f.state.db, None, None, "test")
+        .await
+        .unwrap();
+    f.state.db.drop().await.unwrap();
+}
