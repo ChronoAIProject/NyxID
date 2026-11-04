@@ -258,7 +258,7 @@ export function CollaborationSettings({
                   title={`${person.display_name}${person.id === actor ? " (you)" : ""}`}
                   accessory={
                     person.id === policy.creator_user_id ? (
-                      <span className="text-11 text-text-tertiary">
+                      <span className="text-13 text-text-tertiary">
                         Creator
                       </span>
                     ) : policy.can_manage ? (
@@ -634,7 +634,7 @@ export function CollaborationSettings({
                 <DialogDescription>{confirm.text}</DialogDescription>
               </DialogHeader>
               {error ? (
-                <p role="alert" className="text-12 text-destructive">
+                <p role="alert" className="text-14 text-destructive">
                   {error}
                 </p>
               ) : null}
@@ -671,7 +671,7 @@ export function CollaborationCards({
       {decisions.map((card, i) => (
         <div
           key={card.id ?? `${card.requester_id}-${String(i)}`}
-          className="space-y-2 rounded-lg border border-border bg-card p-3 text-12"
+          className="space-y-2 rounded-lg border border-border bg-card p-3 text-14"
         >
           <p>
             {card.can_decide
@@ -719,7 +719,7 @@ export function CollaborationCards({
         </div>
       ))}
       {mutation.error ? (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {errorText(mutation.error)}
         </p>
       ) : null}

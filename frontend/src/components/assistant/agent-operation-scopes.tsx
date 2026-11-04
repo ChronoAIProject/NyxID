@@ -176,7 +176,7 @@ export function AgentOperationScopes({
                 <span className="block font-medium">
                   {service.service_name}
                 </span>
-                <span className="text-11 font-normal text-text-tertiary">
+                <span className="text-13 font-normal text-text-tertiary">
                   {service.all_operations
                     ? "All operations"
                     : `${service.endpoint_ids.length + service.rules.length} selected operations`}
@@ -426,7 +426,7 @@ export function OperationSelectionForm({
                   />
                 </GroupedRow>
                 <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2">
-                  <span className="text-11 text-text-tertiary">
+                  <span className="text-13 text-text-tertiary">
                     {selected.length} selected
                   </span>
                   <Button
@@ -474,22 +474,22 @@ export function OperationSelectionForm({
                           <span className="block break-all font-mono">
                             {operation.method} {operation.path}
                           </span>
-                          <span className="block text-11 font-normal text-text-tertiary">
+                          <span className="block text-13 font-normal text-text-tertiary">
                             {operation.summary}
                           </span>
                           <span className="flex gap-1">
                             {operation.read_only ? (
-                              <span className="text-11 font-normal text-text-tertiary">
+                              <span className="text-13 font-normal text-text-tertiary">
                                 Read only
                               </span>
                             ) : null}
                             {operation.changes_existing ? (
-                              <span className="text-11 font-normal text-warning">
+                              <span className="text-13 font-normal text-warning">
                                 Changes existing
                               </span>
                             ) : null}
                             {savedInputs[operation.endpoint_id] ? (
-                              <span className="text-11 font-normal text-text-tertiary">
+                              <span className="text-13 font-normal text-text-tertiary">
                                 Value limits
                               </span>
                             ) : null}

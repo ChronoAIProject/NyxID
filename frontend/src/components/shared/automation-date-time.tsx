@@ -68,7 +68,7 @@ export function AutomationDateTime({
       />
     );
   return (
-    <fieldset className="space-y-1 text-12">
+    <fieldset className="space-y-1 text-14">
       <legend>
         {label}
         {optional ? " (optional)" : ""}

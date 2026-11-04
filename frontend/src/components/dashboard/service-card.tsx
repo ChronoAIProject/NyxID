@@ -109,7 +109,7 @@ export function ServiceCard({
 
       {/* Description (if exists) */}
       {service.description && (
-        <p className="text-12 text-muted-foreground line-clamp-2">
+        <p className="text-14 text-muted-foreground line-clamp-2">
           {service.description}
         </p>
       )}

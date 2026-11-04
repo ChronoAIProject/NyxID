@@ -140,7 +140,7 @@ export function AssistantNodeTransferDialog({
         </DialogHeader>
 
         {!result ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-3">
               <Badge
                 variant="secondary"
@@ -170,7 +170,7 @@ export function AssistantNodeTransferDialog({
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

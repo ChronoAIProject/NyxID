@@ -47,7 +47,7 @@ export function FlagBrowserControls({
             value={search}
             onChange={(e) => onChange({ search: e.target.value })}
             placeholder="Search flags, groups, tags or owners"
-            className="h-8 pl-9 text-12"
+            className="h-8 pl-9 text-14"
             aria-label="Search feature flags"
           />
         </div>
@@ -94,7 +94,7 @@ export function FlagBrowserControls({
           </FilterSelect>
         </div>
       </div>
-      <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-11 text-text-tertiary">
+      <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-13 text-text-tertiary">
         <span>
           {visibleCount} of {totalCount} flags
           {lifecycle === "active" && sunsetCount > 0
@@ -138,7 +138,7 @@ function FilterSelect({
         aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-full min-w-0 max-w-44 bg-transparent text-12 text-foreground focus-visible:outline-none"
+        className="h-full min-w-0 max-w-44 bg-transparent text-14 text-foreground focus-visible:outline-none"
       >
         {children}
       </select>

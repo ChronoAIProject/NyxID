@@ -225,7 +225,7 @@ export function ApiKeyCreateDialog({
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-14 break-all">
                 {createdKey}
               </code>
               <Button
@@ -276,7 +276,7 @@ export function ApiKeyCreateDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}

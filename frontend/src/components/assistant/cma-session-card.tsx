@@ -92,12 +92,12 @@ function CmaSessionCard({
       aria-label={`CMA session: ${state.title}`}
       data-private="true"
       data-ph-no-capture
-      className="flex max-h-[min(440px,40dvh)] min-h-0 shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-12 lg:max-h-[480px] lg:rounded-l-2xl lg:rounded-r-none lg:border-0 lg:shadow-sm"
+      className="flex max-h-[min(440px,40dvh)] min-h-0 shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-14 lg:max-h-[480px] lg:rounded-l-2xl lg:rounded-r-none lg:border-0 lg:shadow-sm"
     >
       <div className="flex shrink-0 items-center gap-2">
         <CmaGlyph className="h-4 w-4 text-muted-foreground" />
         <h2 className="flex-1 font-medium">Your CMA session</h2>
-        <span className="text-10 text-text-tertiary">Across chats</span>
+        <span className="text-12 text-text-tertiary">Across chats</span>
         <Button
           variant="ghost"
           size="sm"
@@ -121,13 +121,13 @@ function CmaSessionCard({
         </h3>
         <SessionStatus state={state} />
         {collapsed && state.actions.length ? (
-          <p className="truncate text-11 text-muted-foreground">
+          <p className="truncate text-13 text-muted-foreground">
             {state.actions.at(-1)?.title}
           </p>
         ) : null}
       </div>
       {state.error ? (
-        <div className="shrink-0 space-y-2 rounded-lg border border-warning/25 bg-warning/5 p-2 text-11">
+        <div className="shrink-0 space-y-2 rounded-lg border border-warning/25 bg-warning/5 p-2 text-13">
           <p role="alert">{state.error}</p>
           {state.connection === "unavailable" ? (
             <Button variant="outline" size="sm" onClick={reconnect}>
@@ -190,7 +190,7 @@ function SessionDetails({
   }, [open, visible, scrollBody]);
 
   return (
-    <div className="border-t border-border/50 pt-1 text-10 text-text-tertiary">
+    <div className="border-t border-border/50 pt-1 text-12 text-text-tertiary">
       <Button
         ref={button}
         type="button"
@@ -199,7 +199,7 @@ function SessionDetails({
         aria-expanded={open}
         aria-controls={contentId}
         onClick={() => setOpen((value) => !value)}
-        className="w-full justify-between px-1 text-10 focus-visible:ring-2 focus-visible:ring-ring"
+        className="w-full justify-between px-1 text-12 focus-visible:ring-2 focus-visible:ring-ring"
       >
         Session details
         <ChevronDown
@@ -236,7 +236,7 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
     <div className="flex items-center justify-between gap-2">
       <span
         role="status"
-        className="flex items-center gap-2 text-11 text-muted-foreground"
+        className="flex items-center gap-2 text-13 text-muted-foreground"
       >
         {state.status === "working" || state.status === "starting" ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary" />
@@ -253,7 +253,7 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
         {STATUS_LABELS[state.status]}
       </span>
       <span
-        className="flex items-center gap-1.5 text-10 text-text-tertiary"
+        className="flex items-center gap-1.5 text-12 text-text-tertiary"
         aria-label={`Status stream ${state.connection}`}
       >
         <span
@@ -284,21 +284,21 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
       {state.notice ? (
         <p
           role="note"
-          className="text-11 leading-relaxed text-muted-foreground"
+          className="text-13 leading-relaxed text-muted-foreground"
         >
           {state.notice}
         </p>
       ) : null}
       <section aria-label="CMA activity">
         <div className="mb-1 flex items-center justify-between gap-2">
-          <h4 className="text-10 font-medium text-text-tertiary">
+          <h4 className="text-12 font-medium text-text-tertiary">
             Recent actions
           </h4>
           {state.updatedAt ? (
             <time
               dateTime={state.updatedAt}
               aria-label="Last CMA activity"
-              className="text-10 tabular-nums text-text-tertiary"
+              className="text-12 tabular-nums text-text-tertiary"
             >
               {new Date(state.updatedAt).toLocaleTimeString([], {
                 hour: "2-digit",
@@ -313,7 +313,7 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
             {[...state.actions].reverse().map((action) => (
               <li
                 key={action.id}
-                className="flex items-start gap-2 rounded-lg bg-overlay/35 px-2 py-2 text-11 [&+li]:mt-1"
+                className="flex items-start gap-2 rounded-lg bg-overlay/35 px-2 py-2 text-13 [&+li]:mt-1"
               >
                 <span className="mt-0.5 shrink-0" aria-label={action.status}>
                   {action.status === "running" ? (
@@ -333,7 +333,7 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
             ))}
           </ol>
         ) : (
-          <p className="text-11 leading-relaxed text-text-tertiary">
+          <p className="text-13 leading-relaxed text-text-tertiary">
             {state.status === "working"
               ? "CMA is working. Actions will appear as it reports them."
               : "New session activity will appear here."}

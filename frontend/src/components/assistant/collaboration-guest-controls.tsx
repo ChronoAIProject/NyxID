@@ -79,7 +79,7 @@ export function CollaborationGuestControls({
   });
   if (!query.data?.length) return null;
   return (
-    <section className="space-y-2 text-12" aria-label="Group guest replies">
+    <section className="space-y-2 text-14" aria-label="Group guest replies">
       {query.data.map((row) => (
         <GroupedList
           key={row.group_id}

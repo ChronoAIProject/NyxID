@@ -109,7 +109,7 @@ export function SkillPreloadSettings({
               <span>Files to preload</span>
               <GroupedTextarea
                 aria-label={`Preload files for ${name}`}
-                className="min-h-20 font-mono text-11"
+                className="min-h-20 font-mono text-13"
                 aria-invalid={!!form.formState.errors.paths}
                 aria-describedby={`preload-help-${skillId}${form.formState.errors.paths ? ` preload-error-${skillId}` : ""}`}
                 disabled={disabled || save.isPending}

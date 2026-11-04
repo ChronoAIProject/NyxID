@@ -74,10 +74,10 @@ function CheckSummary({
   return (
     <section className="min-w-0 space-y-2" aria-label={title}>
       <div className="flex items-center gap-2">
-        <h4 className="text-13 font-medium">{title}</h4>
+        <h4 className="text-15 font-medium">{title}</h4>
         <Badge variant={variant}>{statusLabels[status]}</Badge>
       </div>
-      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-12">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-14">
         <dt className="text-muted-foreground">Source</dt>
         <dd>
           {
@@ -154,7 +154,7 @@ function CheckFields({
       disabled={disabled}
       className="space-y-3 rounded-lg border border-border p-3"
     >
-      <legend className="px-1 text-13 font-medium">
+      <legend className="px-1 text-15 font-medium">
         {kind === "health" ? "Health" : "Readiness"}
       </legend>
       <div className="flex items-center justify-between gap-3">
@@ -179,7 +179,7 @@ function CheckFields({
               aria-invalid={Boolean(errors?.path)}
             />
             {errors?.path && (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {errors.path.message}
               </p>
             )}
@@ -193,7 +193,7 @@ function CheckFields({
               aria-invalid={Boolean(errors?.statuses)}
             />
             {errors?.statuses && (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {errors.statuses.message}
               </p>
             )}
@@ -207,7 +207,7 @@ function CheckFields({
               aria-invalid={Boolean(errors?.body)}
             />
             {errors?.body && (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {errors.body.message}
               </p>
             )}
@@ -260,7 +260,7 @@ function ConfigurationForm({
           disabled={busy}
           onEdit={onEdit}
         />
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Health falls back to an available built-in or discovered check when
           owner configuration is off. Readiness is checked only when explicitly
           configured.
@@ -392,11 +392,11 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
       </CardHeader>
       <CardContent className="space-y-4">
         {query.isPending ? (
-          <p className="text-12 text-muted-foreground" role="status">
+          <p className="text-14 text-muted-foreground" role="status">
             Loading monitoring…
           </p>
         ) : query.isError ? (
-          <p role="alert" className="text-12 text-muted-foreground">
+          <p role="alert" className="text-14 text-muted-foreground">
             Monitoring is unavailable. Health and readiness are unknown. Refresh
             to try again.
           </p>
@@ -419,7 +419,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
           )
         )}
         {error && !editing && !clearing && (
-          <p role="alert" className="text-12 text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {error.message}
           </p>
         )}
@@ -477,7 +477,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
               />
             )}
             {error && (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {error.message}
               </p>
             )}
@@ -495,7 +495,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
             )}
             {draftResult && (
               <div className="space-y-2 border-t border-border pt-3">
-                <p className="text-12 font-medium">
+                <p className="text-14 font-medium">
                   Draft test result (not saved)
                 </p>
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -532,7 +532,7 @@ function MonitoringCard({ serviceId }: { serviceId: string }) {
               </DialogDescription>
             </DialogHeader>
             {error && (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {error.message}
               </p>
             )}

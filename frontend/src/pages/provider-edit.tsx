@@ -180,7 +180,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -200,7 +200,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             />
 
             <div>
-              <p className="text-12 font-medium mb-1">Slug</p>
+              <p className="text-14 font-medium mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
               <p className="text-xs text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
@@ -208,7 +208,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             </div>
 
             <div>
-              <p className="text-12 font-medium mb-1">Provider Type</p>
+              <p className="text-14 font-medium mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
@@ -226,7 +226,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -324,7 +324,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="text-15 font-semibold">
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -500,7 +500,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="text-15 font-semibold">
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -634,7 +634,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="text-15 font-semibold">
                   Telegram Widget Configuration
                 </h3>
                 <p className="text-xs text-muted-foreground">
@@ -690,7 +690,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="text-15 font-semibold">
                   API Key Configuration
                 </h3>
 
@@ -702,7 +702,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <FormLabel>API Key Instructions</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Instructions for users to obtain an API key"
                           {...field}
                         />

@@ -22,7 +22,7 @@ export function WorkspacePageHeader({
         <h1 className="text-22 font-bold leading-tight tracking-tight sm:text-28">
           {title}
         </h1>
-        <p className="max-w-2xl text-12 text-muted-foreground">{description}</p>
+        <p className="max-w-2xl text-14 text-muted-foreground">{description}</p>
       </div>
       {actions ? (
         <div data-title-actions="" className="flex shrink-0 flex-wrap items-center gap-2">

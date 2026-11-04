@@ -504,7 +504,7 @@ export function NotificationSettingsPage() {
                     <>
                       <Badge variant="success">Connected</Badge>
                       {settings.telegram_username && (
-                        <span className="text-12 text-muted-foreground">
+                        <span className="text-14 text-muted-foreground">
                           {settings.telegram_username}
                         </span>
                       )}
@@ -558,7 +558,7 @@ export function NotificationSettingsPage() {
                 </div>
               ) : !pushDevices?.devices.length ? (
                 <div className="space-y-3">
-                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
                     No devices registered. Install the NyxID mobile app and sign
                     in to register a device.
                   </div>
@@ -589,7 +589,7 @@ export function NotificationSettingsPage() {
                           {device.platform === "apns" ? "iOS" : "Android"}
                         </Badge>
                         <div className="space-y-0.5">
-                          <p className="text-12 font-medium">
+                          <p className="text-14 font-medium">
                             {device.device_name ?? "Unknown device"}
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -645,7 +645,7 @@ export function NotificationSettingsPage() {
                   {form.formState.errors.root && (
                     <div
                       role="alert"
-                      className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+                      className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
                     >
                       {form.formState.errors.root.message}
                     </div>
@@ -835,7 +835,7 @@ export function NotificationSettingsPage() {
               ) : serviceConfigsError ? (
                 <ErrorBanner message="Failed to load per-service overrides. Try refreshing the page." onRetry={refetchServiceConfigs} />
               ) : serviceConfigs?.configs.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
                   No per-service overrides configured. All services use the
                   global default.
                 </div>
@@ -861,7 +861,7 @@ export function NotificationSettingsPage() {
                     >
                       <div className="flex items-center justify-between">
                         <div className="space-y-0.5">
-                          <p className="text-12 font-medium">
+                          <p className="text-14 font-medium">
                             {config.service_name}
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -1096,7 +1096,7 @@ export function NotificationSettingsPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label className="text-12 font-medium" htmlFor="service-select">
+              <label className="text-14 font-medium" htmlFor="service-select">
                 Service
               </label>
               <Select
@@ -1121,7 +1121,7 @@ export function NotificationSettingsPage() {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-12 font-medium">Require Approval</p>
+                <p className="text-14 font-medium">Require Approval</p>
                 <p className="text-xs text-muted-foreground">
                   Whether this service requires approval for programmatic
                   access.
@@ -1139,7 +1139,7 @@ export function NotificationSettingsPage() {
               <div className="space-y-4">
                 <div className="space-y-2">
                   <label
-                    className="text-12 font-medium"
+                    className="text-14 font-medium"
                     htmlFor="approval-mode-select"
                   >
                     Approval Mode
@@ -1165,7 +1165,7 @@ export function NotificationSettingsPage() {
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-12 font-medium">
+                  <p className="text-14 font-medium">
                     Require Approval For
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3">

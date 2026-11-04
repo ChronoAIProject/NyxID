@@ -21,7 +21,7 @@ export function PageHeader({
           </h2>
         </div>
         {description && (
-          <p className="text-12 text-muted-foreground">{description}</p>
+          <p className="text-14 unthemed:text-12 text-muted-foreground">{description}</p>
         )}
       </div>
       {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}

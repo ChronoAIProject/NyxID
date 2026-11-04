@@ -66,10 +66,10 @@ function EmptyState({ history = false }: { readonly history?: boolean }) {
   return (
     <div className="flex flex-col items-center py-12 text-center">
       <ShieldCheck aria-hidden className="mb-3 size-6 text-text-tertiary" />
-      <p className="text-13 font-medium">
+      <p className="text-15 font-medium">
         {history ? "No decisions yet" : "Nothing waiting on you"}
       </p>
-      <p className="mt-1 text-11 text-text-tertiary">
+      <p className="mt-1 text-13 text-text-tertiary">
         {history
           ? "Decided approvals will show up here."
           : "Approval requests appear when an action needs your sign-off."}
@@ -106,14 +106,14 @@ function HistorySection({
                   />
                 }
                 title={<>
-                  <p className="text-12 font-medium">{entry.serviceName}</p>
+                  <p className="text-14 font-medium">{entry.serviceName}</p>
                   <p
-                    className="mt-1 line-clamp-2 break-words text-12 font-normal text-muted-foreground"
+                    className="mt-1 line-clamp-2 break-words text-14 font-normal text-muted-foreground"
                     title={entry.block.body}
                   >
                     {entry.block.body}
                   </p>
-                  <p className="mt-1 text-11 font-normal text-text-tertiary">
+                  <p className="mt-1 text-13 font-normal text-text-tertiary">
                     <span
                       className={
                         decision === "approved"
@@ -244,7 +244,7 @@ export function ApprovalsView() {
                     aria-label={`${entry.serviceName} request`}
                     className="assistant-workspace-approval space-y-2"
                   >
-                    <h3 className="flex items-center gap-2 px-4 text-12 font-medium">
+                    <h3 className="flex items-center gap-2 px-4 text-14 font-medium">
                       <ServiceIcon
                         slug={`api-${entry.block.service_slug}`}
                         size="xs"

@@ -553,7 +553,7 @@ export function useComposerDictation({
         sideOffset={8}
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => event.preventDefault()}
-        className="w-72 max-w-[calc(100vw-2rem)] rounded-2xl border-hairline bg-popover p-3 text-13 shadow-lg"
+        className="w-72 max-w-[calc(100vw-2rem)] rounded-2xl border-hairline bg-popover p-3 text-15 shadow-lg"
       >
         <div
           className="mb-2 flex h-8 items-center gap-3 px-1"
@@ -634,7 +634,7 @@ export function useComposerDictation({
             }}
           />
         </div>
-        <details className="mt-2 text-11 text-text-tertiary">
+        <details className="mt-2 text-13 text-text-tertiary">
           <summary className="cursor-pointer">
             Transcription source
           </summary>
@@ -661,7 +661,7 @@ export function useComposerDictation({
             </select>
           )}
         </details>
-        <details className="mt-2 text-11 text-text-tertiary">
+        <details className="mt-2 text-13 text-text-tertiary">
           <summary className="cursor-pointer">Credit usage</summary>
           <p className="mt-1">{optionsError || `${quote(option)}.`}</p>
           <p className="mt-1">
@@ -680,7 +680,7 @@ export function useComposerDictation({
           </Button>
         )}
         {notice && (
-          <p role="alert" className="mt-2 text-12 text-destructive">
+          <p role="alert" className="mt-2 text-14 text-destructive">
             {notice}
           </p>
         )}
@@ -689,7 +689,7 @@ export function useComposerDictation({
   ) : null;
   const review = active ? (
     <div className="space-y-3 py-2" aria-label="Dictation review">
-      <div className="min-h-10 whitespace-pre-wrap text-13">
+      <div className="min-h-10 whitespace-pre-wrap text-15">
         {text.parts?.length ? (
           text.parts.map((part, index) => (
             <span
@@ -738,7 +738,7 @@ export function useComposerDictation({
             />
           ))}
         </div>
-        <span role="status" className="text-11 text-text-tertiary">
+        <span role="status" className="text-13 text-text-tertiary">
           {stage === "capturing"
             ? "Listening"
             : stage === "finalizing"
@@ -785,13 +785,13 @@ export function useComposerDictation({
         </Button>
       </div>
       {notice && (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {notice}
         </p>
       )}
     </div>
   ) : notice && !open ? (
-    <p role="alert" className="pb-2 text-12 text-destructive">
+    <p role="alert" className="pb-2 text-14 text-destructive">
       {notice}
     </p>
   ) : null;

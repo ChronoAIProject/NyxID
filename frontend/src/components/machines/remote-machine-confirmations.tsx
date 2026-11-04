@@ -147,36 +147,36 @@ export function RemoteMachineConfirmations({
       {notice?.context === context && (
         <p
           role="status"
-          className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground"
+          className="rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground"
         >
           {notice.message}
         </p>
       )}
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Only the human owner can approve external execution. The client must
         retry the same operation and parameters using the same valid identity;
         approval is consumed once after live authorization is checked again.
         Approval does not execute the request from this page.
       </p>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Waiting approval expires after 15 minutes. Once approved, execution has
         a separate window of at most 10 minutes and remains limited by grant,
         credential, runtime and funding deadlines. A different child credential
         cannot consume this approval.
       </p>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Each page contains at most 100 live pending or approved confirmations.
         {query.data?.next_cursor === undefined
           ? " Older-page availability is unknown on this server."
           : " Older pages use the server’s stable cursor."}
       </p>
-      <p className="rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+      <p className="rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground">
         Assistant action confirmations stay in the original conversation. This
         list contains external client requests, not Assistant conversation
         cards.
       </p>
       {query.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading confirmations…
         </p>
       )}
@@ -184,7 +184,7 @@ export function RemoteMachineConfirmations({
         (missing ? (
           <p
             role="status"
-            className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground"
+            className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground"
           >
             External confirmations are unavailable on this server. Requests that
             require confirmation must remain blocked; this page cannot approve
@@ -197,13 +197,13 @@ export function RemoteMachineConfirmations({
           />
         ))}
       {confirmationId && !linked && !query.isPending && !query.error && (
-        <p role="status" className="text-12 text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           The linked confirmation is not on this page. Check older pages; it may
           have expired or no longer be visible under your current authorization.
         </p>
       )}
       {!query.isPending && !query.error && !rows.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
           No pending or approved confirmations are available.
         </p>
       )}
@@ -262,7 +262,7 @@ export function RemoteMachineConfirmations({
                 value={new Date(row.approved_until).toLocaleString()}
               />
             )}
-            <div className="space-y-2 px-4 py-3 text-12 text-muted-foreground">
+            <div className="space-y-2 px-4 py-3 text-14 text-muted-foreground">
               {status === "approved" && (
                 <p role="status">
                   Approved — waiting for the original caller to retry within the
@@ -528,7 +528,7 @@ export function ConfirmationDecision({
                         }
                       />
                     </FormControl>
-                    <FormLabel className="min-w-0 flex-1 text-12">
+                    <FormLabel className="min-w-0 flex-1 text-14">
                       I reviewed this identity and safe request summary.
                     </FormLabel>
                   </div>
@@ -539,7 +539,7 @@ export function ConfirmationDecision({
           </Form>
           <GroupedFooter>
             {expired && (
-              <p role="status" className="text-12 text-destructive">
+              <p role="status" className="text-14 text-destructive">
                 This confirmation expired. The client must submit a new request.
               </p>
             )}
@@ -602,7 +602,7 @@ function ConfirmationRow({
     <GroupedRow
       title={label}
       accessory={
-        <span className={mono ? "break-all font-mono text-11" : "break-words"}>
+        <span className={mono ? "break-all font-mono text-13" : "break-words"}>
           {value}
         </span>
       }

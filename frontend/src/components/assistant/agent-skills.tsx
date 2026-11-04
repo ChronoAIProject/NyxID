@@ -67,14 +67,14 @@ function SkillHistory({
               <li>
                 <div className="min-w-0 flex-1">
                   <p>{HISTORY_LABELS[item.event_type] ?? "Skill activity"}</p>
-                  <p className="text-11 font-normal text-text-tertiary">
+                  <p className="text-13 font-normal text-text-tertiary">
                     {new Date(item.created_at).toLocaleString()}
                     {item.revision !== null
                       ? ` · Revision ${item.revision}`
                       : ""}
                   </p>
                   {item.skills.length ? (
-                    <p className="text-11 font-normal text-text-tertiary">
+                    <p className="text-13 font-normal text-text-tertiary">
                       {item.skills
                         .map(
                           (pin) =>
@@ -100,14 +100,14 @@ function TestResult({
 }) {
   if (result.isFetching) {
     return (
-      <p role="status" className="text-11 text-text-tertiary">
+      <p role="status" className="text-13 text-text-tertiary">
         Testing…
       </p>
     );
   }
   if (result.error) {
     return (
-      <p role="alert" className="text-11 text-destructive">
+      <p role="alert" className="text-13 text-destructive">
         Test failed: {result.error.message}
       </p>
     );
@@ -116,7 +116,7 @@ function TestResult({
   if (!data) return null;
   if (!data.readable) {
     return (
-      <p role="status" className="text-11 text-warning">
+      <p role="status" className="text-13 text-warning">
         {data.name} {data.version} is disabled, so the agent does not read it.
         Enable it to use it again.
       </p>
@@ -124,14 +124,14 @@ function TestResult({
   }
   return (
     <div role="status" className="space-y-1">
-      <p className="text-11 text-foreground">
+      <p className="text-13 text-foreground">
         Test passed: the agent reads {data.name} {data.version} (
         {data.size_bytes.toLocaleString()} bytes).
       </p>
       {data.excerpt ? (
         <pre
           aria-label={`${data.name} SKILL.md excerpt`}
-          className="max-h-60 overflow-auto whitespace-pre-wrap break-words py-2 text-11"
+          className="max-h-60 overflow-auto whitespace-pre-wrap break-words py-2 text-13"
         >
           {data.excerpt}
         </pre>
@@ -197,7 +197,7 @@ function AttachedSkill({
       >
         <span className="min-w-0 flex-1">
           <span className="block">{skill.name}</span>
-          <span className="block truncate text-11 font-normal text-text-tertiary" title={description}>
+          <span className="block truncate text-13 font-normal text-text-tertiary" title={description}>
             {skill.disabled ? "Disabled" : description}
           </span>
         </span>
@@ -567,7 +567,7 @@ export function AgentSkills({
                 onClick={() => choose(item.id, item.name)}
               >
                 <span className="block">{item.name}</span>
-                <span className="block text-11 font-normal text-text-tertiary">
+                <span className="block text-13 font-normal text-text-tertiary">
                   {item.description}
                 </span>
               </GroupedDisclosure>

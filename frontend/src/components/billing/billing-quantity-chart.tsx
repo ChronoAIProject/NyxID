@@ -233,10 +233,10 @@ function QuantityPanel({
         {empty && (
           <div className="pointer-events-none absolute inset-x-4 top-3 bottom-8 flex items-center justify-center">
             <div className="pointer-events-auto max-w-xs space-y-2 rounded-lg border border-border bg-card p-3 text-center shadow-sm">
-              <p className="text-12 font-medium text-foreground">
+              <p className="text-14 font-medium text-foreground">
                 Select metrics to display usage
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Use the Metrics filter to select one or more metrics.
               </p>
               <Button variant="outline" size="sm" onClick={onChooseMetrics}>

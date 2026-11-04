@@ -66,7 +66,7 @@ export function OfflineBanner() {
       role={isDown ? "alert" : "status"}
       className={cn(
         // Neutral surface; only the icon carries the state's colour.
-        "flex shrink-0 items-center justify-center gap-2 border-b border-hairline bg-overlay-strong px-4 py-2 text-12 font-medium text-foreground",
+        "flex shrink-0 items-center justify-center gap-2 border-b border-hairline bg-overlay-strong px-4 py-2 text-14 font-medium text-foreground",
       )}
     >
       {isDown ? (

@@ -31,7 +31,7 @@ function OwnedBindings() {
   const [review, setReview] = useState<PersonalBinding>();
   const rows = query.data?.pages.flatMap((page) => page.bindings) ?? [];
   return (
-    <section className="space-y-3 text-12">
+    <section className="space-y-3 text-14">
       <GroupedList
         title="Personal chat links"
         footer={

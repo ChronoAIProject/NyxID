@@ -72,7 +72,7 @@ function LevelControl({
             disabled={disabled}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-6 whitespace-nowrap rounded-md px-2 text-11 transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+              "h-6 whitespace-nowrap rounded-md px-2 text-13 transition-colors focus-visible:outline-2 focus-visible:outline-ring",
               value === option.value
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:text-foreground",
@@ -134,9 +134,9 @@ export function ServiceAccessTable({
         >
           Service access
         </h2>
-        <code className="text-11 text-muted-foreground">proxy</code>
+        <code className="text-13 text-muted-foreground">proxy</code>
       </div>
-      <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+      <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
         Allow lets {clientName} read data and take actions, including creating,
         updating or deleting data, using that service. Approval prompts depend
         on your configured policies.
@@ -154,7 +154,7 @@ export function ServiceAccessTable({
             onChange={(event) => setQuery(event.target.value)}
             placeholder={`Search ${rows.length} services`}
             aria-label="Search services"
-            className="h-8 pl-8 text-12"
+            className="h-8 pl-8 text-14"
           />
         </div>
       )}
@@ -162,8 +162,8 @@ export function ServiceAccessTable({
       <div className="mt-2 overflow-hidden rounded-lg border border-border/60">
         <div className="flex flex-wrap items-center justify-between gap-3 bg-overlay px-3 py-2">
           <div className="min-w-0">
-            <p className="text-13 font-medium text-foreground">All services</p>
-            <p className="text-11 text-text-tertiary">
+            <p className="text-15 font-medium text-foreground">All services</p>
+            <p className="text-13 text-text-tertiary">
               {allowsFutureServices
                 ? "Also applies to services you connect later"
                 : "New services stay off unless all services are allowed"}
@@ -182,15 +182,15 @@ export function ServiceAccessTable({
           className="h-75 max-h-[20dvh] min-h-25 divide-y divide-border/60 overflow-y-auto overscroll-contain border-t border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
         >
           {loading ? (
-            <p className="px-3 py-2.5 text-12 text-muted-foreground">
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">
               Loading services...
             </p>
           ) : rows.length === 0 ? (
-            <p className="px-3 py-2.5 text-12 text-muted-foreground">
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">
               No services connected yet. New ones follow the setting above.
             </p>
           ) : visibleRows.length === 0 ? (
-            <p className="px-3 py-2.5 text-12 text-muted-foreground">
+            <p className="px-3 py-2.5 text-14 text-muted-foreground">
               No services match &ldquo;{query.trim()}&rdquo;.
             </p>
           ) : (
@@ -201,13 +201,13 @@ export function ServiceAccessTable({
               >
                 <div className="min-w-0">
                   <p
-                    className="truncate text-13 text-foreground"
+                    className="truncate text-15 text-foreground"
                     title={row.name}
                   >
                     {row.name}
                   </p>
                   {(row.orgName || row.requiredByApp || row.secondary) && (
-                    <p className="truncate text-11 text-text-tertiary">
+                    <p className="truncate text-13 text-text-tertiary">
                       {[
                         row.orgName && `Org · ${row.orgName}`,
                         row.requiredByApp ? "Requested by app" : row.secondary,
@@ -229,7 +229,7 @@ export function ServiceAccessTable({
         </div>
       </div>
 
-      <p className="mt-2 text-11 leading-relaxed text-text-tertiary">
+      <p className="mt-2 text-13 leading-relaxed text-text-tertiary">
         {clientName} can discover the services you allow. NyxID supplies
         credentials to those services without sharing them with {clientName}.
       </p>

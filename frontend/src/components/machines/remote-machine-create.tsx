@@ -295,7 +295,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
             name="name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel className="text-11 font-normal text-text-tertiary">
+                <FormLabel className="text-13 font-normal text-text-tertiary">
                   Machine name
                 </FormLabel>
                 <FormControl>
@@ -635,7 +635,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
                   />
                 </FormControl>
                 <div className="min-w-0 flex-1">
-                  <FormLabel className="text-12 font-medium text-foreground">
+                  <FormLabel className="text-14 font-medium text-foreground">
                     {freeSlot
                       ? "I accept the shared environment, fixed specification, and data policies."
                       : "I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions."}

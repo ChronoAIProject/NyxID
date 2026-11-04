@@ -66,7 +66,7 @@ function tariff(option: VoiceOption) {
 
 function VoiceCreditUsage({ option }: { option: VoiceOption }) {
   return (
-    <details className="mt-3 text-12 text-text-tertiary">
+    <details className="mt-3 text-14 text-text-tertiary">
       <summary className="cursor-pointer">Credit usage</summary>
       <p className="mt-2">
         {tariff(option)}. Paid by{" "}
@@ -520,7 +520,7 @@ export function VoicePanel({
     return (
       <section
         aria-label={settingsOnly ? "Voice settings" : "Voice conversation"}
-        className="text-12"
+        className="text-14"
       >
         <div className="flex min-h-9 flex-wrap items-center gap-1 border-b border-hairline pb-1.5">
           <span role="status" className="min-w-0 flex-1 text-primary">
@@ -534,7 +534,7 @@ export function VoicePanel({
             {active && (
               <span
                 aria-label="Call duration"
-                className="ml-2 font-mono text-11 text-text-tertiary"
+                className="ml-2 font-mono text-13 text-text-tertiary"
               >
                 {timer}
               </span>
@@ -581,7 +581,7 @@ export function VoicePanel({
             <PopoverContent
               side="top"
               align="end"
-              className="max-h-[60dvh] w-80 max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto rounded-2xl p-3 text-12"
+              className="max-h-[60dvh] w-80 max-w-[calc(100vw-2rem)] space-y-3 overflow-y-auto rounded-2xl p-3 text-14"
               onOpenAutoFocus={(e) => e.preventDefault()}
             >
               <p className="font-medium">Voice settings</p>
@@ -840,7 +840,7 @@ export function VoicePanel({
   return (
     <section
       aria-label={settingsOnly ? "Voice settings" : "Voice conversation"}
-      className="max-h-[50dvh] overflow-y-auto rounded-xl border border-border bg-card p-3 text-12 shadow-sm"
+      className="max-h-[50dvh] overflow-y-auto rounded-xl border border-border bg-card p-3 text-14 shadow-sm"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-15 font-semibold">

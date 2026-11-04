@@ -256,7 +256,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
             }
           >
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -298,7 +298,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -344,7 +344,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               user?.is_admin &&
               (developerApps.length > 0 || unavailableAppIds.length > 0) && (
                 <div className="space-y-2">
-                  <p className="text-12 font-medium">
+                  <p className="text-14 font-medium">
                     Developer App Scoping
                   </p>
                   <p className="text-xs text-muted-foreground">
@@ -403,7 +403,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           />
                           <Label
                             htmlFor={`app-${app.id}`}
-                            className="text-12 font-normal"
+                            className="text-14 font-normal"
                           >
                             {app.client_name}
                             {!app.is_active ? " (inactive)" : ""}
@@ -594,7 +594,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                 />
 
                 <div>
-                  <p className="mb-1 text-12 font-medium">Auth Type</p>
+                  <p className="mb-1 text-14 font-medium">Auth Type</p>
                   <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
                   <p className="mt-1 text-xs text-muted-foreground">
                     Auth type cannot be changed after creation.
@@ -605,7 +605,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   <>
                     <Separator className="my-2" />
                     <div className="space-y-2">
-                      <h3 className="text-13 font-semibold">
+                      <h3 className="text-15 font-semibold">
                         Identity Propagation
                       </h3>
                       <p className="text-xs text-muted-foreground">
@@ -662,7 +662,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                                   maxLength={64}
                                 />
                               </FormControl>
-                              <p className="text-12 text-muted-foreground">
+                              <p className="text-14 text-muted-foreground">
                                 Leave blank for Bearer. Use the scheme
                                 documented by the vendor.
                               </p>
@@ -673,7 +673,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       )}
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">
+                        <h3 className="text-15 font-semibold">
                           Service Metadata
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -827,7 +827,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       />
 
                       {service.recommended_skill_refs != null && (
-                        <div className="space-y-2 text-12">
+                        <div className="space-y-2 text-14">
                           <p className="text-muted-foreground">
                             Revision {service.skills_revision ?? 0}:{" "}
                             {service.recommended_skill_refs
@@ -859,7 +859,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <Separator className="my-2" />
                       <div className="space-y-2">
                         <div className="space-y-1">
-                          <p className="text-12 font-medium">
+                          <p className="text-14 font-medium">
                             Default request headers
                           </p>
                           <p className="text-xs text-muted-foreground">
@@ -898,7 +898,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       </div>
 
                       <div className="space-y-2">
-                        <p className="text-12 font-medium">Capabilities</p>
+                        <p className="text-14 font-medium">Capabilities</p>
                         <p className="text-xs text-muted-foreground">
                           Flags describing what this service supports through
                           NyxID proxy.
@@ -945,7 +945,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">
+                        <h3 className="text-15 font-semibold">
                           Forward Access Token
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -957,7 +957,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="forward-access-token"
-                          className="text-12 font-normal"
+                          className="text-14 font-normal"
                         >
                           Forward Access Token
                         </Label>
@@ -984,7 +984,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     )}
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">Billing</h3>
+                        <h3 className="text-15 font-semibold">Billing</h3>
                         <p className="text-xs text-muted-foreground">
                           Services are free by default: usage is metered for
                           observability but never charged. Enable platform
@@ -997,7 +997,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="platform-billable"
-                          className="text-12 font-normal"
+                          className="text-14 font-normal"
                         >
                           Charge wallet credits (platform billing)
                         </Label>
@@ -1014,7 +1014,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <div className="space-y-1">
                           <Label
                             htmlFor="platform-charge-nyxid-credentials-only"
-                            className="text-12 font-normal"
+                            className="text-14 font-normal"
                           >
                             Charge only NyxID-provided credentials
                           </Label>
@@ -1042,7 +1042,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="space-y-2">
-                          <Label className="text-12 font-normal">
+                          <Label className="text-14 font-normal">
                             Charge by
                           </Label>
                           <Select
@@ -1121,7 +1121,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-13 font-semibold">
+                        <h3 className="text-15 font-semibold">
                           Delegation Token Injection
                         </h3>
                         <p className="text-xs text-muted-foreground">
@@ -1136,7 +1136,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="inject-delegation-token"
-                          className="text-12 font-normal"
+                          className="text-14 font-normal"
                         >
                           Inject delegation token
                         </Label>

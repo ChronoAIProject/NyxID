@@ -356,7 +356,7 @@ function ParameterSummary({ rows }: { readonly rows: readonly SummaryRow[] }) {
           className="flex flex-wrap items-center gap-1.5"
         >
           {group[0]?.label ? (
-            <span className="text-10 font-semibold uppercase tracking-[1px] text-muted-foreground">
+            <span className="text-12 font-semibold uppercase tracking-[1px] text-muted-foreground">
               {group[0].label}
             </span>
           ) : null}
@@ -443,7 +443,7 @@ function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
   return (
     <div className="flex items-start gap-2 border-t border-border bg-muted px-4 py-3">
       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
-      <p className="text-11 leading-relaxed text-muted-foreground">
+      <p className="text-13 leading-relaxed text-muted-foreground">
         {block.outcome_note}
       </p>
     </div>
@@ -780,7 +780,7 @@ export function ActionCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-13 font-semibold text-foreground">
+            <h3 className="text-15 font-semibold text-foreground">
               {descriptor.title(params)}
             </h3>
             <Badge
@@ -809,7 +809,7 @@ export function ActionCard({
                           : "Action required"}
             </Badge>
           </div>
-          <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
+          <p className="mt-1.5 text-14 leading-relaxed text-muted-foreground">
             {/* A settled card states its outcome; the pitch for an action the
                 user already answered would only read as stale. */}
             {verdict ? block.outcome_note : descriptor.body(params)}
@@ -825,7 +825,7 @@ export function ActionCard({
           <VerdictIcon
             className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${verdict.iconClass}`}
           />
-          <p className="text-11 leading-relaxed text-muted-foreground">
+          <p className="text-13 leading-relaxed text-muted-foreground">
             {verdict.footer}
           </p>
         </div>
@@ -834,7 +834,7 @@ export function ActionCard({
       {!verdict && !unsupported ? (
         <div className="flex items-start gap-2 px-4 py-3">
           <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
-          <p className="text-11 leading-relaxed text-muted-foreground">
+          <p className="text-13 leading-relaxed text-muted-foreground">
             {descriptor.assurance}
           </p>
         </div>
@@ -880,7 +880,7 @@ export function ActionCard({
               Report failure
             </Button>
           ) : null}
-          <span className="ml-auto text-10 text-muted-foreground">
+          <span className="ml-auto text-12 text-muted-foreground">
             Nothing is shared until you finish.
           </span>
         </div>

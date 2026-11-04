@@ -209,7 +209,7 @@ export function DatePicker(props: DatePickerProps) {
           aria-describedby={props.describedBy}
           aria-invalid={props.invalid}
           className={cn(
-            "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-12 transition-colors",
+            "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-14 unthemed:text-12 transition-colors",
             "hover:border-hairline-strong focus-visible:outline-none focus-visible:border-input-focus",
             "disabled:cursor-not-allowed disabled:opacity-50",
             displayValue ? "text-foreground" : "text-text-tertiary",
@@ -233,7 +233,7 @@ export function DatePicker(props: DatePickerProps) {
             >
               <ChevronLeft className="h-4 w-4" aria-hidden="true" />
             </button>
-            <span className="text-12 font-medium">
+            <span className="text-14 unthemed:text-12 font-medium">
               {MONTHS[viewMonth]} {viewYear}
             </span>
             <button
@@ -251,7 +251,7 @@ export function DatePicker(props: DatePickerProps) {
             {DAYS.map((d, i) => (
               <span
                 key={i}
-                className="text-10 font-semibold uppercase tracking-[1px] text-text-tertiary py-1"
+                className="text-12 unthemed:text-10 font-semibold uppercase tracking-[1px] text-text-tertiary py-1"
               >
                 {d}
               </span>
@@ -274,7 +274,7 @@ export function DatePicker(props: DatePickerProps) {
                   aria-pressed={sel}
                   onClick={() => selectDay(cell.date)}
                   className={cn(
-                    "flex h-8 w-full items-center justify-center rounded-md text-12 transition-colors",
+                    "flex h-8 w-full items-center justify-center rounded-md text-14 unthemed:text-12 transition-colors",
                     !cell.current && "text-text-tertiary/40",
                     cell.current &&
                       !sel &&
@@ -297,7 +297,7 @@ export function DatePicker(props: DatePickerProps) {
             <Button
               type="button"
               variant="ghost"
-              className="h-7 text-11"
+              className="h-7 text-13 unthemed:text-11"
               disabled={values.length === 0}
               onClick={() => {
                 if (multiple) {
@@ -314,7 +314,7 @@ export function DatePicker(props: DatePickerProps) {
               <Button
                 type="button"
                 variant="ghost"
-                className="h-7 text-11"
+                className="h-7 text-13 unthemed:text-11"
                 onClick={() => {
                   const t = new Date();
                   const todayValue = toDateString(t);
@@ -339,7 +339,7 @@ export function DatePicker(props: DatePickerProps) {
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-7 text-11"
+                  className="h-7 text-13 unthemed:text-11"
                   onClick={() => setOpen(false)}
                 >
                   Done

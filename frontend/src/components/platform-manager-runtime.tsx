@@ -81,7 +81,7 @@ export function ManagerRuntimeSettings({
   const query = useManagerRuntime(profile.id);
   if (query.isPending)
     return (
-      <p role="status" className="text-12">
+      <p role="status" className="text-14">
         Loading bot access settings...
       </p>
     );
@@ -94,7 +94,7 @@ export function ManagerRuntimeSettings({
     );
   if (!query.data.supported)
     return (
-      <p role="status" className="text-12 text-muted-foreground">
+      <p role="status" className="text-14 text-muted-foreground">
         Public and personal bot access is not supported by this server.
       </p>
     );
@@ -223,7 +223,7 @@ function BasicRuntimeForm({
       "This bot is retired. Prepare another shared bot to enable access.",
   }[state];
   return (
-    <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
+    <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-14">
       <div className="flex flex-wrap gap-2">
         <Badge variant={active ? "success" : "warning"}>{statusLabel}</Badge>
         <Badge
@@ -518,7 +518,7 @@ export function AiRuntimeForm({
   return (
     <Form {...form}>
       <form
-        className="space-y-4 rounded-xl border border-border bg-card p-4 text-12"
+        className="space-y-4 rounded-xl border border-border bg-card p-4 text-14"
         onSubmit={form.handleSubmit(enable)}
       >
         <div className="flex flex-wrap gap-2">
@@ -575,7 +575,7 @@ export function AiRuntimeForm({
                   <FormControl>
                     <Input {...field} inputMode="decimal" />
                   </FormControl>
-                  <p className="text-11 text-muted-foreground">Credits</p>
+                  <p className="text-13 text-muted-foreground">Credits</p>
                   <FormMessage />
                 </FormItem>
               )}

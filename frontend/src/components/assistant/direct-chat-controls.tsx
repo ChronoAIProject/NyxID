@@ -31,7 +31,7 @@ export function DirectModeBanner() {
   return (
     <div
       aria-label="Direct chat mode notice"
-      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-11 text-muted-foreground sm:px-6"
+      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-13 text-muted-foreground sm:px-6"
       role="status"
     >
       <Info aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
@@ -74,7 +74,7 @@ export function DirectChatControls({
       <GroupedRow>
         <label
           htmlFor="direct-chat-model"
-          className="min-w-0 flex-1 text-12 font-medium"
+          className="min-w-0 flex-1 text-14 font-medium"
         >
           Model
         </label>
@@ -98,7 +98,7 @@ export function DirectChatControls({
       <GroupedRow>
         <label
           htmlFor="direct-chat-effort"
-          className="min-w-0 flex-1 text-12 font-medium"
+          className="min-w-0 flex-1 text-14 font-medium"
         >
           Reasoning effort
         </label>
@@ -125,7 +125,7 @@ export function DirectChatControls({
       <GroupedRow>
         <label
           htmlFor="direct-chat-skill"
-          className="min-w-0 flex-1 text-12 font-medium"
+          className="min-w-0 flex-1 text-14 font-medium"
         >
           NyxID knowledge
         </label>

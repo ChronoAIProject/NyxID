@@ -151,7 +151,7 @@ function AssistantShellLayout({
             >
               <Menu className="h-4 w-4" />
             </button>
-            <div className="min-w-0 flex-1 truncate text-12 text-muted-foreground">
+            <div className="min-w-0 flex-1 truncate text-14 text-muted-foreground">
               {!desktop ? shellTitle : null}
             </div>
             {!desktop ? headerActions : null}

@@ -198,7 +198,7 @@ function AgentPicker({
                     <AgentAvatar agent={row} size="sm" />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-foreground">{row.name}</span>
-                      <span className="block truncate text-11 text-text-tertiary">
+                      <span className="block truncate text-13 text-text-tertiary">
                         {row.description}
                       </span>
                     </span>
@@ -230,7 +230,7 @@ function GroupOwnerPicker({
       }
     >
       <GroupedRow>
-        <label htmlFor="group-owner" className="flex-1 text-12 font-medium">
+        <label htmlFor="group-owner" className="flex-1 text-14 font-medium">
           Ownership
         </label>
         <Select value={value ?? "personal"} onValueChange={(id) => onChange(id === "personal" ? undefined : id)}>
@@ -354,7 +354,7 @@ function GroupFields({
               footer={
                 <>
                   {memberFooter}
-                  <FormMessage className="text-11" />
+                  <FormMessage className="text-13" />
                 </>
               }
             />
@@ -624,7 +624,7 @@ export function GroupSettingsDialog({
                         <GroupedRow>
                           <label
                             htmlFor="group-lead"
-                            className="flex-1 text-12 font-medium"
+                            className="flex-1 text-14 font-medium"
                           >
                             Lead agent
                           </label>
@@ -749,7 +749,7 @@ export function GroupSettingsDialog({
             </DialogDescription>
           </DialogHeader>
           {error ? (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {error}
             </p>
           ) : null}

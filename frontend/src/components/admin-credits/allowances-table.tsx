@@ -87,7 +87,7 @@ export function AllowancesTable({
     );
   if (!bundles.length)
     return (
-      <p className="py-10 text-center text-12 text-muted-foreground">
+      <p className="py-10 text-center text-14 text-muted-foreground">
         No usage allowances.
       </p>
     );
@@ -99,9 +99,9 @@ export function AllowancesTable({
             key={bundle.id}
             className="relative rounded-xl border border-border/50 bg-card p-4"
           >
-            <div className="text-13 font-semibold">{name(bundle)}</div>
-            <div className="my-2 text-11">{units(bundle)}</div>
-            <div className="mb-2 text-11 text-muted-foreground">
+            <div className="text-15 font-semibold">{name(bundle)}</div>
+            <div className="my-2 text-13">{units(bundle)}</div>
+            <div className="mb-2 text-13 text-muted-foreground">
               {billingTargetLabel(bundle)}
             </div>
             <div className="flex items-center justify-between gap-3">
@@ -129,7 +129,7 @@ export function AllowancesTable({
               <TableRow key={bundle.id}>
                 <TableCell>
                   <div className="font-medium">{name(bundle)}</div>
-                  <div className="text-11 text-muted-foreground">
+                  <div className="text-13 text-muted-foreground">
                     {bundle.service_slug}
                   </div>
                 </TableCell>

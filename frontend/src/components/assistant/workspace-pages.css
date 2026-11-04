@@ -45,14 +45,14 @@
   display: none;
 }
 .assistant-workspace-approval h3 {
-  font-size: var(--text-12);
+  font-size: var(--text-14);
   font-weight: 500;
 }
 .assistant-workspace-approval > section > div:nth-child(2) {
   padding-top: 0;
 }
 .assistant-workspace-approval > section > div:nth-child(2) > p:first-child {
-  font-size: var(--text-12);
+  font-size: var(--text-14);
   font-weight: 400;
 }
 .assistant-workspace-approval > section > div:nth-child(2) > div > span {
@@ -61,7 +61,7 @@
   background: transparent;
   padding: 0;
   font-family: inherit;
-  font-size: var(--text-11);
+  font-size: var(--text-13);
   text-transform: none;
   letter-spacing: normal;
 }

@@ -155,7 +155,7 @@ export function DocsSearch({
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-10 tracking-wider text-nyx-secondary-400 uppercase">
+                        <span className="font-mono text-12 tracking-wider text-nyx-secondary-400 uppercase">
                           {TAB_LABEL[docTabForSlug(slug)] ?? ""}
                         </span>
                         <span className="text-sm font-medium text-foreground">{e.title}</span>
@@ -170,7 +170,7 @@ export function DocsSearch({
             </ul>
           )}
         </div>
-        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-11 text-text-tertiary">
+        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-13 text-text-tertiary">
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-border px-1 font-mono">↑</kbd>
             <kbd className="rounded border border-border px-1 font-mono">↓</kbd>

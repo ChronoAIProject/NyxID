@@ -367,7 +367,7 @@ function CredentialForm({
         )}
       </div>
       <div className="max-w-2xl space-y-3">
-        <h3 className="text-13 font-medium">Setup checklist</h3>
+        <h3 className="text-15 font-medium">Setup checklist</h3>
         <ol className="list-decimal space-y-3 pl-4 text-xs text-muted-foreground">
           {provider.setup_checklist.map((step) => (
             <li key={step}>{step}</li>

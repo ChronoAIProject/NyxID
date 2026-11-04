@@ -110,7 +110,7 @@ export function NodeScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-nodes" className="text-12">
+              <Label htmlFor="allow-all-nodes" className="text-14">
                 Allow all nodes
               </Label>
             </div>
@@ -134,7 +134,7 @@ export function NodeScopeCard({
                           variant={
                             n.status === "online" ? "default" : "secondary"
                           }
-                          className="ml-1 text-10"
+                          className="ml-1 text-12"
                         >
                           {n.status}
                         </Badge>

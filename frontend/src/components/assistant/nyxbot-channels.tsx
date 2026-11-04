@@ -206,7 +206,7 @@ export function ChannelBotsManager({
                     <>
                       {row.last_error ? (
                         <p
-                          className="text-11 text-destructive"
+                          className="text-13 text-destructive"
                           data-channel-error={row.last_error}
                         >
                           Last error: {nyxBotChannelError(row.last_error)}
@@ -218,7 +218,7 @@ export function ChannelBotsManager({
                       {["failing", "interrupted", "media_failed"].includes(
                         row.delivery_status ?? "",
                       ) ? (
-                        <p className="text-11 text-destructive">
+                        <p className="text-13 text-destructive">
                           {row.delivery_status === "failing"
                             ? "Messages are not reaching the agent: "
                             : "Attachment problem: "}
@@ -430,7 +430,7 @@ export function ChannelBotsManager({
                     <li>
                       <div className="min-w-0 flex-1">
                         <p>{bot.label}</p>
-                        <p className="text-11 font-normal text-text-tertiary">
+                        <p className="text-13 font-normal text-text-tertiary">
                           {channelPlatformName(bot.platform)}
                           {bot.user_id !== currentUserId
                             ? ` · ${orgName(bot.user_id) ?? ""}`

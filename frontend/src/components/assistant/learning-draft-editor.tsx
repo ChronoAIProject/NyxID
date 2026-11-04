@@ -46,7 +46,7 @@ type Review = ReturnType<typeof useAgentLearningReview>;
 type Proposal = z.infer<typeof learningProposalSchema>;
 type Draft = NonNullable<Proposal["draft"]>;
 
-const LABEL = "text-11 font-medium text-muted-foreground";
+const LABEL = "text-13 font-medium text-muted-foreground";
 
 function requestFailure(cause: unknown): string {
   return cause instanceof Error && cause.message
@@ -163,11 +163,11 @@ function BaseSkillField({
             </SelectContent>
           </Select>
           {loadError ? (
-            <p role="alert" className="text-11 text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               Attached skills could not be loaded. {loadError.message}
             </p>
           ) : null}
-          <FormMessage className="text-11" />
+          <FormMessage className="text-13" />
         </FormItem>
       )}
     />
@@ -320,7 +320,7 @@ export function LearningDraftEditor({
               <Input aria-label={label} readOnly={readOnly} {...field} />
             )}
           </FormControl>
-          <FormMessage className="text-11" />
+          <FormMessage className="text-13" />
         </FormItem>
       )}
     />
@@ -334,7 +334,7 @@ export function LearningDraftEditor({
         onSubmit={(event) => void save(event)}
       >
         {shown ? (
-          <div role="alert" className="space-y-1 text-12 text-destructive">
+          <div role="alert" className="space-y-1 text-14 text-destructive">
             <p>{shown.message}</p>
             {shown.items.map((item) => (
               <p key={`${item.field}-${item.rule}-${item.line ?? 0}`}>
@@ -343,11 +343,11 @@ export function LearningDraftEditor({
             ))}
           </div>
         ) : null}
-        <p className="text-11 text-text-tertiary">
+        <p className="text-13 text-text-tertiary">
           Generated guidance is untrusted and is shown as plain text.
         </p>
         {draft.kind === "none" ? (
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Kind: no skill proposed
           </p>
         ) : (
@@ -374,7 +374,7 @@ export function LearningDraftEditor({
                     </SelectItem>
                   </SelectContent>
                 </Select>
-                <FormMessage className="text-11" />
+                <FormMessage className="text-13" />
               </FormItem>
             )}
           />
@@ -394,12 +394,12 @@ export function LearningDraftEditor({
         ) : null}
         {text("name", "Skill name", false)}
         {kind === "improve" && proposal.source === "authored" ? (
-          <p className="text-11 text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             An improvement keeps the base skill&apos;s name.
           </p>
         ) : null}
         {text("description", "Skill description", true)}
-        {text("skill_md", "Skill draft", true, "min-h-40 font-mono text-11")}
+        {text("skill_md", "Skill draft", true, "min-h-40 font-mono text-13")}
         {text("rationale", "Rationale", true)}
         {text("safety_notes", "Safety notes", true)}
         {files.fields.map((row, index) => (
@@ -420,7 +420,7 @@ export function LearningDraftEditor({
                       {...field}
                     />
                   </FormControl>
-                  <FormMessage className="text-11" />
+                  <FormMessage className="text-13" />
                 </FormItem>
               )}
             />
@@ -433,12 +433,12 @@ export function LearningDraftEditor({
                   <FormControl>
                     <Textarea
                       aria-label={`File ${index + 1} content`}
-                      className="font-mono text-11"
+                      className="font-mono text-13"
                       readOnly={readOnly}
                       {...field}
                     />
                   </FormControl>
-                  <FormMessage className="text-11" />
+                  <FormMessage className="text-13" />
                 </FormItem>
               )}
             />
@@ -486,14 +486,14 @@ export function LearningDraftEditor({
           </div>
         ) : null}
         {validBytes !== undefined ? (
-          <p role="status" className="text-11 text-success">
+          <p role="status" className="text-13 text-success">
             The draft passes validation ({validBytes.toLocaleString("en-US")}{" "}
             bytes).
             {form.formState.isDirty ? " Save it to keep these changes." : ""}
           </p>
         ) : null}
         {proposal.source === "authored" ? (
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Saving updates the draft. Authored drafts are published only from
             their confirmation card in the conversation.
           </p>
@@ -541,21 +541,21 @@ export function ProposalDraftEditor({
   const proposal = review.data?.proposals.find((item) => item.id === proposalId);
   if (review.isPending) {
     return (
-      <p role="status" className="text-11 text-muted-foreground">
+      <p role="status" className="text-13 text-muted-foreground">
         Loading the draft…
       </p>
     );
   }
   if (review.error) {
     return (
-      <p role="alert" className="text-11 text-destructive">
+      <p role="alert" className="text-13 text-destructive">
         The draft could not be loaded. {requestFailure(review.error)}
       </p>
     );
   }
   if (!proposal?.draft) {
     return (
-      <p role="status" className="text-11 text-muted-foreground">
+      <p role="status" className="text-13 text-muted-foreground">
         This draft is no longer available.
       </p>
     );
@@ -575,7 +575,7 @@ export function ProposalDraftEditor({
         <Link
           to="/assistant"
           search={{ c: proposal.card_conversation_id }}
-          className="text-11 text-primary hover:underline"
+          className="text-13 text-primary hover:underline"
         >
           Open the confirmation card
         </Link>

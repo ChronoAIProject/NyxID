@@ -59,7 +59,7 @@ type ServiceScopeProps = {
 export function ServiceScopeCard(props: ServiceScopeProps) {
   const { data: allKeys, isLoading } = useKeys({ includeTools: true });
   if (isLoading && props.initialCatalogServiceId)
-    return <p className="text-12">Loading tool grants…</p>;
+    return <p className="text-14">Loading tool grants…</p>;
   return (
     <ServiceScopeEditor
       key={`${props.keyId}:${props.initialCatalogServiceId ?? ""}`}
@@ -183,7 +183,7 @@ function ServiceScopeEditor({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-12">
+              <Label htmlFor="allow-all-services" className="text-14">
                 Allow all services
               </Label>
             </div>

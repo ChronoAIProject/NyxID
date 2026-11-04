@@ -141,7 +141,7 @@ export function DataTableSearch<SearchKey extends string>({
               onCancel();
             }
           }}
-          className="h-full min-w-0 flex-1 bg-transparent px-1 text-12 text-foreground outline-none placeholder:text-text-tertiary"
+          className="h-full min-w-0 flex-1 bg-transparent px-1 text-14 text-foreground outline-none placeholder:text-text-tertiary"
         />
         <button
           type="button"
@@ -254,7 +254,7 @@ export function DataTableFilterPopover<FilterKey extends string>({
           <Filter className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{triggerLabel}</span>
           {activeCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary-text">
+            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-12 font-semibold text-primary-text">
               {String(activeCount)}
             </span>
           )}
@@ -343,7 +343,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               <span className="min-w-0 flex-1 break-words">{field.label}</span>
               {active && (
                 <span
-                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary-text"
+                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-12 font-semibold text-primary-text"
                   aria-label={`${String(selectedValueCount)} selected`}
                 >
                   {String(selectedValueCount)}
@@ -443,7 +443,7 @@ function DataTableFilterEditor<FilterKey extends string>({
               {field.operator}
             </span>
           </p>
-          <span className="shrink-0 text-10 text-muted-foreground">
+          <span className="shrink-0 text-12 text-muted-foreground">
             {String(selectedCount)} selected
           </span>
         </div>
@@ -496,7 +496,7 @@ function DataTableFilterEditor<FilterKey extends string>({
                 ) : null}
               </span>
               <span>Select all</span>
-              <span className="ml-auto text-10 font-normal text-muted-foreground">
+              <span className="ml-auto text-12 font-normal text-muted-foreground">
                 {String(field.options.length)} values
               </span>
             </button>
@@ -615,7 +615,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
           {values.map((value) => (
             <span
               key={value}
-              className="flex max-w-full items-center gap-1 rounded-md border border-primary/40 bg-primary/10 py-1 pl-2 pr-1 text-11 text-foreground"
+              className="flex max-w-full items-center gap-1 rounded-md border border-primary/40 bg-primary/10 py-1 pl-2 pr-1 text-13 text-foreground"
             >
               <span className="text-muted-foreground">contains</span>
               <span className="min-w-0 break-all font-medium">{value}</span>
@@ -632,7 +632,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
             </span>
           ))}
           {full && (
-            <span className="self-center text-10 text-muted-foreground">
+            <span className="self-center text-12 text-muted-foreground">
               {String(MAX_CUSTOM_VALUES)} value limit reached
             </span>
           )}
@@ -697,7 +697,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
               {mode === "dates" ? "on any selected date" : "between"}
             </span>
           </p>
-          <span className="shrink-0 text-10 text-muted-foreground">
+          <span className="shrink-0 text-12 text-muted-foreground">
             {mode === "dates"
               ? `${String(selectedDates.length)} selected`
               : hasValue
@@ -751,7 +751,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
 
         {mode === "dates" ? (
           <div className="space-y-1.5">
-            <span className="text-11 font-medium text-muted-foreground">
+            <span className="text-13 font-medium text-muted-foreground">
               Dates
             </span>
             <DatePicker
@@ -772,7 +772,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                   <button
                     key={date}
                     type="button"
-                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-11 text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-13 text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     aria-label={`Remove selected date ${date}`}
                     onClick={() =>
                       onValuesChange([
@@ -794,7 +794,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <span className="text-11 font-medium text-muted-foreground">
+              <span className="text-13 font-medium text-muted-foreground">
                 From
               </span>
               <DatePicker
@@ -807,7 +807,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
               />
             </div>
             <div className="space-y-1.5">
-              <span className="text-11 font-medium text-muted-foreground">
+              <span className="text-13 font-medium text-muted-foreground">
                 To
               </span>
               <DatePicker
@@ -1030,7 +1030,7 @@ export function DataTableFilterChips<
               return (
                 <Fragment key={value.toLocaleLowerCase()}>
                   {valueIndex > 0 && (
-                    <span className="flex items-center border-l border-border/70 px-2 text-10 font-semibold text-muted-foreground">
+                    <span className="flex items-center border-l border-border/70 px-2 text-12 font-semibold text-muted-foreground">
                       OR
                     </span>
                   )}

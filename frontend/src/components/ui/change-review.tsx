@@ -22,8 +22,8 @@ function ReviewLine({ children, fullText }: { readonly children: ReactNode; read
     return () => observer.disconnect();
   }, [fullText, expanded]);
   return <div className="flex min-w-0 items-start gap-2">
-    <p ref={value} data-review-line="" title={fullText} className={`min-w-0 flex-1 text-11 font-normal ${expanded ? "break-words whitespace-pre-wrap" : "truncate"}`}>{children}</p>
-    {overflow && <button type="button" className="shrink-0 text-11 font-medium text-primary-text" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
+    <p ref={value} data-review-line="" title={fullText} className={`min-w-0 flex-1 text-13 font-normal ${expanded ? "break-words whitespace-pre-wrap" : "truncate"}`}>{children}</p>
+    {overflow && <button type="button" className="shrink-0 text-13 font-medium text-primary-text" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
   </div>;
 }
 function Change({ change }: { readonly change: FormChange }) {

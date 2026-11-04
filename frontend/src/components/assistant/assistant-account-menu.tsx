@@ -78,7 +78,7 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
           <Bell aria-hidden="true" />
           <span className="min-w-0 flex-1">
             Notification settings
-            <span aria-hidden="true" className="block text-10 text-text-tertiary">Studio</span>
+            <span aria-hidden="true" className="block text-12 text-text-tertiary">Studio</span>
           </span>
           <span className="sr-only"> (opens in Studio)</span>
         </Link>

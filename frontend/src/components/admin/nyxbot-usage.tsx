@@ -54,13 +54,13 @@ function Stat({
 }) {
   return (
     <Card className="min-w-0 px-4 py-4">
-      <p className="text-10 font-medium uppercase tracking-[1.5px] text-muted-foreground">
+      <p className="text-12 font-medium uppercase tracking-[1.5px] text-muted-foreground">
         {label}
       </p>
       <p className="mt-3 font-display text-28 font-medium leading-none tracking-tight tabular-nums">
         {value}
       </p>
-      <p className="mt-2 text-10 leading-relaxed text-muted-foreground">
+      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
         {detail}
       </p>
     </Card>
@@ -69,7 +69,7 @@ function Stat({
 
 function Legend({ feedback = false }: { feedback?: boolean }) {
   return (
-    <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 text-11 text-foreground">
+    <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1.5 text-13 text-foreground">
       <span className="flex items-center gap-1.5">
         <span
           className="size-1.5 rounded-full"
@@ -126,7 +126,7 @@ export function NyxbotUsage() {
         <h2 className="font-display text-15 font-semibold tracking-tight">
           NyxBot usage & feedback
         </h2>
-        <p className="mt-1 text-12 text-muted-foreground">
+        <p className="mt-1 text-14 text-muted-foreground">
           Understand how NyxBot and specialists are used, where work fails, and
           what users say.
         </p>
@@ -149,7 +149,7 @@ export function NyxbotUsage() {
             >
               Last 30 days
             </Button>
-            <label className="space-y-1 text-11 text-muted-foreground">
+            <label className="space-y-1 text-13 text-muted-foreground">
               From
               <Input
                 type="date"
@@ -159,7 +159,7 @@ export function NyxbotUsage() {
                 }
               />
             </label>
-            <label className="space-y-1 text-11 text-muted-foreground">
+            <label className="space-y-1 text-13 text-muted-foreground">
               To
               <Input
                 type="date"
@@ -169,23 +169,23 @@ export function NyxbotUsage() {
                 }
               />
             </label>
-            <span className="pb-2 text-11 text-text-tertiary">UTC</span>
+            <span className="pb-2 text-13 text-text-tertiary">UTC</span>
           </div>
         }
         aside={
-          <span className="text-10 text-muted-foreground">Daily · UTC</span>
+          <span className="text-12 text-muted-foreground">Daily · UTC</span>
         }
       />
       {!window ? (
         <p
           role="alert"
-          className="rounded-lg border border-destructive/30 p-3 text-12 text-destructive"
+          className="rounded-lg border border-destructive/30 p-3 text-14 text-destructive"
         >
           Choose a start and end date covering at most 31 days.
         </p>
       ) : (
         <>
-          <div className="flex items-center gap-3 text-12">
+          <div className="flex items-center gap-3 text-14">
             <label className="flex items-center gap-2">
               Weekly work threshold
               <ThresholdInput
@@ -217,7 +217,7 @@ export function NyxbotUsage() {
           )}
           <NyxbotModelUsage from={from} to={to} />
           <div
-            className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary"
+            className="flex flex-wrap items-center gap-2 text-13 text-text-tertiary"
             role="status"
           >
             <span
@@ -293,7 +293,7 @@ export function NyxbotUsage() {
               <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
                 Session activity
               </h3>
-              <p className="mb-4 mt-1 text-12 text-muted-foreground">
+              <p className="mb-4 mt-1 text-14 text-muted-foreground">
                 Daily conversations with user input and unique settled turns.
               </p>
               <div
@@ -304,7 +304,7 @@ export function NyxbotUsage() {
                   analytics.isPending ? (
                     <Skeleton className="h-full" />
                   ) : (
-                    <p className="pt-16 text-center text-12 text-muted-foreground">
+                    <p className="pt-16 text-center text-14 text-muted-foreground">
                       Activity is unavailable.
                     </p>
                   )
@@ -410,7 +410,7 @@ export function NyxbotUsage() {
               <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
                 Feedback over time
               </h3>
-              <p className="mb-4 mt-1 text-12 text-muted-foreground">
+              <p className="mb-4 mt-1 text-14 text-muted-foreground">
                 Helpful and not helpful votes, by submission day.
               </p>
               <div
@@ -421,7 +421,7 @@ export function NyxbotUsage() {
                   feedback.isPending ? (
                     <Skeleton className="h-full" />
                   ) : (
-                    <p className="pt-16 text-center text-12 text-muted-foreground">
+                    <p className="pt-16 text-center text-14 text-muted-foreground">
                       Feedback is unavailable.
                     </p>
                   )
@@ -509,12 +509,12 @@ export function NyxbotUsage() {
                   <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
                     Turn outcomes
                   </h3>
-                  <p className="mt-1 text-11 text-text-tertiary">
+                  <p className="mt-1 text-13 text-text-tertiary">
                     {number(totalTurns)} settled turns · stopped turns are
                     counted separately from failures.
                   </p>
                 </div>
-                <div className="text-12 text-muted-foreground">
+                <div className="text-14 text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {number(data.outcomes.with_tools)}
                   </span>{" "}
@@ -550,7 +550,7 @@ export function NyxbotUsage() {
                   />
                 </div>
               )}
-              <div className="mt-3 flex flex-wrap gap-5 text-12">
+              <div className="mt-3 flex flex-wrap gap-5 text-14">
                 <span>
                   Completed{" "}
                   <strong className="ml-1 text-success">
@@ -573,12 +573,12 @@ export function NyxbotUsage() {
             </Card>
           )}
           {(data || votes) && (
-            <details className="text-11 text-muted-foreground">
+            <details className="text-13 text-muted-foreground">
               <summary className="w-fit cursor-pointer">
                 View chart data
               </summary>
               <div className="mt-3 overflow-x-auto rounded-lg border border-border">
-                <table className="w-full text-left text-12">
+                <table className="w-full text-left text-14">
                   <caption className="sr-only">
                     Daily NyxBot activity and feedback in UTC
                   </caption>
@@ -625,7 +625,7 @@ export function NyxbotUsage() {
             key={`${from}:${to}`}
             range={feedbackParams}
           />
-          <p className="text-11 leading-relaxed text-text-tertiary">
+          <p className="text-13 leading-relaxed text-text-tertiary">
             Sessions are conversation threads with user input, including channel
             input. Turn outcomes include specialist and automated work; mirrored
             voice replies count once per turn. Feedback includes group replies.
@@ -640,7 +640,7 @@ export function NyxbotUsage() {
 
 function EmptyChart({ text }: { text: string }) {
   return (
-    <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border text-12 text-muted-foreground">
+    <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border text-14 text-muted-foreground">
       {text}
     </div>
   );

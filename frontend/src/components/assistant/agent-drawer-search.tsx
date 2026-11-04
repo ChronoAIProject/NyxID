@@ -302,7 +302,7 @@ export function AgentDrawerSearch({
                   closeSearch();
                 }
               }}
-              className="min-h-8 min-w-0 flex-1 border-0 bg-transparent py-1 text-12 font-normal shadow-none outline-none placeholder:text-text-tertiary [&::-webkit-search-cancel-button]:appearance-none"
+              className="min-h-8 min-w-0 flex-1 border-0 bg-transparent py-1 text-14 font-normal shadow-none outline-none placeholder:text-text-tertiary [&::-webkit-search-cancel-button]:appearance-none"
             />
             {query && <Button type="button" variant="ghost" size="icon" aria-label="Clear agent search" className="size-6" onClick={() => { setQuery(""); input.current?.focus(); }}><X aria-hidden className="size-3" /></Button>}
           </div>
@@ -325,7 +325,7 @@ export function AgentDrawerSearch({
           }}
         >
           {!matches.length ? (
-            <p className="px-4 py-6 text-12 text-text-tertiary">
+            <p className="px-4 py-6 text-14 text-text-tertiary">
               No results for “{query}”.
             </p>
           ) : (
@@ -356,7 +356,7 @@ export function AgentDrawerSearch({
                             <span className="block">
                               <Match text={entry.title} query={query} />
                             </span>
-                            <span className="block text-11 font-normal text-text-tertiary">
+                            <span className="block text-13 font-normal text-text-tertiary">
                               <Match
                                 text={
                                   entry.breadcrumb ??

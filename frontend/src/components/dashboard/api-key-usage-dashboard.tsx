@@ -84,7 +84,7 @@ export function ApiKeyUsageDashboard({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-13 font-semibold text-foreground">Agent Activity</h3>
+          <h3 className="text-15 font-semibold text-foreground">Agent Activity</h3>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 3 }, (_, index) => (
@@ -100,7 +100,7 @@ export function ApiKeyUsageDashboard({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-13 font-semibold text-foreground">Agent Activity</h3>
+          <h3 className="text-15 font-semibold text-foreground">Agent Activity</h3>
         </div>
         <ErrorBanner message="Failed to load agent activity." onRetry={refetch} />
       </div>
@@ -115,7 +115,7 @@ export function ApiKeyUsageDashboard({
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <Activity className="h-4 w-4 text-muted-foreground" />
-        <h3 className="text-13 font-semibold text-foreground">Agent Activity</h3>
+        <h3 className="text-15 font-semibold text-foreground">Agent Activity</h3>
       </div>
 
       {viewMode === "table" ? (
@@ -174,7 +174,7 @@ export function ApiKeyUsageDashboard({
               <Card className="h-full transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/30">
                 <CardContent className="space-y-3 p-4">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="truncate text-12 font-medium text-foreground">
+                    <p className="truncate text-14 font-medium text-foreground">
                       {usage.api_key_name}
                     </p>
                     <Badge variant={usage.platform ? "secondary" : "secondary"}>
@@ -186,12 +186,12 @@ export function ApiKeyUsageDashboard({
                     <span className="text-24 font-bold leading-none text-foreground">
                       {usage.request_count}
                     </span>
-                    <span className="text-11 text-muted-foreground">requests</span>
+                    <span className="text-13 text-muted-foreground">requests</span>
                   </div>
 
                   <MiniLineChart buckets={usage.daily_buckets} />
 
-                  <p className="text-11 text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Last used{" "}
                     {usage.last_used_at
                       ? formatRelativeTime(usage.last_used_at)

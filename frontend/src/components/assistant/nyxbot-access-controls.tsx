@@ -91,7 +91,7 @@ export function AccessModeSwitcher({
             });
         }}
       >
-        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-11">
+        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-13">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -103,7 +103,7 @@ export function AccessModeSwitcher({
         </SelectContent>
       </Select>
       {error ? (
-        <span role="alert" className="text-11 text-destructive">
+        <span role="alert" className="text-13 text-destructive">
           {error}
         </span>
       ) : null}
@@ -168,7 +168,7 @@ export function ModelSelect({
               ? modelDisplayName(row)
               : `${modelDisplayName(row)} (unavailable)`}
             {modelCannotViewImages(row) && (
-              <span className="ml-2 text-11 text-text-tertiary">
+              <span className="ml-2 text-13 text-text-tertiary">
                 Can’t view images
               </span>
             )}
@@ -196,7 +196,7 @@ export function ThreadModelSelect({
       <ModelSelect
         value={model}
         disabled={disabled || change.isPending}
-        className="h-7 w-auto gap-1 px-2 text-11"
+        className="h-7 w-auto gap-1 px-2 text-13"
         onChange={(next) => {
           if (next === model) return;
           setError(undefined);
@@ -206,7 +206,7 @@ export function ThreadModelSelect({
         }}
       />
       {error ? (
-        <span role="alert" className="text-11 text-destructive">
+        <span role="alert" className="text-13 text-destructive">
           {error}
         </span>
       ) : null}

@@ -45,11 +45,11 @@ export function MfaStepUpForm({
       aria-label="Verify this session"
     >
       <h2 className="text-15 font-semibold">Verify this session</h2>
-      <p className="mt-2 text-12 text-muted-foreground">{message}</p>
+      <p className="mt-2 text-14 unthemed:text-12 text-muted-foreground">{message}</p>
       <Form {...form}>
         <form className="mt-4 space-y-3" onSubmit={form.handleSubmit(submit)}>
           {form.formState.errors.root && (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 unthemed:text-12 text-destructive">
               {form.formState.errors.root.message}
             </p>
           )}

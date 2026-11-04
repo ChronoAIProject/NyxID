@@ -100,18 +100,18 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
             <CmaGlyph className="size-6" />
           </span>
           <h3 className="min-w-0 flex-1 text-sm font-semibold tracking-tight">Delegated to CMA</h3>
-          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-11 font-medium", tones[tone])}>
+          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-13 font-medium", tones[tone])}>
             <span aria-hidden className={cn("size-1.5 rounded-full bg-current", pending && tone === "active" && "motion-safe:animate-pulse")} />
             {label}
           </span>
         </div>
-        <p className="mt-3 text-11 text-zinc-400">ChronoAI Managed Agent</p>
-        <dl className="mt-1.5 space-y-1 break-all font-mono text-10 leading-relaxed text-zinc-400">
+        <p className="mt-3 text-13 text-zinc-400">ChronoAI Managed Agent</p>
+        <dl className="mt-1.5 space-y-1 break-all font-mono text-12 leading-relaxed text-zinc-400">
           {operation.agent_id && <div><dt className="inline text-zinc-500">Agent </dt><dd className="inline select-all">{operation.agent_id}</dd></div>}
           {operation.operation_id && operation.operation_id !== operation.agent_id && <div><dt className="inline text-zinc-500">Operation </dt><dd className="inline select-all">{operation.operation_id}</dd></div>}
           {operation.idempotency_key && <div><dt className="inline text-zinc-500">Idempotency-Key </dt><dd className="inline select-all">{operation.idempotency_key}</dd></div>}
         </dl>
-        <ol aria-label="CMA progress" className="mt-4 flex flex-wrap items-center gap-2 text-10">
+        <ol aria-label="CMA progress" className="mt-4 flex flex-wrap items-center gap-2 text-12">
           {stages.map((stage, index) => <li key={stage.label} className="flex items-center gap-2">
             {index > 0 && <span aria-hidden className="text-zinc-600">→</span>}
             <span className={cn("inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5", stage.done ? "border-white/10 bg-white/[0.06] text-zinc-200" : "border-white/5 text-zinc-500")}>
@@ -120,16 +120,16 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
             </span>
           </li>)}
         </ol>
-        {operation.phase && phases[operation.phase] && pending && <p className="mt-3 flex items-center gap-1.5 text-11 text-zinc-400"><Workflow aria-hidden className="size-3" />{phases[operation.phase]}</p>}
-        {tone === "warning" && !pending && <p className="mt-3 flex items-start gap-1.5 text-11 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
-        {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-11 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
-        {operation.state === "cancelled" && <p className="mt-3 text-11 text-zinc-400">Tracking ended. CMA may still be running.</p>}
+        {operation.phase && phases[operation.phase] && pending && <p className="mt-3 flex items-center gap-1.5 text-13 text-zinc-400"><Workflow aria-hidden className="size-3" />{phases[operation.phase]}</p>}
+        {tone === "warning" && !pending && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
+        {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-13 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
+        {operation.state === "cancelled" && <p className="mt-3 text-13 text-zinc-400">Tracking ended. CMA may still be running.</p>}
         {cmaUrl && <Button asChild variant="primary" className="mt-4 w-full">
           <a href={cmaUrl} target="_blank" rel="noopener noreferrer">
             View in CMA <ExternalLink aria-hidden className="size-3" />
           </a>
         </Button>}
-        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.08] pt-3 text-10 text-zinc-400">
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.08] pt-3 text-12 text-zinc-400">
           <span className="inline-flex min-w-0 flex-1 items-center gap-2">
             <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-violet-400/15 text-violet-300"><Radio aria-hidden className="size-3" /></span>
             <span className="break-words"><span className="font-medium text-zinc-200">{operation.monitor_name}</span> · {pending ? "Tracking progress" : "Status recorded"}</span>

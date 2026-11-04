@@ -118,7 +118,7 @@ export function McpConnectionInfo() {
           <p className="text-xs font-medium text-muted-foreground">
             Cursor Configuration
           </p>
-          <Badge variant="secondary" className="text-10">
+          <Badge variant="secondary" className="text-12">
             .cursor/mcp.json
           </Badge>
         </div>
@@ -135,7 +135,7 @@ export function McpConnectionInfo() {
           <p className="text-xs font-medium text-muted-foreground">
             Claude Code Configuration
           </p>
-          <Badge variant="secondary" className="text-10">
+          <Badge variant="secondary" className="text-12">
             .claude/settings.json
           </Badge>
         </div>
@@ -152,7 +152,7 @@ export function McpConnectionInfo() {
           <p className="text-xs font-medium text-muted-foreground">
             Codex Configuration
           </p>
-          <Badge variant="secondary" className="text-10">
+          <Badge variant="secondary" className="text-12">
             ~/.codex/config.toml
           </Badge>
         </div>

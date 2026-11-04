@@ -47,13 +47,13 @@ export function TokenUsageValue({
       </TooltipTrigger>
       <TooltipContent
         collisionPadding={12}
-        className="w-80 max-w-[calc(100vw-1.5rem)] space-y-3 border border-border bg-card p-3 text-12 text-foreground"
+        className="w-80 max-w-[calc(100vw-1.5rem)] space-y-3 border border-border bg-card p-3 text-14 text-foreground"
       >
         <div>
           <p className="font-medium">
             {totalSelected ? "Total tokens" : "Selected token counts"}
           </p>
-          <p className="mt-1 font-mono text-11 tabular-nums">
+          <p className="mt-1 font-mono text-13 tabular-nums">
             {parts.map((metric) => number(usage[metric])).join(" + ")} ={" "}
             {number(value)}
           </p>
@@ -86,13 +86,13 @@ export function TokenUsageValue({
                 </dl>
               </>
             )}
-            <p className="text-11 leading-relaxed text-muted-foreground">
+            <p className="text-13 leading-relaxed text-muted-foreground">
               Image and voice tokens are included in the total when reported.
               {details.length === 0 &&
                 " No separate image or voice breakdown was recorded for this selection."}
             </p>
             {(usage.cached_tokens > 0 || usage.cache_creation_tokens > 0) && (
-              <p className="text-11 leading-relaxed text-muted-foreground">
+              <p className="text-13 leading-relaxed text-muted-foreground">
                 Cache read {number(usage.cached_tokens)} · cache write{" "}
                 {number(usage.cache_creation_tokens)}. These can overlap input
                 counts and are not added to the total.
@@ -101,7 +101,7 @@ export function TokenUsageValue({
           </div>
         )}
         {!totalSelected && selected.length > 1 && (
-          <p className="text-11 leading-relaxed text-muted-foreground">
+          <p className="text-13 leading-relaxed text-muted-foreground">
             Selected counts are added together. Cache counts can overlap input;
             use Total tokens for the input + output total.
           </p>

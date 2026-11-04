@@ -8,12 +8,12 @@ import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 
 const SIZES = {
-  xs: "h-4 w-4 text-9 tracking-[-0.04em]",
-  sm: "h-5 w-5 text-9",
-  md: "h-6 w-6 text-9",
-  lg: "h-8 w-8 text-11",
+  xs: "h-4 w-4 text-12 tracking-[-0.04em]",
+  sm: "h-5 w-5 text-12",
+  md: "h-6 w-6 text-12",
+  lg: "h-8 w-8 text-13",
   /** Spans a two-line thread header (28px name line + 16px handle line). */
-  xl: "h-11 w-11 text-13",
+  xl: "h-11 w-11 text-15",
 } as const;
 
 /**

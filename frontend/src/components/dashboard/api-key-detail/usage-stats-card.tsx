@@ -158,25 +158,25 @@ export function UsageStatsCard({
           <>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Requests
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.request_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Successes
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.success_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Errors
                 </p>
                 <p className="mt-1 text-lg font-semibold">{data.error_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Error Rate
                 </p>
                 <p className="mt-1 text-lg font-semibold">

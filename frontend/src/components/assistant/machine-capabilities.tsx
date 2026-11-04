@@ -127,7 +127,7 @@ function MachineCapabilityPage(
     <>
       <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
         <span className="block">{machine.name}</span>
-        <span className="block text-11 font-normal text-text-tertiary">
+        <span className="block text-13 font-normal text-text-tertiary">
           {needsSelection
             ? "Needs owner selection"
             : machine.mode === "separated"
@@ -381,7 +381,7 @@ export function MachineCapabilityForm({
               <label>
                 <span className="min-w-0 flex-1">
                   {labels[key]}
-                  <span className="block text-11 font-normal text-text-tertiary">
+                  <span className="block text-13 font-normal text-text-tertiary">
                     {descriptions[key]}{!machine.ceiling[key] ? " · Off on node" : ""}
                   </span>
                 </span>

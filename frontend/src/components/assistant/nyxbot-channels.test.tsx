@@ -53,7 +53,7 @@ it.each([
   mount(status, reason);
   const line = screen.getByText(new RegExp(title));
   expect(line).toHaveTextContent(reason);
-  expect(line).toHaveClass("text-11", "text-destructive");
+  expect(line).toHaveClass("text-13", "text-destructive");
 });
 
 it.each([undefined, "ok"])("keeps legacy and healthy status %s quiet", (status) => {

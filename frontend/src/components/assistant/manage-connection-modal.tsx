@@ -153,7 +153,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
     <div>
       <GroupedList title="Replace credential">
         <GroupedRow>
-          <label className="w-full text-11 font-normal text-text-tertiary">
+          <label className="w-full text-13 font-normal text-text-tertiary">
             New credential
             <GroupedInput
               type="password"
@@ -292,7 +292,7 @@ function ConnectionPanel({
   if (error || !key) {
     return (
       <div className="flex h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Couldn't load this connection.
         </p>
         <Button
@@ -371,7 +371,7 @@ function ConnectionPanel({
           {key.proxy_url ? (
             <DetailRow label="Proxy URL">
               <span className="inline-flex max-w-full items-start gap-2">
-                <span className="min-w-0 break-all text-right text-11">
+                <span className="min-w-0 break-all text-right text-13">
                   {key.proxy_url}
                 </span>
                 <button
@@ -506,7 +506,7 @@ export function ManageConnectionModal({
       <DialogContent className="bg-background md:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-12 font-semibold text-muted-foreground">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-14 font-semibold text-muted-foreground">
               {iconSlug || iconUrl ? (
                 <ServiceIcon slug={iconSlug} iconUrl={iconUrl} size="md" />
               ) : (
@@ -515,7 +515,7 @@ export function ManageConnectionModal({
             </span>
             <span className="min-w-0 truncate">{serviceName}</span>
             {multiple && (
-              <span className="text-11 font-normal text-text-tertiary">
+              <span className="text-13 font-normal text-text-tertiary">
                 {keyIds.length} connections
               </span>
             )}

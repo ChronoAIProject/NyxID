@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 
 /* ── NyxID Badge Variants ── */
 const badgeVariants = cva(
-  "inline-flex items-center rounded-md border px-2 py-0.5 text-10 font-medium transition-colors duration-200 focus:outline-none",
+  "inline-flex items-center rounded-md border px-2 py-0.5 text-12 unthemed:text-10 font-medium transition-colors duration-200 focus:outline-none",
   {
     variants: {
       // Dark (base, unprefixed) is the primary surface and stays as the tuned tint.

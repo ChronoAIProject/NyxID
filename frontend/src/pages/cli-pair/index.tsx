@@ -678,7 +678,7 @@ function EnterCodeForm({
 
   return (
     <form className="flex flex-col gap-4" onSubmit={(e) => void submit(e)}>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {prefilled
           ? "We've filled in the code from the URL. Confirm to continue."
           : "Enter the pairing code shown in your terminal. The CLI running on your remote box is waiting for you to complete the wizard here."}
@@ -701,7 +701,7 @@ function EnterCodeForm({
         />
       </div>
       {error ? (
-        <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+        <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
           {error}
         </p>
       ) : null}
@@ -920,7 +920,7 @@ function ResumedCreateWarningPanel({
       <div className="flex flex-col gap-2 sm:flex-row">
         <a
           href={manageHref}
-          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-12 font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-14 font-medium text-primary-foreground hover:bg-primary/90"
         >
           Open {manageLabel}
         </a>
@@ -1047,7 +1047,7 @@ function NotifyingCliPanel({
       </WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
             Couldn't notify CLI: {completeError}. The server-side
             action succeeded; retry to receive the secret, or run
             the CLI command again for a fresh pairing.
@@ -1055,7 +1055,7 @@ function NotifyingCliPanel({
           <button
             type="button"
             onClick={onRetry}
-            className="rounded-lg border bg-primary px-4 py-2 text-12 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            className="rounded-lg border bg-primary px-4 py-2 text-14 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
           >
             Retry
           </button>
@@ -1245,7 +1245,7 @@ function AiKeyAckPanel({
       </WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
             Couldn't notify CLI: {completeError}
           </p>
           <Button variant="primary" onClick={onRetry}>Retry</Button>
@@ -1285,7 +1285,7 @@ function ResumedRotationChoicePanel({
         need to know what happened there so we don't tell the CLI
         something false:
       </WizardHeading>
-      <ul className="ml-4 list-disc text-12 text-muted-foreground">
+      <ul className="ml-4 list-disc text-14 text-muted-foreground">
         <li>
           If the other tab <strong>showed you a new secret you
           saved</strong> (the rotation succeeded), click "Notify
@@ -1342,7 +1342,7 @@ function ResendingAckPanel({
       </WizardHeading>
       {completeError ? (
         <>
-          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+          <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
             Couldn't notify CLI: {completeError}
           </p>
           <Button variant="primary" onClick={onRetry}>Retry</Button>

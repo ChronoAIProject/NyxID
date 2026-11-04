@@ -450,7 +450,7 @@ function PaidStartContent({
               ) : null}
               {error ? <ErrorBanner message={error} /> : null}
               {conflict ? (
-                <p role="alert" className="text-12 text-muted-foreground">
+                <p role="alert" className="text-14 text-muted-foreground">
                   The server rejected this request. Resolve the reported condition,
                   review current Machine details and a fresh quote; continuing
                   requires new acceptance. Adding funds does not start this request.

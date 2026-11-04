@@ -217,7 +217,7 @@ export function CommandPalette({
             className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
             autoFocus
           />
-          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 text-12 font-medium text-text-tertiary">
+          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 text-14 font-medium text-text-tertiary">
             esc
           </kbd>
         </div>
@@ -246,7 +246,7 @@ export function CommandPalette({
                 />
                 <span className="flex-1">{item.label}</span>
                 {item.group === "action" && (
-                  <span className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                  <span className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
                 )}
               </button>
             ))}

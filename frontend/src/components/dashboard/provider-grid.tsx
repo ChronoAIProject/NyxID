@@ -229,7 +229,7 @@ export function ProviderGrid() {
           />
         </div>
       </div>
-      <p className="mt-1 text-11 text-muted-foreground">
+      <p className="mt-1 text-13 text-muted-foreground">
         Select an org to review and disconnect provider tokens owned by that
         org.
       </p>
@@ -243,7 +243,7 @@ export function ProviderGrid() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">
+            <p className="text-14 font-medium text-muted-foreground">
               No Provider Tokens
             </p>
             <p className="text-xs text-muted-foreground">

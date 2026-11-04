@@ -172,7 +172,7 @@ function ReadOnlyNote({ agent }: { readonly agent: AssistantAgent }) {
       <section
         role="note"
         aria-label="Agent destroyed"
-        className="space-y-1 px-4 py-2 text-11 text-text-tertiary"
+        className="space-y-1 px-4 py-2 text-13 text-text-tertiary"
       >
         <p className="font-medium text-foreground">
           {agentTitle(agent)} was destroyed
@@ -197,7 +197,7 @@ function ReadOnlyNote({ agent }: { readonly agent: AssistantAgent }) {
       <section
         role="note"
         aria-label="Read-only"
-        className="space-y-1 px-4 py-2 text-11 text-text-tertiary"
+        className="space-y-1 px-4 py-2 text-13 text-text-tertiary"
       >
         <p className="font-medium text-foreground">Read-only.</p>
         <p>
@@ -298,7 +298,7 @@ function AgentDetailsSheetContent({
               {agent ? <>
                 <span className="agent-header-avatar flex size-8 shrink-0 items-center justify-center"><AgentAvatar agent={agent} size="lg" /></span>
                 <p title={agentTitle(agent)} className={`agent-header-name min-w-0 truncate text-15 font-semibold ${searchOpen ? "max-w-[30%] shrink" : "flex-1"}`}>{agentTitle(agent)}</p>
-              </> : <span className="min-w-0 flex-1 text-13 font-semibold">Agent details</span>}
+              </> : <span className="min-w-0 flex-1 text-15 font-semibold">Agent details</span>}
               <div ref={setSearchHost} className={searchOpen ? "min-w-0 flex-1" : "shrink-0"} />
               <SheetClose asChild>
                 <button type="button" aria-label="Close agent details" data-icon-button="" className="agent-header-icon"><X aria-hidden className="size-4" /></button>
@@ -306,7 +306,7 @@ function AgentDetailsSheetContent({
             </div>
             <div className={`agent-header-subtitle pl-10 pt-1 ${compact ? "pointer-events-none absolute left-4 right-4 top-11" : ""}`} aria-hidden={compact || undefined}>
               {agent ? <>
-                <SheetDescription className="text-11 text-text-tertiary">
+                <SheetDescription className="text-13 text-text-tertiary">
                   {[agentHandle(agent), agent.kind === "nyxbot" ? "Personal agent" : "Specialist", AGENT_STATUS_LABEL[agent.status], `${agent.memory_count} ${agent.memory_count === 1 ? "memory" : "memories"}`].filter(Boolean).join(" · ")}
                   {agent.kind === "specialist" ? <span className="block">Created by {agent.created_by === "nyxbot" ? "NyxBot" : "you"}</span> : null}
                 </SheetDescription>
@@ -321,7 +321,7 @@ function AgentDetailsSheetContent({
               <section
                 role="note"
                 aria-label="No access"
-                className="space-y-1 text-12 text-muted-foreground"
+                className="space-y-1 text-14 text-muted-foreground"
               >
                 <p className="font-medium text-foreground">
                   You cannot view this agent.
@@ -457,7 +457,7 @@ function AgentDetailsContent({
       <CompactChrome className="px-4">
         <SegmentedControlList aria-label="Agent details sections" className="gap-0.5 p-0.5">
           {tabs.map(([value, label]) => (
-            <SegmentedControlTrigger key={value} value={value} className="min-h-6 px-1.5 py-1 text-12 [[data-compact=true]_&]:py-0.5">
+            <SegmentedControlTrigger key={value} value={value} className="min-h-6 px-1.5 py-1 text-14 [[data-compact=true]_&]:py-0.5">
               {label}
             </SegmentedControlTrigger>
           ))}
@@ -723,7 +723,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                           }
                         />
                       </FormControl>
-                      <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
+                      <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
                           The @handle used in groups and by NyxBot.
                         </FormDescription>
                       <GroupedFooter>
@@ -750,7 +750,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
                         Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}.
                         Leave empty to use it.
                       </FormDescription>
@@ -776,7 +776,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         disabled={readOnly}
                         onChange={field.onChange}
                       />
-                      <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
+                      <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
                           Used by this agent's new threads. Each thread can
                           switch from its composer.
                         </FormDescription>
@@ -797,7 +797,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                   className="!flex-row !flex-wrap !items-center !gap-3"
                 >
                   <FormItem>
-                    <FormLabel className="mr-auto text-12 font-medium text-foreground">
+                    <FormLabel className="mr-auto text-14 font-medium text-foreground">
                       Access mode
                     </FormLabel>
                     <Select
@@ -830,7 +830,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         ))}
                       </SelectContent>
                     </Select>
-                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
                         {
                           ACCESS_MODE_DESCRIPTION[
                             effectiveAccessMode(workspaceMode, field.value)
@@ -851,7 +851,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 <GroupedRow search={{ id: "profile-channel_checking_notice", title: "Channel progress reply", breadcrumb: "Overview › Profile", keywords: field.value ? "On" : "Off" }} asChild className="grouped-field">
                   <FormItem>
                     <div className="flex items-center justify-between gap-3">
-                      <FormLabel className="text-12 font-medium text-foreground">
+                      <FormLabel className="text-14 font-medium text-foreground">
                         Channel progress reply
                       </FormLabel>
                       <FormControl>
@@ -862,7 +862,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         />
                       </FormControl>
                     </div>
-                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
                         After five seconds, send “Got it, let me check and get
                         back to you.” if an external check is needed. Attached
                         skill reads and tool discovery do not trigger it. The
@@ -915,7 +915,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
                         Personality and tone only; it never changes what the
                         agent may do.
                       </FormDescription>
@@ -1101,7 +1101,7 @@ function GrantsForm({
                   >
                     <GroupedRow search={{ id: "account-read", title: "Read my account", breadcrumb: "Access › Account", keywords: field.value ? "On" : "Off" }}>
                       <div className="mr-auto">
-                        <FormLabel className="text-12 font-medium text-foreground">
+                        <FormLabel className="text-14 font-medium text-foreground">
                           Read my account
                         </FormLabel>
                       </div>
@@ -1182,7 +1182,7 @@ function GuestAccessList({
             <GroupedRow key={slug} role="listitem" search={{ id: `guest-${slug}`, title: slug, breadcrumb: "Access › Guest access", keywords: GUEST_ACCESS_LABEL[value[slug] ?? "use"] }}>
               <label
                 htmlFor={id}
-                className="min-w-0 flex-1 break-words text-12 font-medium text-foreground"
+                className="min-w-0 flex-1 break-words text-14 font-medium text-foreground"
               >
                 {slug}
               </label>
@@ -1293,7 +1293,7 @@ function MemoryList({
             <GroupedRow search={{ id: "memory-note", title: editing ? "Edit note" : "Add a note", breadcrumb: "Memory", keywords: memoryForm.watch("text") }} className="grouped-field">
               <label
                 htmlFor="shared-memory-note"
-                className="text-12 font-medium"
+                className="text-14 font-medium"
               >
                 {editing
                   ? "Edit shared note"
@@ -1355,10 +1355,10 @@ function MemoryList({
             {memory.map((note) => (
               <GroupedRow search={{ id: `memory-${note.id}`, title: note.text, breadcrumb: "Memory" }} key={note.id} role="listitem" className="items-start">
                 <div className="min-w-0 flex-1 space-y-0.5">
-                  <p className="whitespace-pre-wrap break-words text-12 text-foreground">
+                  <p className="whitespace-pre-wrap break-words text-14 text-foreground">
                     {note.text}
                   </p>
-                  <p className="font-mono text-11 font-normal text-text-tertiary">
+                  <p className="font-mono text-13 font-normal text-text-tertiary">
                     {formatDateTime(note.updated_at)}
                   </p>
                 </div>
@@ -1481,7 +1481,7 @@ function Lifecycle({
             </DialogDescription>
           </DialogHeader>
           {error ? (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {error}
             </p>
           ) : null}

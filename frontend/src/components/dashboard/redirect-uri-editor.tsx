@@ -98,7 +98,7 @@ export function RedirectUriEditor({
                 handleAdd();
               }
             }}
-            className="h-8 text-12"
+            className="h-8 text-14"
           />
           {validationError && (
             <p className="text-xs text-destructive">{validationError}</p>

@@ -513,7 +513,7 @@ export function TriggersPage() {
         description="Relay verified inbound events to agents, webhooks, or notifications."
         actions={
           <>
-            <Link to="/assistant/automations" className="text-12 text-primary-text underline">
+            <Link to="/assistant/automations" className="text-14 text-primary-text underline">
               Automations
             </Link>
             <AddCtaButton
@@ -559,7 +559,7 @@ export function TriggersPage() {
                     <BellRing className="h-4 w-4 text-muted-foreground" />
                   </div>
                   <div className="min-w-0 space-y-2">
-                    <p className="truncate text-13 font-semibold">
+                    <p className="truncate text-15 font-semibold">
                       {trigger.label}
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -574,7 +574,7 @@ export function TriggersPage() {
                         {deliveryLabel(trigger)}
                       </Badge>
                     </div>
-                    <p className="text-11 text-text-tertiary">
+                    <p className="text-13 text-text-tertiary">
                       Created {formatDateTime(trigger.created_at)}
                     </p>
                   </div>
@@ -610,7 +610,7 @@ export function TriggersPage() {
                         {titleCase(trigger.status)}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-mono text-11 text-text-tertiary">
+                    <TableCell className="font-mono text-13 text-text-tertiary">
                       {formatDateTime(trigger.created_at)}
                     </TableCell>
                     <TableCell className="text-right">

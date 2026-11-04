@@ -161,7 +161,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-12 font-medium text-foreground">
+              <span className="block text-14 font-medium text-foreground">
                 Inherit from role default
               </span>
               <span className="block text-xs text-muted-foreground">
@@ -182,7 +182,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-12 font-medium text-foreground">
+              <span className="block text-14 font-medium text-foreground">
                 Customize for this member
               </span>
               <span className="block text-xs text-muted-foreground">
@@ -210,7 +210,7 @@ function MemberScopeForm({
             <div className="space-y-1">
               <Label
                 htmlFor="member-scope-allow-all"
-                className="cursor-pointer text-12 font-medium"
+                className="cursor-pointer text-14 font-medium"
               >
                 Allow all org services
               </Label>
@@ -261,7 +261,7 @@ function MemberScopeForm({
                         htmlFor={id}
                         className="flex-1 cursor-pointer space-y-0.5"
                       >
-                        <span className="block text-12 font-medium text-foreground">
+                        <span className="block text-14 font-medium text-foreground">
                           {service.label}
                         </span>
                         <span className="block text-xs text-muted-foreground">
@@ -274,7 +274,7 @@ function MemberScopeForm({
               </div>
             )}
             {orgServices.length > 0 && (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Selecting nothing revokes proxy access to every org service.
               </p>
             )}

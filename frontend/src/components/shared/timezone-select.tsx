@@ -79,7 +79,7 @@ export function TimezoneSelect({
                 type="button"
                 role="option"
                 aria-selected={zone === value}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-12 hover:bg-accent focus-visible:bg-accent"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-14 hover:bg-accent focus-visible:bg-accent"
                 onClick={() => {
                   onChange(zone);
                   setOpen(false);
@@ -102,7 +102,7 @@ export function TimezoneSelect({
   return grouped ? (
     <GroupedRow title={label} accessory={picker} />
   ) : (
-    <div className="space-y-1 text-12">
+    <div className="space-y-1 text-14">
       <span>{label}</span>
       {picker}
     </div>

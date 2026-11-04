@@ -61,7 +61,7 @@ function SurfaceSwitcher({
             to="/docs/$"
             params={{ _splat: firstSlug(tab.id) }}
             onClick={onNavigate}
-            className={`flex items-center gap-3 rounded-md px-3 py-2 text-13 transition-colors ${
+            className={`flex items-center gap-3 rounded-md px-3 py-2 text-15 transition-colors ${
               active
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -92,7 +92,7 @@ function SidebarGroups({
     <>
       {groups.map((group) => (
         <div key={group.group} className="mb-6">
-          <p className="mb-2 font-mono text-11 tracking-widest text-text-tertiary uppercase">
+          <p className="mb-2 font-mono text-13 tracking-widest text-text-tertiary uppercase">
             {group.group}
           </p>
           <ul className="space-y-0.5">
@@ -215,7 +215,7 @@ export function DocsLayout({
             >
               <Search className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Search</span>
-              <kbd className="hidden rounded border border-border px-1 font-mono text-10 text-text-tertiary sm:inline">
+              <kbd className="hidden rounded border border-border px-1 font-mono text-12 text-text-tertiary sm:inline">
                 /
               </kbd>
             </button>
@@ -256,7 +256,7 @@ export function DocsLayout({
           {toc && toc.length > 0 && (
             <aside className="hidden w-52 shrink-0 xl:block">
               <div className="sticky top-14 max-h-[calc(100dvh-3.5rem)] overflow-y-auto py-10">
-                <p className="mb-3 font-mono text-11 tracking-widest text-text-tertiary uppercase">
+                <p className="mb-3 font-mono text-13 tracking-widest text-text-tertiary uppercase">
                   On this page
                 </p>
                 <ul className="space-y-2 border-l border-border">

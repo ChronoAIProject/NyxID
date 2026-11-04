@@ -67,9 +67,9 @@ export function BillingLaneFields({
   };
   return (
     <section className="space-y-3">
-      <h3 className="text-13 font-semibold">Billing lanes</h3>
+      <h3 className="text-15 font-semibold">Billing lanes</h3>
       {service?.x_channel_billing && (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           X channels bill through the {service.x_channel_billing.lane} lane.
           Configure a synced Requests price on that lane to enable paid X
           channels.
@@ -304,7 +304,7 @@ export function BillingLaneFields({
                   >
                     Add component
                   </Button>
-                  <p className="text-11 text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Prices support up to 12 decimal places. Each unit is charged
                     separately.
                   </p>
@@ -350,8 +350,8 @@ function OperationPrices({
   if (!operations.length) return null;
   return (
     <div className="space-y-2 border-t border-border/50 pt-3">
-      <div className="text-12 font-medium">Operation prices</div>
-      <p className="text-11 text-muted-foreground">
+      <div className="text-14 font-medium">Operation prices</div>
+      <p className="text-13 text-muted-foreground">
         A synced operation price replaces the base Requests price. Leave an
         operation empty to use the base price.
       </p>
@@ -369,7 +369,7 @@ function OperationPrices({
             key={operation}
             className="grid grid-cols-[1fr_8rem_4.5rem] items-center gap-2"
           >
-            <span className="truncate text-12" title={operation}>
+            <span className="truncate text-14" title={operation}>
               {label}
             </span>
             <Input
@@ -402,7 +402,7 @@ function OperationPrices({
               <span />
             )}
             {error && (
-              <p className="col-span-3 text-11 font-medium text-destructive">
+              <p className="col-span-3 text-13 font-medium text-destructive">
                 {error}
               </p>
             )}

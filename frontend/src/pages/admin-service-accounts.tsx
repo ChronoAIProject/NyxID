@@ -193,7 +193,7 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">Failed to load service accounts</p>
+            <p className="text-14 font-medium text-muted-foreground">Failed to load service accounts</p>
             <p className="text-xs text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -201,7 +201,7 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No service accounts found</p>
+            <p className="text-14 font-medium text-muted-foreground">No service accounts found</p>
             <p className="text-xs text-muted-foreground">
               {search
                 ? "No service accounts match your search."
@@ -317,7 +317,7 @@ export function AdminServiceAccountsPage() {
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-11 text-text-tertiary">
+            <p className="text-13 text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -332,7 +332,7 @@ export function AdminServiceAccountsPage() {
               >
                 <ChevronLeft className="h-3 w-3" />
               </Button>
-              <span className="text-11 text-text-tertiary">
+              <span className="text-13 text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button

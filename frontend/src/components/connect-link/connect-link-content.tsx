@@ -498,7 +498,7 @@ export function ConnectLinkContent({
             ) : (
               <>
                 {preview.data.assistant_intent_locked ? (
-                  <p className="text-12 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
+                  <p className="text-14 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
                 ) : null}
                 <ConnectionIdentityHeading
                   className="connection-card-heading"
@@ -785,7 +785,7 @@ export function ConnectLinkReturnPage() {
     <ConnectShell>
       {recoveryError ? <ErrorBanner message={recoveryError} /> : null}
       <Card className="border-border/50">
-        <CardContent className="p-5 text-center text-12 text-muted-foreground">
+        <CardContent className="p-5 text-center text-14 text-muted-foreground">
           Finishing the connection...
         </CardContent>
       </Card>
@@ -1099,14 +1099,14 @@ function DeviceCodePanel({
 }) {
   return (
     <div className="space-y-3 rounded-lg border border-border/50 p-4">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Enter this code at the provider. NyxID will finish the connection after
         authorization.
       </p>
       <p className="font-mono text-15 font-semibold text-foreground">
         {code}
       </p>
-      <p className="text-11 text-muted-foreground" role="status">
+      <p className="text-13 text-muted-foreground" role="status">
         {status === "slow_down"
           ? `Provider requested a slower check. Checking again in ${interval} seconds.`
           : `Checking automatically every ${interval} seconds.`}

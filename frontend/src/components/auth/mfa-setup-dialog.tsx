@@ -141,7 +141,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
 
         {step === "setup" && (
           <div className="space-y-4">
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               You will need an authenticator app like Google Authenticator,
               Authy, or 1Password to complete setup.
             </p>
@@ -175,7 +175,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                 <p className="text-xs text-muted-foreground">
                   Or enter this code manually:
                 </p>
-                <code className="block rounded-lg bg-muted p-2 text-center font-mono text-12 select-all">
+                <code className="block rounded-lg bg-muted p-2 text-center font-mono text-14 select-all">
                   {setupData.secret}
                 </code>
               </div>
@@ -189,7 +189,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                 {form.formState.errors.root && (
                   <div
                     role="alert"
-                    className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+                    className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
                   >
                     {form.formState.errors.root.message}
                   </div>
@@ -237,7 +237,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   key={code}
                   type="button"
                   onClick={() => void handleCopyCode(code, index)}
-                  className="flex min-w-0 items-center justify-between gap-3 rounded-lg bg-muted px-3 py-2 text-left font-mono text-12 transition-colors duration-300 hover:bg-muted/80"
+                  className="flex min-w-0 items-center justify-between gap-3 rounded-lg bg-muted px-3 py-2 text-left font-mono text-14 transition-colors duration-300 hover:bg-muted/80"
                   aria-label={`Copy recovery code ${String(index + 1)}`}
                 >
                   <span className="min-w-0 break-all">{code}</span>

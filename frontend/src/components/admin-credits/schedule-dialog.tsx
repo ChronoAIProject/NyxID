@@ -160,7 +160,7 @@ export function ScheduleDialog({
                                 }
                               />
                             </FormControl>
-                            <FormDescription className="text-11">
+                            <FormDescription className="text-13">
                               Issued as a separate credit allocation each
                               period.
                             </FormDescription>
@@ -193,7 +193,7 @@ export function ScheduleDialog({
                           </SelectContent>
                         </Select>
                         {editingSchedule ? (
-                          <FormDescription className="text-11">
+                          <FormDescription className="text-13">
                             Pause this schedule and create another to change its
                             recurrence.
                           </FormDescription>
@@ -282,7 +282,7 @@ export function ScheduleDialog({
                     <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                       <div>
                         <FormLabel>All services</FormLabel>
-                        <p className="text-11 text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Allow each period&apos;s credits to fund any service.
                         </p>
                       </div>
@@ -323,7 +323,7 @@ export function ScheduleDialog({
                             multiple
                           />
                         </FormControl>
-                        <FormDescription className="text-11">
+                        <FormDescription className="text-13">
                           Service metrics do not change the scheduled credit
                           amount.
                         </FormDescription>
@@ -360,7 +360,7 @@ export function ScheduleDialog({
                       <FormControl>
                         <textarea
                           rows={3}
-                          className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-12 outline-none focus:border-input-focus"
+                          className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-14 outline-none focus:border-input-focus"
                           placeholder="Why these recurring credits are issued"
                           {...field}
                         />
@@ -421,8 +421,8 @@ function ExpiryOption({
         onChange={onChange}
       />
       <span>
-        <span className="block text-12 font-medium">{label}</span>
-        <span className="block text-11 text-muted-foreground">
+        <span className="block text-14 font-medium">{label}</span>
+        <span className="block text-13 text-muted-foreground">
           {description}
         </span>
       </span>

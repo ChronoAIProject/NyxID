@@ -111,10 +111,10 @@ export function UserPicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium">
+                <span className="block truncate text-14 font-medium">
                   {user.display_name || user.slug || user.email}
                 </span>
-                <span className="block truncate text-11 text-muted-foreground">
+                <span className="block truncate text-13 text-muted-foreground">
                   {user.slug ? `Organization / ${user.slug}` : user.email}
                 </span>
               </span>
@@ -122,7 +122,7 @@ export function UserPicker({
           );
         })}
         {failed ? (
-          <p role="alert" className="p-3 text-12 text-destructive">
+          <p role="alert" className="p-3 text-14 text-destructive">
             Owners could not be loaded.{" "}
             <Button
               type="button"
@@ -138,17 +138,17 @@ export function UserPicker({
           </p>
         ) : null}
         {filtered.length === 0 && !loading && !failed ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">
             No owners found.
           </p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
+          <p className="px-3 py-3 text-center text-13 text-muted-foreground">
             Searching...
           </p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-13 text-muted-foreground">
         {selected.length} selected
       </div>
     </div>
@@ -230,10 +230,10 @@ export function ServicePicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium">
+                <span className="block truncate text-14 font-medium">
                   {service.name}
                 </span>
-                <span className="block truncate text-11 text-muted-foreground">
+                <span className="block truncate text-13 text-muted-foreground">
                   {service.slug}
                 </span>
               </span>
@@ -244,7 +244,7 @@ export function ServicePicker({
           );
         })}
         {filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">
             No services found.
           </p>
         ) : null}
@@ -405,17 +405,17 @@ function MemberPicker({
               }
             />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-12 font-medium">
+              <span className="block truncate text-14 font-medium">
                 {item.name}
               </span>
-              <span className="block truncate text-11 text-muted-foreground">
+              <span className="block truncate text-13 text-muted-foreground">
                 {item.detail}
               </span>
             </span>
           </label>
         ))}
         {error ? (
-          <p role="alert" className="px-3 py-3 text-12 text-destructive">
+          <p role="alert" className="px-3 py-3 text-14 text-destructive">
             Failed to load {kind}s.{" "}
             <Button type="button" variant="outline" size="sm" onClick={retry}>
               Retry {kind}s
@@ -423,17 +423,17 @@ function MemberPicker({
           </p>
         ) : null}
         {!error && !loading && filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">
             No {kind}s found.
           </p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
+          <p className="px-3 py-3 text-center text-13 text-muted-foreground">
             Searching...
           </p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-13 text-muted-foreground">
         {selected.length} selected
       </div>
     </div>

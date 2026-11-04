@@ -157,7 +157,7 @@ export function AssistantNodeRotateTokenDialog({
             ) : null}
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-12">
+          <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-14">
             <span className="text-muted-foreground">Node</span>
             <Badge
               variant="secondary"
@@ -169,7 +169,7 @@ export function AssistantNodeRotateTokenDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

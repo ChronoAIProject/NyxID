@@ -102,7 +102,7 @@ function priceLabel(price: EffectivePrice): string {
 
 export function PriceLine({ price }: { readonly price: EffectivePrice }) {
   return (
-    <li className="flex flex-wrap items-center gap-1.5 text-12">
+    <li className="flex flex-wrap items-center gap-1.5 text-14">
       <span>{priceLabel(price)}</span>
       <SourceBadge source={price.source} />
       <SyncBadge status={price.sync_status} />
@@ -111,7 +111,7 @@ export function PriceLine({ price }: { readonly price: EffectivePrice }) {
         <Badge variant="destructive">Retired rate</Badge>
       )}
       {price.sync_error && (
-        <span className="text-11 text-destructive">{price.sync_error}</span>
+        <span className="text-13 text-destructive">{price.sync_error}</span>
       )}
     </li>
   );
@@ -124,7 +124,7 @@ export function EffectiveClassBlock({
 }) {
   return (
     <div className="space-y-1" data-testid="effective-class">
-      <div className="flex flex-wrap items-center gap-1.5 text-12 font-medium">
+      <div className="flex flex-wrap items-center gap-1.5 text-14 font-medium">
         <span>
           {group.credential_classes.map((c) => CLASS_LABELS[c]).join(", ")}
         </span>
@@ -135,7 +135,7 @@ export function EffectiveClassBlock({
           <Badge variant="secondary">Not charged</Badge>
         )}
       </div>
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {REASON_TEXT[group.reason]}
       </p>
       {group.prices.length > 0 && (
@@ -150,7 +150,7 @@ export function EffectiveClassBlock({
       )}
       {group.pending.length > 0 && (
         <div className="space-y-1">
-          <div className="text-11 text-muted-foreground">
+          <div className="text-13 text-muted-foreground">
             Configured, not charged until synced:
           </div>
           <ul className="space-y-1">
@@ -182,7 +182,7 @@ export function EffectiveBilling({
         />
       ))}
       {resale.configured && (
-        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
           Resale{" "}
           {resale.applied
             ? "applies to NyxID platform-key traffic"
@@ -203,17 +203,17 @@ export function EffectiveBillingSummary({
   const { data, isLoading, error } = useAdminBillingService(serviceId);
   return (
     <section className="space-y-2 rounded-lg border border-border/50 p-3">
-      <h3 className="text-13 font-semibold">Effective billing</h3>
+      <h3 className="text-15 font-semibold">Effective billing</h3>
       {isLoading && (
-        <p className="text-12 text-muted-foreground">Resolving prices…</p>
+        <p className="text-14 text-muted-foreground">Resolving prices…</p>
       )}
       {error && (
-        <p className="text-12 text-destructive">
+        <p className="text-14 text-destructive">
           Effective billing is unavailable: {error.message}
         </p>
       )}
       {data && <EffectiveBilling service={data} />}
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Resolved by the server from the saved configuration exactly as billing
         charges it. Global defaults live in Admin → Billing.
       </p>

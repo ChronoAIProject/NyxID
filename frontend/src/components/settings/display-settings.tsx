@@ -95,7 +95,7 @@ function SegmentedChoice<T extends string | number>({
             event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
           }}
           className={cn(
-            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 text-12 transition-colors",
+            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 text-14 transition-colors",
             value === option.value
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:text-foreground",
@@ -121,8 +121,8 @@ function SettingRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
       <div className="min-w-0 flex-1 basis-[18em]">
-        <p className="text-13 font-medium leading-snug">{title}</p>
-        <p className="mt-1 text-12 leading-relaxed text-muted-foreground">{description}</p>
+        <p className="text-15 font-medium leading-snug">{title}</p>
+        <p className="mt-1 text-14 leading-relaxed text-muted-foreground">{description}</p>
       </div>
       {children}
     </div>
@@ -191,7 +191,7 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
         onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
         className="min-w-0 max-w-full flex-1 basis-[10em] accent-primary"
       />
-      <span className="min-w-[5ch] text-right font-mono text-11 text-muted-foreground">{width}px</span>
+      <span className="min-w-[5ch] text-right font-mono text-13 text-muted-foreground">{width}px</span>
       <Button
         variant="ghost"
         size="icon"
@@ -258,13 +258,13 @@ function ScaleControl({ id, label, scale, onChange }: {
             }}
             className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
           />
-          <div className="flex flex-wrap justify-between gap-x-2 text-11 text-muted-foreground" aria-hidden="true">
+          <div className="flex flex-wrap justify-between gap-x-2 text-13 text-muted-foreground" aria-hidden="true">
             <span>{DISPLAY_SCALE_MIN}×</span>
             <span>{DISPLAY_SCALE_MAX}×</span>
           </div>
-          <p className="text-11 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
+          <p className="text-13 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
         </div>
-        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground">
+        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-13 text-muted-foreground">
           {multiplier}
         </output>
       </div>
@@ -337,7 +337,7 @@ function ColorEditor() {
           className="space-y-3 rounded-xl border p-4"
           style={{ backgroundColor: color("background"), color: color("foreground"), borderColor: color("border") }}
         >
-          <p className="text-12 font-medium">Chat preview · {editMode}</p>
+          <p className="text-14 font-medium">Chat preview · {editMode}</p>
           <UserMessageBubble
             className="ml-auto w-fit max-w-[85%] text-16"
             style={{ backgroundColor: color("chat-bubble"), color: color("chat-bubble-foreground") }}
@@ -353,9 +353,9 @@ function ColorEditor() {
             const customized = key in overrides;
             return (
               <li key={key} className="flex flex-wrap items-center gap-2">
-                <span className="min-w-0 flex-1 text-12">
+                <span className="min-w-0 flex-1 text-14">
                   {label}
-                  {customized && <span className="ml-2 text-11 text-text-tertiary">Customized</span>}
+                  {customized && <span className="ml-2 text-13 text-text-tertiary">Customized</span>}
                 </span>
                 <input
                   type="color"
@@ -386,20 +386,20 @@ function ColorEditor() {
         </ul>
 
         <div className="space-y-1.5">
-          <p className="text-12 font-medium">Readability</p>
+          <p className="text-14 font-medium">Readability</p>
           <ul className="space-y-1" aria-label="Contrast checks">
             {CONTRAST_CHECKS.map((check) => {
               const ratio = contrastRatio(color(check.fg), color(check.bg));
               const ok = ratio >= check.target;
               return (
-                <li key={check.label} className="flex items-center gap-2 text-12">
+                <li key={check.label} className="flex items-center gap-2 text-14">
                   {ok ? (
                     <Check data-ui-icon="" className="size-3.5 shrink-0 text-success" aria-hidden />
                   ) : (
                     <TriangleAlert data-ui-icon="" className="size-3.5 shrink-0 text-warning" aria-hidden />
                   )}
                   <span className="flex-1 text-muted-foreground">{check.label}</span>
-                  <span className={cn("font-mono text-11", ok ? "text-muted-foreground" : "text-warning")}>
+                  <span className={cn("font-mono text-13", ok ? "text-muted-foreground" : "text-warning")}>
                     {ratio.toFixed(1)}:1 {ok ? "" : `(needs ${check.target}:1)`}
                   </span>
                 </li>

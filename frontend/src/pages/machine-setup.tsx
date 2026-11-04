@@ -323,7 +323,7 @@ function MachineSetupContent() {
                 name="separation"
                 render={({ field }) => (
                   <FormItem inline>
-                    <FormLabel className="flex-1 text-12 font-medium text-foreground">
+                    <FormLabel className="flex-1 text-14 font-medium text-foreground">
                       Agent separation
                     </FormLabel>
                     <Select value={field.value ?? "automatic"} disabled={locked} onValueChange={value => {

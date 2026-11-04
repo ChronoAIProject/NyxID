@@ -106,7 +106,7 @@ export function ProviderCard({
                 size="sm"
               />
             ) : hasBrand ? (
-              <span className={`text-13 font-bold ${brand.textClass}`}>
+              <span className={`text-15 font-bold ${brand.textClass}`}>
                 {brand.initial}
               </span>
             ) : (
@@ -139,7 +139,7 @@ export function ProviderCard({
               {llmStatus?.status === "ready" && (
                 <LlmReadyBadge llmStatus={llmStatus} gatewayUrl={gatewayUrl} />
               )}
-              <Badge variant="secondary" className="text-10">
+              <Badge variant="secondary" className="text-12">
                 {provider.provider_type === "api_key"
                   ? "API Key"
                   : provider.provider_type === "device_code"

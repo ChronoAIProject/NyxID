@@ -973,7 +973,7 @@ function DraftedChatComposer({
           {active && allowActiveInput ? (
             <p
               data-steering-hint
-              className="mb-1.5 text-11 text-muted-foreground"
+              className="mb-1.5 text-13 text-muted-foreground"
             >
               Still replying. What you send now steers this reply; Stop ends it.
             </p>
@@ -1125,7 +1125,7 @@ function DraftedChatComposer({
             {dragging && (
               <div
                 role="status"
-                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium"
+                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-14 font-medium"
               >
                 Drop files to attach
               </div>
@@ -1177,7 +1177,7 @@ function DraftedChatComposer({
                           onMouseDown={(event) => event.preventDefault()}
                           onClick={() => chooseMention(option.name)}
                           className={cn(
-                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
+                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-14 text-foreground",
                             selected ? "bg-overlay-strong" : "hover:bg-overlay",
                           )}
                         >
@@ -1187,12 +1187,12 @@ function DraftedChatComposer({
                               <span className="min-w-0 flex-1 truncate">
                                 {option.agent.display_name?.trim() || option.name}
                                 {option.agent.display_name?.trim() ? (
-                                  <span className="ml-1.5 text-11 text-text-tertiary">
+                                  <span className="ml-1.5 text-13 text-text-tertiary">
                                     @{option.name}
                                   </span>
                                 ) : null}
                               </span>
-                              <span className="shrink-0 text-10 text-text-tertiary">
+                              <span className="shrink-0 text-12 text-text-tertiary">
                                 {option.agent.kind === "person" ? "Person" : option.agent.shared ? `Shared agent${option.agent.owner_name ? ` · ${option.agent.owner_name}` : ""}` : option.agent.kind === "nyxbot"
                                   ? "Personal agent"
                                   : "Specialist"}
@@ -1213,7 +1213,7 @@ function DraftedChatComposer({
                               )}
                               <span className="min-w-0 flex-1 truncate">
                                 <span className="font-mono">@{option.name}</span>
-                                <span className="ml-1.5 text-11 text-text-tertiary">
+                                <span className="ml-1.5 text-13 text-text-tertiary">
                                   {option.attachment.label}
                                 </span>
                               </span>

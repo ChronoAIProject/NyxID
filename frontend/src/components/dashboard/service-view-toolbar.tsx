@@ -296,7 +296,7 @@ export function ServiceViewToolbar({
               className="flex flex-wrap items-center gap-2"
               aria-label="Display filters"
             >
-              <span className="text-11 text-muted-foreground">
+              <span className="text-13 text-muted-foreground">
                 Display filters
               </span>
               {autoToggle}

@@ -500,7 +500,7 @@ function ManageScopesPanel({
     return (
       <div className="flex flex-col gap-4">
         <WizardHeading title="Manage permissions" />
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
           {entry.name} doesn't support managing scopes here — its permissions
           are fixed by the provider.
         </p>
@@ -953,10 +953,10 @@ function CustomServiceForm({
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-11 text-muted-foreground">
+            <code className="font-mono text-13 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">
+            <p className="text-13 text-muted-foreground mt-1">
               Credential will be encrypted and pushed to this node over
               the existing WebSocket channel. NyxID never logs it.
             </p>
@@ -1192,7 +1192,7 @@ function CatalogConfirmForm({
   if (entry.service_type === "ssh") {
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
           {entry.name} is an SSH service. Use{" "}
           <code>nyxid service add-ssh</code> from your CLI instead
           (certificate-based auth, not a credential binding).
@@ -1222,7 +1222,7 @@ function CatalogConfirmForm({
       `/keys?tab=services&slug=${encodeURIComponent(entry.slug)}`;
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
           {entry.name} uses <code>{entry.auth_method}</code> auth,
           which isn't supported via remote pairing. Complete setup on
           the main Keys page. Your CLI will receive a cancel and
@@ -1456,10 +1456,10 @@ function CatalogConfirmForm({
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
             <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-11 text-muted-foreground">
+            <code className="font-mono text-13 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">
+            <p className="text-13 text-muted-foreground mt-1">
               Credential will be configured on the node agent. NyxID
               never sees or stores it.
             </p>
@@ -1528,7 +1528,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
       {message}
     </p>
   );

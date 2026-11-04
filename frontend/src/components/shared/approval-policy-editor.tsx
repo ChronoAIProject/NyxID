@@ -145,7 +145,7 @@ export function ApprovalPolicyEditor({
               className="space-y-3 rounded-lg border border-border p-3"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-12 font-medium">
+                <span className="text-14 font-medium">
                   Rule {index + 1}
                 </span>
                 <Button

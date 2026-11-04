@@ -171,7 +171,7 @@ export function BillingPage({
           <TabsTrigger value="usage">Usage</TabsTrigger>
         </TabsList>
         {billingCapability && !billingReady && (
-          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-12 text-warning">
+          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-14 text-warning">
             Billing is not available on this deployment.
           </div>
         )}
@@ -219,7 +219,7 @@ export function BillingPage({
           <BillingTopUpHistory />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
-          <p className="text-12 text-text-tertiary">
+          <p className="text-14 text-text-tertiary">
             Credit usage includes voice calls, dictation, and assistant tasks.
             Explore a service below for its recorded usage and charges.
           </p>

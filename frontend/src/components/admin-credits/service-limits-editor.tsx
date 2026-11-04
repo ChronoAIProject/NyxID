@@ -26,10 +26,10 @@ export function ServiceLimitsEditor({
   });
   return (
     <details className="rounded-lg border border-border p-3" open>
-      <summary className="cursor-pointer text-13 font-medium">
+      <summary className="cursor-pointer text-15 font-medium">
         Service limits (optional)
       </summary>
-      <p className="my-3 text-12 text-muted-foreground">
+      <p className="my-3 text-14 text-muted-foreground">
         Limits share the allocation total. A group of services shares one
         ceiling. They do not reserve separate funds. Other eligible services
         remain unrestricted, and other allocations or purchased credits may pay

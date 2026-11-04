@@ -17,6 +17,10 @@
    on the never-themed public pages. */
 @custom-variant light (&:where(.theme-light, .theme-light *));
 
+/* Shared primitives preserve their existing assignments on never-themed pages.
+   This variant assigns canonical tokens; it never changes token definitions. */
+@custom-variant unthemed (&:where(html:not(.theme-light):not(.theme-dark) *));
+
 /* Window-height tiers for full-viewport page chrome: the CLI wizard shell
    shrinks its header and footer to stay within 20% of a short window. The
    ranges are disjoint, so a utility in one tier never competes with the
@@ -128,8 +132,8 @@
   --spacing: 4px;
 
   /* ── Text scale (rem → follows the root font size set by Appearance) ──
-     Unthemed landing/blog defaults; themed app roots use the shared reading
-     mapping below (`text-12` = 11.9px at 1×). Use these tokens instead of
+     Every token is its nominal size divided by 16: text-N = N/16rem.
+     The themed root applies the 0.85 display baseline. Use tokens instead of
      `text-[12px]` so every size responds to the setting. */
   --text-9: 0.5625rem;
   --text-10: 0.625rem;
@@ -266,17 +270,6 @@ html.theme-dark {
   --color-chat-bubble-foreground: #EFEFF1;
 }
 
-/* One reading scale for every themed surface, including body portals.
-   Landing/blog retain the unthemed @theme defaults above. */
-html.theme-light,
-html.theme-dark {
-  --text-9: 0.75rem;
-  --text-10: 0.75rem;
-  --text-11: 0.8125rem;
-  --text-12: 0.875rem;
-  --text-13: 0.9375rem;
-}
-
 html:is(.theme-light, .theme-dark) body {
   line-height: 1.5;
 }
@@ -308,7 +301,7 @@ html.assistant-display svg[data-ui-icon] {
 /* Shared shell roles keep navigation and account typography identical in
    Studio and the assistant, including Studio's mobile navigation. */
 .shell-nav-item {
-  font-size: var(--text-13);
+  font-size: var(--text-15);
 }
 
 html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-icon]) {
@@ -318,7 +311,7 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
 }
 
 .shell-group-label {
-  font-size: var(--text-9);
+  font-size: var(--text-12);
   font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 1.5px;
@@ -326,13 +319,13 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
 }
 
 .shell-user-name {
-  font-size: var(--text-12);
+  font-size: var(--text-14);
   font-weight: 500;
   color: var(--color-foreground);
 }
 
 .shell-user-email {
-  font-size: var(--text-10);
+  font-size: var(--text-12);
   color: var(--color-text-tertiary);
 }
 
@@ -383,7 +376,7 @@ html.assistant-display [data-grouped-list] [data-slot="grouped-select"] {
 [data-grouped-row].grouped-field > span:first-child,
 [data-grouped-row].grouped-field > label,
 [data-grouped-row].grouped-field > label > span:first-child {
-  font-size: var(--text-11);
+  font-size: var(--text-13);
   color: var(--color-text-tertiary);
 }
 

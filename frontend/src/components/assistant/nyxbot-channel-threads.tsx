@@ -30,14 +30,14 @@ function ThreadRow({
               <Link
                 to="/assistant"
                 search={{ c: thread.conversation_id }}
-                className="min-w-0 flex-1 break-words text-12 hover:underline"
+                className="min-w-0 flex-1 break-words text-14 hover:underline"
               >
                 {thread.label}
               </Link>
             ) : (
-              <span className="flex-1 text-12">{thread.label}</span>
+              <span className="flex-1 text-14">{thread.label}</span>
             )}
-            <span className="text-11 font-normal text-text-tertiary">
+            <span className="text-13 font-normal text-text-tertiary">
               {thread.state === "active" && thread.follow_readiness !== "ready"
                 ? "Unavailable"
                 : labels[thread.state]}
@@ -59,7 +59,7 @@ function ThreadRow({
               </Button>
             ) : null}
           </div>
-          <p className="text-11 font-normal text-text-tertiary">
+          <p className="text-13 font-normal text-text-tertiary">
             {thread.last_admitted_at
               ? `Last activity ${formatRelativeTime(thread.last_admitted_at)}. `
               : ""}
@@ -82,7 +82,7 @@ function ThreadRow({
               : ""}
         </p>
         {stop.error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {stop.error.message}
           </p>
         ) : null}

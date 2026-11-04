@@ -171,7 +171,7 @@ export function WebDeviceLogin({
       <button
         type="button"
         onClick={closePanel}
-        className="mb-5 flex cursor-pointer items-center gap-1.5 text-12 font-medium text-muted-foreground transition-colors hover:text-foreground"
+        className="mb-5 flex cursor-pointer items-center gap-1.5 text-14 unthemed:text-12 font-medium text-muted-foreground transition-colors hover:text-foreground"
         aria-label="Back to all sign-in options"
       >
         <ArrowLeft className="size-3.5" />
@@ -195,7 +195,7 @@ export function WebDeviceLogin({
 
       {deviceLogin.phase === "requesting" && (
         <div
-          className="mt-8 flex items-center justify-center gap-2 text-12 text-muted-foreground"
+          className="mt-8 flex items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground"
           role="status"
         >
           <RefreshCw className="size-3.5 animate-spin" />
@@ -204,7 +204,7 @@ export function WebDeviceLogin({
       )}
 
       {deviceLogin.phase === "restoring" && (
-        <div className="mt-8 flex items-center justify-center gap-2 text-12 text-muted-foreground" role="status">
+        <div className="mt-8 flex items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground" role="status">
           <RefreshCw className="size-3.5 animate-spin" />
           Loading your approved account...
         </div>
@@ -221,7 +221,7 @@ export function WebDeviceLogin({
                   className="size-[208px] rounded-md object-contain"
                 />
               ) : (
-                <div className="flex size-[208px] items-center justify-center gap-2 text-12 text-muted-foreground">
+                <div className="flex size-[208px] items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground">
                   <ScanLine className="size-4" />
                   Preparing QR code...
                 </div>
@@ -230,7 +230,7 @@ export function WebDeviceLogin({
           </div>
 
           <div className="text-center">
-            <p className="text-11 uppercase text-text-tertiary">
+            <p className="text-13 unthemed:text-11 uppercase text-text-tertiary">
               Manual code
             </p>
             <div className="mt-1.5 flex items-center justify-center gap-2">
@@ -252,15 +252,15 @@ export function WebDeviceLogin({
             </div>
           </div>
 
-          <p className="text-center text-12 leading-relaxed text-muted-foreground">
+          <p className="text-center text-14 unthemed:text-12 leading-relaxed text-muted-foreground">
             Scan the code, or open{" "}
-            <span className="break-all font-mono text-11 text-foreground">
+            <span className="break-all font-mono text-13 unthemed:text-11 text-foreground">
               {deviceLogin.request.verification_uri}
             </span>{" "}
             on your phone and enter the manual code.
           </p>
 
-          <div className="flex items-center justify-center gap-1.5 text-11 text-warning">
+          <div className="flex items-center justify-center gap-1.5 text-13 unthemed:text-11 text-warning">
             <Clock3 className="size-3.5" />
             Expires in{" "}
             {formatWebAuthDeviceRemaining(
@@ -276,7 +276,7 @@ export function WebDeviceLogin({
           role="status"
         >
           <AlertTriangle className="mx-auto size-5 text-destructive" />
-          <p className="mt-2 text-13 font-medium text-destructive">
+          <p className="mt-2 text-15 unthemed:text-13 font-medium text-destructive">
             {terminalMessage}
           </p>
           <Button
@@ -298,16 +298,16 @@ export function WebDeviceLogin({
         <section className="mt-6 space-y-3 text-center" aria-live="polite">
           <CheckCircle2 className="mx-auto size-6 text-success" />
           <h3 className="text-15 font-semibold">Restricted terminal login</h3>
-          <p className="text-12 text-muted-foreground">This browser remains signed out.</p>
+          <p className="text-14 unthemed:text-12 text-muted-foreground">This browser remains signed out.</p>
           <code data-sensitive className="block font-mono text-24">{deviceLogin.loginCode.code}</code>
-          <p className="text-12">Terminal command: <code>nyxid login --code</code></p>
-          <p className="text-12 text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
+          <p className="text-14 unthemed:text-12">Terminal command: <code>nyxid login --code</code></p>
+          <p className="text-14 unthemed:text-12 text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
         </section>
       )}
 
       {deviceLogin.phase === "success" && (
         <div
-          className="mt-8 flex items-center justify-center gap-2 text-13 text-success"
+          className="mt-8 flex items-center justify-center gap-2 text-15 unthemed:text-13 text-success"
           role="status"
         >
           <CheckCircle2 className="size-4" />

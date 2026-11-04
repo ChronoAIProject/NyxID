@@ -38,14 +38,14 @@ export function PoolOperationCheck({
   }
   return (
     <div className="space-y-2">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Check which connections allow a particular request. Enter the path
         relative to each connection’s base URL, for example /chat/completions.
         This does not send a request to the provider.
       </p>
       <div className="flex flex-wrap items-end gap-2">
         <div className="w-24 space-y-1">
-          <label htmlFor={`${id}-method`} className="text-12">
+          <label htmlFor={`${id}-method`} className="text-14">
             Method
           </label>
           <Select
@@ -70,7 +70,7 @@ export function PoolOperationCheck({
           </Select>
         </div>
         <div className="min-w-36 flex-1 space-y-1">
-          <label htmlFor={`${id}-path`} className="text-12">
+          <label htmlFor={`${id}-path`} className="text-14">
             Operation path
           </label>
           <Input
@@ -99,13 +99,13 @@ export function PoolOperationCheck({
         <p
           id={`${id}-error`}
           role="alert"
-          className="text-12 text-destructive"
+          className="text-14 text-destructive"
         >
           {error}
         </p>
       )}
       {operation && (
-        <div className="flex flex-wrap items-center justify-between gap-2 text-12">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-14">
           <span className="text-muted-foreground">
             Showing results for{" "}
             <code>

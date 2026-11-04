@@ -116,7 +116,7 @@ function PluginCard({
         />
       ) : null}
       <div className="pointer-events-none flex items-center gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-13 font-semibold text-muted-foreground">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-15 font-semibold text-muted-foreground">
           {add ? <Plus aria-hidden className="size-[1.5em]" /> : item.iconSlug || item.iconUrl ? (
             <ServiceIcon
               slug={item.iconSlug}
@@ -128,12 +128,12 @@ function PluginCard({
           )}
         </span>
         <div className="min-w-0 flex-1">
-          <p title={item.name} className="truncate text-13 font-medium">
+          <p title={item.name} className="truncate text-15 font-medium">
             {item.name}
           </p>
           <p
             title={status}
-            className="mt-0.5 truncate text-11 text-text-tertiary"
+            className="mt-0.5 truncate text-13 text-text-tertiary"
           >
             {item.added && !item.disabled ? (
               <span
@@ -147,17 +147,17 @@ function PluginCard({
       </div>
       <p
         title={item.description}
-        className="pointer-events-none line-clamp-2 break-words text-12 leading-relaxed text-muted-foreground"
+        className="pointer-events-none line-clamp-2 break-words text-14 leading-relaxed text-muted-foreground"
       >
         {item.description}
       </p>
-      <div className="pointer-events-none mt-auto flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-11">
+      <div className="pointer-events-none mt-auto flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-13">
         <div className="pointer-events-auto relative flex min-w-0 items-center gap-2">
           {secondary}
         </div>
         <span
           aria-hidden
-          className="flex items-center gap-1 text-12 font-medium"
+          className="flex items-center gap-1 text-14 font-medium"
         >
           {actionLabel}
           {onActivate || href ? <ArrowRight className="size-[1em]" /> : null}
@@ -176,7 +176,7 @@ function SectionHeading({
 }) {
   return (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
-      <h2 className="text-13 font-medium">{children}</h2>
+      <h2 className="text-15 font-medium">{children}</h2>
       {actions}
     </div>
   );
@@ -238,7 +238,7 @@ function ConnectorCard({
           <button
             type="button"
             disabled={busy}
-            className="min-h-8 text-11 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="min-h-8 text-13 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => onConnect(item.connectOwnSlug!, true)}
           >
             Connect your own
@@ -336,7 +336,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           {added.length ? (
             <CardGrid>{cards(added)}</CardGrid>
           ) : (
-            <p className="px-4 py-6 text-12 text-text-tertiary">
+            <p className="px-4 py-6 text-14 text-text-tertiary">
               {loadFailed
                 ? "Connected services could not be loaded right now."
                 : "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy."}
@@ -368,7 +368,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
       !added.length &&
       !available.length &&
       !showModels ? (
-        <p className="py-12 text-center text-12 text-text-tertiary">
+        <p className="py-12 text-center text-14 text-text-tertiary">
           No plugins match this search.
         </p>
       ) : null}
@@ -547,7 +547,7 @@ function SkillsTab({
       {agents.isPending ? (
         <Skeleton className="h-8 w-[300px]" />
       ) : manageable.length === 0 && !agents.error ? (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           No agent you can maintain is available.
         </p>
       ) : agent ? (
@@ -558,7 +558,7 @@ function SkillsTab({
         />
       ) : null}
       {errors.map((error, index) => (
-        <p key={index} role="alert" className="text-12 text-destructive">
+        <p key={index} role="alert" className="text-14 text-destructive">
           {error.message}
         </p>
       ))}
@@ -619,7 +619,7 @@ function SkillsTab({
         </GroupedList>
       ) : null}
       {query.trim() && items.length === 0 && search.data ? (
-        <p className="py-14 text-center text-11 text-text-tertiary">
+        <p className="py-14 text-center text-13 text-text-tertiary">
           No plugins match this search.
         </p>
       ) : null}

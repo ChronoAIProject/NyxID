@@ -75,18 +75,18 @@ export function OnboardingTakeover() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 p-2">
               <div className="px-2 py-1.5">
-                <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-                <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
+                <p className="text-14 font-medium text-foreground">{user?.display_name ?? "User"}</p>
+                <p className="text-13 text-text-tertiary">{user?.email ?? ""}</p>
               </div>
               <DropdownMenuItem
                 onClick={() => void navigate({ to: "/settings" as string })}
-                className="rounded-md text-12"
+                className="rounded-md text-14"
               >
                 Settings
               </DropdownMenuItem>
               <DropdownMenuItem
                 onClick={() => void handleLogout()}
-                className="rounded-md text-12 text-destructive focus:text-destructive"
+                className="rounded-md text-14 text-destructive focus:text-destructive"
               >
                 Log out
               </DropdownMenuItem>
@@ -144,13 +144,13 @@ export function OnboardingTakeover() {
           type="button"
           onClick={() => void markComplete()}
           disabled={completeOnboarding.isPending}
-          className="text-12 text-text-tertiary transition-colors duration-200 hover:text-foreground disabled:opacity-50"
+          className="text-14 text-text-tertiary transition-colors duration-200 hover:text-foreground disabled:opacity-50"
         >
           Skip for now
         </button>
 
         {/* Trust signals */}
-        <div className="flex items-center gap-6 text-11 text-text-tertiary">
+        <div className="flex items-center gap-6 text-13 text-text-tertiary">
           <span className="flex items-center gap-1.5">
             <ShieldCheck className="h-3.5 w-3.5" />
             End-to-end encrypted

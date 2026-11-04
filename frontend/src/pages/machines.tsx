@@ -60,7 +60,7 @@ function MachineCard({
     <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="flex flex-wrap items-center gap-2">
         <Monitor className="h-4 w-4 text-text-tertiary" />
-        <h3 className="min-w-0 flex-1 truncate text-13 font-medium">
+        <h3 className="min-w-0 flex-1 truncate text-15 font-medium">
           {node.name}
         </h3>
         {update?.update_available ? (
@@ -68,14 +68,14 @@ function MachineCard({
             Update available ({update.target_version})
           </Badge>
         ) : null}
-        <span className="text-11 text-muted-foreground">
+        <span className="text-13 text-muted-foreground">
           v{node.metadata?.agent_version ?? "unknown"}
         </span>
         <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
         <MachineIsolationBadge machine={machine} />
         <MachineSharingBadge />
       </div>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {[
           machine.shell && "Commands",
           machine.files && "Files",
@@ -86,7 +86,7 @@ function MachineCard({
           .join(" · ")}{" "}
         · {machine.os} / {machine.arch}
       </p>
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {node.owner.display_name} ·{" "}
         {node.is_connected ? "Connected" : "Disconnected"}
         {machine.computer && !machine.computer_ready
@@ -223,7 +223,7 @@ function MachinesContent() {
         <TabsContent value="machines" className="mt-6 space-y-6">
           <section aria-label="Remote machines" className="space-y-3">
             <h3 className="text-15 font-semibold">Remote machines</h3>
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Personal hosted machines with a fixed workspace and selected
               capabilities. Resource state, runtime billing and execution
               authorization are independent.
@@ -231,13 +231,13 @@ function MachinesContent() {
             {!remote.isPending &&
               !remote.error &&
               !remote.discoveryComplete && (
-                <p role="status" className="text-12 text-muted-foreground">
+                <p role="status" className="text-14 text-muted-foreground">
                   Complete remote Machine discovery is not confirmed by this
                   server.
                 </p>
               )}
             {remote.isPending ? (
-              <p role="status" className="text-12">
+              <p role="status" className="text-14">
                 Loading remote machines…
               </p>
             ) : remote.error ? (
@@ -251,7 +251,7 @@ function MachinesContent() {
                 onOpen={openRemote}
               />
             ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
+              <p className="rounded-lg border border-dashed border-border p-6 text-14 text-muted-foreground">
                 No remote machines. Check your free slot and the configured
                 profile before creating one.
               </p>
@@ -262,7 +262,7 @@ function MachinesContent() {
             <p role="status">Loading machines…</p>
           ) : null}
           {nodes.error || orgs.error ? (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               Could not load machines.{" "}
               {nodes.error?.message ?? orgs.error?.message}
             </p>
@@ -272,7 +272,7 @@ function MachinesContent() {
           !nodes.error &&
           !orgs.error &&
           !machines.length ? (
-            <p className="rounded-xl border border-border/50 p-6 text-12 text-muted-foreground">
+            <p className="rounded-xl border border-border/50 p-6 text-14 text-muted-foreground">
               Add a machine to let NyxBot run commands, work with files and use
               a desktop.
             </p>
@@ -358,7 +358,7 @@ function MachinesContent() {
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <CompactChrome><SheetHeader className="shrink-0 p-5 pr-10 [[data-compact=true]_&]:py-2">
-            <SheetTitle className="[[data-compact=true]_&]:text-13">{selected?.name} settings</SheetTitle>
+            <SheetTitle className="[[data-compact=true]_&]:text-15">{selected?.name} settings</SheetTitle>
             <SheetDescription className="[[data-compact=true]_&]:hidden">
               Control confirmations, saved-login typing and specialist access.
             </SheetDescription>
@@ -399,7 +399,7 @@ function RemoteMachineList({
       >
         {label(machine.resource_state)}
       </Badge>
-      <span className="text-11 text-muted-foreground">
+      <span className="text-13 text-muted-foreground">
         Billing: {label(machine.billing_state)} · Authorization:{" "}
         {label(machine.authorization_state)}
       </span>
@@ -413,11 +413,11 @@ function RemoteMachineList({
             key={machine.node_id}
             className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
           >
-            <h4 className="break-all text-13 font-semibold">
+            <h4 className="break-all text-15 font-semibold">
               {machine.name ?? machine.sandbox_name}
             </h4>
             {state(machine)}
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Generation {machine.runtime_generation} ·{" "}
               {machine.profile.workspace_gib} GiB workspace
             </p>
@@ -446,7 +446,7 @@ function RemoteMachineList({
                   <div className="font-medium">
                     {machine.name ?? machine.sandbox_name}
                   </div>
-                  <div className="font-mono text-11 text-muted-foreground">
+                  <div className="font-mono text-13 text-muted-foreground">
                     {machine.node_id}
                   </div>
                 </TableCell>
@@ -454,7 +454,7 @@ function RemoteMachineList({
                 <TableCell>
                   Generation {machine.runtime_generation}
                   <br />
-                  <span className="text-11 text-muted-foreground">
+                  <span className="text-13 text-muted-foreground">
                     {machine.profile.workspace_gib} GiB workspace
                   </span>
                 </TableCell>

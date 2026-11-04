@@ -167,7 +167,7 @@ export function MachineUpdate({
           <>
             <GroupedRow asChild className="block space-y-0.5">
               <label>
-                <span className="text-11 font-normal text-text-tertiary">
+                <span className="text-13 font-normal text-text-tertiary">
                   Docker container name
                 </span>
                 <GroupedInput

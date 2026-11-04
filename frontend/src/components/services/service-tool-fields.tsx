@@ -84,7 +84,7 @@ export function ServiceToolFields({
         </div>
       </FormItem>
       {service.import_source && (
-        <p className="text-11 text-text-tertiary">
+        <p className="text-13 text-text-tertiary">
           Import source: {service.import_source.kind} ·{" "}
           {service.import_source.reference} ·{" "}
           {service.import_source.version ?? "Unversioned"} ·{" "}

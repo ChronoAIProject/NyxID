@@ -202,7 +202,7 @@ function MarkdownHeadingTwo({ children }: ComponentProps<"h2">) {
 
 const COMPONENTS: Components = {
   span: ({ node, children, ...props }) => node?.properties.dataGroupMention
-    ? <span title={props.title} data-group-mention className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-11">{children}</span>
+    ? <span title={props.title} data-group-mention className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-13">{children}</span>
     : <span {...props}>{children}</span>,
   p: ({ children }) => (
     <p
@@ -337,15 +337,15 @@ const COMPONENTS: Components = {
     />
   ),
   sup: ({ children }) => (
-    <sup className="text-10 leading-none text-nyx-secondary-400">
+    <sup className="text-12 leading-none text-nyx-secondary-400">
       {children}
     </sup>
   ),
   section: ({ children }) => (
     <section
-      className={`${BLOCK} border-t border-hairline pt-2 text-11 text-foreground/90`}
+      className={`${BLOCK} border-t border-hairline pt-2 text-13 text-foreground/90`}
     >
-      <div className="mb-1 text-10 font-medium text-muted-foreground">
+      <div className="mb-1 text-12 font-medium text-muted-foreground">
         Footnotes
       </div>
       <InsideFootnoteSectionContext.Provider value>

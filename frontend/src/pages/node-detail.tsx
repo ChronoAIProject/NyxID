@@ -313,7 +313,7 @@ export function NodeDetailPage() {
           label="Owner"
           value={nodeOwnerLabel(node.owner, currentUserId)}
         />
-        <div className="flex items-center justify-between px-5 py-3 text-13">
+        <div className="flex items-center justify-between px-5 py-3 text-15">
           <span className="text-muted-foreground">Status</span>
           <NodeStatusBadge
             status={node.status}
@@ -389,7 +389,7 @@ export function NodeDetailPage() {
             {admins.map((admin) => (
               <div
                 key={admin.user_id}
-                className="flex items-center justify-between px-5 py-3 text-13"
+                className="flex items-center justify-between px-5 py-3 text-15"
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -404,7 +404,7 @@ export function NodeDetailPage() {
             ))}
           </>
         ) : (
-          <p className="px-5 py-3 text-12 text-muted-foreground">
+          <p className="px-5 py-3 text-14 text-muted-foreground">
             No admins are currently listed for this node.
           </p>
         )}
@@ -422,7 +422,7 @@ export function NodeDetailPage() {
                 >
                   {String(node.metrics.total_requests)}
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
+                <p className="text-13 text-muted-foreground mt-1">
                   Total Requests
                 </p>
               </div>
@@ -433,7 +433,7 @@ export function NodeDetailPage() {
                 >
                   {(node.metrics.success_rate * 100).toFixed(1)}%
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
+                <p className="text-13 text-muted-foreground mt-1">
                   Success Rate
                 </p>
               </div>
@@ -444,7 +444,7 @@ export function NodeDetailPage() {
                 >
                   {node.metrics.avg_latency_ms.toFixed(0)}ms
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
+                <p className="text-13 text-muted-foreground mt-1">
                   Avg Latency
                 </p>
               </div>
@@ -455,7 +455,7 @@ export function NodeDetailPage() {
                 >
                   {String(node.metrics.error_count)}
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">Errors</p>
+                <p className="text-13 text-muted-foreground mt-1">Errors</p>
               </div>
             </div>
             {node.metrics.last_error && (
@@ -486,7 +486,7 @@ export function NodeDetailPage() {
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SolarPanelIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No metrics recorded yet. Metrics will appear after the first proxy
               request.
             </p>
@@ -506,7 +506,7 @@ export function NodeDetailPage() {
                   )
                 }
               >
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 Create pending credential metadata, then enter the secret on the
                 accept page for browser-side encryption.
               </p>
@@ -650,7 +650,7 @@ export function NodeDetailPage() {
             ) : !pendingCredentials || pendingCredentials.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
                 <SwitchIcon className="h-48 w-48 text-muted-foreground" />
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   No pending credentials are waiting for this node.
                 </p>
               </div>
@@ -759,7 +759,7 @@ export function NodeDetailPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <p className="text-12 font-medium text-foreground">
+              <p className="text-14 font-medium text-foreground">
                 Destination owner
               </p>
               <OrgScopeSelect
@@ -771,7 +771,7 @@ export function NodeDetailPage() {
                 label="Destination owner"
               />
             </div>
-            <div className="rounded-lg border border-border bg-muted/40 p-3 text-12">
+            <div className="rounded-lg border border-border bg-muted/40 p-3 text-14">
               <p className="font-medium text-foreground">Transfer preview</p>
               <ul className="mt-2 space-y-1 text-muted-foreground">
                 <li>
@@ -785,7 +785,7 @@ export function NodeDetailPage() {
                 </p>
               )}
             </div>
-            <label className="flex items-start gap-2 text-12 text-muted-foreground">
+            <label className="flex items-start gap-2 text-14 text-muted-foreground">
               <Checkbox
                 checked={transferConfirmed}
                 onCheckedChange={(checked) =>

@@ -573,7 +573,7 @@ function StandardConsentPage({
                 ? "Authorize Lark bot"
                 : "Authorize application"}
           </h1>
-          <p className="max-w-md break-words text-12 leading-relaxed text-muted-foreground">
+          <p className="max-w-md break-words text-14 leading-relaxed text-muted-foreground">
             {bindingReview ? (
               <>
                 Review the NyxID services available to{" "}
@@ -592,7 +592,7 @@ function StandardConsentPage({
             )}
           </p>
           {preview && (
-            <p className="text-11 font-medium uppercase text-muted-foreground">
+            <p className="text-13 font-medium uppercase text-muted-foreground">
               Preview · Decisions disabled
             </p>
           )}
@@ -622,13 +622,13 @@ function StandardConsentPage({
                   <ScopeIcon scope="openid" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="text-13 font-medium text-foreground">
+                  <p className="text-15 font-medium text-foreground">
                     Your NyxID profile
                   </p>
-                  <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                  <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
                     {identityScopeSummary(identityScopes)}
                   </p>
-                  <code className="mt-1 block break-all text-11 text-muted-foreground">
+                  <code className="mt-1 block break-all text-13 text-muted-foreground">
                     {identityScopes.join(" ")}
                   </code>
                 </div>
@@ -646,16 +646,16 @@ function StandardConsentPage({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p
-                      className={`text-13 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
+                      className={`text-15 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
                     >
                       {meta?.title ?? item}
                     </p>
                     {meta && (
                       <>
-                        <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
+                        <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
                           {meta.description}
                         </p>
-                        <code className="mt-1 block break-all text-11 text-muted-foreground">
+                        <code className="mt-1 block break-all text-13 text-muted-foreground">
                           {item}
                         </code>
                       </>
@@ -702,7 +702,7 @@ function StandardConsentPage({
                 {customize ? "Done" : "Customize"}
               </Button>
             </div>
-            <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
+            <p className="mt-1.5 text-14 leading-relaxed text-muted-foreground">
               {serviceAccess.allow_all_services
                 ? bindingReview && currentBindingAllowsAllServices
                   ? "This binding currently authorizes all available services."
@@ -725,28 +725,28 @@ function StandardConsentPage({
                         className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
                       >
                         <div className="min-w-0">
-                          <p className="break-words text-13 font-medium text-foreground">
+                          <p className="break-words text-15 font-medium text-foreground">
                             {item.primary}
                           </p>
                           {item.description && (
                             <p
-                              className="mt-1 line-clamp-2 break-words text-12 leading-relaxed text-muted-foreground"
+                              className="mt-1 line-clamp-2 break-words text-14 leading-relaxed text-muted-foreground"
                               title={item.description}
                             >
                               {item.description}
                             </p>
                           )}
                           {item.secondary && (
-                            <p className="mt-1 break-words text-11 text-text-tertiary">
+                            <p className="mt-1 break-words text-13 text-text-tertiary">
                               {item.secondary}
                             </p>
                           )}
                           {item.orgName && (
                             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                              <Badge variant="secondary" className="text-10">
+                              <Badge variant="secondary" className="text-12">
                                 Org
                               </Badge>
-                              <span className="break-words text-11 text-muted-foreground">
+                              <span className="break-words text-13 text-muted-foreground">
                                 {item.orgName}
                               </span>
                             </div>
@@ -754,17 +754,17 @@ function StandardConsentPage({
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-1 sm:justify-end">
                           {item.currentlyAuthorized && bindingReview && (
-                            <Badge variant="secondary" className="text-10">
+                            <Badge variant="secondary" className="text-12">
                               Authorized now
                             </Badge>
                           )}
                           {item.requiredByApp && (
-                            <Badge variant="secondary" className="text-10">
+                            <Badge variant="secondary" className="text-12">
                               Required by app
                             </Badge>
                           )}
                           {item.newlySelected && (
-                            <Badge variant="accent" className="text-10">
+                            <Badge variant="accent" className="text-12">
                               New
                             </Badge>
                           )}
@@ -773,7 +773,7 @@ function StandardConsentPage({
                     ))}
                     {unmatchedDefaults.map((name) => (
                       <div key={`unmatched-${name}`} className="py-3.5">
-                        <p className="break-words text-12 leading-relaxed text-muted-foreground">
+                        <p className="break-words text-14 leading-relaxed text-muted-foreground">
                           <span className="font-medium text-foreground">
                             {name}
                           </span>{" "}
@@ -802,7 +802,7 @@ function StandardConsentPage({
                   {!allowAllServices && (
                     <ServiceScrollList bordered={false}>
                       {!preview && userServicesLoading ? (
-                        <p className="py-3.5 text-12 text-muted-foreground">
+                        <p className="py-3.5 text-14 text-muted-foreground">
                           Loading services...
                         </p>
                       ) : selectableServices.length > 0 ? (
@@ -830,14 +830,14 @@ function StandardConsentPage({
                               <div className="min-w-0">
                                 <Label
                                   htmlFor={`oauth-service-${service.id}`}
-                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-13 leading-5 text-foreground`}
+                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-15 leading-5 text-foreground`}
                                 >
                                   <span className="block break-words font-medium">
                                     {serviceDisplayName(service)}
                                   </span>
                                   {service.catalog_service_description?.trim() && (
                                     <span
-                                      className="mt-1 line-clamp-2 break-words text-12 font-normal leading-relaxed text-muted-foreground"
+                                      className="mt-1 line-clamp-2 break-words text-14 font-normal leading-relaxed text-muted-foreground"
                                       title={
                                         service.catalog_service_description
                                       }
@@ -846,7 +846,7 @@ function StandardConsentPage({
                                     </span>
                                   )}
                                   {serviceSecondaryText(service) && (
-                                    <span className="mt-1 block break-words text-11 font-normal text-text-tertiary">
+                                    <span className="mt-1 block break-words text-13 font-normal text-text-tertiary">
                                       {serviceSecondaryText(service)}
                                     </span>
                                   )}
@@ -855,11 +855,11 @@ function StandardConsentPage({
                                   <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                                     <Badge
                                       variant="secondary"
-                                      className="text-10"
+                                      className="text-12"
                                     >
                                       Org
                                     </Badge>
-                                    <span className="break-words text-11 font-normal text-muted-foreground">
+                                    <span className="break-words text-13 font-normal text-muted-foreground">
                                       {orgName}
                                     </span>
                                   </div>
@@ -872,7 +872,7 @@ function StandardConsentPage({
                                       )) && (
                                       <Badge
                                         variant="secondary"
-                                        className="text-10"
+                                        className="text-12"
                                       >
                                         Authorized now
                                       </Badge>
@@ -880,7 +880,7 @@ function StandardConsentPage({
                                   {requiredByApp && (
                                     <Badge
                                       variant="secondary"
-                                      className="text-10"
+                                      className="text-12"
                                     >
                                       Required by app
                                     </Badge>
@@ -898,7 +898,7 @@ function StandardConsentPage({
                                     ) && (
                                       <Badge
                                         variant="accent"
-                                        className="text-10"
+                                        className="text-12"
                                       >
                                         New
                                       </Badge>
@@ -909,7 +909,7 @@ function StandardConsentPage({
                           );
                         })
                       ) : (
-                        <p className="py-3.5 text-12 text-muted-foreground">
+                        <p className="py-3.5 text-14 text-muted-foreground">
                           No active services are available.
                         </p>
                       )}
@@ -951,7 +951,7 @@ function StandardConsentPage({
               >
                 Make sure you trust {clientName}
               </h2>
-              <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
+              <p className="mt-2 text-14 leading-relaxed text-muted-foreground">
                 This app may receive the account information above and use the
                 services you approve. Continue only if you trust it. You can
                 revoke access later from Authorized Applications.
@@ -966,7 +966,7 @@ function StandardConsentPage({
             agentAccess && "lg:col-start-1 lg:row-start-3 lg:self-start",
           )}
         >
-          <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center justify-between text-14 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
             App details
             <ChevronDown
               className="h-4 w-4 transition-transform group-open:rotate-180"

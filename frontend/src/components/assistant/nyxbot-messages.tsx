@@ -120,7 +120,7 @@ function AutomationNotice({ message }: { readonly message: ChatMessage }) {
         action={
           <Link
             to="/assistant/automations"
-            className="mt-2 inline-block text-11 text-muted-foreground underline hover:text-foreground"
+            className="mt-2 inline-block text-13 text-muted-foreground underline hover:text-foreground"
           >
             Open Automations
           </Link>
@@ -161,7 +161,7 @@ const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
   return (
     <article aria-label="Message from NyxBot" className="group/message flex flex-col items-end gap-1">
-      <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
+      <div className="flex items-center gap-1.5 text-12 text-text-tertiary">
         <AgentAvatar agent={NYXBOT_MARK} size="xs" />
         From NyxBot
       </div>

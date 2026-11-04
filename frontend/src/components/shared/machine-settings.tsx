@@ -136,7 +136,7 @@ export function MachineSettings({
       <form
         aria-label="Machine settings"
         onSubmit={form.handleSubmit(save)}
-        className="flex min-h-0 min-w-0 flex-1 flex-col text-12"
+        className="flex min-h-0 min-w-0 flex-1 flex-col text-14"
       >
         <FormViewport className="flex min-h-0 flex-1 flex-col"><CompactScroll className="flex-1 space-y-6 px-5 pb-5 [overflow-wrap:anywhere]">
           {update && (

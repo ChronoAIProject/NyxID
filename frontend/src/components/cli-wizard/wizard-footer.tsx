@@ -19,7 +19,7 @@ export interface WizardFooterProps {
 // A short window shrinks the footer's gap; below 680px it is hidden so the
 // shell's chrome stays within 20% of the window.
 const FOOTER_CLASS =
-  "mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground short:mt-4 very-short:hidden"
+  "mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-14 text-muted-foreground short:mt-4 very-short:hidden"
 
 export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
   if (context === "local") {

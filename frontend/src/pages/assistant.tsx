@@ -138,7 +138,7 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
     >
       <Suspense
         fallback={
-          <p role="status" className="text-12 text-text-tertiary">
+          <p role="status" className="text-14 text-text-tertiary">
             Loading {workspaceTitles[view]}...
           </p>
         }

@@ -104,7 +104,7 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
         <h1 className="text-28 font-normal tracking-tight">
           MFA verification
         </h1>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 unthemed:text-12 text-muted-foreground">
           {verifyMutation.sessionConfirmationPending
             ? "Verification was submitted. Confirm your session to continue."
             : cookieChallenge
@@ -118,7 +118,7 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
           {form.formState.errors.root && (
             <div
               role="alert"
-              className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+              className="rounded-lg bg-destructive/10 p-3 text-14 unthemed:text-12 text-destructive"
             >
               {form.formState.errors.root.message}
             </div>
@@ -203,7 +203,7 @@ export function MfaCodeFields({
       <Button
         type="button"
         variant="link"
-        className="h-auto p-0 text-12"
+        className="h-auto p-0 text-14 unthemed:text-12"
         disabled={disabled}
         onClick={onToggleRecovery}
       >

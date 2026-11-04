@@ -71,7 +71,7 @@ export function ChoiceCard({
     >
       {icon}
       <span className="text-xs font-medium">{title}</span>
-      <span className="text-10 text-muted-foreground">{description}</span>
+      <span className="text-12 text-muted-foreground">{description}</span>
     </button>
   );
 }

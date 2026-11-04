@@ -101,7 +101,7 @@ function ResourceManagement() {
   return (
     <section
       aria-label="Platform phone accounts and allocations"
-      className="space-y-6 rounded-xl border border-border bg-card p-5 text-12"
+      className="space-y-6 rounded-xl border border-border bg-card p-5 text-14"
     >
       <div>
         <h2 className="text-16 font-semibold">

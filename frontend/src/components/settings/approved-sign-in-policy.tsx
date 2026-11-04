@@ -34,16 +34,16 @@ export function ApprovedSignInPolicy() {
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <label htmlFor="skip-approved-sign-in-mfa" className="text-12 font-medium">
+          <label htmlFor="skip-approved-sign-in-mfa" className="text-14 font-medium">
             Skip MFA for NyxID app sign-ins
           </label>
-          <p id="skip-approved-sign-in-description" className="text-12 text-muted-foreground">
+          <p id="skip-approved-sign-in-description" className="text-14 text-muted-foreground">
             Approve QR or typed sign-in codes from a signed-in NyxID app or browser without
             another authenticator code. Enabled by default; turn this off to require MFA
             for these approvals. Approve only codes shown on your own screen.
             {!user?.mfa_enabled && " Takes effect when two-factor authentication is on."}
           </p>
-          {!policy && <p className="text-12 text-muted-foreground">This server does not support changing this setting yet.</p>}
+          {!policy && <p className="text-14 text-muted-foreground">This server does not support changing this setting yet.</p>}
         </div>
         <Switch
           id="skip-approved-sign-in-mfa"
@@ -57,7 +57,7 @@ export function ApprovedSignInPolicy() {
           }}
         />
       </div>
-      {error && <p role="alert" className="text-12 text-destructive">{error}</p>}
+      {error && <p role="alert" className="text-14 text-destructive">{error}</p>}
       {stepUp.prompt}
       <Dialog open={!!accountId && confirmAccount === accountId} onOpenChange={(open) => { if (!open) setConfirmAccount(null); }}>
         <DialogContent>

@@ -61,7 +61,7 @@ export function ServiceListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BrickWallIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">
+            <p className="text-14 font-medium text-muted-foreground">
               No services yet
             </p>
             <p className="text-xs text-muted-foreground">

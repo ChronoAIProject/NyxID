@@ -177,7 +177,7 @@ function ConnectionGroups({
                     <li>
                       <span className="min-w-0 flex-1 break-words">
                         <span className="block font-medium">{key.label}</span>
-                        <span className="text-11 font-normal text-text-tertiary">
+                        <span className="text-13 font-normal text-text-tertiary">
                           {connectionOwnerLabel(key)} · {key.slug}
                           {connectionAvailable(key) ? "" : " · Unavailable"}
                         </span>
@@ -271,12 +271,12 @@ function ConnectionOrderForm({
     <form onSubmit={order.save} className="space-y-0">
       <GroupedFooter>
         {order.message && (
-          <p role="status" className="text-11 text-text-tertiary">
+          <p role="status" className="text-13 text-text-tertiary">
             {order.message}
           </p>
         )}
         {order.validationError && (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {order.validationError}
           </p>
         )}

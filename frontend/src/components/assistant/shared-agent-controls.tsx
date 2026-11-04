@@ -211,7 +211,7 @@ function SharingEditor({
             </Select>
           </GroupedRow>
           <GroupedRow asChild className="grouped-field">
-            <label className="block space-y-1 text-12">
+            <label className="block space-y-1 text-14">
               <span>{kind === "org" ? "Organization ID" : "Person email"}</span>
               <GroupedInput
                 value={subject}

@@ -68,7 +68,7 @@ function OwnedAdapterBindings() {
   const profiles =
     catalog.data?.filter((d) => d.setup.agent === "nyxbot_specialist") ?? [];
   return (
-    <section className="space-y-4 text-12">
+    <section className="space-y-4 text-14">
       <GroupedList
         title="Phone and speech connections"
         footer={
@@ -200,7 +200,7 @@ function BindingCard({
         />
         <GroupedRow asChild className="block space-y-0.5">
           <label>
-            <span className="text-11 font-normal text-text-tertiary">
+            <span className="text-13 font-normal text-text-tertiary">
               Webhook URL
             </span>
             <Input
@@ -371,7 +371,7 @@ function BindingCard({
               closes.
             </DialogDescription>
           </DialogHeader>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-overlay p-3 text-11">
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-overlay p-3 text-13">
             {secret}
           </pre>
         </DialogContent>
@@ -542,7 +542,7 @@ function SetupForm({
           />
           <GroupedRow>
             <label
-              className="min-w-0 flex-1 text-12 font-medium text-foreground"
+              className="min-w-0 flex-1 text-14 font-medium text-foreground"
               htmlFor="adapter-credential-mode"
             >
               Credentials
@@ -587,7 +587,7 @@ function SetupForm({
           </GroupedRow>
           <GroupedRow>
             <label
-              className="min-w-0 flex-1 text-12 font-medium text-foreground"
+              className="min-w-0 flex-1 text-14 font-medium text-foreground"
               htmlFor="adapter-connection"
             >
               {mode === "connection"

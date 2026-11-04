@@ -131,7 +131,7 @@ export function DashboardPage() {
         >
           Welcome back, {user?.display_name ?? "there"}
         </h1>
-        <p className="text-12 text-muted-foreground mt-1">
+        <p className="text-14 text-muted-foreground mt-1">
           {user?.email ?? ""}
         </p>
       </div>
@@ -268,7 +268,7 @@ export function DashboardPage() {
         {!aiDismissed && <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />}
         <ApprovalsCard demotePrimary={siblingDemote} />
         <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
-          <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+          <p className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
             Quick Links
           </p>
           <div className="flex flex-col gap-1.5">
@@ -338,7 +338,7 @@ function OnboardingChecklist({
           <h2 className="text-15 font-semibold text-foreground">
             Getting started
           </h2>
-          <p className="text-11 text-muted-foreground mt-0.5">
+          <p className="text-13 text-muted-foreground mt-0.5">
             {steps.filter((s) => s.done).length} of {steps.length} complete
           </p>
         </div>
@@ -395,14 +395,14 @@ function OnboardingChecklist({
                           : "border-border/50 bg-card group-active:bg-overlay",
                       )}
                     >
-                      <p className={cn("text-13 font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
+                      <p className={cn("text-15 font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
                         {step.title}
                       </p>
-                      <p className={cn("text-11 mt-0.5 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>
+                      <p className={cn("text-13 mt-0.5 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>
                         {step.description}
                       </p>
                       {step.done ? (
-                        <span className="mt-2 inline-flex items-center gap-1.5 text-12 font-medium text-success/70">
+                        <span className="mt-2 inline-flex items-center gap-1.5 text-14 font-medium text-success/70">
                           <Check className="h-3.5 w-3.5" />
                           Completed
                         </span>
@@ -468,12 +468,12 @@ function OnboardingChecklist({
                         : "border-border/50 bg-card group-hover:border-hairline-strong group-hover:bg-overlay",
                     )}
                   >
-                    <p className={cn("text-13 font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
+                    <p className={cn("text-15 font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
                       {step.title}
                     </p>
-                    <p className={cn("text-11 mt-1 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
+                    <p className={cn("text-13 mt-1 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
                     {step.done ? (
-                      <span className="mt-3 inline-flex items-center gap-1.5 text-12 font-medium text-success/70">
+                      <span className="mt-3 inline-flex items-center gap-1.5 text-14 font-medium text-success/70">
                         <Check className="h-3.5 w-3.5" />
                         Completed
                       </span>
@@ -546,13 +546,13 @@ function StatusCell({
         {icon}
       </div>
       <div className="min-w-0">
-        <p className="truncate text-10 font-semibold uppercase tracking-wider text-text-tertiary">
+        <p className="truncate text-12 font-semibold uppercase tracking-wider text-text-tertiary">
           {label}
         </p>
         {loading ? (
           <Skeleton className="mt-1 h-4 w-20" />
         ) : (
-          <p className="text-13 font-medium text-foreground truncate">
+          <p className="text-15 font-medium text-foreground truncate">
             {value}
           </p>
         )}
@@ -635,10 +635,10 @@ function AccountPostureCard({
           <ShieldCheck className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div>
-          <p className="text-13 font-semibold text-foreground">
+          <p className="text-15 font-semibold text-foreground">
             Security Posture
           </p>
-          <p className={cn("text-11 font-medium", statusColor)}>
+          <p className={cn("text-13 font-medium", statusColor)}>
             {statusLabel}
           </p>
         </div>
@@ -670,7 +670,7 @@ function AccountPostureCard({
               </span>
               <span
                 className={cn(
-                  "flex-1 truncate text-12",
+                  "flex-1 truncate text-14",
                   item.done ? "text-foreground" : "text-muted-foreground",
                 )}
               >
@@ -679,7 +679,7 @@ function AccountPostureCard({
               {item.done ? (
                 <Check className="h-3 w-3 shrink-0 text-success/60 transition-transform duration-200 group-hover:scale-110" />
               ) : (
-                <span className="inline-flex shrink-0 items-center gap-0.5 text-10 font-semibold uppercase tracking-wide text-nyx-secondary-400 transition-all duration-200 group-hover:gap-1">
+                <span className="inline-flex shrink-0 items-center gap-0.5 text-12 font-semibold uppercase tracking-wide text-nyx-secondary-400 transition-all duration-200 group-hover:gap-1">
                   {item.cta}
                   <ArrowRight className="h-2.5 w-2.5" />
                 </span>
@@ -692,10 +692,10 @@ function AccountPostureCard({
       {/* Footer with progress bar + next-step CTA */}
       <div className="border-t border-border/50 px-4 py-2.5">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-11 text-text-tertiary">
+          <span className="text-13 text-text-tertiary">
             {doneCount} of {items.length}
           </span>
-          <span className="text-11 font-medium text-foreground">
+          <span className="text-13 font-medium text-foreground">
             {score}%
           </span>
         </div>
@@ -708,7 +708,7 @@ function AccountPostureCard({
         {nextStep && !loading && (
           <Link
             to={nextStep.href}
-            className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 text-11 transition-colors duration-200 hover:bg-overlay"
+            className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 text-13 transition-colors duration-200 hover:bg-overlay"
           >
             <span className="text-muted-foreground">
               Next: <span className="text-foreground">{nextStep.label}</span>
@@ -743,8 +743,8 @@ function QuickActionCard({
         {icon}
       </div>
       <div>
-        <p className="text-12 font-semibold text-foreground">{title}</p>
-        <p className="text-10 text-muted-foreground mt-0.5">{desc}</p>
+        <p className="text-14 font-semibold text-foreground">{title}</p>
+        <p className="text-12 text-muted-foreground mt-0.5">{desc}</p>
       </div>
     </Link>
   );
@@ -761,7 +761,7 @@ function RightPanelContent({
     <>
       <ApprovalsCard demotePrimary={demotePrimary} />
       <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
-        <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+        <p className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
           Quick Links
         </p>
         <div className="flex flex-col gap-1.5">
@@ -786,13 +786,13 @@ function AiSetupCard({
       <div className="absolute inset-0 bg-gradient-to-b from-nyx-500/[0.04] via-nyx-500/[0.02] to-transparent dark:from-nyx-500/15 dark:via-nyx-500/5 dark:to-transparent" />
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200%] h-[120px] bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.07)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.25)_0%,transparent_70%)]" />
       <div className="relative flex flex-col gap-3 p-4">
-        <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 text-10 font-semibold text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">
+        <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 text-12 font-semibold text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">
           NEW
         </span>
         <h3 className="text-15 font-semibold text-foreground leading-snug">
           Give your AI agents superpowers
         </h3>
-        <p className="text-12 text-muted-foreground leading-relaxed">
+        <p className="text-14 text-muted-foreground leading-relaxed">
           Install NyxID skills in Claude Code, Cursor, or Codex to unlock
           secure credential brokering.
         </p>
@@ -831,7 +831,7 @@ function QuickLink({
   return (
     <Link
       to={to}
-      className="flex items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-12 text-muted-foreground transition-colors duration-300 hover:bg-overlay hover:text-foreground"
+      className="flex items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-14 text-muted-foreground transition-colors duration-300 hover:bg-overlay hover:text-foreground"
     >
       {label}
       <ArrowUpRight className="h-3 w-3 text-text-tertiary" />
@@ -846,10 +846,10 @@ function ApprovalsCard({
 }) {
   return (
     <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-3">
-      <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+      <p className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
         Approvals
       </p>
-      <p className="text-12 text-muted-foreground leading-relaxed">
+      <p className="text-14 text-muted-foreground leading-relaxed">
         Approve AI agent access via Telegram or the NyxID mobile app.
       </p>
       <div className="flex flex-col gap-2">

@@ -36,7 +36,7 @@ function CodeBlock({
 
   return (
     <div className="space-y-2">
-      <Badge variant="secondary" className="text-10">
+      <Badge variant="secondary" className="text-12">
         {label}
       </Badge>
       <div className="relative">
@@ -209,8 +209,8 @@ export function IntegrationGuidePage() {
               className="flex items-center gap-4 rounded-lg border border-border bg-muted/50 px-3 py-2.5"
             >
               <div className="min-w-0 flex-1">
-                <p className="text-12 text-foreground break-all">{scope}</p>
-                <p className="text-11 text-muted-foreground">
+                <p className="text-14 text-foreground break-all">{scope}</p>
+                <p className="text-13 text-muted-foreground">
                   <span className="font-medium text-foreground">
                     {meta.title}
                   </span>

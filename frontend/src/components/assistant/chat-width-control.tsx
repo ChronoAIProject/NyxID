@@ -56,7 +56,7 @@ function ChatDimensionControl({ label, saved, onChange, range }: {
         onLostPointerCapture={cancel}
         className="h-6 min-w-0 flex-1 cursor-pointer accent-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       />
-      <span className="shrink-0 font-mono text-11 text-muted-foreground">{value}px</span>
+      <span className="shrink-0 font-mono text-13 text-muted-foreground">{value}px</span>
       <Button
         size="icon"
         variant="ghost"

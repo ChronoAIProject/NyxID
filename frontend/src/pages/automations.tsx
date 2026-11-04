@@ -249,7 +249,7 @@ function AutomationsContent() {
                 <span className="block break-words font-medium">
                   {row.label}
                 </span>
-                <span className="mt-0.5 block text-11 font-normal text-text-tertiary">
+                <span className="mt-0.5 block text-13 font-normal text-text-tertiary">
                   {target(row)} ·{" "}
                   {row.source === "schedule" ? "Schedule" : "Webhook"} ·{" "}
                   <span
@@ -260,7 +260,7 @@ function AutomationsContent() {
                     {row.status === "active" ? "Active" : "Paused"}
                   </span>
                 </span>
-                <span className="mt-1 block text-11 font-normal text-text-tertiary">
+                <span className="mt-1 block text-13 font-normal text-text-tertiary">
                   {row.source === "webhook"
                     ? "Runs on webhook events"
                     : row.next_run_at
@@ -270,7 +270,7 @@ function AutomationsContent() {
                     : "Not run yet"}
                 </span>
                 {row.pause_reason && (
-                  <span className="mt-1 block text-11 font-normal text-warning">
+                  <span className="mt-1 block text-13 font-normal text-warning">
                     {automationPauseReason(row.pause_reason)}
                   </span>
                 )}
@@ -438,7 +438,7 @@ export function AutomationEditor({
     return (
       <GroupedRow key={name} asChild className="block space-y-0.5">
         <label>
-          <span className="text-11 font-normal text-text-tertiary">
+          <span className="text-13 font-normal text-text-tertiary">
             {label}
           </span>
           <GroupedInput
@@ -503,7 +503,7 @@ export function AutomationEditor({
   ) {
     return (
       <GroupedRow className="block space-y-2">
-        <p className="text-12 font-medium">{label}</p>
+        <p className="text-14 font-medium">{label}</p>
         <SegmentedControl
           value={values[name]}
           onValueChange={(value) =>
@@ -622,7 +622,7 @@ export function AutomationEditor({
                 {values.delivery_type === "assistant" && (
                   <GroupedRow asChild className="block space-y-0.5">
                     <label>
-                      <span className="text-11 font-normal text-text-tertiary">
+                      <span className="text-13 font-normal text-text-tertiary">
                         Instruction
                       </span>
                       <GroupedTextarea

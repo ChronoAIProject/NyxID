@@ -27,7 +27,7 @@ export function LoginPage() {
         {!appLoginOpen && (
           <>
             <MfaVerifyForm returnTo={returnTo} cookieChallenge={cookieMfaRequired} />
-            <p className="border-t border-border pt-6 text-center text-12 text-muted-foreground">
+            <p className="border-t border-border pt-6 text-center text-14 text-muted-foreground">
               You can also sign in by approving from your NyxID app.
             </p>
           </>
@@ -44,7 +44,7 @@ export function LoginPage() {
   return (
     <>
       {params.get("mfa") === "expired" && (
-        <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+        <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
           Your verification expired. Please sign in again.
         </p>
       )}

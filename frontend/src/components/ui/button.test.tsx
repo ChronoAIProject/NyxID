@@ -14,7 +14,7 @@ describe("Button", () => {
 
       expect(screen.getByRole("button", { name: "Connect" })).toHaveClass(
         "text-white",
-        "text-12",
+        "text-14",
       );
     },
   );

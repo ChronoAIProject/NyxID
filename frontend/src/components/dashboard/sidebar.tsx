@@ -251,7 +251,7 @@ export function AssistantNavEntry({
       </span>
       <span
         className={cn(
-          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
+          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-12 font-semibold text-nyx-secondary-400",
           collapsed && "hidden",
         )}
       >
@@ -417,7 +417,7 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="text-13 font-medium text-foreground">
+                <p className="text-15 font-medium text-foreground">
                   Sidebar control
                 </p>
               </div>
@@ -512,7 +512,7 @@ function SidebarModeOption({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-13 transition-colors duration-200 hover:bg-overlay-strong",
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-15 transition-colors duration-200 hover:bg-overlay-strong",
         active
           ? "text-foreground"
           : "text-muted-foreground hover:text-foreground",

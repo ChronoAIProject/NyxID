@@ -73,7 +73,7 @@ export function GroupAgentAccessRequest({
       </>
     );
   return (
-    <div className="space-y-1 text-12">
+    <div className="space-y-1 text-14">
       {request?.status === "pending" ? (
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">Owner approval pending</Badge>

@@ -222,7 +222,7 @@ function ConversationsSection({
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <h3 className="text-lg font-medium">Conversation Routes</h3>
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Map conversations to AI agents for message relay.
           </p>
         </div>
@@ -242,7 +242,7 @@ function ConversationsSection({
       ) : !conversations || conversations.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
           <ArticleIcon className="h-48 w-48 text-muted-foreground" />
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             No conversation routes configured. Add a route to start relaying
             messages to an AI agent.
           </p>
@@ -274,16 +274,16 @@ function ConversationsSection({
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
-                  <p className="pr-10 text-13 font-semibold text-foreground truncate">
+                  <p className="pr-10 text-15 font-semibold text-foreground truncate">
                     {conv.platform_conversation_id || conv.platform_sender_id || "—"}
                   </p>
-                  <p className="text-11 text-muted-foreground">Agent: {agentName}</p>
+                  <p className="text-13 text-muted-foreground">Agent: {agentName}</p>
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     <Badge variant="secondary">{conversationTypeLabel(conv.platform_conversation_type)}</Badge>
                     {conv.is_active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
                     {conv.default_agent && <Badge variant="info">Default</Badge>}
                   </div>
-                  <div className="mt-3 text-11 text-muted-foreground">
+                  <div className="mt-3 text-13 text-muted-foreground">
                     {activities.length ? <LatestActivity activity={latest(conv.id)} descriptors={activities} unavailable={!!activityQuery.error} loading={activityQuery.isPending} /> : conv.last_message_at ? `Last message ${formatRelativeTime(conv.last_message_at)}` : "No messages"}
                   </div>
                 </div>
@@ -571,7 +571,7 @@ export function AddRouteDialog({
                 checked={watch("default_agent") ?? false}
                 onCheckedChange={(v) => setValue("default_agent", v)}
               />
-              <Label htmlFor="default_agent" className="text-12">
+              <Label htmlFor="default_agent" className="text-14">
                 Set as default agent for this bot
               </Label>
             </div>
@@ -724,7 +724,7 @@ function LarkPermissionSetupSection({
   return (
     <DetailSection title="Configure Permissions">
       <div className="p-4">
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Open this link to grant the scopes NyxID's adapter needs in the
           Lark/Feishu developer console. The required scopes are
           pre-selected — confirm and bulk-enable them to finish setup.
@@ -951,7 +951,7 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
       <span className="flex flex-col gap-0.5">
         <span
           className={cn(
-            "text-12",
+            "text-14",
             row.status === "done"
               ? "text-muted-foreground line-through"
               : "text-foreground",
@@ -960,7 +960,7 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
           {row.label}
         </span>
         {row.hint ? (
-          <span className="text-11 text-muted-foreground">{row.hint}</span>
+          <span className="text-13 text-muted-foreground">{row.hint}</span>
         ) : null}
       </span>
     </li>
@@ -1039,10 +1039,10 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
   return (
     <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6">
       <div className="space-y-1">
-        <p className="text-13 font-medium text-foreground">
+        <p className="text-15 font-medium text-foreground">
           {isDiscord ? "Finish Discord setup" : "Finish webhook setup"}
         </p>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           {isDiscord ? "Ordinary chat arrives through the Gateway connection. Send the bot a DM or @mention it; the first authenticated message activates the bot. The Interactions Endpoint URL is optional and only needed for slash commands/components." : <>Register the URL below in {getPlatform(bot.platform).label} and complete
           the checklist. The bot moves to Active automatically once{" "}
           {getPlatform(bot.platform).label} delivers a verified inbound message.</>}

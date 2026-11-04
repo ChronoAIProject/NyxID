@@ -40,7 +40,7 @@ import type { PlatformProfile } from "@/schemas/platform-onboarding";
 function Preview({ content }: { content: HelpContent }) {
   return (
     <div
-      className="space-y-4 rounded-lg border border-border bg-muted p-4 text-12"
+      className="space-y-4 rounded-lg border border-border bg-muted p-4 text-14"
       aria-label="Help preview"
     >
       {content.articles.map((a, i) => (
@@ -112,7 +112,7 @@ function LibraryEditor({
     setRollback(undefined);
   };
   return (
-    <div className="space-y-4 text-12">
+    <div className="space-y-4 text-14">
       <p>
         Published revision {library.published_revision}. Publishing updates
         every manager assigned to this library. Started replies keep their
@@ -156,7 +156,7 @@ function LibraryEditor({
             ),
           )}
         >
-          <h3 className="text-13 font-semibold">FAQ articles</h3>
+          <h3 className="text-15 font-semibold">FAQ articles</h3>
           {articles.fields.map((a, i) => (
             <fieldset
               key={a.fieldKey}
@@ -230,7 +230,7 @@ function LibraryEditor({
           >
             Add article
           </Button>
-          <h3 className="text-13 font-semibold">Use cases</h3>
+          <h3 className="text-15 font-semibold">Use cases</h3>
           <p className="text-muted-foreground">
             These describe ideas and example prompts. They do not create bots or
             grant access.
@@ -564,7 +564,7 @@ export function PlatformHelpAssignment({
   const value = selected ?? assignment.data.library_id;
   return (
     <div className="space-y-2">
-      <label className="text-12 font-medium" htmlFor={`help-${profile.id}`}>
+      <label className="text-14 font-medium" htmlFor={`help-${profile.id}`}>
         Shared help library
       </label>
       <Select value={value} onValueChange={setSelected}>

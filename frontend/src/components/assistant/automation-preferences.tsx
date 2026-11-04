@@ -47,7 +47,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
         <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: "Overview › Automations", keywords: `${row.source} ${row.status}` }} key={row.id} asChild interactive>
           <Link to="/assistant/automations" search={{ agent: agentId }}>
             <span className="min-w-0 flex-1 break-words">{row.label}</span>
-            <span className="text-11 text-text-tertiary">
+            <span className="text-13 text-text-tertiary">
               {row.status === "active"
                 ? row.source === "webhook" ? "Runs on webhook events" : row.next_run_at
                   ? formatAutomationTime(row.next_run_at, settings.data?.timezone ?? browserTimezone())
@@ -76,7 +76,7 @@ export function AutomationPreferences({ title = "Automations" }: { readonly titl
   const [open, setOpen] = useState(false);
   const guard = useGroupedDraftGuard();
   return (
-    <div className="max-w-2xl space-y-6 text-12">
+    <div className="max-w-2xl space-y-6 text-14">
       <GroupedList title={title}>
         <GroupedDisclosure
           aria-expanded={open}

@@ -80,8 +80,8 @@ export function GatewayCleanupControls({
   if (!tasks.data?.length && !tasks.error) return null;
   return (
     <section className="space-y-3 rounded-lg border border-border p-3">
-      <h3 className="text-12 font-medium">Previous gateway connections</h3>
-      <p className="text-12 text-muted-foreground">
+      <h3 className="text-14 font-medium">Previous gateway connections</h3>
+      <p className="text-14 text-muted-foreground">
         Inspect a previous connection before resolving its cleanup. A changed
         remote binding is kept; recovery never deletes a different version.
       </p>
@@ -92,7 +92,7 @@ export function GatewayCleanupControls({
       {tasks.data?.map((task) => (
         <div
           key={task.id}
-          className="flex flex-wrap items-center justify-between gap-2 text-12"
+          className="flex flex-wrap items-center justify-between gap-2 text-14"
         >
           <span>
             Previous connection · version{" "}
@@ -118,7 +118,7 @@ export function GatewayCleanupControls({
         </div>
       ))}
       {current && (
-        <div className="space-y-3 text-12">
+        <div className="space-y-3 text-14">
           <p>
             Reviewed previous version {current.captured_version}.{" "}
             {current.remote_exists
@@ -216,7 +216,7 @@ function AdminProfiles() {
         />
       )}
       {profiles.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading platform profiles…
         </p>
       )}
@@ -231,7 +231,7 @@ function AdminProfiles() {
           key={profile.id}
           title={`${profile.display_name ?? profile.manager_bot_id} · ${channelPlatformName(profile.platform ?? "telegram")}`}
         >
-          <div className="space-y-3 p-4 text-12">
+          <div className="space-y-3 p-4 text-14">
             {profile.deleted_at && <p>Retired</p>}
             {!profile.deleted_at && (
               <>
@@ -337,7 +337,7 @@ function AdminProfiles() {
         </DetailSection>
       ))}
       {profiles.data?.profiles.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
           No platform profiles on this page.
         </p>
       )}
@@ -376,7 +376,7 @@ function AdminProfiles() {
                 ),
               )}
             >
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 Conversion replaces the channel owner’s private route with
                 shared access, revokes old assistant and route keys, and starts
                 paused. Built-in FAQ needs no model or funding organization.
@@ -393,7 +393,7 @@ function AdminProfiles() {
                     <FormControl>
                       <select
                         {...field}
-                        className="h-8 w-full rounded-lg border border-input bg-background px-3 text-12"
+                        className="h-8 w-full rounded-lg border border-input bg-background px-3 text-14"
                       >
                         <option value="">Choose a manager</option>
                         {targets.data?.bots

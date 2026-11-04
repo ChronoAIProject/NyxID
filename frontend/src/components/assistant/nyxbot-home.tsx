@@ -44,7 +44,7 @@ function Section({
 
 function Quiet({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{children}</p>
+    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{children}</p>
   );
 }
 
@@ -65,7 +65,7 @@ function HomeList({
   return (
     <div className="overflow-hidden rounded-xl border border-border/50 bg-card">
       <ul aria-label={label}>{children}</ul>
-      {more ? <div className="px-4 pb-3 text-11">{more}</div> : null}
+      {more ? <div className="px-4 pb-3 text-13">{more}</div> : null}
     </div>
   );
 }
@@ -85,8 +85,8 @@ function HomeListRow({
     <li className="flex items-start gap-3 px-4 py-3">
       {lead}
       <div className="min-w-0 flex-1 space-y-0.5">
-        <div className="flex items-center gap-2 text-12">{title}</div>
-        <p className="line-clamp-2 text-12 text-muted-foreground">{body}</p>
+        <div className="flex items-center gap-2 text-14">{title}</div>
+        <p className="line-clamp-2 text-14 text-muted-foreground">{body}</p>
       </div>
       {action}
     </li>
@@ -146,11 +146,11 @@ export function AwayList({
             <>
               <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
               {item.kind === "request" ? (
-                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
+                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-12 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
                   Needs a decision
                 </span>
               ) : (
-                <span className="flex items-center gap-1.5 text-11 text-text-tertiary">
+                <span className="flex items-center gap-1.5 text-13 text-text-tertiary">
                   <AgentStatusDot status={item.agent.status} />
                   {AGENT_STATUS_LABEL[item.agent.status]}
                   <span aria-hidden="true">·</span>
@@ -226,7 +226,7 @@ function MemoryPreview({
               title={
                 <>
                   <span className="font-medium text-foreground">Remembered</span>
-                  <span className="text-11 text-text-tertiary">{formatRelativeTime(note.updated_at)}</span>
+                  <span className="text-13 text-text-tertiary">{formatRelativeTime(note.updated_at)}</span>
                 </>
               }
               body={note.text}
@@ -258,16 +258,16 @@ function RosterCard({
         <AgentAvatar agent={agent} size="lg" />
         <div className="min-w-0 flex-1">
           <p className="flex min-w-0 items-baseline gap-1.5">
-            <span className="truncate text-13 font-semibold text-foreground">
+            <span className="truncate text-15 font-semibold text-foreground">
               {agentTitle(agent)}
             </span>
             {handle ? (
-              <span className="shrink-0 text-11 text-text-tertiary">
+              <span className="shrink-0 text-13 text-text-tertiary">
                 {handle}
               </span>
             ) : null}
           </p>
-          <p className="flex items-center gap-1.5 text-11 text-text-tertiary">
+          <p className="flex items-center gap-1.5 text-13 text-text-tertiary">
             {nyxbot ? (
               "Your personal agent"
             ) : (
@@ -285,7 +285,7 @@ function RosterCard({
           </p>
         </div>
       </div>
-      <p className="line-clamp-2 min-h-8 text-12 text-muted-foreground">
+      <p className="line-clamp-2 min-h-8 text-14 text-muted-foreground">
         {agent.description ||
           (nyxbot
             ? "Full access to your services and account. Delegates to your specialists."
@@ -326,16 +326,16 @@ function GroupCard({
         <div className="flex w-full items-center gap-2">
           <AgentAvatarStack agents={group.members} size="sm" max={4} />
           {working ? (
-            <span className="ml-auto flex items-center gap-1.5 text-11 text-muted-foreground">
+            <span className="ml-auto flex items-center gap-1.5 text-13 text-muted-foreground">
               <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
               {working} working
             </span>
           ) : null}
         </div>
-        <span className="truncate text-13 font-semibold text-foreground">
+        <span className="truncate text-15 font-semibold text-foreground">
           {group.name}
         </span>
-        <span className="truncate text-11 text-text-tertiary">
+        <span className="truncate text-13 text-text-tertiary">
           {group.owner?.type === "org" ? `${group.owner.name} · ` : ""}
           {group.members.map((member) => agentTitle(member)).join(", ")}
           {group.last_message_at ? ` · ${formatRelativeTime(group.last_message_at)}` : ""}
@@ -397,7 +397,7 @@ export function NyxBotHome({
               {greetingFor(now)}
               {firstName ? `, ${firstName}` : ""}
             </h1>
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               NyxBot is your personal agent. Ask it anything below, or check in
               on your team.
             </p>
@@ -436,7 +436,7 @@ export function NyxBotHome({
                   aria-label={section.label}
                   className="space-y-2"
                 >
-                  <h3 className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                  <h3 className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                     {section.label}
                   </h3>
                   <ul className="grid gap-3 sm:grid-cols-2">

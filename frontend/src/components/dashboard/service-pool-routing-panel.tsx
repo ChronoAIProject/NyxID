@@ -163,7 +163,7 @@ export function ServicePoolRoutingPanel({
           <Button type="submit" variant="outline" size="sm">
             Inspect
           </Button>
-          <p className="basis-full text-11 text-muted-foreground">
+          <p className="basis-full text-13 text-muted-foreground">
             Showing {operation.method} {operation.path} · metadata only, no
             service call · refreshed every 15s
           </p>
@@ -241,7 +241,7 @@ export function ServicePoolRoutingPanel({
                       </span>
                     </div>
                     {(key?.slug || candidate?.slug) && (
-                      <code className="block truncate text-11 text-muted-foreground">
+                      <code className="block truncate text-13 text-muted-foreground">
                         {key?.slug ?? candidate?.slug}
                       </code>
                     )}
@@ -256,26 +256,26 @@ export function ServicePoolRoutingPanel({
                         <span>{connectionSourceLabel(key)}</span>
                       </div>
                     )}
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       {key
                         ? credentialLabel(key, billing)
                         : "Credential not reported"}
                     </p>
                     {ai && (
-                      <p className="break-words text-11 text-muted-foreground">
+                      <p className="break-words text-13 text-muted-foreground">
                         Model: {member.model ?? "Not configured"}
                       </p>
                     )}
                   </TableCell>
                   <TableCell className="space-y-1 text-xs">
                     <p>{billingModelLabel(billing)}</p>
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       {billing?.context === "configuration"
                         ? "Expected payer"
                         : "Payer"}
                       : {billingAccountLabel(billing)}
                     </p>
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       {billing
                         ? nyxidChargeLabel(billing)
                         : "Rate not reported"}
@@ -294,7 +294,7 @@ export function ServicePoolRoutingPanel({
                         : status}
                     </Badge>
                     {candidate && (
-                      <p className="text-11 text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         {candidate.consecutive_failures} failures
                         {candidate.last_status
                           ? ` · Last HTTP ${candidate.last_status}`
@@ -302,13 +302,13 @@ export function ServicePoolRoutingPanel({
                       </p>
                     )}
                     {candidate?.cooldown_until && (
-                      <p className="text-11 text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Cooldown until{" "}
                         {new Date(candidate.cooldown_until).toLocaleString()}
                       </p>
                     )}
                     {!pool.is_active && (
-                      <p className="text-11 text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Pool disabled · no execution
                       </p>
                     )}
@@ -324,7 +324,7 @@ export function ServicePoolRoutingPanel({
           </p>
         )}
       </div>
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Each attempted connection uses its own rates and billing account.
         Reported usage can charge more than one attempt. Within that account:
         eligible allowance → credit grants → wallet credits. Platform-key usage

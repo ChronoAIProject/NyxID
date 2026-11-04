@@ -29,7 +29,7 @@ export function ThreadTitle({
           "group flex min-w-0 max-w-full items-center gap-2 text-left",
           heading
             ? "text-15 font-semibold text-foreground"
-            : "text-12 text-muted-foreground hover:text-foreground",
+            : "text-14 text-muted-foreground hover:text-foreground",
         )}
         onClick={() => {
           form.reset({ title });
@@ -99,7 +99,7 @@ export function ThreadTitle({
         </Button>
       </div>
       {error && (
-        <p role="alert" className="text-11 text-destructive">
+        <p role="alert" className="text-13 text-destructive">
           {error}
         </p>
       )}

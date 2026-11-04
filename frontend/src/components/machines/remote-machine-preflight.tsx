@@ -27,7 +27,7 @@ export function RemoteMachineQuota({
   return (
     <section
       aria-label="Platform quota preflight"
-      className={grouped ? "space-y-1" : "space-y-1 text-12 text-muted-foreground"}
+      className={grouped ? "space-y-1" : "space-y-1 text-14 text-muted-foreground"}
     >
       <p>
         Namespace quota: {quota ? quota.status.replaceAll("_", " ") : "Unknown"}
@@ -91,7 +91,7 @@ export function RemoteMachineBillingPreflight({
   return (
     <section
       aria-label="Paid runtime prerequisites"
-      className={grouped ? "space-y-1" : "space-y-2 text-12 text-muted-foreground"}
+      className={grouped ? "space-y-1" : "space-y-2 text-14 text-muted-foreground"}
     >
       <p>
         Billing preflight:{" "}

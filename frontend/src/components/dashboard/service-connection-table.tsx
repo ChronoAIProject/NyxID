@@ -154,7 +154,7 @@ function ConnectionMetadata({
       : []),
   ];
   return (
-    <dl className="grid gap-x-6 gap-y-3 px-1 py-2 text-11 sm:grid-cols-2 lg:grid-cols-3">
+    <dl className="grid gap-x-6 gap-y-3 px-1 py-2 text-13 sm:grid-cols-2 lg:grid-cols-3">
       {rows.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <dt className="text-muted-foreground">{label}</dt>
@@ -540,17 +540,17 @@ export function ServiceConnectionTable({
                       </Button>
                     </div>
                   )}
-                  <p className="mt-1 flex min-w-0 items-center gap-1 text-11 text-muted-foreground">
+                  <p className="mt-1 flex min-w-0 items-center gap-1 text-13 text-muted-foreground">
                     <code className="truncate" title={key.slug}>
                       {key.slug}
                     </code>
-                    <span className="shrink-0 text-10 uppercase tracking-wide">
+                    <span className="shrink-0 text-12 uppercase tracking-wide">
                       · {key.service_type}
                       {key.streaming_supported ? " · Streaming" : ""}
                       {key.websocket_supported ? " · WebSocket" : ""}
                     </span>
                   </p>
-                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11 text-muted-foreground">
+                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-13 text-muted-foreground">
                     <span
                       title={
                         key.expires_at
@@ -587,7 +587,7 @@ export function ServiceConnectionTable({
                     </span>
                   </div>
                   <p
-                    className="mt-1 truncate text-11 text-muted-foreground"
+                    className="mt-1 truncate text-13 text-muted-foreground"
                     title={credentialLabel(key, billing)}
                   >
                     {credentialLabel(key, billing)}
@@ -642,7 +642,7 @@ export function ServiceConnectionTable({
                           ? "No recorded use with exact connection attribution in the last 30 days"
                           : "Use is not reported by this server"
                     }
-                    className="mt-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm text-left text-11 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
+                    className="mt-1 flex w-full min-w-0 items-center gap-1.5 rounded-sm text-left text-13 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <Clock3
                       className="size-3.5 shrink-0 text-muted-foreground"
@@ -710,7 +710,7 @@ export function ServiceConnectionTable({
                         {billing &&
                           (billingCategory === "platform" ||
                             billingCategory === "byok") && (
-                            <span className="mt-1 block truncate text-11 text-muted-foreground">
+                            <span className="mt-1 block truncate text-13 text-muted-foreground">
                               {plainBilling(key, billing, catalog).short}
                             </span>
                           )}
@@ -753,12 +753,12 @@ export function ServiceConnectionTable({
                   {editable ? (
                     <>
                       <p
-                        className="truncate font-mono text-11"
+                        className="truncate font-mono text-13"
                         title={target(key)}
                       >
                         {target(key)}
                       </p>
-                      <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11 text-muted-foreground">
+                      <p className="mt-1 flex flex-wrap items-center gap-x-2 text-13 text-muted-foreground">
                         <span className="truncate" title={configCounts}>
                           {authNames[key.auth_method] ?? key.auth_method} ·{" "}
                           {route}
@@ -776,7 +776,7 @@ export function ServiceConnectionTable({
                       </p>
                     </>
                   ) : (
-                    <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
+                    <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
                       <LockKeyhole
                         className="size-3 shrink-0"
                         aria-hidden="true"
@@ -784,7 +784,7 @@ export function ServiceConnectionTable({
                       {key.auto_connected ? "Platform managed" : "Editors only"}
                     </p>
                   )}
-                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-11">
+                  <p className="mt-1 flex flex-wrap items-center gap-x-2 text-13">
                     <span
                       className="truncate"
                       title={
@@ -828,7 +828,7 @@ export function ServiceConnectionTable({
                     colSpan={5}
                     className="whitespace-normal pb-3 pt-0"
                   >
-                    <p className="mb-1.5 text-11 font-medium text-muted-foreground">
+                    <p className="mb-1.5 text-13 font-medium text-muted-foreground">
                       Member of service pools
                     </p>
                     <ul
@@ -844,7 +844,7 @@ export function ServiceConnectionTable({
                             <button
                               type="button"
                               onClick={() => onViewPool?.(pool.id)}
-                              className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-11 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                              className="flex min-w-0 items-start gap-1.5 rounded-sm text-left text-13 text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                               title={`${poolStrategyLabel(pool)} · ${pool.members.length} connections${!pool.is_active ? " · pool disabled" : ""}${!member.enabled ? " · member disabled" : ""}`}
                             >
                               <PoolStrategyIcon
@@ -920,7 +920,7 @@ export function ServiceConnectionTable({
   const blocked = ordering.busy || ordering.blocked;
   return (
     <div ref={root} className="min-w-0">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/50 p-3 text-12">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/50 p-3 text-14">
         <p className="flex-1 text-muted-foreground">
           Showing all {connections.length} connections while ordering; filters
           still apply to other services. Drag a handle, or press Space and use
@@ -946,14 +946,14 @@ export function ServiceConnectionTable({
         </Button>
       </div>
       {ordering.validationError && (
-        <p role="alert" className="p-3 text-12 text-destructive">
+        <p role="alert" className="p-3 text-14 text-destructive">
           At most 200 connections can have a saved agent order across all
           services. Reset this group to default, or reduce the group before
           saving.
         </p>
       )}
       {ordering.message && (
-        <p role="status" className="p-3 text-12 text-muted-foreground">
+        <p role="status" className="p-3 text-14 text-muted-foreground">
           {ordering.message}
         </p>
       )}
@@ -970,7 +970,7 @@ export function ServiceConnectionTable({
       {ordering.failure === "conflict" && (
         <div
           role="alert"
-          className="flex flex-wrap items-center gap-2 p-3 text-12"
+          className="flex flex-wrap items-center gap-2 p-3 text-14"
         >
           <p>Agent order changed in another tab.</p>
           <Button
@@ -1016,7 +1016,7 @@ export function ServiceConnectionTable({
         </div>
       )}
       {ordering.failure === "capacity" && (
-        <div role="alert" className="space-y-2 p-3 text-12">
+        <div role="alert" className="space-y-2 p-3 text-14">
           <p>
             {ordering.capacityMessage ||
               "Agent order storage is full (200 connections across all services). Reset the agent order of another service, or release unavailable preferences for services you can no longer access, then try again."}

@@ -53,7 +53,7 @@ export function ServiceSavedViews({
           >
             <Bookmark className="size-3.5" aria-hidden="true" />
             Saved views
-            <span className="rounded-full bg-muted px-1.5 text-10 tabular-nums">
+            <span className="rounded-full bg-muted px-1.5 text-12 tabular-nums">
               {view.workspace.views.length}
             </span>
             <ChevronDown className="size-3" aria-hidden="true" />
@@ -64,7 +64,7 @@ export function ServiceSavedViews({
           className="w-96 max-w-[calc(100vw-2rem)] space-y-3"
         >
           <div>
-            <h3 className="text-13 font-semibold">Saved views</h3>
+            <h3 className="text-15 font-semibold">Saved views</h3>
             <p className="mt-1 text-xs text-muted-foreground">
               Save named filter combinations. The default opens when you return
               to AI Services.
@@ -94,7 +94,7 @@ export function ServiceSavedViews({
                         />
                       )}
                     </span>
-                    <span className="mt-1 block text-11 font-normal text-muted-foreground">
+                    <span className="mt-1 block text-13 font-normal text-muted-foreground">
                       {view.workspace.default_id === saved.id
                         ? "Default · "
                         : ""}
@@ -244,7 +244,7 @@ export function ServiceSavedViews({
             )}
           </form>
           {!view.canSaveViews && (
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Saving named views requires the updated server.
             </p>
           )}
@@ -258,7 +258,7 @@ export function ServiceSavedViews({
       {active && (
         <span
           role="status"
-          className="inline-flex items-center gap-1.5 text-11 text-muted-foreground"
+          className="inline-flex items-center gap-1.5 text-13 text-muted-foreground"
         >
           <Check className="size-3 text-success" />
           {active.name}

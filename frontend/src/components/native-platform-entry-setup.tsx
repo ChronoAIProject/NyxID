@@ -144,7 +144,7 @@ export function NativePlatformEntrySetup({
           : "Shared entry for another chat platform"
       }
     >
-      <div className="space-y-4 p-4 text-12">
+      <div className="space-y-4 p-4 text-14">
         <p>
           {profile
             ? "Review this entry’s current credentials and transport before updating. Updating pauses both access modes and revokes prior chat authority. Owner routing remains closed; explicitly enable access after verification."

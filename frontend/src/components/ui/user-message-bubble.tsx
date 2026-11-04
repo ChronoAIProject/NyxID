@@ -5,7 +5,7 @@ export function UserMessageBubble({ className, ...props }: ComponentProps<"div">
   return (
     <div
       className={cn(
-        "rounded-[18px] rounded-br-[4px] bg-chat-bubble px-3 py-2 text-12 leading-relaxed text-chat-bubble-foreground whitespace-pre-wrap break-words",
+        "rounded-[18px] rounded-br-[4px] bg-chat-bubble px-3 py-2 text-14 leading-relaxed text-chat-bubble-foreground whitespace-pre-wrap break-words",
         className,
       )}
       {...props}

@@ -244,7 +244,7 @@ function EndpointFormEditor({
             className="space-y-4"
           >
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -271,7 +271,7 @@ function EndpointFormEditor({
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-background px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description of this endpoint"
                       {...field}
                     />
@@ -395,7 +395,7 @@ function EndpointFormEditor({
                   },
                 ] as const
               ).map((field) => (
-                <label key={field.name} className="text-12">
+                <label key={field.name} className="text-14">
                   {field.label}
                   <Select
                     value={form.watch(field.name) ?? "unspecified"}

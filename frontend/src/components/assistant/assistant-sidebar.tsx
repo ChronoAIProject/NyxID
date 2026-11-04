@@ -187,7 +187,7 @@ function ConversationRow({
         aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full overflow-hidden px-2 py-1 text-left text-13 transition-colors",
+          "w-full overflow-hidden px-2 py-1 text-left text-15 transition-colors",
           active
             ? "font-medium text-foreground"
             : "text-muted-foreground group-hover:text-foreground",
@@ -202,12 +202,12 @@ function ConversationRow({
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
-          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
+          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-12 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
         </span>
         {showDraft && (
           <span
             id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-normal text-text-tertiary"
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-13 leading-normal text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
             <span className="sr-only">Draft: </span>
@@ -223,7 +223,7 @@ function ConversationRow({
             data-icon-button=""
             data-keep-drawer-open=""
             className={cn(
-              "absolute right-1 top-1 flex items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+              "absolute right-1 top-1 flex items-center justify-center rounded-md bg-card text-15 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
               "pointer-events-none opacity-0",
               "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
               "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -344,20 +344,20 @@ function ChannelThreadsGroup({
         aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
-        className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-normal text-text-tertiary @min-[15rem]:inline">
+        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-12 font-medium leading-normal text-text-tertiary @min-[15rem]:inline">
           {platform}
         </span>
         {running ? (
           <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
         ) : null}
-        <span className="shrink-0 tabular-nums text-11">{count}</span>
+        <span className="shrink-0 tabular-nums text-13">{count}</span>
       </button>
       {open ? (
         // The guide line runs down from the chevron's centre.
@@ -366,7 +366,7 @@ function ChannelThreadsGroup({
             const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
             const followed = children.some((thread) => thread.channel?.thread_id);
             return <div key={chatId}>
-              {followed ? <p className="px-3 pt-1 text-11 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              {followed ? <p className="px-3 pt-1 text-13 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
               <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
             </div>;
           })}
@@ -375,7 +375,7 @@ function ChannelThreadsGroup({
               type="button"
               onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
               data-keep-drawer-open=""
-              className="w-full rounded-lg px-3 py-1 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+              className="w-full rounded-lg px-3 py-1 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
             >
               Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
             </button>
@@ -393,7 +393,7 @@ function HandleTooltip({ handle, children }: { readonly handle?: string; readonl
     <TooltipProvider delayDuration={200}>
       <Tooltip>
         <TooltipTrigger asChild>{children}</TooltipTrigger>
-        <TooltipContent side="bottom" align="start" className="text-11">{handle}</TooltipContent>
+        <TooltipContent side="bottom" align="start" className="text-13">{handle}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );
@@ -479,7 +479,7 @@ function AgentRow({
             className={cn(
               // The whole row highlights (also while its options button is
               // hovered); only its content fades under that button.
-              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left text-13 transition-colors group-hover:bg-sidebar-hover",
+              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left text-15 transition-colors group-hover:bg-sidebar-hover",
               selected
                 ? "font-medium text-foreground"
                 : "text-muted-foreground group-hover:text-foreground",
@@ -518,14 +518,14 @@ function AgentRow({
               {platforms.slice(0, 1).map((platform) => (
                 <span
                   key={platform}
-                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-normal text-text-tertiary @min-[15rem]:inline"
+                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-12 font-medium leading-normal text-text-tertiary @min-[15rem]:inline"
                 >
                   {channelPlatformName(platform)}
                   {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
                 </span>
               ))}
               {pending > 0 ? (
-                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
+                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-12 font-medium text-warning">
                   {pending}
                 </span>
               ) : null}
@@ -541,7 +541,7 @@ function AgentRow({
                 aria-label={`Options for ${name}`}
                 data-keep-drawer-open=""
                 className={cn(
-                  "absolute right-1 top-1/2 flex size-[1.5em] -translate-y-1/2 items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+                  "absolute right-1 top-1/2 flex size-[1.5em] -translate-y-1/2 items-center justify-center rounded-md bg-card text-15 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
                   "pointer-events-none opacity-0",
                   "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
                   "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -586,7 +586,7 @@ function AgentRow({
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-11 text-text-tertiary">
+            <p className="px-3 py-1.5 text-13 text-text-tertiary">
               Loading threads...
             </p>
           ) : null}
@@ -603,7 +603,7 @@ function AgentRow({
               type="button"
               onClick={() => model.onNewThread(agent.id)}
               aria-label={`New chat with ${name}`}
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
               <Plus aria-hidden="true" className="h-3 w-3" />
               New chat
@@ -652,7 +652,7 @@ function AgentsSection({
           type="button"
           aria-pressed={showDestroyed}
           onClick={() => setShowDestroyed((value) => !value)}
-          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
           {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
         </button>
@@ -771,14 +771,14 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
               );
             })}
             {owner === "personal" && model.loading && !model.groups.length ? (
-              <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading crews...</p>
+              <p className="px-3 py-1.5 text-13 text-text-tertiary">Loading crews...</p>
             ) : null}
             {owner === "personal" && !model.loading && !model.groups.length ? (
               <button
                 type="button"
                 onClick={model.onNewGroup}
                 data-keep-drawer-open=""
-                className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+                className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
               >
                 Chat with several agents at once
               </button>
@@ -1012,7 +1012,7 @@ export function AssistantSidebar({
             icon={FileText}
             label="Artifacts"
             trailing={
-              <span className="font-mono text-9 text-text-tertiary">
+              <span className="font-mono text-12 text-text-tertiary">
                 {counts.data?.artifacts ?? 0}
               </span>
             }
@@ -1032,7 +1032,7 @@ export function AssistantSidebar({
           />
           <span className="min-w-0 flex-1 truncate">Approvals</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
-            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
+            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-12 font-medium text-warning">
               {counts.data?.pendingApprovals}
             </span>
           )}
@@ -1045,7 +1045,7 @@ export function AssistantSidebar({
       {notice ? (
         <p
           role="status"
-          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-10 leading-relaxed text-muted-foreground"
+          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-12 leading-relaxed text-muted-foreground"
         >
           {notice}
         </p>
@@ -1167,12 +1167,12 @@ function RenameChatInline({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-12">
+          <label htmlFor="chat-title" className="text-14">
             Title
           </label>
           <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
           {error ? (
-            <p role="alert" className="mt-2 text-12 text-destructive">
+            <p role="alert" className="mt-2 text-14 text-destructive">
               {error}
             </p>
           ) : null}
@@ -1354,15 +1354,15 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
         <button data-icon-button="" type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
       </PopoverTrigger>
       <PopoverContent side="right" align="start" className="w-72 p-2">
-        <p className="px-2 py-1 text-12 font-medium">Previous chats</p>
+        <p className="px-2 py-1 text-14 font-medium">Previous chats</p>
         <ul aria-label="Previous chats" className="max-h-80 space-y-0.5 overflow-y-auto">
           {conversations.map((chat) => (
             <li key={chat.id}>
-              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-12 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
+              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
             </li>
           ))}
         </ul>
-        {!conversations.length ? <p className="px-2 py-1.5 text-11 text-text-tertiary">No chats yet.</p> : null}
+        {!conversations.length ? <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p> : null}
       </PopoverContent>
     </Popover>
   );
@@ -1460,23 +1460,23 @@ function RailAgentChats({
   const chats = selected ? model.threads : (threads.data ?? []);
   const loading = selected ? Boolean(model.threadsLoading) : threads.isPending;
   return (
-    <div className="space-y-1 text-12">
+    <div className="space-y-1 text-14">
       <div className="flex items-center gap-2 px-1 pb-1">
         <AgentAvatar agent={agent} size="sm" />
         <span className="min-w-0 flex-1 truncate font-medium text-foreground">{agentTitle(agent)}</span>
         <button
           type="button"
           onClick={onNewChat}
-          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           <Plus aria-hidden="true" className="h-3 w-3" />
           New chat
         </button>
       </div>
       {loading && !chats.length ? (
-        <p className="px-2 py-1.5 text-11 text-text-tertiary">Loading chats...</p>
+        <p className="px-2 py-1.5 text-13 text-text-tertiary">Loading chats...</p>
       ) : !chats.length ? (
-        <p className="px-2 py-1.5 text-11 text-text-tertiary">No chats yet.</p>
+        <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p>
       ) : (
         <ul aria-label={`${agentTitle(agent)} chats`} className="space-y-0.5">
           {chats.slice(0, RAIL_THREADS).map((chat) => (
@@ -1500,7 +1500,7 @@ function RailAgentChats({
         <button
           type="button"
           onClick={onAll}
-          className="w-full rounded-md px-2 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="w-full rounded-md px-2 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           All chats ({chats.length})
         </button>

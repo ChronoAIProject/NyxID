@@ -52,7 +52,7 @@ export function ServiceAgentOrderPanel({
   const availability = readState && (
     <p
       role={order.readError ? "alert" : "status"}
-      className={stateInSummary ? undefined : "text-11"}
+      className={stateInSummary ? undefined : "text-13"}
     >
       {readState}
     </p>
@@ -61,7 +61,7 @@ export function ServiceAgentOrderPanel({
     <section
       aria-label={`Agent discovery order for ${group.name}`}
       className={cn(
-        "space-y-2 bg-card px-4 py-3 text-12 text-muted-foreground",
+        "space-y-2 bg-card px-4 py-3 text-14 text-muted-foreground",
         className,
       )}
     >
@@ -123,7 +123,7 @@ export function ServiceAgentOrderPanel({
                       event.preventDefault();
                   }}
                   data-service-order-help
-                  className="max-w-[min(20rem,calc(100vw-2rem))] space-y-2 text-12 leading-relaxed"
+                  className="max-w-[min(20rem,calc(100vw-2rem))] space-y-2 text-14 leading-relaxed"
                 >
                   <ul className="space-y-2">
                     <li>Connections that match equally are shown in your order.</li>

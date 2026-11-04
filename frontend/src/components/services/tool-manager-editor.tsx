@@ -53,11 +53,11 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
           }
         })}
       >
-        <label className="text-12">
+        <label className="text-14">
           API base URL
           <Input disabled={!!frozen} {...destination.register("base_url")} />
         </label>
-        <p className="text-11 text-text-tertiary">
+        <p className="text-13 text-text-tertiary">
           {frozen
             ? "Destination frozen. Changes require an Admin."
             : "Review the vendor destination before setting the first credential."}
@@ -76,7 +76,7 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
       </form>
       <section className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
         <h2 className="text-15 font-semibold">Shared vendor credential</h2>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           {service.auth_method === "none"
             ? "No credential required."
             : service.credential_configured

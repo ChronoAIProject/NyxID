@@ -240,19 +240,19 @@ function AgentAssignment({
                     machine.
                   </p>
                   {error ? (
-                    <p role="alert" className="text-12 text-destructive">
+                    <p role="alert" className="text-14 text-destructive">
                       {error}
                     </p>
                   ) : null}
                   {membershipSaved && !error ? (
-                    <p role="status" className="text-12 text-success">
+                    <p role="status" className="text-14 text-success">
                       Machine assignment saved. Review the capability state below; a
                       capability save is a separate operation and does not roll back
                       this assignment.
                     </p>
                   ) : null}
                   {membershipSaved && capabilitySaveFailed ? (
-                    <p role="alert" className="text-12 text-warning">
+                    <p role="alert" className="text-14 text-warning">
                       Assignment succeeded, but capability changes failed. The
                       assignment remains in place; reload the current capability state
                       and retry editing when it is available.

@@ -259,11 +259,11 @@ function TopBar({
         <button
           type="button"
           onClick={onSearch}
-          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-14 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <Search className="h-[14px] w-[14px]" />
           <span>Search...</span>
-          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-10 text-text-tertiary">/</kbd>
+          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-12 text-text-tertiary">/</kbd>
         </button>
 
         {/* Profile — desktop only (mobile has it in the menu) */}
@@ -284,13 +284,13 @@ function TopBar({
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
-              className="rounded-md text-12"
+              className="rounded-md text-14"
             >
               Settings
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => void handleLogout()}
-              className="rounded-md text-12 text-destructive focus:text-destructive"
+              className="rounded-md text-14 text-destructive focus:text-destructive"
             >
               Log out
             </DropdownMenuItem>
@@ -302,7 +302,7 @@ function TopBar({
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
-          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-14 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
             <Github className="h-3 w-3" />
@@ -328,13 +328,13 @@ function TopBar({
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
-              className="rounded-md text-12"
+              className="rounded-md text-14"
             >
               Settings
             </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => void handleLogout()}
-              className="rounded-md text-12 text-destructive focus:text-destructive"
+              className="rounded-md text-14 text-destructive focus:text-destructive"
             >
               Log out
             </DropdownMenuItem>
@@ -481,7 +481,7 @@ function MobileNav({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search..."
-            className="flex-1 bg-transparent text-13 text-foreground placeholder:text-text-tertiary outline-none"
+            className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
           />
           {searchQuery && (
             <button type="button" onClick={() => setSearchQuery("")} className="text-text-tertiary">
@@ -506,13 +506,13 @@ function MobileNav({
                   <item.icon className="h-[18px] w-[18px] shrink-0 text-text-tertiary" />
                   <span className="flex-1 text-left">{item.label}</span>
                   {item.group === "action" && (
-                    <span className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                    <span className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
                   )}
                 </button>
               ))}
             </div>
           ) : (
-            <div className="py-8 text-center text-13 text-text-tertiary">
+            <div className="py-8 text-center text-15 text-text-tertiary">
               No results for &ldquo;{searchQuery}&rdquo;
             </div>
           )
@@ -600,7 +600,7 @@ function MobileNav({
           <button
             type="button"
             onClick={() => { onClose(); void navigate({ to: "/settings" }); }}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-12 text-muted-foreground active:bg-overlay-strong"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-14 text-muted-foreground active:bg-overlay-strong"
           >
             <Settings className="h-3.5 w-3.5" />
             Settings
@@ -608,7 +608,7 @@ function MobileNav({
           <button
             type="button"
             onClick={() => void handleLogout()}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-12 text-destructive active:bg-overlay-strong"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-14 text-destructive active:bg-overlay-strong"
           >
             <LogOut className="h-3.5 w-3.5" />
             Log out

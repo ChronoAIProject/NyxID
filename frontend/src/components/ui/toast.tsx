@@ -31,8 +31,8 @@ export function Toaster() {
       toastOptions={{
         classNames: {
           toast:
-            "group !rounded-xl !border !text-13 !shadow-lg !shadow-primary/5 !gap-3 !p-3 !border-border [&:not([data-type])]:!bg-card [&:not([data-type])]:!text-foreground [&_[data-icon]]:!flex [&_[data-icon]]:!h-[22px] [&_[data-icon]]:!w-[22px] [&_[data-icon]]:!shrink-0 [&_[data-icon]]:!items-center [&_[data-icon]]:!justify-center [&_[data-icon]]:!rounded-[6px] [&_[data-icon]>svg]:!h-3 [&_[data-icon]>svg]:!w-3 [&_[data-icon]]:!m-0",
-          description: "!text-12 !mt-0 whitespace-pre-line break-words",
+            "group !rounded-xl !border !text-15 !shadow-lg !shadow-primary/5 !gap-3 !p-3 !border-border [&:not([data-type])]:!bg-card [&:not([data-type])]:!text-foreground [&_[data-icon]]:!flex [&_[data-icon]]:!h-[22px] [&_[data-icon]]:!w-[22px] [&_[data-icon]]:!shrink-0 [&_[data-icon]]:!items-center [&_[data-icon]]:!justify-center [&_[data-icon]]:!rounded-[6px] [&_[data-icon]>svg]:!h-3 [&_[data-icon]>svg]:!w-3 [&_[data-icon]]:!m-0",
+          description: "!text-14 !mt-0 whitespace-pre-line break-words",
           actionButton: "!bg-primary !text-primary-foreground",
           cancelButton: "!bg-muted !text-muted-foreground",
           // Typed backgrounds mix the accent INTO the solid card color

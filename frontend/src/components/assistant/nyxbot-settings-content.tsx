@@ -167,7 +167,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             name="access_mode"
             render={({ field }) => (
               <FormItem inline>
-                <FormLabel className="flex-1 text-12 font-medium">
+                <FormLabel className="flex-1 text-14 font-medium">
                   Access mode
                 </FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
@@ -257,10 +257,10 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
               render={({ field }) => (
                 <FormItem inline>
                   <div className="min-w-0 flex-1">
-                    <FormLabel className="text-12 font-medium">
+                    <FormLabel className="text-14 font-medium">
                       {label}
                     </FormLabel>
-                    <RowDescription className="text-11 font-normal text-text-tertiary">
+                    <RowDescription className="text-13 font-normal text-text-tertiary">
                       {description}
                     </RowDescription>
                   </div>
@@ -300,7 +300,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             name="specialist_access_requests"
             render={({ field }) => (
               <FormItem inline>
-                <FormLabel className="flex-1 text-12 font-medium">
+                <FormLabel className="flex-1 text-14 font-medium">
                   Specialist access requests
                 </FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>

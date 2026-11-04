@@ -371,7 +371,7 @@ function RemoteMachineDetailView({
             : "An accepted request is awaiting a confirmed resource result.";
 
   return (
-    <div className="min-h-0 min-w-0 space-y-6 p-4 sm:p-5 [&_h2]:break-words [&>div:first-child>div:last-child]:max-w-full max-sm:[&_div.flex.text-12]:flex-col max-sm:[&_div.flex.text-12]:items-start max-sm:[&_div.flex.text-12]:gap-1 max-sm:[&_div.flex.text-12>div]:max-w-full max-sm:[&_.text-right]:text-left">
+    <div className="min-h-0 min-w-0 space-y-6 p-4 sm:p-5 [&_h2]:break-words [&>div:first-child>div:last-child]:max-w-full max-sm:[&_div.flex.text-14]:flex-col max-sm:[&_div.flex.text-14]:items-start max-sm:[&_div.flex.text-14]:gap-1 max-sm:[&_div.flex.text-14>div]:max-w-full max-sm:[&_.text-right]:text-left">
       <PageHeader
         title={machine.name ?? node?.name ?? "Remote Nyx Machine"}
         description={`${machine.profile.cpu_millis / 1000} vCPU · ${machine.profile.memory_mib / 1024} GiB RAM · ${machine.profile.workspace_gib} GiB workspace`}
@@ -442,12 +442,12 @@ function RemoteMachineDetailView({
         >
           {title && (
             <div className="space-y-1">
-              <h3 className="text-13 font-semibold">{title}</h3>
-              <p className="text-12 text-muted-foreground">{attention}</p>
+              <h3 className="text-15 font-semibold">{title}</h3>
+              <p className="text-14 text-muted-foreground">{attention}</p>
             </div>
           )}
           {notice && (
-            <div className="space-y-1 text-12">
+            <div className="space-y-1 text-14">
               <p>{notice.message}</p>
               <a
                 className="break-all text-primary-text underline"
@@ -458,7 +458,7 @@ function RemoteMachineDetailView({
             </div>
           )}
           {acceptancePending && acceptedAction && (
-            <p role="status" className="text-12">
+            <p role="status" className="text-14">
               {readable(acceptedAction)} request accepted. Waiting for the
               resource and runtime result.
             </p>
@@ -516,20 +516,20 @@ function RemoteMachineDetailView({
             className="grid min-w-0 gap-4 sm:grid-cols-3"
           >
             <div className="min-w-0 space-y-1">
-              <p className="text-11 text-muted-foreground">Execution</p>
-              <p className="text-13 font-semibold">
+              <p className="text-13 text-muted-foreground">Execution</p>
+              <p className="text-15 font-semibold">
                 {machine.authorization_state === "active" && canPause
                   ? "Runtime authorized"
                   : "Execution unavailable"}
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Agent and external grants are checked separately.
               </p>
             </div>
             <div className="min-w-0 space-y-1">
-              <p className="text-11 text-muted-foreground">Runtime billing</p>
-              <p className="text-13 font-semibold">{accounting.label}</p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">Runtime billing</p>
+              <p className="text-15 font-semibold">{accounting.label}</p>
+              <p className="text-13 text-muted-foreground">
                 {accounting.detail}
               </p>
               <Button variant="link" onClick={() => setTab("billing")}>
@@ -537,15 +537,15 @@ function RemoteMachineDetailView({
               </Button>
             </div>
             <div className="min-w-0 space-y-1">
-              <p className="text-11 text-muted-foreground">Node connection</p>
-              <p className="text-13 font-semibold">
+              <p className="text-13 text-muted-foreground">Node connection</p>
+              <p className="text-15 font-semibold">
                 {node
                   ? node.is_connected
                     ? "WSS connected"
                     : "WSS disconnected"
                   : "WSS status unknown"}
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Last heartbeat: {time(machine.last_heartbeat_at)}
               </p>
             </div>
@@ -560,7 +560,7 @@ function RemoteMachineDetailView({
               value="No fixed capacity declared"
             />
             <RemoteMachineUsage machineId={machineId} />
-            <details className="text-12">
+            <details className="text-14">
               <summary className="cursor-pointer px-4 py-3 font-medium">
                 Storage and recovery rules
               </summary>
@@ -580,7 +580,7 @@ function RemoteMachineDetailView({
             </details>
           </DetailSection>
           <DetailSection title="Using this machine">
-            <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
+            <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
               <p className="font-medium text-foreground">
                 {machine.specialist_assignment_state
                   ? {
@@ -744,7 +744,7 @@ function RemoteMachineTechnicalDetails({
   readonly machine: RemoteMachine;
 }) {
   return (
-    <details className="rounded-xl border border-border/50 bg-card text-12">
+    <details className="rounded-xl border border-border/50 bg-card text-14">
       <summary className="cursor-pointer px-4 py-3 font-medium">
         Technical information and resource binding
       </summary>
@@ -1039,7 +1039,7 @@ function LifecycleActionDialog({
                           }
                         />
                       </FormControl>
-                      <FormLabel className="min-w-0 flex-1 text-12">
+                      <FormLabel className="min-w-0 flex-1 text-14">
                         I understand{" "}
                         {action === "delete"
                           ? "the irreversible data loss and cleanup policy"
@@ -1055,7 +1055,7 @@ function LifecycleActionDialog({
               />
               <GroupedFooter>
                 {review.intent && (
-                  <p className="text-12 text-muted-foreground">
+                  <p className="text-14 text-muted-foreground">
                     A previous request is awaiting a confirmed result. Retrying uses
                     its original body and idempotency key.
                   </p>
@@ -1180,14 +1180,14 @@ function RemoteMachineTimeline({
   );
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Safe lifecycle events only. This timeline contains no commands,
         environment values, file contents or job output. Terminal projections
         remain for 90 days; required active work, cleanup, idempotency and
         billing evidence are retained separately.
       </p>
       {query.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading operation timeline…
         </p>
       )}
@@ -1198,7 +1198,7 @@ function RemoteMachineTimeline({
         />
       )}
       {!query.isPending && !query.error && !uniqueEvents.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
           No lifecycle events are available on this page.
         </p>
       )}
@@ -1209,19 +1209,19 @@ function RemoteMachineTimeline({
             className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-13 font-semibold">
+              <span className="text-15 font-semibold">
                 {readable(event.kind)}
               </span>
               <time
-                className="text-11 text-text-tertiary"
+                className="text-13 text-text-tertiary"
                 dateTime={event.created_at}
               >
                 {time(event.created_at)}
               </time>
             </div>
-            <p className="text-12 text-muted-foreground">{event.message}</p>
+            <p className="text-14 text-muted-foreground">{event.message}</p>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-11 text-text-tertiary">
+              <span className="text-13 text-text-tertiary">
                 Responsibility: {event.responsibility}
               </span>
               <Button
@@ -1234,7 +1234,7 @@ function RemoteMachineTimeline({
           </li>
         ))}
       </ol>
-      <div className="space-y-2 text-12 text-muted-foreground">
+      <div className="space-y-2 text-14 text-muted-foreground">
         <p>
           Loaded {uniqueEvents.length}{" "}
           {uniqueEvents.length === 1 ? "event" : "events"} on this page
@@ -1537,9 +1537,9 @@ function RemoteMachineClientSetup() {
           ["Codex", "~/.codex/config.toml", buildCodexConfig(url)],
         ] as const).map(([name, path, value]) => (
           <GroupedRow key={name} className="block space-y-1">
-            <p className="text-11 font-normal text-text-tertiary">{name} · {path}</p>
+            <p className="text-13 font-normal text-text-tertiary">{name} · {path}</p>
             <div className="relative">
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono text-11 font-normal leading-relaxed">{value}</pre>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono text-13 font-normal leading-relaxed">{value}</pre>
               <Button size="icon" variant="ghost" className="absolute right-0 top-0"
                 aria-label={`Copy ${name} HTTP MCP config`}
                 onClick={() =>

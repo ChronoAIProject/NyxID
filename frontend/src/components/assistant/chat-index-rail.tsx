@@ -279,7 +279,7 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
         </div>
       </nav>
       {hover && hoveredEntry ? (
-        <div role="tooltip" className="absolute right-full mr-2 w-max max-w-72 -translate-y-1/2 rounded-lg border border-hairline bg-popover px-3 py-2 text-11 text-foreground shadow-sm" style={{ top: hover.y }}>
+        <div role="tooltip" className="absolute right-full mr-2 w-max max-w-72 -translate-y-1/2 rounded-lg border border-hairline bg-popover px-3 py-2 text-13 text-foreground shadow-sm" style={{ top: hover.y }}>
           <p className="mb-1 font-medium text-text-tertiary">{hoveredEntry.author}</p>
           <p className="line-clamp-3 whitespace-pre-wrap break-words">{hoveredEntry.title}</p>
         </div>

@@ -307,19 +307,19 @@ function MachineGrantCardContent({
         <CardTitle>Machine permissions</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           {source.kind === "api_key"
             ? "This parent Key and all its valid login credentials share one Machine grant. Logging out a child credential stops only that child’s work; revoking or rotating the parent affects all children and requires new approval for a successor."
             : "This account and OAuth client share one Machine grant across connections. First approval and reauthorization use the application’s OAuth consent flow."}
         </p>
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Revoking only Machine permissions leaves other service consent intact
           and does not pause or delete the Machine. Changing a grant invalidates
           its earlier work across every assigned Machine; independent subjects
           and Assistant assignments are separate.
         </p>
         {!eligible && (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             This source is not eligible for external Machine permissions. Use an
             active personal general-purpose Key or the application’s explicit
             Machine consent.
@@ -378,13 +378,13 @@ function MachineGrantCardContent({
                         : "expired"}
                 </Badge>
               </div>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {independentValidity
                   ? "Source authentication and Machine grant validity are live checks over their authoritative records. Unknown or stale results do not establish execution authority, Machine readiness, or the client’s local token state."
                   : "The server reports one combined source and grant check; it does not report source validity separately. This result is separate from Machine resource readiness and from the client’s local token or transport state."}
               </p>
               {source.kind === "api_key" ? (
-                <div className="space-y-2 rounded-lg border border-border/50 bg-muted/30 p-3 text-12">
+                <div className="space-y-2 rounded-lg border border-border/50 bg-muted/30 p-3 text-14">
                   <p className="font-medium">Current parent Key review</p>
                   {sourceMetadataPending ? (
                     <p role="status" className="text-muted-foreground">
@@ -432,7 +432,7 @@ function MachineGrantCardContent({
               ) : null}
               {grant && (
                 <>
-                  <dl className="grid gap-x-4 gap-y-2 text-12 sm:grid-cols-2">
+                  <dl className="grid gap-x-4 gap-y-2 text-14 sm:grid-cols-2">
                     <div>
                       <dt className="text-muted-foreground">Grant ID</dt>
                       <dd className="break-all font-mono">{grant.id}</dd>
@@ -467,7 +467,7 @@ function MachineGrantCardContent({
                       ([nodeId, assignment]) => (
                         <article
                           key={nodeId}
-                          className={`space-y-1 rounded-lg border p-3 text-12 ${nodeId === machineId ? "border-primary/50" : "border-border"}`}
+                          className={`space-y-1 rounded-lg border p-3 text-14 ${nodeId === machineId ? "border-primary/50" : "border-border"}`}
                         >
                           <div className="flex flex-wrap items-center gap-2">
                             <Link
@@ -504,7 +504,7 @@ function MachineGrantCardContent({
                     )}
                   </div>
                   {machineId && !currentAssignment ? (
-                    <p role="alert" className="text-12 text-warning">
+                    <p role="alert" className="text-14 text-warning">
                       This source grant no longer includes the current Machine.
                       Reload the Machine permissions list before taking an
                       action.
@@ -514,21 +514,21 @@ function MachineGrantCardContent({
               )}
               {(query.data.source_valid === false ||
                 (active && query.data.grant_valid === false)) && (
-                <p className="text-12 text-warning">
+                <p className="text-14 text-warning">
                   Current source or grant checks prevent editing. Reload and
                   review the original authentication source before approving new
                   Machine permissions.
                 </p>
               )}
               {!sourceVersionAvailable && (
-                <p role="alert" className="text-12 text-warning">
+                <p role="alert" className="text-14 text-warning">
                   This server did not expose the parent Key revision required
                   for safe approval. Reload after server integration; approvals
                   are unavailable.
                 </p>
               )}
               {source.kind === "oauth" && !active && (
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   Reconnect from this application and explicitly approve Machine
                   access to create a new grant. Existing consent cannot silently
                   restore revoked or expired Machine permissions.
@@ -619,7 +619,7 @@ function MachineGrantCardContent({
               </DialogDescription>
             </DialogHeader>
             {revokeReview && !revokeReviewCurrent && (
-              <p role="alert" className="text-12 text-warning">
+              <p role="alert" className="text-14 text-warning">
                 Machine permissions changed since this review. Close this
                 dialog, reload, and review the current grant before revoking.
               </p>
@@ -699,13 +699,13 @@ function MachineGrantCardContent({
               </DialogDescription>
             </DialogHeader>
             {removeReview && !removeReviewCurrent ? (
-              <p role="alert" className="text-12 text-warning">
+              <p role="alert" className="text-14 text-warning">
                 The source grant changed since this review. Close this dialog,
                 reload, and review the current assignments before removing the
                 Machine.
               </p>
             ) : null}
-            <div className="space-y-1 rounded-lg border border-border p-3 text-12">
+            <div className="space-y-1 rounded-lg border border-border p-3 text-14">
               <p className="font-medium">Affected assignments</p>
               {grant
                 ? Object.keys(grant.assignments).map((nodeId) => (
@@ -726,7 +726,7 @@ function MachineGrantCardContent({
                 : null}
             </div>
             {grant && Object.keys(grant.assignments).length > 1 ? (
-              <div className="space-y-2 text-12">
+              <div className="space-y-2 text-14">
                 <p>{SHARED_LEGACY_WARNING}</p>
                 <label className="flex items-start gap-2">
                   <Checkbox

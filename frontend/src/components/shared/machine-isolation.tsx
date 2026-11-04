@@ -74,7 +74,7 @@ export function MachineSeparationSupport({ machine, support, setupNote, humanOnl
     : timeout ? "Separation probe timed out"
     : unsupported ? "Separation prerequisites not met"
     : "Separation support unknown";
-  return <div className={humanOnly ? "space-y-1 text-11 text-text-tertiary" : "space-y-1 text-12 text-muted-foreground"} aria-label="Separation support" data-support-reason={reason}>
+  return <div className={humanOnly ? "space-y-1 text-13 text-text-tertiary" : "space-y-1 text-14 text-muted-foreground"} aria-label="Separation support" data-support-reason={reason}>
     {humanOnly ? <p className={confirmed ? "text-foreground" : "text-warning"}>{label}</p> : <Badge variant={confirmed ? "success" : "warning"}>{label}</Badge>}
     <p>{confirmed
       ? "The latest capability report confirms support. Each agent’s stored mode and permissions still apply; existing shared legacy assignments stay shared."
