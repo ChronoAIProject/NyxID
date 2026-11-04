@@ -51,6 +51,7 @@ pub(super) struct Responses {
     continuations: HashSet<String>,
     completed: HashSet<String>,
     calls: HashSet<String>,
+    submitted: HashSet<String>,
 }
 
 fn invalid() -> AppError {
@@ -205,6 +206,11 @@ impl Responses {
                 }
                 self.completed.insert(response_id.into());
                 if kind != "response.completed" {
+                    return Err(invalid());
+                }
+                // Continuation acknowledges a submission; a fresh function
+                // call ID cannot submit that same Live delegation again.
+                if !response.calls.is_empty() && !self.submitted.insert(delegation.into()) {
                     return Err(invalid());
                 }
                 for invocation in &response.calls {

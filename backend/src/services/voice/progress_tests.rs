@@ -718,6 +718,17 @@ async fn native_voice_task_preserves_complete_model_request_without_captions_and
         assert_eq!(commands[0]["type"],"response.item.create");
         assert_eq!(commands[0]["item"]["call_id"],"native-call");
         assert_eq!(commands[1]["type"],"response.create");
+        drop(commands);
+        let mut continuation=native_created();
+        continuation["event"]["response"]["id"]=json!("native-continuation");
+        native.event(&state,&mut call,&mut socket,&continuation,false).await.unwrap();
+        let mut retry=native_item(json!({"request":text}));
+        retry["event"]["item"]["call_id"]=json!("new-id-for-same-task");
+        native.event(&state,&mut call,&mut socket,&retry,false).await.unwrap();
+        let mut completed=native_completed();
+        completed["event"]["response"]["id"]=json!("native-continuation");
+        assert!(native.event(&state,&mut call,&mut socket,&completed,false).await.is_err());
+        assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{"session_id":&call.id}).await.unwrap(),1);
         server.abort();
     }).await;
 }

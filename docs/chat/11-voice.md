@@ -608,7 +608,7 @@ sequenceDiagram
     U->>O: Spoken service request over browser WebRTC
     O-->>V: Caption deltas + native model task call
     V->>D: Deduplicate; persist input and request; admit/queue
-    V->>O: commentary.append (accepted/queued, delegation_id)
+    V->>O: response.item.create (queued/refused receipt); response.create
     O-->>U: Immediate acknowledgement
     V->>N: Ordinary user turn on same thread/key
     N-->>V: Allowlisted activity state
@@ -622,7 +622,7 @@ sequenceDiagram
     V->>O: commentary.append (settled result)
     O-->>U: Proactive result
     opt Explicit cancel of another running task
-        O-->>V: User transcript identifies task cancellation
+        O-->>V: Complete model task identifies requested cancellation
         V->>D: Expected-turn Stop; invalidate task continuation
         V->>N: Existing Stop/drop-stream and machine cancellation
         N->>D: Persist cancelled or uncertain outcome
@@ -644,7 +644,7 @@ sequenceDiagram
     B->>V: End (local capture/playback off immediately)
     V->>O: session.close
     O-->>V: session.closed with final usage.seconds
-    V->>D: Settle duration; release session slot
+    V->>D: Settle reported Responses tokens and duration; release slot
     V-->>B: voice.ended; close media/control transports
     Note over N,D: Accepted work survives audio end; reply/notification stays in thread
 ```
