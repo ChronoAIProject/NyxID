@@ -22,6 +22,8 @@ export const nextStepSchema = z.object({
 
 export const assistantOnboardingSchema = z.object({
   show_intro: z.boolean(),
+  /** The owner hid the home's suggestions; the intro still offers them. */
+  suggestions_hidden: z.boolean().default(false),
   intro_version: z.number(),
   profile: z
     .object({

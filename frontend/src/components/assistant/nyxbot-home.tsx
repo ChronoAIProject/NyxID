@@ -366,7 +366,7 @@ export function NyxBotHome({
   onManageMemory,
   nextSteps,
   onStartNextStep,
-  onDismissNextStep,
+  onHideNextSteps,
   onReplayIntro,
 }: {
   readonly userName: string | undefined;
@@ -383,7 +383,8 @@ export function NyxBotHome({
   /** Suggested next steps; the section is hidden when there are none. */
   readonly nextSteps?: readonly NextStep[];
   readonly onStartNextStep?: (step: NextStep) => void;
-  readonly onDismissNextStep?: (step: NextStep) => void;
+  /** Hides the whole section until the intro is retaken. */
+  readonly onHideNextSteps?: () => void;
   readonly onReplayIntro?: () => void;
 }) {
   const [now] = useState(() => new Date());
@@ -420,17 +421,23 @@ export function NyxBotHome({
             id="nyxbot-home-next-steps"
             title="Suggested for you"
             action={
-              onReplayIntro ? (
-                <Button size="sm" variant="ghost" onClick={onReplayIntro}>
-                  Replay intro
-                </Button>
-              ) : undefined
+              <div className="flex items-center gap-1">
+                {onReplayIntro ? (
+                  <Button size="sm" variant="ghost" onClick={onReplayIntro}>
+                    Replay intro
+                  </Button>
+                ) : null}
+                {onHideNextSteps ? (
+                  <Button size="sm" variant="ghost" onClick={onHideNextSteps}>
+                    Hide
+                  </Button>
+                ) : null}
+              </div>
             }
           >
             <NextStepCards
               steps={nextSteps}
               onStart={onStartNextStep}
-              onDismiss={onDismissNextStep}
               className="sm:grid-cols-2"
             />
           </Section>

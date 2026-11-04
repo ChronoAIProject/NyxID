@@ -2,7 +2,7 @@
 //! Human-only (first-party sessions), like the rest of `/assistant/nyxagent`.
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Query, State},
 };
 use serde::{Deserialize, Serialize};
 
@@ -50,6 +50,8 @@ pub struct RecommendationResponse {
 pub struct OnboardingResponse {
     /// Open the first-run intro now.
     show_intro: bool,
+    /// The owner hid the home's suggestions (the intro still offers them).
+    suggestions_hidden: bool,
     intro_version: i32,
     profile: Option<ProfileResponse>,
     topics: Vec<ChoiceResponse>,
@@ -91,8 +93,12 @@ async fn respond(
             icon: rec.icon,
         })
         .collect();
+    let suggestions_hidden = profile
+        .as_ref()
+        .is_some_and(|row| row.suggestions_hidden_at.is_some());
     Ok(OnboardingResponse {
         show_intro,
+        suggestions_hidden,
         intro_version: INTRO_VERSION,
         profile: profile.map(|row| ProfileResponse {
             outcome: row.outcome,
@@ -198,18 +204,18 @@ pub async fn save_onboarding(
     ))
 }
 
-/// POST /api/v1/assistant/nyxagent/onboarding/recommendations/{id}/dismiss
+/// POST /api/v1/assistant/nyxagent/onboarding/suggestions/hide
 ///
-/// Hides one next step for good and returns the refreshed state.
-pub async fn dismiss_recommendation(
+/// Hides the home's suggestions until the intro is retaken; returns the
+/// refreshed state.
+pub async fn hide_suggestions(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<String>,
 ) -> AppResult<Json<OnboardingResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    onboarding::dismiss(&state.db, &owner, &id).await?;
+    onboarding::hide_suggestions(&state.db, &owner).await?;
     let profile = onboarding::get(&state.db, &owner).await?;
     Ok(Json(
         respond(&state, &owner, profile, onboarding::DEFAULT_RECOMMENDATIONS).await?,

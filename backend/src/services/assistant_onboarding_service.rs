@@ -14,8 +14,8 @@ use mongodb::{
 use crate::{
     errors::{AppError, AppResult},
     models::assistant_onboarding::{
-        AssistantOnboarding, COLLECTION_NAME, INTRO_VERSION, InterestTopic,
-        MAX_DISMISSED_RECOMMENDATIONS, OnboardingOutcome, WorkStyle,
+        AssistantOnboarding, COLLECTION_NAME, INTRO_VERSION, InterestTopic, OnboardingOutcome,
+        WorkStyle,
     },
 };
 
@@ -301,10 +301,6 @@ static CATALOG: &[Recommendation] = &[
     },
 ];
 
-pub fn is_known_recommendation(id: &str) -> bool {
-    CATALOG.iter().any(|rec| rec.id == id)
-}
-
 /// What the owner already has, read only when recommendations are requested.
 #[derive(Clone, Debug, Default)]
 pub struct Signals {
@@ -350,7 +346,7 @@ fn is_done(rec: &Recommendation, signals: &Signals) -> bool {
 }
 
 /// The best `limit` recommendations: matching topics and work style first,
-/// then the catalog's own priority. Done and dismissed ones are left out.
+/// then the catalog's own priority. Done ones are left out.
 pub fn recommend(
     profile: Option<&AssistantOnboarding>,
     signals: &Signals,
@@ -358,13 +354,10 @@ pub fn recommend(
 ) -> Vec<&'static Recommendation> {
     let topics = profile.map(|row| row.topics.as_slice()).unwrap_or_default();
     let style = profile.and_then(|row| row.work_style);
-    let dismissed = profile
-        .map(|row| row.dismissed_recommendations.as_slice())
-        .unwrap_or_default();
     let mut ranked: Vec<(i32, usize, &'static Recommendation)> = CATALOG
         .iter()
         .enumerate()
-        .filter(|(_, rec)| !dismissed.iter().any(|id| id == rec.id) && !is_done(rec, signals))
+        .filter(|(_, rec)| !is_done(rec, signals))
         .map(|(order, rec)| {
             let topic_hits = rec.topics.iter().filter(|t| topics.contains(t)).count() as i32;
             let style_hit = style.is_some_and(|s| rec.styles.contains(&s));
@@ -534,9 +527,11 @@ pub async fn save(db: &Database, owner: &str, answers: Answers) -> AppResult<Ass
                 "outcome": encode(&answers.outcome)?,
                 "topics": encode(&topics)?,
                 "work_style": encode(&work_style)?,
+                // Retaking the intro brings the suggestions back.
+                "suggestions_hidden_at": bson::Bson::Null,
                 "updated_at": now,
             },
-            "$setOnInsert": {"created_at": now, "dismissed_recommendations": []},
+            "$setOnInsert": {"created_at": now},
         },
     )
     .await?;
@@ -558,24 +553,15 @@ pub async fn save(db: &Database, owner: &str, answers: Answers) -> AppResult<Ass
     Ok(row)
 }
 
-pub async fn dismiss(db: &Database, owner: &str, recommendation_id: &str) -> AppResult<()> {
-    if !is_known_recommendation(recommendation_id) {
-        return Err(AppError::NotFound("Recommendation not found".into()));
-    }
-    if get(db, owner)
-        .await?
-        .is_some_and(|row| row.dismissed_recommendations.len() >= MAX_DISMISSED_RECOMMENDATIONS)
-    {
-        return Ok(());
-    }
+/// Hide the home's suggestions until the owner retakes the intro.
+pub async fn hide_suggestions(db: &Database, owner: &str) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
-    // Dismissing before the intro was ever answered records a skipped intro.
+    // Hiding before the intro was ever answered records a skipped intro.
     fenced_upsert(
         db,
         owner,
         doc! {
-            "$addToSet": {"dismissed_recommendations": recommendation_id},
-            "$set": {"updated_at": now},
+            "$set": {"suggestions_hidden_at": now, "updated_at": now},
             "$setOnInsert": {
                 "intro_version": INTRO_VERSION,
                 "outcome": "skipped",
@@ -630,7 +616,7 @@ mod tests {
             outcome: OnboardingOutcome::Completed,
             topics: topics.to_vec(),
             work_style: style,
-            dismissed_recommendations: Vec::new(),
+            suggestions_hidden_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -693,11 +679,11 @@ mod tests {
     }
 
     #[test]
-    fn done_and_dismissed_are_left_out() {
-        let mut row = profile(&[InterestTopic::Inbox, InterestTopic::Calendar], None);
-        row.dismissed_recommendations = vec!["morning_brief".into()];
+    fn done_steps_are_left_out() {
+        let row = profile(&[InterestTopic::Inbox, InterestTopic::Calendar], None);
         let signals = Signals {
             service_slugs: vec!["api-google-2".into()],
+            has_schedule: true,
             ..Signals::default()
         };
         let recs = recommend(Some(&row), &signals, 3);
@@ -747,7 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn answers_drive_intro_gate_memory_note_and_dismissals() {
+    async fn answers_drive_intro_gate_memory_note_and_hidden_suggestions() {
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
         let db = crate::test_utils::connect_transaction_test_database("assistant_onboarding").await;
         let owner = "12345678-1234-4123-8123-123456789abc";
@@ -851,25 +837,27 @@ mod tests {
             .unwrap();
         assert!(nyxbot.memory.iter().all(|note| note.id != MEMORY_NOTE_ID));
 
-        dismiss(&db, owner, "connect_inbox").await.unwrap();
-        dismiss(&db, owner, "connect_inbox").await.unwrap();
-        assert!(matches!(
-            dismiss(&db, owner, "nope").await,
-            Err(AppError::NotFound(_))
-        ));
+        hide_suggestions(&db, owner).await.unwrap();
         let row = get(&db, owner).await.unwrap().unwrap();
-        assert_eq!(row.dismissed_recommendations, ["connect_inbox"]);
+        assert!(row.suggestions_hidden_at.is_some());
         assert_eq!(row.outcome, OnboardingOutcome::Skipped);
-        let signals = load_signals(&db, owner).await.unwrap();
-        assert!(
-            recommend(Some(&row), &signals, 6)
-                .iter()
-                .all(|rec| rec.id != "connect_inbox")
-        );
+        // Retaking the intro brings them back.
+        let row = save(
+            &db,
+            owner,
+            Answers {
+                outcome: OnboardingOutcome::Completed,
+                topics: vec![],
+                work_style: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(row.suggestions_hidden_at.is_none());
     }
 
     #[tokio::test]
-    async fn existing_nyxbot_users_skip_the_intro_and_dismissing_first_records_a_skip() {
+    async fn existing_nyxbot_users_skip_the_intro_and_hiding_first_records_a_skip() {
         let db =
             crate::test_utils::connect_transaction_test_database("assistant_onboarding_existing")
                 .await;
@@ -879,7 +867,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!should_show_intro(&db, owner, None).await.unwrap());
-        dismiss(&db, owner, "morning_brief").await.unwrap();
+        hide_suggestions(&db, owner).await.unwrap();
         let row = get(&db, owner).await.unwrap().unwrap();
         assert_eq!(row.outcome, OnboardingOutcome::Skipped);
         assert_eq!(row.intro_version, INTRO_VERSION);

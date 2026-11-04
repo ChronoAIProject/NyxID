@@ -95,8 +95,8 @@ export function NyxBotHome({
     staleTime: 60_000,
     retry: false,
   });
-  const dismiss = useMutation({
-    mutationFn: (id: string) => onboardingApi.dismiss(id),
+  const hideSuggestions = useMutation({
+    mutationFn: () => onboardingApi.hideSuggestions(),
     onSuccess: (next) => queryClient.setQueryData(onboardingKey, next),
   });
   const [intro, setIntro] = useState<"first_run" | "home">();
@@ -106,7 +106,9 @@ export function NyxBotHome({
     introShown.current = true;
     setIntro("first_run");
   }, [onboarding.data?.show_intro]);
-  const nextSteps = onboarding.data?.recommendations ?? [];
+  const nextSteps = onboarding.data?.suggestions_hidden
+    ? []
+    : (onboarding.data?.recommendations ?? []);
   const roster = agents.data?.agents ?? [];
   const groups = crews.data ?? [];
   const latest = useRef({ roster, groups });
@@ -174,19 +176,27 @@ export function NyxBotHome({
         <Section
           title="Suggested for you"
           action={
-            <ActionButton
-              label="Replay intro"
-              compact
-              variant="secondary"
-              onPress={() => setIntro("home")}
-            />
+            <>
+              <ActionButton
+                label="Replay intro"
+                compact
+                variant="secondary"
+                onPress={() => setIntro("home")}
+              />
+              <ActionButton
+                label="Hide"
+                compact
+                variant="secondary"
+                disabled={!online || hideSuggestions.isPending}
+                onPress={() => hideSuggestions.mutate()}
+              />
+            </>
           }
         >
           <NextStepList
             steps={nextSteps}
             disabled={!online}
             onStart={onStartNextStep}
-            onDismiss={(step) => dismiss.mutate(step.id)}
           />
         </Section>
       ) : null}

@@ -27,6 +27,7 @@ const step = (id: string, title: string) => ({
 
 const state = (overrides: Partial<AssistantOnboarding> = {}): AssistantOnboarding => ({
   show_intro: true,
+  suggestions_hidden: false,
   intro_version: 1,
   profile: null,
   topics: [
@@ -230,20 +231,11 @@ it("arrow keys move between intro screens", async () => {
   expect(screen.getByRole("checkbox", { name: /Email & inbox/ }).getAttribute("aria-checked")).toBe("true");
 });
 
-it("next-step cards start and dismiss independently", async () => {
+it("next-step cards start their step and carry no per-card dismiss", async () => {
   const user = userEvent.setup();
   const onStart = vi.fn();
-  const onDismiss = vi.fn();
-  render(
-    <NextStepCards
-      steps={[step("connect_inbox", "Connect your inbox")]}
-      onStart={onStart}
-      onDismiss={onDismiss}
-    />,
-  );
-  await user.click(screen.getByRole("button", { name: "Dismiss Connect your inbox" }));
-  expect(onDismiss).toHaveBeenCalledTimes(1);
-  expect(onStart).not.toHaveBeenCalled();
+  render(<NextStepCards steps={[step("connect_inbox", "Connect your inbox")]} onStart={onStart} />);
+  expect(screen.queryByRole("button", { name: /Dismiss/ })).toBeNull();
   await user.click(screen.getByRole("button", { name: /Connect your inbox description/ }));
   expect(onStart).toHaveBeenCalledTimes(1);
 });

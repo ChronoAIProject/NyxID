@@ -6,7 +6,6 @@ pub const COLLECTION_NAME: &str = "assistant_onboarding";
 /// The current first-run intro. Bump to show a revised intro once to people
 /// who finished an older one.
 pub const INTRO_VERSION: i32 = 1;
-pub const MAX_DISMISSED_RECOMMENDATIONS: usize = 32;
 
 /// What the owner said NyxBot should help with. A closed set: answers drive
 /// curated recommendations and one NyxBot memory note, never free text.
@@ -62,9 +61,9 @@ pub struct AssistantOnboarding {
     pub topics: Vec<InterestTopic>,
     #[serde(default)]
     pub work_style: Option<WorkStyle>,
-    /// Recommendation IDs the owner dismissed; bounded.
-    #[serde(default)]
-    pub dismissed_recommendations: Vec<String>,
+    /// When the owner hid the home's suggestions; cleared by retaking the intro.
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub suggestions_hidden_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

@@ -32,8 +32,9 @@ a replay starts at the questions. It then has three parts:
 3. **Next steps and the tour.** One-click cards ranked by the answers. Clicking
    a card sends its prompt to NyxBot as the user's message. NyxBot then does
    the work with its normal tools, connect links and confirmations. The same
-   cards stay in **Suggested for you** on the NyxBot home until the step is
-   done or the user dismisses it. On web, **Show me around** starts a
+   cards stay in **Suggested for you** on the NyxBot home until each step is
+   done. The section's **Hide** hides them all until the intro is retaken;
+   cards have no individual dismiss. On web, **Show me around** starts a
    spotlight tour of the live screen. The tour visits the composer, the
    suggestions, the agents, **Create new agent**, Approvals and Automations.
    Targets are found by their `data-tour` attributes, and steps whose target
@@ -43,19 +44,22 @@ a replay starts at the questions. It then has three parts:
 
 - **Collection:** `assistant_onboarding`, with `_id` = user ID. It stores the
   intro version, the outcome (`completed` or `skipped`), the topics, the work
-  style, dismissed recommendation IDs (at most 32) and timestamps. The answer
+  style, when the suggestions were hidden, and timestamps. The answer
   enums are closed; values written by a newer replica deserialize as
   `unsupported` and are ignored. Personal erasure removes the row.
 - **`GET /api/v1/assistant/nyxagent/onboarding`** returns:
   - `show_intro`;
   - the stored `profile`;
   - the `topics` and `work_styles` choices with their labels;
-  - up to `limit` (default 3, maximum 6) `recommendations`.
+  - up to `limit` (default 3, maximum 6) `recommendations`;
+  - `suggestions_hidden`, which tells the home to hide its section. The intro
+    still shows the recommendations.
 - **`PUT /api/v1/assistant/nyxagent/onboarding`** with
   `{outcome, topics, work_style}` replaces the answers. It writes the
-  metadata-only audit event `assistant_onboarding_saved`.
-- **`POST /api/v1/assistant/nyxagent/onboarding/recommendations/{id}/dismiss`**
-  hides one card and returns the refreshed state.
+  metadata-only audit event `assistant_onboarding_saved`. Saving also clears a
+  hidden-suggestions mark.
+- **`POST /api/v1/assistant/nyxagent/onboarding/suggestions/hide`** hides the
+  home's suggestions and returns the refreshed state.
 - **Access:** all three routes are human-only (first-party sessions) and
   follow the NyxAgent engine flag, like the other `/assistant/nyxagent` routes.
 

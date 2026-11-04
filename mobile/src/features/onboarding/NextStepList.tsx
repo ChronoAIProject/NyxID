@@ -9,12 +9,10 @@ import { featherIcon, type NextStep } from "./onboardingContracts";
 export function NextStepList({
   steps,
   onStart,
-  onDismiss,
   disabled,
 }: {
   steps: readonly NextStep[];
   onStart: (step: NextStep) => void;
-  onDismiss?: (step: NextStep) => void;
   disabled?: boolean;
 }) {
   const { colors } = useTheme();
@@ -58,19 +56,6 @@ export function NextStepList({
               →
             </Label>
           </Pressable>
-          {onDismiss ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Dismiss ${step.title}`}
-              hitSlop={8}
-              onPress={() => onDismiss(step)}
-              style={styles.dismiss}
-            >
-              <Label muted style={styles.arrow}>
-                ✕
-              </Label>
-            </Pressable>
-          ) : null}
         </View>
       ))}
     </View>
@@ -104,5 +89,4 @@ const styles = StyleSheet.create({
   title: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 19 },
   description: { fontSize: 12, lineHeight: 17 },
   arrow: { fontSize: 14, lineHeight: 19 },
-  dismiss: { paddingHorizontal: 12, paddingVertical: 12 },
 });

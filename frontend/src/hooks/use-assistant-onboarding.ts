@@ -30,17 +30,16 @@ export function useSaveOnboarding() {
   });
 }
 
-export function useDismissNextStep() {
+/** Hides the home's suggestions until the intro is retaken. */
+export function useHideSuggestions() {
   const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   const key = nyxBotQueryKeys.onboarding(userId);
   return useMutation({
-    mutationFn: (id: string) => nyxBotApi.dismissNextStep(id),
-    onMutate: (id) => {
+    mutationFn: () => nyxBotApi.hideSuggestions(),
+    onMutate: () => {
       queryClient.setQueryData<AssistantOnboarding>(key, (state) =>
-        state
-          ? { ...state, recommendations: state.recommendations.filter((step) => step.id !== id) }
-          : state,
+        state ? { ...state, suggestions_hidden: true } : state,
       );
     },
     onSuccess: (state) => queryClient.setQueryData(key, state),

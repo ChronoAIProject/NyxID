@@ -85,7 +85,7 @@ import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import {
   useAssistantOnboarding,
-  useDismissNextStep,
+  useHideSuggestions,
   useIntroReplay,
 } from "@/hooks/use-assistant-onboarding";
 import { FirstRunIntro } from "./onboarding/first-run-intro";
@@ -874,7 +874,7 @@ function NyxAgentThreadPage() {
   // First-run intro and next steps. A step's prompt goes to NyxBot from its
   // home, so a step started elsewhere returns home first.
   const onboarding = useAssistantOnboarding(onChatRoute && !search.mock);
-  const dismissNextStep = useDismissNextStep();
+  const hideSuggestions = useHideSuggestions();
   const replayPending = useIntroReplay((state) => state.pending);
   const consumeReplay = useIntroReplay((state) => state.consume);
   const [intro, setIntro] = useState<"first_run" | "account_menu">();
@@ -1157,9 +1157,9 @@ function NyxAgentThreadPage() {
               const nyxbot = nyxBotOf(agents.data?.agents);
               if (nyxbot) setDetailsAgentId(nyxbot.id);
             }}
-            nextSteps={onboarding.data?.recommendations}
+            nextSteps={onboarding.data?.suggestions_hidden ? undefined : onboarding.data?.recommendations}
             onStartNextStep={startNextStep}
-            onDismissNextStep={(step) => dismissNextStep.mutate(step.id)}
+            onHideNextSteps={() => hideSuggestions.mutate()}
             onReplayIntro={() => setIntro("account_menu")}
           />
         ) : chat.isLoading && !chat.session.messages.length ? (

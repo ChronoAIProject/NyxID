@@ -16,13 +16,10 @@ export const onboardingApi = {
       await requestJson(ROOT, { method: "PUT", body: answers }),
     );
   },
-  /** Hides one next step for good; returns the refreshed state. */
-  async dismiss(id: string) {
+  /** Hides the home's suggestions until the intro is retaken. */
+  async hideSuggestions() {
     return onboardingSchema.parse(
-      await requestJson(
-        `${ROOT}/recommendations/${encodeURIComponent(id)}/dismiss`,
-        { method: "POST" },
-      ),
+      await requestJson(`${ROOT}/suggestions/hide`, { method: "POST" }),
     );
   },
 };

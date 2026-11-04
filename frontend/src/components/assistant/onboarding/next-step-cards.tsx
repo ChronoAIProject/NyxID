@@ -1,4 +1,4 @@
-import { ArrowRight, X } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { OnboardingIcon } from "./onboarding-icons";
 import { cn } from "@/lib/utils";
 import type { NextStep } from "@/schemas/assistant-onboarding";
@@ -11,13 +11,11 @@ import type { NextStep } from "@/schemas/assistant-onboarding";
 export function NextStepCards({
   steps,
   onStart,
-  onDismiss,
   disabled,
   className,
 }: {
   readonly steps: readonly NextStep[];
   readonly onStart: (step: NextStep) => void;
-  readonly onDismiss?: (step: NextStep) => void;
   readonly disabled?: boolean;
   readonly className?: string;
 }) {
@@ -59,16 +57,6 @@ export function NextStepCards({
                 className="size-3.5 shrink-0 text-text-tertiary transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
               />
             </button>
-            {onDismiss ? (
-              <button
-                type="button"
-                aria-label={`Dismiss ${step.title}`}
-                onClick={() => onDismiss(step)}
-                className="absolute -top-1.5 -right-1.5 rounded-full border border-border bg-card p-0.5 text-text-tertiary opacity-0 shadow-sm transition-opacity group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus [@media(hover:none)]:opacity-100 motion-reduce:transition-none"
-              >
-                <X aria-hidden="true" className="size-2.5" />
-              </button>
-            ) : null}
           </li>
         );
       })}

@@ -124,12 +124,10 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/onboarding`, { method: "PUT", body: answers }),
     );
   },
-  /** Hides one next step for good; returns the refreshed state. */
-  async dismissNextStep(id: string) {
+  /** Hides the home's suggestions until the intro is retaken. */
+  async hideSuggestions() {
     return assistantOnboardingSchema.parse(
-      await assistantJson(`${ROOT}/onboarding/recommendations/${encodeURIComponent(id)}/dismiss`, {
-        method: "POST",
-      }),
+      await assistantJson(`${ROOT}/onboarding/suggestions/hide`, { method: "POST" }),
     );
   },
   async channels() {
