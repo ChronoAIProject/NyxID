@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { Search } from "lucide-react";
 import {
   GroupedList,
@@ -62,7 +63,7 @@ function SkillHistory({
               (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0),
           )
           .map((item) => (
-            <GroupedRow key={item.id} asChild>
+            <GroupedRow data-drawer-search-target={`skill-history-${item.id}`} key={item.id} asChild>
               <li>
                 <div className="min-w-0 flex-1">
                   <p>{HISTORY_LABELS[item.event_type] ?? "Skill activity"}</p>
@@ -178,9 +179,15 @@ function AttachedSkill({
 }) {
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
+  const searchId = `skill-${skill.skill_id}`;
+  useDrawerSearchEntries([{ id: searchId, title: skill.name, breadcrumb: `Skills › ${skill.name}`,
+    keywords: `${description ?? ""} ${skill.version} ${skill.disabled ? "Disabled" : "Enabled"} preload`,
+    pages: [searchId], reveal: () => onOpenChange(true),
+  }]);
   return (
     <>
       <GroupedDisclosure
+        data-drawer-page-trigger={searchId}
         onClick={() => onOpenChange(true)}
         accessory={
           <span className="font-mono font-normal text-text-tertiary">
@@ -196,6 +203,7 @@ function AttachedSkill({
         </span>
       </GroupedDisclosure>
       <GroupedDetail
+        searchPage={searchId}
         open={open}
         title={skill.name}
         backLabel="Back to Skills"
@@ -221,7 +229,7 @@ function AttachedSkill({
             </>
           }
         >
-          <GroupedRow title="Version" accessory={skill.version} />
+          <GroupedRow data-drawer-search-target={searchId} title="Version" accessory={skill.version} />
           <GroupedDisclosure disabled={disabled} onClick={review}>
             {latest && latest !== skill.version
               ? `Newer version available: ${latest}`
@@ -346,6 +354,15 @@ export function AgentSkills({
   };
   const [activeSkill, setActiveSkill] = useState<string>();
   const [historyOpen, setHistoryOpen] = useState(false);
+  useDrawerSearchEntries([
+    { id: "skill-history", title: "History", breadcrumb: "Skills › History", keywords: "Skill activity", pages: ["skill-history"], reveal: () => setHistoryOpen(true) },
+    ...(!readOnly ? (search.data?.items ?? []).map((item) => ({ id: `catalog-skill-${item.id}`, title: item.name, breadcrumb: "Skills › Find skills", keywords: item.description ?? "",
+      pages: ["skill-version"], reveal: () => { setActiveSkill(undefined); choose(item.id, item.name); },
+    })) : []),
+    ...(history.data?.items ?? []).map((item) => ({ id: `skill-history-${item.id}`, title: HISTORY_LABELS[item.event_type] ?? "Skill activity",
+      breadcrumb: "Skills › History", keywords: `${item.skills.map((pin) => `${pin.name} ${pin.version}`).join(" ")} ${item.created_at} Revision ${item.revision ?? ""}`,
+      pages: ["skill-history"], reveal: () => setHistoryOpen(true) })),
+  ]);
   const errors = [
     current.error,
     write.error,
@@ -465,20 +482,22 @@ export function AgentSkills({
           ) : undefined
         }
       >
-        <GroupedDisclosure onClick={() => setHistoryOpen(true)}>
+        <GroupedDisclosure data-drawer-page-trigger="skill-history" onClick={() => setHistoryOpen(true)}>
           History
         </GroupedDisclosure>
       </GroupedList>
       <GroupedDetail
+        searchPage="skill-history"
         open={historyOpen}
         title="Skill history"
         backLabel="Back to Skills"
         onBack={() => setHistoryOpen(false)}
       >
         {history.data?.items.length ? (
-          <SkillHistory items={history.data.items} />
+          <div data-drawer-search-target="skill-history"><SkillHistory items={history.data.items} /></div>
         ) : (
           <GroupedList
+            data-drawer-search-target="skill-history"
             footer={
               history.error ? (
                 <p role="alert" className="text-destructive">
@@ -503,6 +522,7 @@ export function AgentSkills({
         <>
           <GroupedList
             title="Find skills"
+            search={{ id: "find-skills", title: "Find skills", breadcrumb: "Skills", keywords: "Search Ornn catalog" }}
             footer={
               search.data?.items.length === 0
                 ? "No visible skills found."
@@ -574,6 +594,7 @@ export function AgentSkills({
             ) : null}
           </GroupedList>
           <GroupedDetail
+            searchPage="skill-version"
             open={Boolean(selected)}
             level={activeSkill ? 2 : 1}
             title={selected?.name ?? "Choose version"}
@@ -585,6 +606,7 @@ export function AgentSkills({
           >
             <GroupedList
               title="Choose version"
+              data-drawer-search-target={selected ? `catalog-skill-${selected.id}` : undefined}
               footer={
                 <>
                   {preview.isFetching ? (

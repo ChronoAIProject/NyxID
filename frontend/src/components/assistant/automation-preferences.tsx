@@ -43,7 +43,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
   return (
     <GroupedList title="Automations">
       {rows.map((row) => (
-        <GroupedRow key={row.id} asChild interactive>
+        <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: "Overview › Automations", keywords: `${row.source} ${row.status}` }} key={row.id} asChild interactive>
           <Link to="/assistant/automations" search={{ agent: agentId }}>
             <span className="min-w-0 flex-1 break-words">{row.label}</span>
             <span className="text-11 text-text-tertiary">
@@ -56,7 +56,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
           </Link>
         </GroupedRow>
       ))}
-      <GroupedRow asChild interactive>
+      <GroupedRow search={{ id: "manage-automations", title: `Manage automations (${rows.length})`, breadcrumb: "Overview › Automations" }} asChild interactive>
         <Link to="/assistant/automations" search={{ agent: agentId }}>
           <span className="flex-1">Manage automations ({rows.length})</span>
           <ChevronRight

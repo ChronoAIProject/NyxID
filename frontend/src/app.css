@@ -1445,3 +1445,14 @@ html.theme-dark .assistant-halo--visible {
 :is(a, button, summary, [role="button"], [role="menuitem"], [role="option"], [role="tab"]):hover svg:is(.text-text-tertiary, .text-muted-foreground) {
   color: inherit;
 }
+
+/* Search reveals retain row focus without moving content. */
+[data-drawer-search-target][data-search-highlight] {
+  background-color: var(--color-overlay);
+  outline: 2px solid var(--color-input-focus);
+  outline-offset: -2px;
+  border-radius: var(--radius-xl);
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-drawer-search-target] { transition: background-color 160ms ease; }
+}

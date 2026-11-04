@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
   GroupedList,
   GroupedRow,
@@ -169,6 +170,10 @@ export function ChannelBotsManager({
 
   const [availableOpen, setAvailableOpen] = useState(false);
   const [search, setSearch] = useState("");
+  useDrawerSearchEntries(available.map((bot) => ({ id: `available-bot-${bot.id}`, title: bot.label,
+    breadcrumb: "Channels › Available bots", keywords: channelPlatformName(bot.platform), pages: ["available-bots"],
+    reveal: () => { setSearch(""); setAvailableOpen(true); },
+  })));
   return (
     <div className="space-y-6">
       {channels.error || (error && !availableOpen) ? (
@@ -231,6 +236,7 @@ export function ChannelBotsManager({
                   }
                 >
                   <GroupedRow
+                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: "Channels › Connected bot", keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
                     title={
                       <>
                         {row.bot_label}
@@ -363,11 +369,12 @@ export function ChannelBotsManager({
             : undefined
         }
       >
-        <GroupedDisclosure onClick={() => setAvailableOpen(true)}>
+        <GroupedDisclosure data-drawer-page-trigger="available-bots" search={{ id: "connect-another-bot", title: "Connect another bot", breadcrumb: "Channels" }} onClick={() => setAvailableOpen(true)}>
           Connect another bot
         </GroupedDisclosure>
       </GroupedList>
       <GroupedDetail
+        searchPage="available-bots"
         open={availableOpen}
         title="Connect another bot"
         backLabel="Back to Channels"
@@ -418,7 +425,7 @@ export function ChannelBotsManager({
                 const target = agent?.id ?? connectTargets[bot.id] ?? nyxbot?.id;
                 const targetName = agent ? agentLabel(agent) : undefined;
                 return (
-                  <GroupedRow key={bot.id} asChild>
+                  <GroupedRow data-drawer-search-target={`available-bot-${bot.id}`} key={bot.id} asChild>
                     <li>
                       <div className="min-w-0 flex-1">
                         <p>{bot.label}</p>

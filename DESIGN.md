@@ -295,6 +295,39 @@ Drawer deep links focus the selected panel heading; detail Back restores focus
 to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
 desktop. All spacing, text and icons follow the assistant display scale.
 
+### Agent drawer search
+
+The agent details drawer places a filled iOS search field below its header and
+above its segmented tabs, with a leading search icon, a clear action and the
+accessible name/placeholder “Search this agent”. Nonempty searches replace the
+visible panels with inset result groups named for their tabs. Results are native
+buttons with a title, a breadcrumb subtitle and emphasized matching text; a polite
+live region announces the result count. No matches reads `No results for “…”`.
+
+Sections explicitly opt into the typed `drawer-search` registry from their own
+live render data. Stable IDs identify entries and reveal targets. Index only
+entries shown for the current agent, permissions and flags; no DOM-derived index
+or separate inventory. Match case and diacritic insensitively, requiring every
+query word; rank exact titles, title prefixes, title substrings, then metadata.
+Cap results at 80 and group them in tab order. Channel chat metadata is fetched
+with its existing GET hook while the drawer is mounted so unopened chats are
+searchable; chat controls and mutations keep their existing behavior.
+
+Search retains mounted tabs and visited detail pages, including their drafts.
+While searching, one opaque save bar aggregates dirty forms across the drawer,
+using each form’s existing validation, payload, fence and local error. Revealing a
+result uses the existing detail discard guards, switches tabs, opens its detail
+page if needed, then scrolls and focuses the target row and briefly highlights it.
+The highlight has no motion when reduced motion is requested. Detail pages occupy
+the content region below search; covered tabs and controls remain inert.
+Back retains the usual detail navigation. Focus restoration never takes focus
+away from someone already typing in search.
+
+Inside the drawer, `/` and Cmd/Ctrl+F focus search unless an editable control owns
+focus. Arrow keys move through results and Enter reveals the selected result
+(or the first result from the search field). The first Escape clears a nonempty
+query; the next Escape follows normal sheet dismissal and dirty-draft guards.
+
 ### Assistant workspace pages
 
 Approvals, Plugins, Automations and Machines use `WorkspacePageHeader` inside the
@@ -603,6 +636,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Agent drawer search uses explicit live section registrations | Search groups results by tab and reveals exact rows or retained detail pages, preserving dirty drafts, save fences and dismissal guards. Search stays above the content region; keyboard and reduced-motion behavior are part of the pattern. |
 | 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and primary submit actions. Dialog footers stay visible; inline settings bars appear while dirty. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |
 | 2026-11-04 | Workspace page family and equal-size plugin cards | Shared headers and segmented status views align workspace pages. Connectors and skill results share a text-scaled card size with native full-card actions and contained secondary controls; attached skills remain grouped rows. |
 | 2026-11-04 | NyxBot inset grouped forms and segmented navigation | One neutral card per group, inset hairlines, borderless controls and external helper text replace nested boxes. Mounted tabs preserve drafts; detail navigation keeps independent revision-fenced saves. The subtle `border-border/50` edge preserves light-theme contrast. |

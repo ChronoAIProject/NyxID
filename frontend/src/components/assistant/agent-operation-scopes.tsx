@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries, useDrawerSearchPage } from "@/lib/drawer-search";
 import {
   GroupedFormActions,
   GroupedFormScope,
@@ -64,6 +65,21 @@ export function AgentOperationScopes({
   const returnFocus = useRef<HTMLButtonElement>(null);
   const enabled = useFeature(guests ? FEATURE_FLAG.GUEST_OPERATION_SCOPES : FEATURE_FLAG.AGENT_OPERATION_SCOPES);
   const query = useAgentOperations(agentId, enabled && !disabled, guests);
+  const searchId = (id: string) => `operations-${guests ? "guest-" : ""}${id}`;
+  useDrawerSearchEntries(enabled && drillIn ? (query.data ?? []).map((service) => ({
+    id: searchId(service.service_id), title: `${service.service_name} · ${guests ? "Guest operations" : "Operations"}`,
+    breadcrumb: `Access › ${guests ? "Guest service operations" : "Service operations"}`,
+    keywords: `${service.service_slug} ${service.all_operations ? "All operations" : "Selected operations"} ${service.operations.map((operation) => `${operation.summary ?? ""} ${operation.method} ${operation.path}`).join(" ")} ${service.rules.map((rule) => `${rule.method} ${rule.path_template}`).join(" ")}`,
+    pages: [searchId(service.service_id)], reveal: () => {
+      returnFocus.current = [...(root.current?.querySelectorAll<HTMLButtonElement>("[data-operation-link]") ?? [])].find((element) => element.dataset.operationLink === service.service_id) ?? null;
+      setVisited((current) => current.includes(service.service_id) ? current : [...current, service.service_id]);
+      setActive(service.service_id);
+    },
+  })) : []);
+  useDrawerSearchPage(active ? { id: searchId(active), open: true, leave: async () => {
+    if (guard && !await guard.confirmDiscard(`${owner}/${active}`)) return false;
+    setActive(undefined); return true;
+  } } : null);
   const activeAvailable = Boolean(
     query.data?.some((service) => service.service_id === active),
   );
@@ -77,7 +93,7 @@ export function AgentOperationScopes({
     if (!view) return;
     // Covered sheet controls leave keyboard and screen-reader navigation until Back.
     const release: (() => void)[] = [];
-    const boundary = root.current?.closest('[role="dialog"]') ?? root.current;
+    const boundary = detailContainer ?? root.current?.closest('[role="dialog"]') ?? root.current;
     let current: HTMLElement = view;
     while (current !== boundary && current.parentElement) {
       const parent = current.parentElement;
@@ -354,7 +370,7 @@ export function OperationSelectionForm({
           </>
         }
       >
-        <GroupedRow>
+        <GroupedRow data-drawer-search-target={`operations-${guests ? "guest-" : ""}${service.service_id}`}>
           <span className="mr-auto">Allowed operations</span>
           <Select
             value={guests ? guestMode : all ? "all" : "selected"}

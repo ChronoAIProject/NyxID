@@ -23,9 +23,10 @@ vi.mock("@/hooks/use-keys", () => ({
   }),
 }));
 vi.mock("@/hooks/use-channel-bots", () => ({
-  useChannelBots: () => ({ isPending: false, error: null, refetch: vi.fn(), data: [] }),
+  useChannelBots: () => ({ isPending: false, error: null, refetch: vi.fn(), data: availableBots }),
 }));
 
+let availableBots: Record<string, unknown>[];
 const at = "2026-09-28T00:00:00Z";
 let agent: Record<string, unknown>;
 let memory: { id: string; text: string; created_at: string; updated_at: string }[];
@@ -85,6 +86,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(fixtures[path]));
   }));
   writes = [];
+  availableBots = [];
   readinessReads = 0;
   requestMode = "denied";
   agent = agentRow({});
@@ -934,4 +936,288 @@ it("closes a pristine sheet immediately", async () => {
   await user.click(screen.getByRole("button", { name: "Close" }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
   expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).toBeNull();
+});
+
+it("searches across mounted tabs, reveals a memory row and moves focus to it", async () => {
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox", { name: "Search this agent" });
+  await user.click(search);
+  await user.paste("weekly monday");
+  const results = screen.getByRole("list", { name: "Memory search results" });
+  expect(screen.getByRole("status")).toHaveTextContent("1 result for weekly monday");
+  expect(within(results).getAllByRole("mark")).toHaveLength(2);
+  expect(screen.queryByRole("form", { name: "Profile" })).not.toBeInTheDocument();
+  await user.click(within(results).getByRole("button", { name: /Weekly digests on Mondays Memory/ }));
+  expect(search).toHaveValue("");
+  expect(screen.getByRole("tab", { name: "Memory" })).toHaveAttribute("aria-selected", "true");
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="memory-n1"]')).toHaveFocus());
+  expect(document.activeElement).toHaveAttribute("data-search-highlight");
+});
+
+it("preserves profile and grants drafts and a single coordinated save bar while searching", async () => {
+  const { user } = renderSheet();
+  const role = await screen.findByRole("textbox", { name: "Role" });
+  await user.clear(role);
+  await user.type(role, "Fresh unsaved role");
+  await user.click(screen.getByRole("tab", { name: "Access" }));
+  await user.click(screen.getByRole("checkbox", { name: /Slack/ }));
+  const search = screen.getByRole("searchbox");
+  await user.click(search);
+  await user.paste("fresh unsaved");
+  const bars = screen.getAllByRole("region", { name: "Unsaved changes" });
+  expect(bars).toHaveLength(1);
+  expect(bars[0]).toHaveTextContent("Unsaved: profile, grants");
+  await user.click(screen.getByRole("button", { name: "Role Overview › Profile" }));
+  expect(role).toHaveValue("Fresh unsaved role");
+  await user.click(screen.getByRole("tab", { name: "Access" }));
+  expect(screen.getByRole("checkbox", { name: /Slack/ })).toBeChecked();
+  await user.click(search);
+  await user.paste("slack");
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
+  expect(writes.map((write) => write.method)).toEqual(["PATCH", "PUT"]);
+  expect(search).toHaveValue("slack");
+});
+
+it("clears search on the first Escape and follows the dirty dismissal guard on the next", async () => {
+  const close = vi.fn();
+  const { user } = renderSheet({ onOpenChange: close });
+  const role = await screen.findByRole("textbox", { name: "Role" });
+  await user.type(role, " draft");
+  const search = screen.getByRole("searchbox");
+  await user.click(search);
+  await user.paste("role");
+  await user.keyboard("{Escape}");
+  expect(search).toHaveValue("");
+  expect(search).toHaveFocus();
+  expect(close).not.toHaveBeenCalled();
+  expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).not.toBeInTheDocument();
+  await user.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(role).toHaveValue("Finds urgent issues draft");
+});
+
+it("supports drawer shortcuts, result arrows and Enter without stealing editable shortcuts", async () => {
+  const { user } = renderSheet();
+  const tab = await screen.findByRole("tab", { name: "Overview" });
+  const search = screen.getByRole("searchbox");
+  tab.focus();
+  await user.keyboard("/");
+  expect(search).toHaveFocus();
+  await user.click(search);
+  await user.paste("account");
+  await user.keyboard("{ArrowDown}");
+  const result = document.activeElement!;
+  expect(result).toHaveRole("button");
+  await user.keyboard("{ArrowUp}{ArrowDown}{Enter}");
+  await waitFor(() => expect(search).toHaveValue(""));
+  expect(screen.getByRole("tab", { name: "Access" })).toHaveAttribute("aria-selected", "true");
+  const selected = screen.getByRole("tab", { name: "Access" });
+  selected.focus();
+  await user.keyboard("{Control>}f{/Control}");
+  expect(search).toHaveFocus();
+  await user.click(screen.getByRole("tab", { name: "Overview" }));
+  const role = screen.getByRole("textbox", { name: "Role" });
+  await user.click(role);
+  await user.keyboard("/");
+  expect(role).toHaveFocus();
+  expect(role).toHaveValue("Finds urgent issues/");
+});
+
+it("reveals a machine drill-in and guards leaving its dirty draft through search", async () => {
+  machineAccessFixture();
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("work mac");
+  await user.click(await screen.findByRole("button", { name: "Work Mac Access › Machine access" }));
+  const target = document.querySelector('[data-drawer-search-target="machine-detail-node"]');
+  await waitFor(() => expect(target).toHaveFocus());
+  const shell = screen.getByRole("checkbox", { name: "Shell commands" });
+  await user.click(shell);
+  await user.type(search, "persona");
+  expect(search).toHaveValue("persona");
+  expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "Persona Overview › Profile" }));
+  expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(search).toHaveValue("persona");
+  await user.click(screen.getByRole("button", { name: "Clear agent search" }));
+  expect(shell).toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  expect(screen.getByRole("button", { name: /Work Mac/ })).toBeVisible();
+});
+
+it("searches only entries available to an organization viewer and preserves read-only controls", async () => {
+  agent = agentRow({ owner_kind: "org", owner_id: "team", org_role: "viewer", can_maintain: false });
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.type(search, "persona");
+  await user.click(screen.getByRole("button", { name: "Persona Overview › Profile" }));
+  expect(screen.getByRole("textbox", { name: "Persona" })).toBeDisabled();
+  for (const query of ["connect another bot", "weekly digests", "destroy", "share agent", "find skills", "read my account"]) {
+    await user.clear(search);
+    await user.type(search, query);
+    expect(screen.getByText(`No results for “${query}”.`)).toBeInTheDocument();
+  }
+  expect(writes).toHaveLength(0);
+});
+
+it("keeps destroyed-agent search available with deletion and remembered notes but no channel actions", async () => {
+  agent = agentRow({ status: "destroyed", destroyed_at: at });
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("delete");
+  expect(screen.getByRole("button", { name: "Delete permanently Overview" })).toBeInTheDocument();
+  await user.clear(search);
+  await user.click(search);
+  await user.paste("weekly");
+  expect(screen.getByRole("button", { name: /Weekly digests on Mondays Memory/ })).toBeInTheDocument();
+  await user.clear(search);
+  await user.click(search);
+  await user.paste("connect another bot");
+  expect(screen.getByText("No results for “connect another bot”.")).toBeInTheDocument();
+});
+
+it("opens the exact service operation scope from search without changing its revision fence", async () => {
+  const owner = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({ ...owner, capabilities: { enabled_features: ["assistant:operation-scopes"] } });
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => request.endpoint.endsWith("/operations")
+    ? new Response(JSON.stringify([{ service_id: "notion-id", service_slug: "api-notion", service_name: "Notion", revision: 7,
+      all_operations: true, allows_explicit_rules: true, endpoint_ids: [], rules: [], operations: [] }])) : original(request);
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("notion operations");
+  await user.click(await screen.findByRole("button", { name: "Notion · Operations Access › Service operations" }));
+  const view = document.querySelector('[data-operation-view="notion-id"]')!;
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="operations-notion-id"]')).toHaveFocus());
+  expect(view).toHaveTextContent("Revision 7");
+  expect(screen.getByRole("tab", { name: "Access", hidden: true })).toHaveAttribute("aria-selected", "true");
+  expect(search).toBeVisible();
+  await user.click(within(view as HTMLElement).getByRole("button", { name: "Back to Access" }));
+  expect(screen.getByRole("button", { name: /Notion All operations/ })).toHaveFocus();
+  expect(writes).toHaveLength(0);
+});
+
+it("finds attached skills by description and version and opens retained history from search", async () => {
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (request.endpoint.endsWith("/skills")) return new Response(JSON.stringify({ revision: 6,
+      skills: [{ source: "ornn", skill_id: "faq", name: "kek-faq-reference", version: "1.2.3", sha256: "abc" }],
+      metadata: { faq: { description: "Café booking reference", size_bytes: 80 } },
+    }));
+    if (request.endpoint.endsWith("/skills/history")) return new Response(JSON.stringify({ items: [
+      { id: "activity", event_type: "assistant_skills_updated", revision: 6, created_at: at, skills: [{ skill_id: "faq", name: "kek-faq-reference", version: "1.2.3" }] },
+    ] }));
+    return original(request);
+  };
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("cafe 1.2.3");
+  await user.click(await screen.findByRole("button", { name: "kek-faq-reference Skills › kek-faq-reference" }));
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="skill-faq"]')).toHaveFocus());
+  expect(screen.getByRole("heading", { name: "kek-faq-reference" })).toBeVisible();
+  await user.click(search);
+  await user.paste("history");
+  await user.click(screen.getByRole("button", { name: "History Skills › History" }));
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="skill-history"]')).toHaveFocus());
+  expect(screen.getByRole("list", { name: "Skill history" })).toHaveTextContent("Attached skills changed");
+  await user.click(screen.getByRole("button", { name: "Back to Skills" }));
+  expect(screen.getByRole("button", { name: "History" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: /kek-faq-reference.*1.2.3/ })).toBeVisible();
+});
+
+it("indexes connected bot handles, unopened chats and available bots, revealing the exact channel page", async () => {
+  availableBots = [{ id: "new-bot", label: "Help desk", platform: "slack" }];
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (request.endpoint === "/assistant/nyxagent/channels") return new Response(JSON.stringify({ channel_agents: [{
+      id: "connected", channel_bot_id: "bot", platform: "telegram", bot_label: "Helper", bot_username: "helper_bot",
+      transport: "webhook", status: "active", owner_linked: true, agent_id: agent.id, created_at: at,
+    }] }));
+    if (request.endpoint.endsWith("/channels/connected/chats")) return new Response(JSON.stringify({ chats: [{
+      id: "room", channel_agent_id: "connected", platform: "telegram", bot_label: "Helper", kind: "group", title: "Café research room",
+      reply_mode: "mention", members: "owner", owner_seen: true, allow_posts: false, last_message_at: at,
+    }] }));
+    return original(request);
+  };
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("helper_bot");
+  expect(await screen.findByRole("button", { name: "Helper Channels › Connected bot" })).toBeInTheDocument();
+  await user.clear(search);
+  await user.click(search);
+  await user.paste("cafe room");
+  await user.click(await screen.findByRole("button", { name: "Café research room Channels › Helper › Chats" }));
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="channel-chat-room"]')).toHaveFocus());
+  expect(screen.getByRole("heading", { name: /Café research room · Group/ })).toBeVisible();
+  await user.click(search);
+  await user.paste("help desk");
+  await user.click(screen.getByRole("button", { name: "Help desk Channels › Available bots" }));
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="available-bot-new-bot"]')).toHaveFocus());
+  expect(screen.getByRole("button", { name: /Connect Help desk to researcher/ })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "Back to Channels" }));
+  expect(screen.getByRole("button", { name: "Chats and who can talk" })).toBeVisible();
+  expect(writes).toHaveLength(0);
+});
+
+it.each(["user", "manager"] as const)("keeps shared %s search scoped to its rendered profile and memory", async (share_role) => {
+  agent = agentRow({ share_role, can_maintain: false, owner_name: "Alex", persona: "Friendly guide" });
+  const original = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) => {
+    if (/\/(private-notes|shared-memory)$/.test(request.endpoint)) return new Response(JSON.stringify({ revision: 2, notes: [{ id: "shared-note", text: "Café team convention" }] }));
+    if (request.endpoint.endsWith("/consents")) return new Response(JSON.stringify({ consents: [] }));
+    return original(request);
+  };
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("friendly");
+  expect(screen.getByRole("button", { name: "Persona Overview" })).toBeInTheDocument();
+  await user.clear(search);
+  await user.click(search);
+  await user.paste("cafe convention");
+  expect((await screen.findAllByRole("button", { name: /Memory/ })).length).toBeGreaterThan(0);
+  await user.clear(search);
+  await user.click(search);
+  await user.paste("connect another bot");
+  expect(screen.getByText("No results for “connect another bot”.")).toBeInTheDocument();
+  expect(writes).toHaveLength(0);
+});
+
+it("indexes NyxBot's full-access row without specialist-only profile or lifecycle entries", async () => {
+  agent = agentRow({ kind: "nyxbot", name: "nyxbot" });
+  const { user } = renderSheet();
+  const search = await screen.findByRole("searchbox");
+  await user.click(search);
+  await user.paste("connected services account");
+  await user.click(screen.getByRole("button", { name: "Connected services and account Access" }));
+  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="nyxbot-full-access"]')).toHaveFocus());
+  expect(screen.queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
+  await user.click(search);
+  await user.paste("destroy");
+  expect(screen.getByText("No results for “destroy”.")).toBeInTheDocument();
+});
+
+it("honors an incoming tab deep link while searching and preserves the mounted profile draft", async () => {
+  const props = { agentId: String(agent.id), agents: [], open: true, onOpenChange: vi.fn(), onDeleted: vi.fn() };
+  const { rerender } = render(<QueryClientProvider client={client}><AgentDetailsSheet {...props} /></QueryClientProvider>);
+  const user = userEvent.setup();
+  const role = await screen.findByRole("textbox", { name: "Role" });
+  await user.type(role, " draft");
+  const search = screen.getByRole("searchbox");
+  await user.click(search);
+  await user.paste("missing");
+  rerender(<QueryClientProvider client={client}><AgentDetailsSheet {...props} tab="skills" /></QueryClientProvider>);
+  await waitFor(() => expect(search).toHaveValue(""));
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Skills", level: 2 })).toHaveFocus());
+  await user.click(screen.getByRole("tab", { name: "Overview" }));
+  expect(role).toHaveValue("Finds urgent issues draft");
 });

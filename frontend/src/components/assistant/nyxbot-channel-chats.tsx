@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries, useDrawerSearchEnabled } from "@/lib/drawer-search";
 import {
   GroupedList,
   GroupedRow,
@@ -143,6 +144,7 @@ function ChatRow({
   return (
     <div className="space-y-3">
       <GroupedList
+        data-drawer-search-target={`channel-chat-${chat.id}`}
         title={`${title} · ${kindLabel}${chat.last_message_at ? ` · ${formatRelativeTime(chat.last_message_at)}` : ""}`}
         footer={
           <>
@@ -259,7 +261,7 @@ function ChatRow({
 
 /**
  * The chats a connected bot is in, with who may talk to its agent. Loaded
- * only once opened, since a busy bot can be in many chats.
+ * on opening, or while indexed by the agent drawer search.
  */
 export function ChannelChats({
   channel,
@@ -273,7 +275,8 @@ export function ChannelChats({
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState(CHATS_SHOWN);
   const [error, setError] = useState<string>();
-  const chats = useNyxBotChannelChats(channel.id, open);
+  const inDrawer = useDrawerSearchEnabled();
+  const chats = useNyxBotChannelChats(channel.id, open || inDrawer);
   const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
   const readiness = useGuestReadiness(agentId, open);
   const access = useSetNyxBotPrivateChats();
@@ -282,6 +285,14 @@ export function ChannelChats({
   const rows = chats.data ?? [];
   const roots = rows.filter((chat) => !chat.parent_chat_id || !rows.some((parent) => parent.id === chat.parent_chat_id));
 
+  const searchId = `channel-chats-${channel.id}`;
+  useDrawerSearchEntries([
+    { id: searchId, title: "Chats and who can talk", breadcrumb: `Channels › ${channel.bot_label}`, keywords: "Private chats posts members", pages: [searchId], reveal: () => setOpen(true) },
+    ...rows.map((chat) => ({ id: `channel-chat-${chat.id}`, title: channelChatTitle(chat.kind, chat.title, channel.platform),
+      breadcrumb: `Channels › ${channel.bot_label} › Chats`, keywords: `${chat.kind ?? ""} ${chat.members ?? ""} Answered by Posts on its own`,
+      pages: [searchId], reveal: () => { setShown(rows.length); setOpen(true); },
+    })),
+  ]);
   async function setAccess(privateChats: "owner" | "everyone") {
     setError(undefined);
     try {
@@ -303,10 +314,11 @@ export function ChannelChats({
 
   return (
     <>
-      <GroupedDisclosure onClick={() => setOpen(true)}>
+      <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
         Chats and who can talk
       </GroupedDisclosure>
       <GroupedDetail
+        searchPage={searchId}
         open={open}
         title={`${channel.bot_label} · Chats`}
         backLabel="Back to Channels"
@@ -314,6 +326,7 @@ export function ChannelChats({
       >
         <GroupedList
           title="Private chats"
+          data-drawer-search-target={searchId}
           footer={
             <>
               <p>

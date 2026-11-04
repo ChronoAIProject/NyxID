@@ -58,7 +58,7 @@ export function AgentConnections({
           </>
         }
       >
-        <GroupedRow asChild interactive>
+        <GroupedRow search={{ id: "manage-connections", title: "Manage connected accounts", breadcrumb: "Access › Connections" }} asChild interactive>
           <Link to="/keys">
             <span className="flex-1">Manage connected accounts</span>
             <ChevronRight aria-hidden className="size-[1.125em]" />
@@ -172,7 +172,7 @@ function ConnectionGroups({
             <div className="space-y-0">
               <ol aria-label={`${group.name} connections`}>
                 {rows.map((key, index) => (
-                  <GroupedRow asChild key={key.id}>
+                  <GroupedRow search={{ id: `connection-${key.id}`, title: key.label, breadcrumb: `Access › Connections › ${group.name}`, keywords: `${key.slug} ${connectionOwnerLabel(key)} ${connectionAvailable(key) ? "Available" : "Unavailable"}` }} asChild key={key.id}>
                     <li>
                       <span className="min-w-0 flex-1 break-words">
                         <span className="block font-medium">{key.label}</span>

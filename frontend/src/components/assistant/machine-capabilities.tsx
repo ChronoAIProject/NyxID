@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
   GroupedList,
   GroupedRow,
@@ -116,9 +117,14 @@ function MachineCapabilityPage(
   const [open, setOpen] = useState(false);
   const machine = props.machine;
   const needsSelection = machine.selection_required === true || machine.mode === "selection_required";
+  const searchId = `machine-detail-${machine.node_id}`;
+  useDrawerSearchEntries([{ id: searchId, title: machine.name, breadcrumb: "Access › Machine access",
+    keywords: `${needsSelection ? "Needs owner selection" : machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy access"} ${Object.keys(labels).map((key) => labels[key as keyof typeof labels]).join(" ")}`,
+    pages: [searchId], reveal: () => setOpen(true),
+  }]);
   return (
     <>
-      <GroupedDisclosure onClick={() => setOpen(true)}>
+      <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
         <span className="block">{machine.name}</span>
         <span className="block text-11 font-normal text-text-tertiary">
           {needsSelection
@@ -129,6 +135,7 @@ function MachineCapabilityPage(
         </span>
       </GroupedDisclosure>
       <GroupedDetail
+        searchPage={searchId}
         open={open}
         title={machine.name}
         backLabel="Back to Access"
@@ -307,6 +314,7 @@ export function MachineCapabilityForm({
         }
       >
         <GroupedRow
+          data-drawer-search-target={`machine-detail-${machine.node_id}`}
           title="Workspace"
           accessory={
             needsSelection

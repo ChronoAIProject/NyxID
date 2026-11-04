@@ -45,7 +45,7 @@ export function ShareAgentDialog({
   return (
     <>
       <GroupedList title="Sharing">
-        <GroupedDisclosure onClick={() => setOpen(true)}>
+        <GroupedDisclosure search={{ id: "share-agent", title: "Share agent", breadcrumb: "Overview › Sharing" }} onClick={() => setOpen(true)}>
           Share agent
         </GroupedDisclosure>
       </GroupedList>
@@ -407,7 +407,7 @@ function NotesEditor({
         <ul>
           {value.notes.length ? (
             value.notes.map((n) => (
-              <GroupedRow asChild key={n.id}>
+              <GroupedRow search={{ id: `shared-note-${kind}-${n.id}`, title: n.text, breadcrumb: `Memory › ${title}` }} asChild key={n.id}>
                 <li className="break-words">{n.text}</li>
               </GroupedRow>
             ))
@@ -442,7 +442,7 @@ function NotesEditor({
             </>
           }
         >
-          <GroupedRow asChild className="grouped-field">
+          <GroupedRow search={{ id: `shared-notes-${kind}`, title, breadcrumb: "Memory", keywords: form.watch("text") }} asChild className="grouped-field">
             <label>
               <span>One note per line</span>
               <GroupedTextarea
@@ -527,7 +527,7 @@ export function SharedConsentCards({
             </>
           }
         >
-          <GroupedRow title="Use your connection" description={row.operation} />
+          <GroupedRow search={{ id: `consent-${row.id}`, title: row.connection_name ?? "Use your connection", breadcrumb: "Access › Connection consent", keywords: `${row.operation} ${row.decision}` }} title="Use your connection" description={row.operation} />
           {row.decision === "pending" ? (
             (["once", "always", "skip"] as const).map((decision) => (
               <GroupedRow key={decision} asChild interactive>
@@ -589,8 +589,8 @@ export function SharedAgentProfile({
   if (agent.share_role !== "manager" || agent.status === "destroyed")
     return (
       <GroupedList title="Profile">
-        <GroupedRow title="Description" description={agent.description} />
-        <GroupedRow title="Persona" description={agent.persona} />
+        <GroupedRow search={{ id: "shared-description", title: "Description", keywords: agent.description }} title="Description" description={agent.description} />
+        <GroupedRow search={{ id: "shared-persona", title: "Persona", keywords: agent.persona ?? "" }} title="Persona" description={agent.persona} />
       </GroupedList>
     );
   const submit = form.handleSubmit(async (values) => {
@@ -625,7 +625,7 @@ export function SharedAgentProfile({
         >
           {(["display_name", "description", "persona"] as const).map(
             (field) => (
-              <GroupedRow key={field} asChild className="grouped-field">
+              <GroupedRow search={{ id: `shared-profile-${field}`, title: field === "display_name" ? "Display name" : field === "description" ? "Description" : "Persona", keywords: form.watch(field) }} key={field} asChild className="grouped-field">
                 <label>
                   <span>
                     {field === "display_name"

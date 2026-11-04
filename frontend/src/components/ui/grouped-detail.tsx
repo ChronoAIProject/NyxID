@@ -1,3 +1,4 @@
+import { useDrawerSearching, useDrawerSearchPage } from "@/lib/drawer-search";
 import {
   useCallback,
   useContext,
@@ -20,6 +21,7 @@ import { GroupedDraftOwnerContext, useGroupedDraftGuard } from "@/lib/grouped-dr
 /** A retained sheet page: navigation changes visibility without discarding its forms. */
 export function GroupedDetail({
   open,
+  searchPage,
   title,
   backLabel,
   onBack,
@@ -27,6 +29,7 @@ export function GroupedDetail({
   level: requestedLevel,
 }: {
   readonly open: boolean;
+  readonly searchPage?: string;
   readonly title: string;
   readonly backLabel: string;
   readonly onBack: () => void;
@@ -50,7 +53,12 @@ export function GroupedDetail({
   const container = context.container ?? fallback;
   const [visited, setVisited] = useState(open);
   if (open && !visited) setVisited(true);
-  const active = open && context.visible;
+  const searching = useDrawerSearching();
+  useDrawerSearchPage(searchPage ? { id: searchPage, open, level, leave: async () => {
+    if (guard && !await guard.confirmDiscard(owner)) return false;
+    onBack(); return true;
+  } } : null);
+  const active = open && context.visible && !searching;
   useEffect(() => {
     if (!active || !page.current) return;
     const previous =
@@ -79,12 +87,16 @@ export function GroupedDetail({
       page.current
         .querySelector<HTMLElement>("h2")
         ?.focus({ preventScroll: true });
+    const activePage = page.current;
     return () => {
       release.forEach((restore) => restore());
-      if (previous?.isConnected && !previous.closest("[hidden], [inert]"))
-        previous.focus({ preventScroll: true });
+      if (!activePage.contains(document.activeElement)) return;
+      const trigger = searchPage ? [...(container?.querySelectorAll<HTMLElement>("[data-drawer-page-trigger]") ?? [])]
+        .find((element) => element.dataset.drawerPageTrigger === searchPage && !element.closest("[hidden], [inert]")) : null;
+      const destination = previous?.isConnected && previous !== document.body && !previous.closest("[hidden], [inert]") ? previous : trigger;
+      destination?.focus({ preventScroll: true });
     };
-  }, [active, container, level]);
+  }, [active, container, level, searchPage]);
   const content = visited ? (
     <section
       ref={page}

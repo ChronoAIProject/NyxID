@@ -18,9 +18,11 @@ import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 export function GroupedFormScope({
   children,
   inherit = false,
+  collect = false,
 }: {
   readonly children: ReactNode;
   readonly inherit?: boolean;
+  readonly collect?: boolean;
 }) {
   const parent = useContext(GroupedFormContext);
   const [entries, setEntries] = useState<ReadonlyMap<string, GroupedFormEntry>>(
@@ -29,18 +31,22 @@ export function GroupedFormScope({
   const [saving, setSaving] = useState(false);
   const currentEntries = useRef(entries);
   const lock = useRef(false);
+  const parentRegister = collect ? parent?.register : undefined;
+  const parentRemove = collect ? parent?.remove : undefined;
   const register = useCallback((id: string, entry: GroupedFormEntry) => {
     currentEntries.current = new Map(currentEntries.current).set(id, entry);
     setEntries(currentEntries.current);
-  }, []);
+    parentRegister?.(id, entry);
+  }, [parentRegister]);
   const remove = useCallback((id: string) => {
     const next = new Map(currentEntries.current);
     next.delete(id);
     currentEntries.current = next;
     setEntries(next);
-  }, []);
+    parentRemove?.(id);
+  }, [parentRemove]);
   async function save() {
-    if (lock.current) return;
+    if (lock.current || (collect && parent?.saving)) return;
     lock.current = true;
     setSaving(true);
     try {
@@ -67,7 +73,7 @@ export function GroupedFormScope({
   if (inherit && parent) return children;
   return (
     <GroupedFormContext.Provider
-      value={{ entries, register, remove, saving, save }}
+      value={{ entries, register, remove, saving: saving || Boolean(collect && parent?.saving), save }}
     >
       {children}
     </GroupedFormContext.Provider>

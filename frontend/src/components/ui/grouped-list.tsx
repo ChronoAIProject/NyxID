@@ -1,3 +1,4 @@
+import { useDrawerSearchTarget, type DrawerSearchMetadata } from "@/lib/drawer-search";
 import {
   createContext,
   cloneElement,
@@ -26,14 +27,17 @@ export function GroupedFooter({ children }: { readonly children: ReactNode }) {
 /** A single inset card. Compose groups as siblings, with explanatory text outside the card. */
 export function GroupedList({
   title,
+  search,
   footer,
   children,
   className,
   ...props
 }: ComponentProps<"section"> & {
+  readonly search?: DrawerSearchMetadata;
   readonly title?: string;
   readonly footer?: ReactNode;
 }) {
+  const searchTarget = useDrawerSearchTarget(search);
   const id = useId();
   const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(
     null,
@@ -41,6 +45,8 @@ export function GroupedList({
   return (
     <FooterContext.Provider value={footerContainer}>
       <section
+        ref={searchTarget}
+        data-drawer-search-target={search?.id}
         aria-labelledby={title ? id : undefined}
         className={cn("space-y-2", className)}
         {...props}
@@ -78,6 +84,7 @@ export function GroupedRow({
   asChild,
   interactive = false,
   title,
+  search,
   description,
   leading,
   accessory,
@@ -87,15 +94,19 @@ export function GroupedRow({
 }: Omit<ComponentProps<"div">, "title"> & {
   readonly asChild?: boolean;
   readonly interactive?: boolean;
+  readonly search?: DrawerSearchMetadata;
   readonly title?: ReactNode;
   readonly description?: ReactNode;
   readonly leading?: ReactNode;
   readonly accessory?: ReactNode;
 }) {
+  const searchTarget = useDrawerSearchTarget(search);
   const Component = asChild ? Slot : "div";
   const child = asChild && isValidElement<{ className?: string }>(children) ? children : null;
   return (
     <Component
+      ref={searchTarget}
+      data-drawer-search-target={search?.id}
       data-grouped-row=""
       className={cn(
         "relative not-first:before:absolute not-first:before:left-4 not-first:before:right-0 not-first:before:top-0 not-first:before:h-px not-first:before:bg-border/50 flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-left text-12 font-medium text-foreground",
@@ -138,11 +149,12 @@ export function GroupedRow({
 export function GroupedDisclosure({
   children,
   accessory,
+  search,
   className,
   ...props
-}: ComponentProps<"button"> & { readonly accessory?: ReactNode }) {
+}: ComponentProps<"button"> & { readonly accessory?: ReactNode; readonly search?: DrawerSearchMetadata }) {
   return (
-    <GroupedRow asChild interactive className={className}>
+    <GroupedRow asChild interactive className={className} search={search}>
       <button type="button" {...props}>
         <span className="min-w-0 flex-1 break-words">{children}</span>
         {accessory}

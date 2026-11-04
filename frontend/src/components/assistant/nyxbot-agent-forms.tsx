@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { flushSync } from "react-dom";
 import { useEffect, useState } from "react";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -104,6 +105,11 @@ export function ServiceGrantPicker({
     ...services,
     ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug })),
   ];
+  useDrawerSearchEntries(keys.isPending ? [] : rows.map((service) => ({
+    id: `service-${service.slug}`, title: service.label, breadcrumb: `Access › Services › ${service.slug}`,
+    keywords: `${service.slug} ${value.includes(service.slug) ? "Granted" : "Available"}`,
+    reveal: () => setSearch(""),
+  })));
   function toggle(slug: string, checked: boolean) {
     onChange(checked ? [...value, slug] : value.filter((item) => item !== slug));
   }
@@ -169,7 +175,7 @@ export function ServiceGrantPicker({
               .includes(search.toLowerCase()),
           )
           .map((service) => (
-            <GroupedRow key={service.slug} asChild interactive>
+            <GroupedRow data-drawer-search-target={`service-${service.slug}`} key={service.slug} asChild interactive>
               <button
                 type="button"
                 role="checkbox"

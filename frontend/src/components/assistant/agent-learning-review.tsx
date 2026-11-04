@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
   GroupedList,
   GroupedRow,
@@ -45,6 +46,10 @@ export function AgentLearningReview({
     if (serverThreshold !== undefined) setThreshold(serverThreshold);
   }, [serverThreshold]);
 
+  useDrawerSearchEntries(enabled && (!readOnly || review.data) ? (review.data?.proposals ?? []).map((proposal) => ({
+    id: `learning-${proposal.id}`, title: proposal.draft?.name ?? "Learning proposal", breadcrumb: "Skills › Learning proposals",
+    keywords: `${proposal.status} ${proposal.source}`, pages: [`learning-${proposal.id}`], reveal: () => setOpen(proposal.id),
+  })) : []);
   if (!enabled || (readOnly && !review.data)) {
     return null;
   }
@@ -56,6 +61,7 @@ export function AgentLearningReview({
     <section aria-label="Learning" className="space-y-3">
       <GroupedList
         title="Learning proposals"
+        search={{ id: "learning-proposals", title: "Learning proposals", breadcrumb: "Skills", keywords: "Automatic learning private drafts" }}
         footer={
           <>
             <p>
@@ -92,6 +98,7 @@ export function AgentLearningReview({
         }
       >
         <GroupedRow
+          search={{ id: "automatic-learning", title: "Automatic learning", breadcrumb: "Skills › Learning proposals", keywords: learningEnabled ? "On" : "Off" }}
           title="Automatic learning"
           accessory={
             readOnly ? (
@@ -117,6 +124,7 @@ export function AgentLearningReview({
         />
         {!readOnly ? (
           <GroupedRow
+            search={{ id: "learning-threshold", title: "Threshold", breadcrumb: "Skills › Learning proposals", keywords: String(threshold) }}
             title="Threshold"
             accessory={
               <GroupedInput
@@ -392,12 +400,13 @@ export function AgentLearningReview({
           >
             {!isOpen ? summary : null}
             <GroupedDetail
+              searchPage={`learning-${proposal.id}`}
               open={isOpen}
               title={draft?.name ?? "Learning proposal"}
               backLabel="Back to Skills"
               onBack={() => setOpen(undefined)}
             >
-              {isOpen ? summary : null}
+              {isOpen ? <div data-drawer-search-target={`learning-${proposal.id}`}>{summary}</div> : null}
               {isOpen &&
               proposal.source === "authored" &&
               proposal.auto_allowed ? (

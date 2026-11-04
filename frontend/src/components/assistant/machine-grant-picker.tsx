@@ -1,3 +1,4 @@
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { useState } from "react";
 import { Check } from "lucide-react";
 import {
@@ -48,6 +49,11 @@ export function MachineGrantPicker({
     .map((id) => ({ id, label: `${id} (unavailable)` }));
   const error = kind === "machines" ? nodes.error : logins.error;
   const allRows = [...rows, ...unknown];
+  useDrawerSearchEntries(allRows.map((row) => ({
+    id: `${kind}-${row.id}`, title: row.label,
+    breadcrumb: `Access › ${kind === "machines" ? "Machines" : "Saved logins"}`,
+    keywords: value.includes(row.id) ? "Granted" : "Available", reveal: () => setSearch(""),
+  })));
   const filtered = allRows.filter((row) =>
     row.label.toLowerCase().includes(search.toLowerCase()),
   );
@@ -87,7 +93,7 @@ export function MachineGrantPicker({
           }
         >
           {filtered.map((row) => (
-            <GroupedRow key={row.id} asChild interactive>
+            <GroupedRow data-drawer-search-target={`${kind}-${row.id}`} key={row.id} asChild interactive>
               <button
                 type="button"
                 role="checkbox"

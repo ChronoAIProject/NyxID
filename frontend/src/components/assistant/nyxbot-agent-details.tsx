@@ -1,3 +1,5 @@
+import { DrawerSearchProvider, AgentDrawerSearch } from "./agent-drawer-search";
+import { DrawerSearchTabContext, type DrawerSearchTab } from "@/lib/drawer-search";
 import {
   GroupedFormActions,
   GroupedFormScope,
@@ -84,6 +86,7 @@ import {
   useNyxBotAgent,
   useGuestReadiness,
   useNyxBotSettings,
+  useNyxAgentModels,
   useSetNyxBotAgentGrants,
   useUpdateNyxBotAgent,
 } from "@/hooks/use-nyxbot-agents";
@@ -91,6 +94,7 @@ import { ApiError } from "@/lib/api-client";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type { AgentDetailsTab } from "@/lib/assistant/search";
 import {
+  modelDisplayName,
   ACCESS_MODE_DESCRIPTION,
   ACCESS_MODE_LABEL,
   AGENT_STATUS_LABEL,
@@ -224,6 +228,13 @@ function AgentDetailsSheetContent({
   const [detailContainer, setDetailContainer] = useState<HTMLDivElement | null>(
     null,
   );
+  const [query, setQuery] = useState("");
+  const session = `${agentId}:${open}`;
+  const [previousSession, setPreviousSession] = useState(session);
+  if (previousSession !== session) {
+    setPreviousSession(session);
+    setQuery("");
+  }
   const detail = useNyxBotAgent(agentId, open);
   const returnFocus = useRef<HTMLElement | null>(null);
   const agent = detail.data?.agent;
@@ -238,6 +249,12 @@ function AgentDetailsSheetContent({
       <GroupedDraftNavigation active={open} />
       <SheetContent
         ref={setDetailContainer}
+        onEscapeKeyDown={(event) => {
+          if (!query.trim()) return;
+          event.preventDefault();
+          setQuery("");
+          detailContainer?.querySelector<HTMLElement>('[role="searchbox"]')?.focus();
+        }}
         className="flex w-full flex-col overflow-clip bg-background p-0 sm:max-w-lg"
         onOpenAutoFocus={() => {
           returnFocus.current =
@@ -316,6 +333,8 @@ function AgentDetailsSheetContent({
         {agent ? (
           <AgentDetailsContent
             key={agent.id}
+            query={query}
+            setQuery={setQuery}
             agent={agent}
             agents={agents}
             proposalId={proposalId}
@@ -342,6 +361,8 @@ const DRAWER_TABS = [
 ] as const;
 
 function AgentDetailsContent({
+  query,
+  setQuery,
   agent,
   agents,
   proposalId,
@@ -357,15 +378,19 @@ function AgentDetailsContent({
   readonly proposalId?: string;
   readonly tab?: AgentDetailsTab;
   readonly requestMode?: "denied" | "routed_to_nyxbot";
+  readonly query: string;
+  readonly setQuery: (query: string) => void;
   readonly memory: readonly AssistantAgentMemoryNote[];
   readonly onDeleted: () => void;
   readonly onClose: () => void;
   readonly detailContainer: HTMLDivElement | null;
 }) {
-  const [active, setActive] = useState<string>(
+  const searching = Boolean(query.trim());
+  const [active, setActive] = useState<DrawerSearchTab>(
     tab ?? (proposalId ? "skills" : "overview"),
   );
   const panels = useRef<HTMLDivElement>(null);
+  const [pageContainer, setPageContainer] = useState<HTMLDivElement | null>(null);
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const tabs = DRAWER_TABS.filter(([value]) =>
     value === "channels"
@@ -386,21 +411,29 @@ function AgentDetailsContent({
     setActive(incoming);
   }
   useEffect(() => {
-    panels.current
+    setQuery("");
+    const focusPanel = () => panels.current
       ?.querySelector<HTMLElement>("[data-panel]:not([hidden]) h2")
       ?.focus({ preventScroll: true });
-  }, [incoming]);
+    focusPanel();
+    const frame = requestAnimationFrame(focusPanel);
+    return () => cancelAnimationFrame(frame);
+  }, [incoming, setQuery]);
   useEffect(() => {
     panels.current
       ?.querySelector<HTMLElement>("[data-panel]:not([hidden]) [data-panel-scroll]")
       ?.scrollTo?.({ top: 0 });
   }, [selected]);
   return (
+    <DrawerSearchProvider query={query}>
+    <GroupedFormScope>
     <SegmentedControl
       value={selected}
-      onValueChange={setActive}
+      onValueChange={(value) => setActive(value as DrawerSearchTab)}
       className="flex min-h-0 flex-1 flex-col gap-4"
     >
+      <AgentDrawerSearch query={query} setQuery={setQuery} selected={selected} selectTab={setActive} container={detailContainer} />
+      <div ref={setPageContainer} className={`relative order-1 flex min-h-0 flex-col gap-4 ${searching ? "shrink-0" : "flex-1"}`}>
       <div className="shrink-0 px-4">
         <SegmentedControlList aria-label="Agent details sections">
           {tabs.map(([value, label]) => (
@@ -412,6 +445,8 @@ function AgentDetailsContent({
       </div>
       <div
         ref={panels}
+        hidden={searching}
+        style={searching ? { display: "none" } : undefined}
         className="min-h-0 flex-1 overflow-hidden px-4"
       >
         {tabs.map(([value, label]) => (
@@ -426,13 +461,14 @@ function AgentDetailsContent({
             <h2 tabIndex={-1} className="sr-only outline-none">
               {label}
             </h2>
+            <DrawerSearchTabContext.Provider value={value}>
             <GroupedDetailContext.Provider
               value={{
-                container: detailContainer,
-                visible: selected === value,
+                container: pageContainer,
+                visible: selected === value && !searching,
               }}
             >
-              <GroupedFormScope>
+              <GroupedFormScope collect>
                 <div data-panel-scroll="" className="assistant-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto pb-6">
                   {value === "overview" ? (
                     <>
@@ -443,6 +479,7 @@ function AgentDetailsContent({
                       )}
                       <GroupedList
                         title="Ownership"
+                        search={{ id: "ownership", title: "Ownership", keywords: [agent.owner_kind === "org" ? agent.owner_name ?? agent.owner_id : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}` : "Personal agent", agent.org_role, agent.share_role].filter(Boolean).join(" ") }}
                         footer={
                           agent.owner_kind === "org"
                             ? `Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
@@ -489,9 +526,9 @@ function AgentDetailsContent({
                                     agentId={agent.id}
                                     disabled={readOnly}
                                     drillIn
-                                    visible={selected === "grants"}
+                                    visible={selected === "grants" && !searching}
                                     onClose={onClose}
-                                    detailContainer={detailContainer}
+                                    detailContainer={pageContainer}
                                   />
                                   {agent.owner_kind !== "org" ? (
                                     <CollaborationGuestControls
@@ -505,9 +542,9 @@ function AgentDetailsContent({
                                       disabled={readOnly}
                                       guests
                                       drillIn
-                                      visible={selected === "grants"}
+                                      visible={selected === "grants" && !searching}
                                       onClose={onClose}
-                                      detailContainer={detailContainer}
+                                      detailContainer={pageContainer}
                                     />
                                   ) : null}
                                 </>
@@ -519,6 +556,7 @@ function AgentDetailsContent({
                               footer="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first."
                             >
                               <GroupedRow
+                                search={{ id: "nyxbot-full-access", title: "Connected services and account", breadcrumb: "Access", keywords: "Full access" }}
                                 title="Connected services and account"
                                 accessory="Full access"
                               />
@@ -564,10 +602,15 @@ function AgentDetailsContent({
                 <GroupedFormBar />
               </GroupedFormScope>
             </GroupedDetailContext.Provider>
+            </DrawerSearchTabContext.Provider>
           </SegmentedControlContent>
         ))}
       </div>
+      </div>
+      {searching && <div className="order-3"><GroupedFormBar /></div>}
     </SegmentedControl>
+    </GroupedFormScope>
+    </DrawerSearchProvider>
   );
 }
 
@@ -577,6 +620,7 @@ const INHERIT = "inherit";
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
+  const models = useNyxAgentModels(advancedControls);
   const workspaceMode = useNyxBotSettings().data?.access_mode;
   const nyxbot = agent.kind === "nyxbot";
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
@@ -645,7 +689,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="name"
                 render={({ field }) => (
-                  <GroupedRow asChild className="grouped-field">
+                  <GroupedRow search={{ id: "profile-name", title: "Name", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>Name</FormLabel>
                       <FormControl>
@@ -675,7 +719,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="display_name"
               render={({ field }) => (
-                <GroupedRow asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-display_name", title: "Display name", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>Display name</FormLabel>
                     <FormControl>
@@ -705,7 +749,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="model"
                 render={({ field }) => (
-                  <GroupedRow asChild className="grouped-field">
+                  <GroupedRow search={{ id: "profile-model", title: "Model", breadcrumb: "Overview › Profile", keywords: `${field.value ?? ""} ${models.data?.filter((model) => model.id === field.value).map(modelDisplayName).join(" ") ?? ""}` }} asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>Model</FormLabel>
                       <ModelSelect
@@ -733,7 +777,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="access_mode_override"
               render={({ field }) => (
-                <GroupedRow
+                <GroupedRow search={{ id: "profile-access_mode_override", title: "Access mode", breadcrumb: "Overview › Profile", keywords: field.value ? ACCESS_MODE_LABEL[field.value] : `Workspace setting ${workspaceMode ? ACCESS_MODE_LABEL[workspaceMode] : ""}` }}
                   asChild
                   className="!flex-row !flex-wrap !items-center !gap-3"
                 >
@@ -791,7 +835,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="channel_checking_notice"
               render={({ field }) => (
-                <GroupedRow asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-channel_checking_notice", title: "Channel progress reply", breadcrumb: "Overview › Profile", keywords: field.value ? "On" : "Off" }} asChild className="grouped-field">
                   <FormItem>
                     <div className="flex items-center justify-between gap-3">
                       <FormLabel className="text-12 font-medium text-foreground">
@@ -821,7 +865,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="description"
               render={({ field }) => (
-                <GroupedRow asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-description", title: nyxbot ? "Notes" : "Role", breadcrumb: "Overview › Profile", keywords: `Description ${field.value ?? ""}` }} asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>{nyxbot ? "Notes" : "Role"}</FormLabel>
                     <FormControl>
@@ -848,7 +892,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="persona"
               render={({ field }) => (
-                <GroupedRow asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-persona", title: "Persona", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>Persona</FormLabel>
                     <FormControl>
@@ -1041,7 +1085,7 @@ function GrantsForm({
                       </>
                     }
                   >
-                    <GroupedRow>
+                    <GroupedRow search={{ id: "account-read", title: "Read my account", breadcrumb: "Access › Account", keywords: field.value ? "On" : "Off" }}>
                       <div className="mr-auto">
                         <FormLabel className="text-12 font-medium text-foreground">
                           Read my account
@@ -1120,7 +1164,7 @@ function GuestAccessList({
         {services.map((slug) => {
           const id = `guest-access-${slug}`;
           return (
-            <GroupedRow key={slug} role="listitem">
+            <GroupedRow key={slug} role="listitem" search={{ id: `guest-${slug}`, title: slug, breadcrumb: "Access › Guest access", keywords: GUEST_ACCESS_LABEL[value[slug] ?? "use"] }}>
               <label
                 htmlFor={id}
                 className="min-w-0 flex-1 break-words text-12 font-medium text-foreground"
@@ -1231,7 +1275,7 @@ function MemoryList({
               </>
             }
           >
-            <GroupedRow className="grouped-field">
+            <GroupedRow search={{ id: "memory-note", title: editing ? "Edit note" : "Add a note", breadcrumb: "Memory", keywords: memoryForm.watch("text") }} className="grouped-field">
               <label
                 htmlFor="shared-memory-note"
                 className="text-12 font-medium"
@@ -1293,7 +1337,7 @@ function MemoryList({
         >
           <div role="list" aria-label={`${name} memory`}>
             {memory.map((note) => (
-              <GroupedRow key={note.id} role="listitem" className="items-start">
+              <GroupedRow search={{ id: `memory-${note.id}`, title: note.text, breadcrumb: "Memory" }} key={note.id} role="listitem" className="items-start">
                 <div className="min-w-0 flex-1 space-y-0.5">
                   <p className="whitespace-pre-wrap break-words text-12 text-foreground">
                     {note.text}
@@ -1389,7 +1433,7 @@ function Lifecycle({
           : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."
       }
     >
-      <GroupedRow asChild interactive className="text-destructive">
+      <GroupedRow search={{ id: "lifecycle", title: destroyed ? "Delete permanently" : "Destroy", breadcrumb: "Overview" }} asChild interactive className="text-destructive">
         <button
           type="button"
           onClick={() => {
