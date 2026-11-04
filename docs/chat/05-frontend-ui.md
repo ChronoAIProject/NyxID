@@ -426,18 +426,35 @@ orphan window. Device-code and token entry keep their existing setup behavior.
 
 ## Sidebar and history
 
-Active sessions from the person's connected CMA services automatically appear
-as status cards in the shared right-hand preview column, which also hosts
-machine cards. They stream public status and recent
-action summaries independently of NyxBot's turn. The cards use the machine
-card's docked surface and spacing, share the column's width and resize divider,
-and offer minimise/maximise controls; minimised cards keep streaming.
-Inactive sessions disappear after discovery refreshes. On narrow
-screens the cards sit above chat and the composer remains available.
-The **Across chats** label identifies these as a personal CMA account overview;
-the current activity contract does not link them to a NyxID specialist or task.
-See [Automatic CMA session cards](12-cma-sessions.md) for discovery scope, proxy
-connection requirements, event contract, preferences, and recovery.
+Verified CMA sessions appear automatically only in their source NyxID chat,
+with a CMA activity indicator beside the existing machine control. Each card
+links to that original conversation/specialist and optionally to CMA's validated
+supplied callback. Pinning makes a card available across chats and every page;
+unpinning restores source-only visibility. Account-bound pin/minimise preferences
+survive reload and clear on account changes. One app-level provider owns streams.
+
+Cards reuse the shared resizable preview column alongside machine cards; on
+narrow screens they sit above chat while retaining composer space. Other pages
+show pinned cards in a bounded floating stack. Automatic discovery uses only
+server-verified personal connection receipts, never account inventory or the
+current route as origin evidence. Status-filtered active inventory is joined to
+exact receipts before the card limit; pins use a separate exact query. The
+compact card combines glyph/title and controls in its header, task/stream state
+on one line, and three recent actions with expandable history. Header icon
+controls have hover/focus tooltips, and the card has no internal horizontal
+dividers. Connection,
+session ID, and timestamp stay behind Session details. The root floating
+surface uses matched shell-route ownership, including global monitoring on
+standalone desktop and not-found pages. Retryable refresh outages retain the
+last valid observation for the same connection/account/source; one denied or
+unavailable connection cannot suppress healthy peers. Authorization and terminal
+detail clear the affected observation. Explicitly pinning a visible authorized
+session keeps its card and stream through navigation, including an older
+empty/error pin cache, while the pin receipt refresh is pending or retryably
+unavailable. A successful withdrawal or denial clears the promoted observation. The fixed header and internal scrolling recovery/activity
+body keep Reconnect accessible at short keyboard heights, even when minimised.
+See [CMA session status cards](12-cma-sessions.md)
+for attribution boundaries, scoped polling, preferences, and recovery.
 
 The sidebar has a primary New chat command, workspace destinations, and a Chats navigation list. The chat list is a semantic `nav`. Each conversation title is a button whose accessible name is the title.
 

@@ -1,4 +1,5 @@
 import { NyxAgentRequestLinks } from "./nyxagent-request-links";
+import { CmaSessionIndicator } from "./cma-session-card";
 import { useConnectionDown } from "@/hooks/use-connection-down";
 import { SharedConsentCards } from "./shared-agent-controls";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -943,6 +944,7 @@ function NyxAgentThreadPage() {
         }
         controls={selectedId || machineToggle ? (
           <>
+            <CmaSessionIndicator conversationId={machineConversation} />
             {machineToggle}
             {selectedId ? (
               <WorkingContextPanel conversationId={selectedId} onManageMemory={setDetailsAgentId} onReset={() => void chat.refreshHistory()} />
