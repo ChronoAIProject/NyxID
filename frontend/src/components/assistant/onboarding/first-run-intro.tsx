@@ -21,8 +21,8 @@ import type {
 } from "@/schemas/assistant-onboarding";
 import { NextStepCards } from "./next-step-cards";
 import { OnboardingIcon } from "./onboarding-icons";
-import { AccessModesPreview, ReplayClip } from "./intro-previews";
-import { preloadReplays } from "./replay-clips";
+import { AccessModesPreview } from "./intro-previews";
+import { LiveReplay } from "./live-replay";
 
 /** The screens after the greeting; the progress bar counts these. */
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
@@ -79,7 +79,6 @@ export function FirstRunIntro({
 
   useEffect(() => {
     if (!open) return;
-    preloadReplays();
     saved.current = undefined;
     openedAt.current = Date.now();
     setIndex(0);
@@ -259,10 +258,10 @@ export function FirstRunIntro({
                 title="Meet NyxBot, your chief of staff"
                 description="Ask in plain words. NyxBot works across the apps you connect, keeps track of what matters and remembers how you like things done."
               >
-                <ReplayClip
-                  clip="chief-of-staff"
-                  title="NyxBot"
-                  label="Replay: the owner asks NyxBot to set up a Telegram bot; NyxBot links the setup page and keeps watching until the bot exists."
+                <LiveReplay
+                  kind="chief-of-staff"
+                  topics={topics}
+                  label="Example: the owner asks NyxBot a question about their day and NyxBot answers from their connected apps."
                 />
                 <Points
                   items={[
@@ -276,10 +275,9 @@ export function FirstRunIntro({
                 title="Specialists: experts with one job"
                 description="Think of specialists as people who are great at one thing. Give each a fixed role and scope, so it does that job better than anyone. Work with them directly, or let NyxBot hand them the work."
               >
-                <ReplayClip
-                  clip="specialists"
-                  title="NyxBot and a specialist"
-                  label="Replay: the owner asks NyxBot for urgent issues; NyxBot hands the job to the researcher specialist, which reports back, and NyxBot answers."
+                <LiveReplay
+                  kind="specialists"
+                  label="Example: the owner asks for urgent issues; NyxBot hands the job to the Research specialist, which reports back, and NyxBot answers."
                 />
                 <Points
                   items={[
@@ -293,10 +291,9 @@ export function FirstRunIntro({
                 title="You stay in control"
                 description="NyxBot asks before it does anything sensitive. You choose how often it asks, and you can change it any time in NyxBot settings."
               >
-                <ReplayClip
-                  clip="control"
-                  title="NyxBot"
-                  label="Replay: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
+                <LiveReplay
+                  kind="control"
+                  label="Example: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
                 />
                 <AccessModesPreview />
               </StepHeading>

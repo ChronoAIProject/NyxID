@@ -1,59 +1,12 @@
 import { useState } from "react";
-import { useMediaQuery } from "@/hooks/use-media-query";
-import { CLIPS } from "./replay-clips";
 import { ACCESS_MODE_DESCRIPTION, ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
 import type { NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 
 /*
- * Real assistant screens for the first-run intro: recorded replays of the
- * product (sample data only) and an access-mode explainer.
+ * The access-mode explainer for the first-run intro.
  */
 
-
-function WindowBar({ title }: { readonly title: string }) {
-  return (
-    <div className="flex items-center gap-2 border-b border-border/50 bg-sidebar px-3 py-2">
-      <span aria-hidden="true" className="flex gap-1">
-        <span className="h-2 w-2 rounded-full bg-overlay-strong" />
-        <span className="h-2 w-2 rounded-full bg-overlay-strong" />
-        <span className="h-2 w-2 rounded-full bg-overlay-strong" />
-      </span>
-      <span className="truncate text-11 font-medium text-text-tertiary">{title}</span>
-    </div>
-  );
-}
-
-/**
- * A recorded replay of the real assistant (dev mock mode, fixture data;
- * regenerate with `scripts/record-onboarding-clips.mjs`). It loops like a GIF;
- * with reduced motion it shows the finished conversation as a still.
- */
-export function ReplayClip({
-  clip,
-  title,
-  label,
-}: {
-  readonly clip: keyof typeof CLIPS;
-  readonly title: string;
-  /** What the replay shows, for assistive tech. */
-  readonly label: string;
-}) {
-  const reduced = useMediaQuery("(prefers-reduced-motion: reduce)");
-  const files = CLIPS[clip];
-  return (
-    <div className="overflow-hidden rounded-xl border border-border bg-background shadow-sm">
-      <WindowBar title={title} />
-      <img
-        key={clip}
-        src={reduced ? files.still : files.animated}
-        alt={label}
-        decoding="async"
-        className="block aspect-[1280/864] w-full bg-background object-cover"
-      />
-    </div>
-  );
-}
 
 const MODES: readonly NyxAgentAccessMode[] = ["nyxmode", "ask_every_time", "autopilot"];
 

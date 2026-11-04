@@ -14,18 +14,20 @@ a replay starts at the questions. It then has three parts:
    pills glide to their new places, and new pills fade in one after another.
    Every pick is optional.
 2. **Three intro screens.**
-   - **Chief of staff, specialists and "You stay in control"** play recorded
-     replays of the real assistant. The replays are captured in dev mock mode, so they contain
-     fixture data only. Web uses animated WebP, which plays through the image
-     pipeline like a GIF, with a still frame for reduced motion. The files are
-     imported from `frontend/src/assets/onboarding/` so they are
-     content-hashed;
-     mobile uses GIFs in `mobile/assets/onboarding/`. To regenerate them after
-     a UI change, run `frontend/scripts/record-onboarding-clips.mjs`. It turns
-     on two dev-only fixture switches: `partialText` (no placeholder stream)
-     and `markContinuations` (decision continuations render as system lines,
-     as on the server). Neither changes the e2e defaults.
-   - **You stay in control** replays an action card being allowed. On web an
+   - **Chief of staff, specialists and "You stay in control"** play live,
+     scripted replays on web (`live-replay.tsx`). They use the real chat
+     message bubbles and action card, driven by a timeline of sample data, so
+     they follow the user's theme, text size and density and never touch real
+     conversations. The chief-of-staff example follows the first topic the
+     user picked. With reduced motion they show the finished conversation.
+     Mobile plays GIF recordings of the real assistant from
+     `mobile/assets/onboarding/`. They are captured in dev mock mode, so they
+     contain fixture data only; regenerate them with
+     `frontend/scripts/record-onboarding-clips.mjs`. The script turns on two
+     dev-only fixture switches: `partialText` (no placeholder stream) and
+     `markContinuations` (decision continuations render as system lines, as
+     on the server). Neither changes the e2e defaults.
+   - **You stay in control** shows an action card being allowed. On web an
      access-mode explainer follows it.
    - **Specialists copy:** specialists are presented as people who are great
      at one thing. The owner gives each a fixed role and scope, and works with

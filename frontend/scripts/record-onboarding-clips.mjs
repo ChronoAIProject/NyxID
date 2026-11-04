@@ -1,15 +1,13 @@
 #!/usr/bin/env node
-// Records the first-run intro clips from the real assistant UI in dev mock
-// mode (fixture data only, no backend, no personal data). Re-run after a UI
+// Records the mobile app's first-run intro clips from the real assistant UI in
+// dev mock mode (fixture data only, no backend, no personal data). The web
+// intro plays live scripted replays instead (live-replay.tsx). Re-run after a UI
 // change that the clips show:
 //
 //   npm run dev -- --port 3101 --strictPort    # in another terminal
 //   node scripts/record-onboarding-clips.mjs [http://localhost:3101]
 //
-// Writes src/assets/onboarding/<clip>.webp (web: animated WebP, which plays
-// through the image pipeline like a GIF) plus <clip>-still.webp (the finished
-// conversation, for reduced motion), and ../mobile/assets/onboarding/<clip>.gif
-// (mobile). Needs ffmpeg (with libwebp) on PATH.
+// Writes ../mobile/assets/onboarding/<clip>.gif. Needs ffmpeg on PATH.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,7 +17,6 @@ import { chromium } from "playwright";
 
 const base = process.argv[2] ?? "http://localhost:3101";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const webOut = path.join(root, "src", "assets", "onboarding");
 const mobileOut = path.join(root, "..", "mobile", "assets", "onboarding");
 const VIEWPORT = { width: 1000, height: 560 };
 const SCALE = 2;
@@ -77,7 +74,6 @@ const FAULTS = {
   control: { ...DEMO, progressStallMs: 3500 },
 };
 
-fs.mkdirSync(webOut, { recursive: true });
 fs.mkdirSync(mobileOut, { recursive: true });
 const browser = await chromium.launch();
 for (const [name, run] of Object.entries(CLIPS)) {
@@ -127,7 +123,7 @@ for (const [name, run] of Object.entries(CLIPS)) {
     .join("\n");
   const concat = path.join(dir, "frames.txt");
   fs.writeFileSync(concat, `${list}\nfile '${frames.at(-1).file}'\n`);
-  // An intermediate H.264 master; the shipped formats are encoded from it.
+  // An intermediate H.264 master; the GIF is encoded from it.
   const mp4 = path.join(dir, `${name}.mp4`);
   execFileSync("ffmpeg", [
     "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", concat,
@@ -135,20 +131,11 @@ for (const [name, run] of Object.entries(CLIPS)) {
     "-crf", "24", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", mp4,
   ]);
   execFileSync("ffmpeg", [
-    "-y", "-loglevel", "error", "-i", mp4, "-vf", "fps=15,scale=960:-2:flags=lanczos",
-    "-c:v", "libwebp_anim", "-lossless", "0", "-quality", "72", "-compression_level", "5",
-    "-loop", "0", "-an", path.join(webOut, `${name}.webp`),
-  ]);
-  execFileSync("ffmpeg", [
-    "-y", "-loglevel", "error", "-sseof", "-1", "-i", mp4, "-frames:v", "1",
-    "-vf", "scale=960:-2:flags=lanczos", "-quality", "82", path.join(webOut, `${name}-still.webp`),
-  ]);
-  execFileSync("ffmpeg", [
     "-y", "-loglevel", "error", "-i", mp4, "-vf",
     "fps=12,scale=600:-1:flags=lanczos,split[a][b];[a]palettegen=max_colors=96[p];[b][p]paletteuse=dither=bayer:bayer_scale=4",
     path.join(mobileOut, `${name}.gif`),
   ]);
   fs.rmSync(dir, { recursive: true, force: true });
-  console.log(`${name}: ${(fs.statSync(path.join(webOut, `${name}.webp`)).size / 1024).toFixed(0)} KB webp, ${(fs.statSync(path.join(mobileOut, `${name}.gif`)).size / 1024).toFixed(0)} KB gif`);
+  console.log(`${name}: ${(fs.statSync(path.join(mobileOut, `${name}.gif`)).size / 1024).toFixed(0)} KB gif`);
 }
 await browser.close();

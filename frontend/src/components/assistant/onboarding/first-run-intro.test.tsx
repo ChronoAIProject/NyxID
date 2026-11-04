@@ -7,10 +7,9 @@ import type { AssistantOnboarding } from "@/schemas/assistant-onboarding";
 import { FirstRunIntro } from "./first-run-intro";
 import { NextStepCards } from "./next-step-cards";
 
-// No network: the intro would otherwise prefetch its replay files.
-vi.mock("./replay-clips", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./replay-clips")>()),
-  preloadReplays: () => undefined,
+// The live replays render the real chat bubbles, which need the app's router.
+vi.mock("./live-replay", () => ({
+  LiveReplay: ({ label }: { label: string }) => <figure aria-label={label} />,
 }));
 
 const at = "2026-11-04T00:00:00Z";
