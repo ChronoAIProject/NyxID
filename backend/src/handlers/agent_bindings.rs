@@ -644,6 +644,7 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> ApiKey {
         ApiKey {
+            permission_policy_id: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             name: "test-agent".to_string(),

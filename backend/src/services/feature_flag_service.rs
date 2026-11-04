@@ -255,6 +255,12 @@ const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 pub const ORG_INSTRUCTION_FLAG_KEY: &str = "assistant:org-instruction-v1";
+pub const EXECUTION_PERMISSIONS_FLAG_KEY: &str = "permissions:execution-v1";
+const EXECUTION_PERMISSIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: EXECUTION_PERMISSIONS_FLAG_KEY,
+    description: "Stage explicit execution permissions after fleet readiness; contract readers only, no execution or authoring enabled yet",
+    default_enabled: false,
+};
 const ORG_INSTRUCTION_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ORG_INSTRUCTION_FLAG_KEY,
     description: "Require exact owner instruction for organization connections in every access mode",
@@ -407,6 +413,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     ORG_INSTRUCTION_FLAG,
+    EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
@@ -455,6 +462,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     ORG_INSTRUCTION_FLAG,
+    EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
@@ -2071,6 +2079,19 @@ mod tests {
     }
 
     #[test]
+    fn execution_permissions_are_default_off_and_readiness_gated() {
+        let flag = FEATURE_FLAGS
+            .iter()
+            .find(|flag| flag.key == EXECUTION_PERMISSIONS_FLAG_KEY)
+            .unwrap();
+        assert!(!flag.default_enabled);
+        assert!(
+            super::super::security_readiness_service::CAPABILITIES
+                .contains(&EXECUTION_PERMISSIONS_FLAG_KEY)
+        );
+    }
+
+    #[test]
     fn registry_keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for def in FEATURE_FLAGS {
@@ -3057,6 +3078,7 @@ mod tests {
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
                 "assistant:org-instruction-v1",
+                "permissions:execution-v1",
                 "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
                 "assistant:org-agents",

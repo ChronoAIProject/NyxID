@@ -5,6 +5,9 @@ pub const COLLECTION_NAME: &str = "approval_grants";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalGrant {
+    /// Reader-first explicit permission contract. Never inferred from legacy scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<super::execution_permission::ExecutionPermission>,
     /// UUID v4 string
     #[serde(rename = "_id")]
     pub id: String,
@@ -36,7 +39,8 @@ pub struct ApprovalGrant {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub granted_at: DateTime<Utc>,
 
-    /// When this grant expires (user-configurable, default 30 days)
+    /// Legacy grant expiry; for execution rows this is the conservative TTL
+    /// projection. execution.validity is authoritative (see EXECUTION_PERMISSIONS.md).
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 
@@ -44,6 +48,7 @@ pub struct ApprovalGrant {
     #[serde(default)]
     pub revoked: bool,
 
+    /// Legacy semantics only; execution rows always bind their exact actor.
     /// True when this grant was created under an org's per-service approval
     /// policy. Org-scoped grants are reusable by **any** member of the owning
     /// org (the `user_id` field) calling the same service, regardless of the
@@ -62,12 +67,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_row_has_no_execution_permission() {
+        let doc = bson::to_document(&make_approval_grant()).unwrap();
+        assert!(!doc.contains_key("execution"));
+        assert!(
+            bson::from_document::<ApprovalGrant>(doc)
+                .unwrap()
+                .execution
+                .is_none()
+        );
+    }
+
+    #[test]
     fn collection_name() {
         assert_eq!(COLLECTION_NAME, "approval_grants");
     }
 
     fn make_approval_grant() -> ApprovalGrant {
         ApprovalGrant {
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),

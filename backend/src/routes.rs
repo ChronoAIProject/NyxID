@@ -2780,6 +2780,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::update_settings),
         )
         .route(
+            "/nyxagent/onboarding",
+            get(handlers::assistant_onboarding::get_onboarding)
+                .put(handlers::assistant_onboarding::save_onboarding),
+        )
+        .route(
+            "/nyxagent/onboarding/suggestions/hide",
+            post(handlers::assistant_onboarding::hide_suggestions),
+        )
+        .route(
             "/nyxagent/channels",
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
