@@ -181,7 +181,7 @@ function MachinesContent() {
     });
   }
   return (
-    <div className="space-y-6">
+    <div className="shell-page-stack">
       <WorkspacePageHeader
         title="Machines"
         description="Remote and self-hosted computers for authorized agents and clients."

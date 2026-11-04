@@ -124,7 +124,7 @@ export function DashboardLayout() {
           </div>
 
           <main
-            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
+            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain shell-page-content"
             style={{ paddingBottom: "max(2rem, var(--sab))" }}
           >
             <div className="w-full">
@@ -217,11 +217,12 @@ function TopBar({
   const showBack = !ROOT_PATHS.has(pathname);
 
   return (
-    <header className="flex items-center shrink-0 h-[52px] border-b border-border/60">
+    <header className="flex items-center shrink-0 min-h-[52px] border-b border-border/60">
       {/* Mobile: back + logo left */}
       <div className="flex items-center pl-2 gap-1 md:hidden">
         {showBack ? (
           <button
+            data-icon-button=""
             type="button"
             onClick={() => window.history.back()}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
@@ -251,7 +252,7 @@ function TopBar({
         <div className="flex-1" />
 
         {/* Right actions */}
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
         {/* Theme toggle — light/dark, all breakpoints */}
         <ThemeToggle />
 
@@ -270,6 +271,7 @@ function TopBar({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
+              data-icon-button=""
               type="button"
               className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
               aria-label="User menu"
@@ -278,7 +280,7 @@ function TopBar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
-            <div className="px-2 py-1.5">
+            <div className="shell-account-heading">
               <p className="shell-user-name">{user?.display_name ?? "User"}</p>
               <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
@@ -314,6 +316,7 @@ function TopBar({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
+              data-icon-button=""
               type="button"
               className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
               aria-label="User menu"
@@ -322,7 +325,7 @@ function TopBar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
-            <div className="px-2 py-1.5">
+            <div className="shell-account-heading">
               <p className="shell-user-name">{user?.display_name ?? "User"}</p>
               <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
@@ -343,6 +346,7 @@ function TopBar({
 
         {/* Mobile: GitHub */}
         <a
+          data-icon-button=""
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
@@ -354,6 +358,7 @@ function TopBar({
 
         {onMobileMenu && (
         <button
+          data-icon-button=""
           type="button"
           onClick={onMobileMenu}
           className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
@@ -530,7 +535,7 @@ function MobileNav({
               ))}
             </div>
 
-            <div className="px-4 my-3">
+            <div className="flex items-center">
               <span className="shell-group-label">
                 Approvals
               </span>
@@ -546,7 +551,7 @@ function MobileNav({
               ))}
             </div>
 
-            <div className="px-4 my-3">
+            <div className="flex items-center">
               <span className="shell-group-label">
                 Developer
               </span>
@@ -564,7 +569,7 @@ function MobileNav({
 
             {(adminNav.length > 0) && (
               <>
-                <div className="px-4 my-3">
+                <div className="flex items-center">
                   <span className="shell-group-label">
                     Admin
                   </span>
@@ -587,11 +592,11 @@ function MobileNav({
 
       {/* Footer — user info + logout */}
       <div className="shrink-0 border-t border-border/60 px-5 py-4 space-y-2" style={{ paddingBottom: "max(1rem, var(--sab))" }}>
-        <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
+        <div className="shell-user-block">
+          <div className="shell-user-avatar border border-hairline bg-overlay-strong">
             <User className="h-[14px] w-[14px] text-text-tertiary" />
           </div>
-          <div className="min-w-0 flex-1">
+          <div className="shell-user-copy">
             <p className="shell-user-name truncate">{user?.display_name ?? "User"}</p>
             <p className="shell-user-email truncate">{user?.email ?? ""}</p>
           </div>

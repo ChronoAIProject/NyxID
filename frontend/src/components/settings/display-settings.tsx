@@ -51,7 +51,7 @@ function DisplaySectionHeader({ icon: Icon, title, children }: {
   readonly children: ReactNode;
 }) {
   return (
-    <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--assistant-density,1))] space-y-0">
+    <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--display-density,1))] space-y-0">
       <Icon data-ui-icon="" aria-hidden="true" className="mt-[0.125em] shrink-0 text-17 text-text-tertiary" />
       <div className="min-w-0 space-y-1.5">
         <CardTitle className="text-15 leading-snug">{title}</CardTitle>

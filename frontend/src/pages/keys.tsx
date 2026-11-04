@@ -120,7 +120,7 @@ function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
 
 function LoadingSkeleton() {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="grid shell-card-grid sm:grid-cols-2 lg:grid-cols-3">
       {Array.from({ length: 6 }, (_, i) => (
         <Skeleton key={i} className="h-32 rounded-xl" />
       ))}
@@ -424,7 +424,7 @@ export function KeysPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="shell-page-stack">
       <PageHeader
         title="Services & Credentials"
         description="Manage your AI service credentials and agent keys."

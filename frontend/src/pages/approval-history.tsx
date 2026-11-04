@@ -117,7 +117,7 @@ export function ApprovalHistoryPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="shell-page-stack">
       <PageHeader
         title="Approval History"
         description="Review pending requests before they expire. Refresh to discover new requests or decisions."

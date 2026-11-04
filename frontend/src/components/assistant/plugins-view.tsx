@@ -182,7 +182,7 @@ function SectionHeading({
   );
 }
 function CardGrid({ children }: { readonly children: ReactNode }) {
-  return <div className="assistant-plugin-grid grid gap-3">{children}</div>;
+  return <div className="assistant-plugin-grid shell-card-grid grid">{children}</div>;
 }
 function LoadingGrid() {
   return (
@@ -637,7 +637,7 @@ export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
   const [tab, setTab] = useState("connector");
   const [query, setQuery] = useState("");
   return (
-    <div className="space-y-6 pb-4">
+    <div className="shell-page-stack pb-4">
       <WorkspacePageHeader
         title="Plugins"
         description="Connect your services and model accounts. Add skills to teach your assistant new workflows."

@@ -133,7 +133,7 @@ function workspaceActiveView(view: WorkspaceView) {
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
   return (
     <div
-      className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-10"
+      className="h-full overflow-y-auto shell-page-content"
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
       <Suspense

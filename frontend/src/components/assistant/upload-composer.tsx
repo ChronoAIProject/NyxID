@@ -431,7 +431,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                         />
                       </button>
                     ) : (
-                      <div className="flex flex-1 flex-col justify-between gap-2 p-3 pr-[calc(1.125em+1em*var(--assistant-density,1)+var(--spacing)*2)]">
+                      <div className="flex flex-1 flex-col justify-between gap-2 p-3 pr-[calc(1.125em+1em*var(--display-density,1)+var(--spacing)*2)]">
                         {file.kind === "pasted-text" ? (
                           <p className="line-clamp-2 text-12 leading-normal text-muted-foreground">
                             {file.text}

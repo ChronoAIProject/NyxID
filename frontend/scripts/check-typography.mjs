@@ -19,6 +19,7 @@ const excluded = file => /\.test\.|\.spec\.|\.d\.ts$/.test(file) || unthemed.has
 
 export function typographyViolations(file, source) {
   const errors = [];
+  if (!excluded(file) && source.includes('--assistant-density')) errors.push('shared spacing must use --display-density');
   const fail = (offset, message) => errors.push(`line ${source.slice(0, offset).split('\n').length}: ${message}`);
   const classes = (text, offset) => {
     if (/\bfont-display\b/.test(text) && /\btext-28\b/.test(text) && !/\bfont-(semibold|bold)\b/.test(text)) {

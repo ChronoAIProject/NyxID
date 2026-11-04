@@ -183,6 +183,7 @@ function NavItem({
       to={item.to}
       onClick={onClick}
       title={collapsed ? item.label : undefined}
+      data-nav-collapsed={collapsed}
       className={cn(
         "shell-nav-item group/nav flex items-center rounded-lg py-2 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
@@ -228,6 +229,7 @@ export function AssistantNavEntry({
       to="/assistant"
       onClick={onClick}
       title={collapsed ? "Assistant" : undefined}
+      data-nav-collapsed={collapsed}
       className={cn(
         "shell-nav-item group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
@@ -327,7 +329,7 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="px-3 my-2 flex items-center">
+        <div className="flex items-center">
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
@@ -348,7 +350,7 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="px-3 my-2 flex items-center">
+        <div className="flex items-center">
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
@@ -371,7 +373,7 @@ export function Sidebar({
 
         {adminNav.length > 0 && (
           <>
-            <div className="px-3 my-2 flex items-center">
+            <div className="flex items-center">
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (

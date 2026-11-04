@@ -193,7 +193,7 @@ function AutomationsContent() {
     );
   }
   return (
-    <div className="space-y-6">
+    <div className="shell-page-stack">
       <WorkspacePageHeader
         column
         title="Automations"

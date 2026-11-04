@@ -1,0 +1,128 @@
+import { expect, test, type Page } from "@playwright/test";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const properties = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap", "rowGap", "minHeight", "minWidth", "lineHeight", "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius", "fontSize", "fontWeight"] as const;
+
+async function readings(page: Page, selector: string) {
+  return page.locator(selector).evaluateAll((elements, properties) => Object.fromEntries(elements.map((element, i) => {
+    const style = getComputedStyle(element);
+    const icons = [...element.querySelectorAll("svg")].map(icon => { const s = getComputedStyle(icon); return { width: s.width, height: s.height }; });
+    return [element.getAttribute("data-parity") ?? `${element.tagName}-${i}`, { ...Object.fromEntries(properties.map(key => [key, style[key as keyof CSSStyleDeclaration]])), height: style.height, icons }];
+  })), [...properties]);
+}
+
+async function openRoute(page: Page, path: string, scale: number, density: number, theme: "light" | "dark") {
+  await page.addInitScript(({ scale, density, theme }) => {
+    localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: scale, density, mode: theme, motion: "reduce" }, version: 2 }));
+    localStorage.setItem("nyxid.telemetry_consent.v3.test-user", JSON.stringify({ enabled: false, asked: true }));
+  }, { scale, density, theme });
+  await page.goto(`${path}?mock=1`);
+  await expect(page.locator(".shell-page-content")).toBeVisible();
+  await page.evaluate(async () => {
+    const module = await import("/e2e/fixtures/mount-treatment.ts");
+    module.mountTreatment();
+  });
+  await expect(page.locator('[data-parity="input"]')).toBeVisible();
+  await expect(page.locator('[data-parity="hidden-icon"]')).toBeHidden();
+  await page.evaluate(() => document.fonts.ready);
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) for (const scale of [0.5, 1, 1.5, 2]) for (const density of [1, 1.4]) {
+  test(`shared box treatment (${theme}, ${width}, text ${scale}×, spacing ${density}×)`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, isMobile: width === 390, hasTouch: width === 390, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.addInitScript(() => { window.addEventListener("error", event => { (window as Window & { treatmentErrors?: string[] }).treatmentErrors ??= []; (window as Window & { treatmentErrors: string[] }).treatmentErrors.push(event.message); }); });
+    // Fixture mode serves local data; never send writes to a backend.
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    const shells: Record<string, unknown>[] = [];
+    for (const path of ["/approvals/history", "/assistant/approvals"]) {
+      await openRoute(page, path, scale, density, theme);
+      if (!path.startsWith("/assistant")) {
+        const toolbar = page.locator('header:has([aria-label="User menu"])');
+        await expect.poll(() => toolbar.evaluate(header => {
+          const outer = header.getBoundingClientRect();
+          return [...header.querySelectorAll("button,a")].flatMap(button => {
+            const box = button.getBoundingClientRect();
+            return !box.width || !box.height || (box.top >= outer.top && box.bottom <= outer.bottom && box.left >= outer.left && box.right <= outer.right) ? [] : [{ label: button.getAttribute("aria-label") ?? button.textContent, box: box.toJSON(), header: outer.toJSON() }];
+          });
+        })).toEqual([]);
+      }
+      const sample: Record<string, unknown> = { controls: await readings(page, "[data-treatment-fixture] [data-parity]") };
+      sample.header = await readings(page, "[data-treatment-fixture] [data-page-header], [data-treatment-fixture] [data-page-heading], [data-treatment-fixture] [data-page-heading] :is(h1,h2), [data-treatment-fixture] [data-page-heading] > p, [data-treatment-fixture] [data-title-actions]");
+      // Title tag names differ intentionally; compare the roles by stable position.
+      sample.header = Object.values(sample.header as object);
+      sample.group = await readings(page, "[data-treatment-fixture] section[aria-labelledby] > h3, [data-treatment-fixture] [data-grouped-footer]");
+      sample.page = await page.locator(".shell-page-content").evaluate(el => { const s = getComputedStyle(el); return { padding: s.padding, gap: s.gap }; });
+      for (const kind of ["dialog", "sheet", "menu", "popover", "select", "tooltip", "toast"]) {
+        await page.evaluate(kind => window.treatmentFixture.portal(kind), kind);
+        const selector = kind === "toast" ? "[data-sonner-toast]" : `[data-parity="${kind === "select" ? "select-content" : kind}"]`;
+        await expect(page.locator(selector).first()).toBeVisible();
+        sample[kind] = Object.values(await readings(page, kind === "toast" ? "[data-sonner-toast], [data-sonner-toast] :is([data-title],[data-description],[data-button])" : `${selector}, ${selector} [data-parity], ${selector} [data-icon-button], ${selector} [data-select-indicator]`));
+        if (process.env.NYX_TREATMENT_SHOTS && density === 1 && (scale === 1 || scale === 2) && ["dialog", "menu", "toast"].includes(kind)) {
+          await mkdir(process.env.NYX_TREATMENT_SHOTS, { recursive: true });
+          await page.screenshot({ animations: "disabled", path: join(process.env.NYX_TREATMENT_SHOTS, `${theme}-${width}-${scale}-${path.startsWith("/assistant") ? "assistant" : "studio"}-${kind}.png`) });
+        }
+        await page.evaluate(() => window.treatmentFixture.portal(""));
+        await expect(page.locator(selector).first()).toBeHidden();
+        await expect.poll(() => page.evaluate(() => getComputedStyle(document.body).pointerEvents)).not.toBe("none");
+      }
+      await page.evaluate(() => window.treatmentFixture.portal(""));
+      const assistant = path.startsWith("/assistant");
+      if (width === 390) await page.getByRole("button", { name: assistant ? "Open chats" : "Open menu", exact: true }).click();
+      const nav = page.locator(assistant ? '.shell-nav-item[href="/assistant/plugins"]' : '.shell-nav-item[href="/dashboard"]').filter({ visible: true }).first();
+      await expect(nav).toBeVisible();
+      sample.nav = Object.values(await readings(page, assistant ? '.shell-nav-item[href="/assistant/plugins"]:visible' : '.shell-nav-item[href="/dashboard"]:visible'))[0];
+      sample.groupLabel = Object.values(await readings(page, '.shell-group-label:visible'))[0];
+      if (width === 390) await page.getByRole("button", { name: assistant ? "Close chats" : "Close menu", exact: true }).last().click();
+      if (width === 390 && !assistant) await expect(page.getByRole("button", { name: "Close menu", exact: true })).toHaveCount(0);
+      if (width === 390 && assistant) await page.getByRole("button", { name: "Open chats", exact: true }).click();
+      await page.getByRole("button", { name: assistant ? "Account menu" : "User menu", exact: true }).filter({ visible: true }).click();
+      sample.account = Object.values(await readings(page, '[role="menu"] .shell-user-name, [role="menu"] .shell-user-email'));
+      await page.keyboard.press("Escape");
+      if (width === 390 && assistant) await page.getByRole("button", { name: "Close chats", exact: true }).last().click();
+      if (process.env.NYX_TREATMENT_SHOTS && density === 1 && (scale === 1 || scale === 2)) {
+        await page.locator('[data-treatment-fixture]').scrollIntoViewIfNeeded();
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_TREATMENT_SHOTS, `${theme}-${width}-${scale}-${path.startsWith("/assistant") ? "assistant" : "studio"}-controls.png`) });
+      }
+      expect(await page.evaluate(() => (window as Window & { treatmentErrors?: string[] }).treatmentErrors ?? [])).toEqual([]);
+      shells.push(sample);
+    }
+    expect(shells[1]).toEqual(shells[0]);
+    expect(errors).toEqual([]);
+    const evidence = { theme, width, scale, density, shells };
+    await test.info().attach("box-parity.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
+    if (process.env.NYX_TREATMENT_SHOTS) await writeFile(join(process.env.NYX_TREATMENT_SHOTS, `${theme}-${width}-${scale}-${density}-metrics.json`), JSON.stringify(evidence, null, 2));
+    await context.close();
+  });
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) {
+  test(`equivalent page spacing (${theme}, ${width})`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, isMobile: width === 390, hasTouch: width === 390, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    await page.addInitScript(theme => localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: 1, density: 1, mode: theme }, version: 2 })), theme);
+    const pages = [];
+    for (const path of ["/approvals/history", "/assistant/approvals", "/keys", "/assistant/plugins"]) {
+      await page.goto(`${path}?mock=1`);
+      await expect(page.locator('[data-page-header]')).toBeVisible();
+      const metrics = await page.locator('[data-page-header]').evaluate(header => {
+        const s = getComputedStyle(header), heading = getComputedStyle(header.querySelector('[data-page-heading]')!), content = getComputedStyle(document.querySelector('.shell-page-content')!), stack = getComputedStyle(header.closest('.shell-page-stack')!);
+        const grid = document.querySelector('.shell-card-grid');
+        return { cardGap: grid ? getComputedStyle(grid).gap : null, headerColumnGap: s.columnGap, headerRowGap: s.rowGap, headingGap: heading.gap, pagePadding: content.padding, sectionGap: stack.gap };
+      });
+      pages.push({ path, metrics });
+      if (process.env.NYX_TREATMENT_SHOTS) await page.screenshot({ animations: "disabled", path: join(process.env.NYX_TREATMENT_SHOTS, `${theme}-${width}-${path.replaceAll('/', '_')}-page.png`) });
+    }
+    for (const page of pages) {
+      if (page.path === "/keys" || page.path === "/assistant/plugins") expect(page.metrics.cardGap).toBe("16px");
+      expect({ ...page.metrics, cardGap: null }).toEqual({ ...pages[0]!.metrics, cardGap: null });
+    }
+    await test.info().attach("page-spacing.json", { body: JSON.stringify(pages, null, 2), contentType: "application/json" });
+    if (process.env.NYX_TREATMENT_SHOTS) await writeFile(join(process.env.NYX_TREATMENT_SHOTS, `${theme}-${width}-page-spacing.json`), JSON.stringify(pages, null, 2));
+    await context.close();
+  });
+}

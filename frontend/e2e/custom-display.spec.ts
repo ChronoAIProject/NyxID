@@ -107,7 +107,11 @@ for (const theme of ["light", "dark"] as const)
           });
           // Panels intentionally defer rendering until their viewport sentinel
           // enters. Enlarged wallet/filter content can put this panel offscreen.
-          await analytics.getByRole("article", { name: "Request traffic" }).scrollIntoViewIfNeeded();
+          const traffic = analytics.getByRole("article", { name: "Request traffic" });
+          // Align the heading, rather than accepting a partially visible card:
+          // layout measurement can move the lazy panel just below the viewport.
+          await traffic.getByRole("heading", { name: "Request traffic" }).evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
+          await expect(traffic).toBeInViewport({ ratio: 0.1 });
           const metrics = analytics.locator(".font-display.text-28");
           await expect(metrics).toHaveCount(5);
           for (const metric of await metrics.all())

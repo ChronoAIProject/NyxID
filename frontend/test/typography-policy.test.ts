@@ -1,9 +1,19 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error The lint guard is deliberately a standalone Node script.
 import { checkTypography, typographyViolations } from "../scripts/check-typography.mjs";
+import { readFileSync } from "node:fs";
+import postcss from "postcss";
 import { resolve } from "node:path";
 
 describe("typography policy", () => {
+  it("never scopes shared treatment to the assistant shell", () => {
+    postcss.parse(readFileSync(resolve("src/app.css"), "utf8")).walkRules(rule => {
+      if (rule.selector.includes("assistant-display")) {
+        expect(rule.selector).toBe("html.assistant-display [data-chat-index-target]");
+      }
+    });
+    expect(readFileSync(resolve("src/hooks/use-theme.ts"), "utf8")).not.toContain("--assistant-density");
+  });
   it("keeps source tokens canonical and role consumers scalable", () => {
     expect(checkTypography(resolve("src"))).toEqual([]);
   });
@@ -17,6 +27,7 @@ describe("typography policy", () => {
     ['"font-display text-28 font-medium"', "underweighted prominent metric"],
     ['<span className={cn("font-display font-medium", compact ? "text-22" : "text-28")} />', "split metric assignment"],
     ['"font-display text-28"', "metric without a weight"],
+    ['"gap-[calc(0.75em*var(--assistant-density,1))]"', "obsolete shell-specific density"],
   ])("rejects %s (%s)", (source) => {
     expect(typographyViolations("components/example.tsx", source)).not.toEqual([]);
   });

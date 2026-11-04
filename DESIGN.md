@@ -137,7 +137,36 @@ On coarse pointers, editable inputs use `max(16px, var(--text-14))` to prevent i
 focus zoom without changing their semantic role above that floor. Controls and
 label/value rows wrap with available space; essential monetary values stay complete.
 Shell navigation icons share `1.125em` sizing, labels and account footer roles.
-Assistant-only icon, density and control-layout rules do not remap typography.
+Studio and NyxBot also share control treatment and page spacing. The themed root
+owns `--display-density` and every shared control rule, including body portals;
+`assistant-display` never changes shared primitive geometry. Interface icons use
+`max(0.75rem, 1.125em)`. Icon/label actions use `0.5em × spacing` gaps,
+`0.75em × spacing` horizontal and `0.375em × spacing` vertical padding; icon-only
+controls use `0.5em × spacing` padding. Enlarged controls grow to fit their labels
+with the shared 24px floor. Grouped rows use four spacing units horizontally,
+2.5 vertically, and an eleven-unit minimum height. Select indicators, tab strips,
+range inputs and grouped fields have one treatment regardless of shell.
+Icon-only actions opt into the shared icon-button treatment. Their display rule
+lives in the base layer so responsive visibility utilities remain authoritative.
+Toolbars grow and wrap their action groups at enlarged text and spacing settings.
+
+`shell-page-content` gives both shells four spacing units of content inset on
+mobile, six from 640px, eight horizontally from 768px, and ten horizontally from
+1024px; top inset stays six on desktop. Bottom inset reserves at least 2rem and
+the safe area. `shell-page-stack` uses six spacing units between sections;
+`shell-card-grid` uses four between cards. `WorkspacePageHeader` composes the
+shared `PageHeader` inside its sticky-title behavior: identical title line-height,
+description gap, action gap and wrapping. Shared shell navigation, group labels
+and account blocks own their padding, gaps, radii and icon dimensions.
+
+The only remaining `assistant-display` CSS rule exempts conversation-index tick
+slots from general control minimums. It is a transcript navigator, not a shared
+control. Chat transcript/composer/slab layout remains component-scoped because
+Studio has no corresponding surface. Never-themed pages retain their own defaults.
+The treatment parity browser matrix mounts identical primitives in the real Studio
+and NyxBot Approvals routes and measures both inline and portaled controls at
+1440/390, both themes, text 0.5/1/1.5/2× and spacing 1/1.4×. Real navigation,
+account metadata and equivalent page spacing are also checked.
 
 Mobile Activity cards lead with the service name in `text-15 font-semibold`; the action uses `text-14 font-medium` and the URL uses secondary `text-13`. Service names may wrap to two lines.
 
@@ -163,11 +192,11 @@ family in cards, tables, summaries, route panels, and routing controls so the sa
 shapes retain their meaning.
 
 ### Buttons
-- **Height:** default `h-8`, sm `h-7`, lg `h-9`, icon `h-8 w-8`
+- **Height:** themed controls use intrinsic height with a shared `max(24px, 1.5rem, 1lh + 2 spacing units)` floor; labels and padding determine the final height. Size variants retain their horizontal insets, and icon controls use the shared icon-only treatment. Never-themed defaults retain `h-8` / `h-7` / `h-9`.
 - **Text:** `text-14 font-medium`
-- **Radius:** `rounded-lg` (8px)
-- **Icon size:** `size-3` (12px) inside buttons
-- **Gap:** `gap-1.5` between icon and text
+- **Radius:** `rounded-lg` (shared radius token)
+- **Icon size:** themed controls use `max(0.75rem, 1.125em)`; never-themed defaults retain `size-3`.
+- **Gap:** themed icon–label actions use `0.5em × spacing multiplier`; text-only actions retain their size variant’s insets.
 - **ButtonIcon:** `h-[18px] w-[18px] rounded-[4px]` — small inset icon container for primary/destructive buttons
 - **Variants:** default (ghost border), primary (gradient — used as the dominant dialog/CTA submit), destructive, outline, secondary, ghost, link
 - **Loading:** `isLoading` prop shows `Loader2` spinner + children, disables button. Some legacy pages still use a label-swap (`{mutation.isPending ? "Creating..." : "Add"}`) — prefer `isLoading` for new code.
@@ -181,7 +210,7 @@ its full-width textarea, with send/stop/mic on the right; composers without a
 toolbar keep the existing inline layout.
 
 ### Inputs
-- **Height:** `h-8`
+- **Height:** intrinsic with the shared control minimum; input padding keeps the text clear of its edge
 - **Text:** `text-14`
 - **Padding:** `px-3 py-1.5`
 - **Radius:** `rounded-lg`
@@ -189,7 +218,7 @@ toolbar keep the existing inline layout.
 - **Placeholder:** `text-text-tertiary`
 
 ### Selects
-- **Trigger height:** `h-8`
+- **Trigger height:** intrinsic with the shared control minimum
 - **Text:** `text-14`
 - **Padding:** `px-3 py-1.5`
 - **Trigger radius:** `rounded-lg`
@@ -341,11 +370,11 @@ and local errors. Create dialogs keep their direct Create action.
 `components/ui/segmented-control.tsx` wraps Radix Tabs: a `bg-muted` track,
 raised `bg-card shadow-sm` selected segment, `text-14` labels, arrow-key
 navigation and associated tab panels. Segments size to their labels and wrap
-onto another line when the assistant text scale needs more space. Keep inactive form panels mounted and
+onto another line when the shared Display scale needs more space. Keep inactive form panels mounted and
 hidden so switching tabs or returning from a detail view preserves drafts.
 Drawer deep links focus the selected panel heading; detail Back restores focus
 to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
-desktop. All spacing, text and icons follow the assistant display scale.
+desktop. All spacing, text and icons follow the shared Display scale.
 
 The conversation index floats at the transcript's right edge with no panel
 fill or hairline. Right-aligned, round-capped ticks use a 7px uniform pitch
@@ -597,7 +626,7 @@ Every content page starts with `<PageHeader title description? actions? leading?
 - Title: `text-22 sm:text-28 font-bold leading-none tracking-tight`, inline `letterSpacing: -0.03em`. The mobile page-title role is intentional — never override.
 - `leading` slot: 32–48px avatar/icon to the left of the title (`OrgAvatar`, status dot, color chip)
 - `description`: `text-14 text-muted-foreground` directly below the title group
-- `actions` slot: right-aligned, `flex items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
+- `actions` slot: right-aligned, `flex flex-wrap items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
 - A few legacy pages (`provider-list`, `developer-apps`, `guide`, `ai-setup`) still hand-roll a header. They typically also miss the `text-22 sm:text-28` responsive downshift (e.g. `provider-list.tsx:129` and `ai-setup.tsx:266` both hardcode `text-28`), so on mobile their titles overflow. New code uses `PageHeader`; when touching a legacy page, migrate it.
 
 ### List page
@@ -751,13 +780,14 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | One control treatment and page rhythm in both shells | Shared themed controls and portals use the same density, padding, gaps, minimums, icons and radii. WorkspacePageHeader composes PageHeader; content insets, section gaps and card gaps share shell classes. Assistant-only root CSS is limited to transcript tick slots. Browser parity covers real shells and portals at all supported audit scales. |
 | 2026-11-04 | Custom role and enlarged-text guarantees | Custom onboarding actions are text-14/500 and prominent analytics values are text-28/600. The shared 24px hit-area floor covers custom Studio actions as well as primitives. Toast actions and analytics filters reflow; chart axes refresh cached font measurement after Display changes. Active recipes reference the semantic role table. |
 | 2026-11-04 | Canonical text numbers and shared semantic roles | Every text-N is N/16rem, defined once. A simultaneous markup/CSS migration preserves the current reading sizes; a separate change corrects semantic roles using the table above. Studio, NyxBot, auth/docs, charts, Billing, onboarding and portals use the same roles and weights. Root 0.85 rebase and spacing preferences are unchanged. Touch fields floor the input role at 16px; shared targets floor at 24px. |
-| 2026-11-04 | One reading scale across Studio and NyxBot | The themed root owns the reading tokens and 1.5 body line height, so route changes and portals cannot change a token’s rendered size. Control sizing and density stay scoped to the assistant; shared navigation icons follow their labels in both shells. Never-themed landing/blog defaults remain separate. |
+| 2026-11-04 | One reading scale across Studio and NyxBot | The themed root owns the reading tokens and 1.5 body line height, so route changes and portals cannot change a token’s rendered size. Shared navigation icons follow their labels in both shells. The later one-treatment decision also makes control sizing and density global to themed surfaces. Never-themed landing/blog defaults remain separate. |
 | 2026-11-04 | Rebase default text size to the previous 0.85×; restore dense rail and compact save chrome | The root baseline applies consistently in Studio and the assistant. Versioned migration preserves custom rendered sizes within bounds without changing spacing. Explicit rail geometry prevents general control scaling from stretching tick slots; compact bars and single-line reviews keep editing chrome small. |
 | 2026-11-04 | Compact titles, explicit change review and viewport save actions | Observer-driven headers retain search focus and compensate their height in the scroll content. One bar outside the scrolling viewport preserves access to dirty forms across tabs, detail pages and mobile keyboards. Allowlisted field diffs make edit saves reviewable without exposing credentials; section help adds searchable context. |
 | 2026-11-04 | Agent drawer search uses explicit live section registrations | Search groups results by tab and reveals exact rows or retained detail pages, preserving dirty drafts, save fences and dismissal guards. Search stays above the content region; keyboard and reduced-motion behavior are part of the pattern. |
-| 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and primary submit actions. Dialog footers stay visible; inline settings bars appear while dirty. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |
+| 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and primary submit actions. Dialog footers stay visible; inline settings bars appear while dirty. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Grouped variants remain explicit; shared control treatment now follows the later one-treatment decision in both shells. |
 | 2026-11-04 | Workspace page family and equal-size plugin cards | Shared headers and segmented status views align workspace pages. Connectors and skill results share a text-scaled card size with native full-card actions and contained secondary controls; attached skills remain grouped rows. |
 | 2026-11-04 | NyxBot inset grouped forms and segmented navigation | One neutral card per group, inset hairlines, borderless controls and external helper text replace nested boxes. Mounted tabs preserve drafts; detail navigation keeps independent revision-fenced saves. The subtle `border-border/50` edge preserves light-theme contrast. |
 | 2026-04-01 | Initial design system created | Created by /design-consultation + /design-shotgun. User reviewed 7 directions and chose refined purple with warm neutrals. |

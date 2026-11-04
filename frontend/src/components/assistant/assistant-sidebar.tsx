@@ -90,7 +90,7 @@ const TITLE_FADE =
 
 function GroupLabel({ children }: { readonly children: string }) {
   return (
-    <div className="px-3 py-2 shell-group-label">
+    <div className="shell-group-label">
       {children}
     </div>
   );
@@ -99,7 +99,7 @@ function GroupLabel({ children }: { readonly children: string }) {
 /** An owner's agents or crews: a top-level section label, flush with WORKSPACE. */
 function OwnerLabel({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="-ml-2 px-3 py-2 shell-group-label">
+    <p className="-ml-2 shell-group-label">
       {children}
     </p>
   );
@@ -1087,14 +1087,14 @@ export function AssistantSidebar({
             data-keep-drawer-open=""
             data-assistant-account-fallback="menu"
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
+              "shell-user-block w-full transition-colors hover:bg-overlay",
               Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
             )}
           >
-            <div className="flex shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong p-[0.375em]">
+            <div className="shell-user-avatar border border-hairline bg-overlay-strong">
               <User className="h-3.5 w-3.5 text-text-tertiary" />
             </div>
-            <div className="min-w-0 flex-1">
+            <div className="shell-user-copy">
               <p className="truncate shell-user-name">
                 {user?.display_name ?? "User"}
               </p>
@@ -1199,7 +1199,7 @@ function RenameChatInline({
 }
 
 const RAIL_BUTTON =
-  "assistant-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
+  "ui-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
 
 /** One rail icon with its name in a tooltip. */
 function RailItem({ label, children }: { readonly label: string; readonly children: ReactNode }) {

@@ -857,7 +857,7 @@ export function GroupedServiceCards({
           renderTable(matchingKeys)
         ) : (
           <MotionConfig reducedMotion="user">
-            <div className="grid items-start gap-6 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="shell-card-grid grid items-start sm:grid-cols-2 xl:grid-cols-3">
               {visible.map(({ group, matches }) => (
                 <GroupCard
                   key={group.id}

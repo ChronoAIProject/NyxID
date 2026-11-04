@@ -1,4 +1,5 @@
 import { StickyTitle } from "@/components/ui/compact-title";
+import { PageHeader } from "@/components/shared/page-header";
 import type { ReactNode } from "react";
 import "./workspace-pages.css";
 
@@ -14,21 +15,8 @@ export function WorkspacePageHeader({
   readonly actions?: ReactNode;
 }) {
   return (
-    <StickyTitle title={title} actions={actions} column={column}><header
-      data-workspace-header=""
-      className={`flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4${column ? " max-w-2xl" : ""}`}
-    >
-      <div className="min-w-0 space-y-2">
-        <h1 className="text-22 font-bold leading-tight tracking-tight sm:text-28">
-          {title}
-        </h1>
-        <p className="max-w-2xl text-14 text-muted-foreground">{description}</p>
-      </div>
-      {actions ? (
-        <div data-title-actions="" className="flex shrink-0 flex-wrap items-center gap-2">
-          {actions}
-        </div>
-      ) : null}
-    </header></StickyTitle>
+    <StickyTitle title={title} actions={actions} column={column}>
+      <PageHeader data-workspace-header="" titleAs="h1" title={title} description={description} actions={actions} className={column ? "max-w-2xl" : undefined} />
+    </StickyTitle>
   );
 }
