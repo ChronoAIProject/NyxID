@@ -278,7 +278,6 @@ function setup(
         "VolumeX",
       ].map((name) => [name, name]),
     ),
-    "./WalkieTalkieIcon": { WalkieTalkieIcon: "WalkieTalkie" },
     "../../../components/workspace/WorkspaceSheetSurface": {
       WorkspaceSheetSurface: "SheetSurface",
     },
@@ -632,7 +631,7 @@ test("push-to-talk disables input during server muting and exposes accessible pr
   f.harness.unmount();
 });
 
-test("hold to talk is a walkie-talkie with no running call timer; hands-free is a phone call", () => {
+test("hold to talk names itself under the mic, mutes with a mute symbol and runs no call timer; hands-free is a phone call", () => {
   const walkie = setup({
     active: true,
     saved: { ...saved, input_mode: "push_to_talk" },
@@ -643,9 +642,20 @@ test("hold to talk is a walkie-talkie with no running call timer; hands-free is 
     false,
     "no call length while waiting to talk",
   );
-  assert.ok(walkie.all().some((row) => row.type === "WalkieTalkie"));
-  assert.match(walkie.text(), /Hold to talk/);
-  assert.doesNotMatch(walkie.text(), /release to send/, "the button labels itself");
+  const nodes = walkie.all();
+  const hold = nodes.findIndex((row) => row.props?.accessibilityLabel === "Hold to talk");
+  const hint = nodes.findIndex(
+    (row, index) =>
+      index > hold &&
+      row.type === "Text" &&
+      [row.props.children].flat().includes("Hold to talk"),
+  );
+  assert.ok(hold >= 0 && hint > hold, "the instruction follows the microphone");
+  const mute = nodes.find((row) => row.props?.accessibilityLabel === "Mute microphone")!;
+  assert.ok(
+    [mute.props.children].flat(Infinity).some((child: any) => child?.type === "MicOff"),
+    "the left control is a mute symbol, not a second mic",
+  );
   assert.doesNotMatch(walkie.text(), /Audio is sent only/, "details stay collapsed");
   walkie.harness.unmount();
   const phone = setup({ active: true });

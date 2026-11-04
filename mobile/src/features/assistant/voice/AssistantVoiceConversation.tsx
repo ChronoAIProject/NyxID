@@ -43,7 +43,6 @@ import { useNativeVoice } from "./useNativeVoice";
 import { useVoiceLevels } from "./useVoiceLevels";
 import { VoiceAura } from "./VoiceAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
-import { WalkieTalkieIcon } from "./WalkieTalkieIcon";
 import { voiceAuraPhase, voiceAuraStatus } from "./voiceAuraState";
 import { chooseVoiceOption, voiceElapsed, voiceTariff } from "./voiceSelection";
 import type { VoicePreferences, VoiceSnapshot } from "./voiceContracts";
@@ -776,11 +775,11 @@ function VoiceConversation({
                   disabled={voice.starting}
                   onPress={() => void voice.mute(!muted)}
                 >
-                  {muted ? (
-                    <MicOff size={20} color={colors.bg} />
-                  ) : (
-                    <Mic size={20} color={colors.textPrimary} />
-                  )}
+                  {/* Always the mute symbol, so it never reads as a second mic. */}
+                  <MicOff
+                    size={20}
+                    color={muted ? colors.bg : colors.textPrimary}
+                  />
                 </RoundButton>
               ) : (
                 <View style={styles.smallSpacer} />
@@ -798,6 +797,7 @@ function VoiceConversation({
                 <Mic size={30} color={onMain} />
               </MainButton>
             ) : inputMode === "push_to_talk" ? (
+              <View style={styles.holdColumn}>
               <View style={styles.holdStage}>
                 <Animated.View
                   pointerEvents="none"
@@ -813,7 +813,7 @@ function VoiceConversation({
                         {
                           scale: hold.interpolate({
                             inputRange: [0, 1],
-                            outputRange: [1, 1.25],
+                            outputRange: [1, 1.5],
                           }),
                         },
                       ],
@@ -826,7 +826,7 @@ function VoiceConversation({
                       {
                         scale: hold.interpolate({
                           inputRange: [0, 1],
-                          outputRange: [1, 1.06],
+                          outputRange: [1, 1.1],
                         }),
                       },
                     ],
@@ -854,19 +854,29 @@ function VoiceConversation({
                       },
                     ]}
                     style={[
-                      styles.talk,
+                      styles.main,
                       {
                         backgroundColor: main,
                         opacity: microphoneBlocked || !voice.connected ? 0.4 : 1,
                       },
                     ]}
                   >
-                    <WalkieTalkieIcon size={24} color={onMain} />
-                    <Text style={[styles.talkLabel, { color: onMain }]}>
-                      {voice.holding ? "Release to send" : "Hold to talk"}
-                    </Text>
+                    <Mic size={30} color={onMain} />
                   </Pressable>
                 </Animated.View>
+              </View>
+              {/* The instruction sits under the microphone it describes. */}
+              <Text
+                accessibilityElementsHidden
+                importantForAccessibility="no"
+                style={[styles.holdHint, { color: colors.textSecondary }]}
+              >
+                {microphoneBlocked && voice.connected
+                  ? "Muted"
+                  : voice.holding
+                    ? "Release to send"
+                    : "Hold to talk"}
+              </Text>
               </View>
             ) : (
               <MainButton
@@ -1241,33 +1251,20 @@ const styles = StyleSheet.create({
   },
   fadeSlice: { position: "absolute", left: 0, right: 0, overflow: "hidden" },
   transcript: { flexGrow: 0 },
+  holdColumn: { alignItems: "center", gap: 8 },
   holdStage: {
-    width: 184,
+    width: 76,
     height: 76,
     alignItems: "center",
     justifyContent: "center",
   },
   halo: {
     position: "absolute",
-    width: 184,
-    height: 68,
-    borderRadius: 34,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
   },
-  talk: {
-    width: 184,
-    height: 68,
-    borderRadius: 34,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    shadowColor: "#1A1530",
-    shadowOpacity: 0.28,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
-  },
-  talkLabel: { fontFamily: fonts.bodySemi, fontSize: 16, lineHeight: 20 },
+  holdHint: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 18 },
   transcriptContent: { gap: 14, paddingBottom: 4, paddingHorizontal: 8 },
   caption: { gap: 2, alignItems: "center" },
   captionRecent: { gap: 4 },

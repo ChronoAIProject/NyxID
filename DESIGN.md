@@ -688,13 +688,14 @@ the top once they overflow); the chat's pending action cards and a small
 collapsible tasks tray only while they exist; the Hands-free / Hold to talk
 switch (text only); round mute and End controls around the centre control;
 and Details / No sound? Resume audio links, with the microphone, echo and price
-notes behind Details. Hands-free is a phone call: a 76pt microphone button, a
-running call timer, one short hint line and an End that hangs up. Hold to talk
-is a walkie-talkie: the centre control is a wide 184×68pt push-to-talk bar
-with a walkie-talkie and "Hold to talk" (becoming "Release to send" while
-held), no call timer runs, and the timer counts only the current transmission
-while the bar is held. Holding swells the bar and lifts a soft halo around it,
-settling back on release (no animation under Reduce Motion). Leaving the voice page by any route ends the call; accepted agent
+notes behind Details. Both modes use a 76pt microphone in the centre.
+Hands-free is a phone call: a running call timer, one short hint line and an
+End that hangs up. Hold to talk is a walkie-talkie: the instruction ("Hold to
+talk", "Release to send" while held, "Muted") sits directly under the
+microphone, the left control is always the mute symbol, no call timer runs,
+and the timer counts only the current transmission while the microphone is
+held. Holding swells the microphone and lifts a soft halo around it, settling
+back on release (no animation under Reduce Motion). Leaving the voice page by any route ends the call; accepted agent
 tasks keep running. The aura is decorative and hidden from VoiceOver (see the
 2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside
 the composer (see Chat composers).
