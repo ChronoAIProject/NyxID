@@ -8,31 +8,34 @@ import { afterGroupedFormCommit, type GroupedFormEntry } from "@/lib/grouped-for
 import type { FormChange } from "@/lib/grouped-form-changes";
 import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
 
-function ReviewValue({ label, children }: { readonly label: "Before" | "After"; readonly children: string }) {
+function ReviewLine({ children, fullText }: { readonly children: ReactNode; readonly fullText: string }) {
   const [expanded, setExpanded] = useState(false);
   const [overflow, setOverflow] = useState(false);
-  const value = useRef<HTMLDivElement>(null);
+  const value = useRef<HTMLParagraphElement>(null);
   useLayoutEffect(() => {
     const node = value.current;
     if (!node || expanded) return;
-    const measure = () => setOverflow(node.scrollHeight > node.clientHeight);
+    const measure = () => setOverflow(node.scrollWidth > node.clientWidth);
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     return () => observer.disconnect();
-  }, [children, expanded]);
-  return <div data-review-value={label.toLowerCase()} className={`min-w-0 break-words whitespace-pre-wrap ${label === "Before" ? "text-text-tertiary" : "text-foreground"}`}>
-    <div ref={value} className={!expanded ? "line-clamp-3" : undefined}><span className="font-medium">{label}: </span><span className={label === "Before" ? "line-through" : undefined}>{children}</span></div>
-    {overflow && <button type="button" className="mt-1 text-11 font-medium text-primary-text" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
+  }, [fullText, expanded]);
+  return <div className="flex min-w-0 items-start gap-2">
+    <p ref={value} data-review-line="" title={fullText} className={`min-w-0 flex-1 text-11 font-normal ${expanded ? "break-words whitespace-pre-wrap" : "truncate"}`}>{children}</p>
+    {overflow && <button type="button" className="shrink-0 text-11 font-medium text-primary-text" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
   </div>;
 }
 function Change({ change }: { readonly change: FormChange }) {
+  const label = <span className="font-medium text-foreground">{change.label}: </span>;
   return <GroupedRow className="items-start">
     <div className="min-w-0 flex-1 space-y-1">
-      <p>{change.label}</p>
-      <div className="text-11 font-normal text-text-tertiary">
-        {change.added ? <>{change.added.map((value) => <p className="text-foreground" key={`+${value}`}>+ {value}</p>)}{change.removed.map((value) => <p key={`-${value}`}>− {value}</p>)}</> : <div className="space-y-2"><ReviewValue label="Before">{change.before}</ReviewValue><ReviewValue label="After">{change.after}</ReviewValue></div>}
-      </div>
+      {change.added ? <>
+        {change.added.map((value) => <ReviewLine key={`+${value}`} fullText={`${change.label}: + ${value}`}>{label}<span className="text-foreground">+ {value}</span></ReviewLine>)}
+        {change.removed.map((value) => <ReviewLine key={`-${value}`} fullText={`${change.label}: − ${value}`}>{label}<span className="text-text-tertiary">− {value}</span></ReviewLine>)}
+      </> : <ReviewLine fullText={`${change.label}: ${change.before} → ${change.after}`}>
+        {label}<span data-review-value="before" className="text-text-tertiary line-through">{change.before}</span><span className="text-text-tertiary"> → </span><span data-review-value="after" className="text-foreground">{change.after}</span>
+      </ReviewLine>}
     </div>
   </GroupedRow>;
 }

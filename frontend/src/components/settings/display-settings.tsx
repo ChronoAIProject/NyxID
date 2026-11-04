@@ -216,7 +216,7 @@ function ScaleControl({ id, label, scale, onChange }: {
   const [draft, setDraft] = useState<number | null>(null);
   const dragPointer = useRef<number | null>(null);
   const value = draft ?? scale;
-  const multiplier = `${value}×`;
+  const multiplier = `${Number(value.toFixed(2))}×`;
 
   return (
     <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">

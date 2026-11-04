@@ -1325,8 +1325,7 @@ it("reviews profile values before saving and keeps Enter on the same review path
   const review = await screen.findByRole("dialog", { name: "Review changes" });
   expect(writes).toEqual([]);
   expect(review).toHaveTextContent("Role / description");
-  expect(review).toHaveTextContent("Before: Finds urgent issues");
-  expect(review).toHaveTextContent("After: Review this role");
+  expect(review).toHaveTextContent("Finds urgent issues → Review this role");
   await user.click(within(review).getByRole("button", { name: "Keep editing" }));
   expect(role).toHaveValue("Review this role");
   expect(writes).toEqual([]);
@@ -1349,14 +1348,18 @@ it("toggles the circular search control, collapses empty blur, and preserves non
   expect(input).toHaveValue("persona");
 });
 
-it("closes narrow-header search explicitly without closing the drawer or losing its draft", async () => {
+it("uses a leading search glyph and clears then closes search without losing its draft", async () => {
   const { user } = renderSheet();
   const role = await screen.findByLabelText("Role");
   await user.clear(role);
   await user.type(role, "Retain this role");
   await openSearch(user);
   await user.type(screen.getByRole("searchbox"), "persona");
-  await user.click(screen.getByRole("button", { name: "Close agent search" }));
+  expect(screen.queryByRole("button", { name: "Close agent search" })).toBeNull();
+  expect(document.querySelector(".agent-header-search-glyph")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Clear agent search" }));
+  expect(screen.getByRole("searchbox")).toHaveValue("");
+  await user.keyboard("{Escape}");
   expect(screen.queryByRole("searchbox")).toBeNull();
   expect(screen.getByRole("dialog", { name: "Agent details" })).toBeVisible();
   await waitFor(() => expect(screen.getByRole("button", { name: "Search researcher agent details" })).toHaveFocus());

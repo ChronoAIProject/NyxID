@@ -107,7 +107,7 @@ export function GroupedFormBar({ dialog = false, viewport = false }: { readonly 
     >
       {!dialog && (
         <p
-          className="mr-auto basis-full text-11 text-text-tertiary"
+          className="sr-only"
           aria-live="polite"
         >
           Unsaved: {[...new Set(dirty.map((entry) => entry.label))].join(", ")}
@@ -215,7 +215,7 @@ export function GroupedFormActions({
     <ChangeReview entries={[{label, dirty, pending, disabled, save, discard, changes}]} save={save} disabled={disabled || pending}>{(review) => <>
     <ReviewSubmit review={context?.requestReview ?? review} />
     {!coordinated && dirty && <GroupedSaveBar role="region" aria-label="Unsaved changes">
-      <p className="mr-auto basis-full text-11 text-text-tertiary">
+      <p className="sr-only" aria-live="polite">
         Unsaved: {label}
       </p>
       <Button

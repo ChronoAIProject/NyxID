@@ -21,7 +21,10 @@ it("uses a primary submit, ghost Discard and an opaque separated dirty-only bar"
   expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Edit profile" }));
   const bar = screen.getByRole("region", { name: "Unsaved changes" });
-  expect(bar).toHaveClass("border-t", "border-border/50", "bg-background");
+  expect(bar).toHaveClass("border-t", "border-border/50", "bg-background", "py-2");
+  expect(bar).not.toHaveClass("flex-wrap");
+  expect(within(bar).getByText("Unsaved: profile")).toHaveClass("sr-only");
+  expect(within(bar).getByText("Unsaved: profile")).toHaveAttribute("aria-live", "polite");
   expect(screen.getByRole("button", { name: "Save changes" })).toHaveClass("nyx-gradient-vivid");
   expect(screen.getByRole("button", { name: "Discard" })).not.toHaveClass("nyx-gradient-vivid");
 });
@@ -63,8 +66,7 @@ it("reviews each dirty section before saving and names only successes after a pa
   const grants = vi.fn().mockRejectedValue(new Error("Revision changed"));
   render(<GroupedFormScope viewport><Draft name="profile" initiallyDirty save={profile} /><Draft name="grants" initiallyDirty save={grants} /><GroupedFormBar viewport /></GroupedFormScope>);
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("Before: Off");
-  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("After: On");
+  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("Enabled: Off → On");
   expect(screen.getByRole("heading", { name: "Profile" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Grants" })).toBeVisible();
   expect(profile).not.toHaveBeenCalled();
@@ -80,24 +82,23 @@ it("reviews each dirty section before saving and names only successes after a pa
   success.mockRestore();
 });
 
-it("keeps both values visible when a long previous value is truncated in review", async () => {
-  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(48);
-  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) { return (this.textContent?.length ?? 0) > 160 ? 120 : 24; });
+it("truncates a scalar change on one line with its full title and expandable values", async () => {
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(240);
+  vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(1200);
   const before = "Previous instructions ".repeat(30), after = "Revised instructions ".repeat(30);
   render(<GroupedFormActions label="profile" dirty changes={() => [{ label: "Persona", before, after }]} save={vi.fn()} discard={vi.fn()} />);
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   const previous = screen.getByText(before.trim());
   const revised = screen.getByText(after.trim());
-  expect(previous.parentElement).toHaveClass("line-clamp-3");
-  expect(previous).toHaveClass("line-through");
-  expect(previous.closest("[data-review-value]")).toHaveClass("text-text-tertiary");
-  expect(revised.parentElement).toHaveClass("line-clamp-3");
-  expect(revised).not.toHaveClass("line-through");
-  expect(revised.closest("[data-review-value]")).toHaveClass("text-foreground");
-  expect(screen.queryByText("→")).toBeNull();
-  await userEvent.click(within(previous.closest<HTMLElement>("[data-review-value]")!).getByRole("button", { name: "Show more" }));
-  expect(previous.parentElement).not.toHaveClass("line-clamp-3");
-  expect(revised.parentElement).toHaveClass("line-clamp-3");
+  const line = previous.closest<HTMLElement>("[data-review-line]")!;
+  expect(line).toHaveClass("truncate");
+  expect(line).toHaveAttribute("title", `Persona: ${before} → ${after}`);
+  expect(previous).toHaveClass("text-text-tertiary", "line-through");
+  expect(revised).toHaveClass("text-foreground");
+  expect(revised.closest("[data-review-line]")).toBe(line);
+  await userEvent.click(within(line.parentElement!).getByRole("button", { name: "Show more" }));
+  expect(line).not.toHaveClass("truncate");
+  expect(line).toHaveClass("whitespace-pre-wrap");
   expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
 });
 

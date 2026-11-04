@@ -23,7 +23,7 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
   const pitchMeasure = useRef<HTMLSpanElement>(null);
   const rail = useRef<HTMLElement>(null);
   const ticks = useRef<HTMLDivElement>(null);
-  const [layout, setLayout] = useState({ capacity: 60, pitch: 8 });
+  const [layout, setLayout] = useState({ capacity: 60, pitch: 14 });
   const [activeId, setActiveId] = useState<string>();
   const [browseStart, setBrowseStart] = useState<number | null>(null);
   const [keyboardIndex, setKeyboardIndex] = useState<number | null>(null);
@@ -42,19 +42,23 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
     const measureElement = pitchMeasure.current;
     if (!element || !measureElement || typeof ResizeObserver === "undefined") return;
     const measure = () => {
-      const regularPitch = measureElement.getBoundingClientRect().height || 8;
-      // Round down to browser layout precision so fitting ticks never overflow.
-      const fittedPitch = Math.floor(element.clientHeight / entries.length * 64) / 64;
-      const pitch = Math.min(regularPitch, Math.max(regularPitch * 5 / 8, fittedPitch));
-      const capacity = Math.max(2, Math.floor(element.clientHeight / pitch));
+      // The compact toolbar floats over the transcript. Keep the whole gutter
+      // below it, including when its labels wrap at a larger reading size.
+      const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
+      const parent = element.parentElement;
+      element.style.top = `${controls && parent ? Math.max(0, controls.getBoundingClientRect().bottom - parent.getBoundingClientRect().top + 8) : 0}px`;
+      const pitch = measureElement.getBoundingClientRect().height || 14;
+      const capacity = Math.max(1, Math.floor(element.clientHeight / pitch));
       setLayout((current) => current.capacity === capacity && current.pitch === pitch ? current : { capacity, pitch });
     };
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     observer.observe(measureElement);
+    const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
+    if (controls) observer.observe(controls);
     measure();
     return () => observer.disconnect();
-  }, [entries.length]);
+  }, [entries.length, scrollRef]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -130,13 +134,13 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
   }
   return (
     <div ref={container} className="pointer-events-none absolute top-0 right-[var(--assistant-scrollbar-width,0px)] z-30 hidden w-7 items-center justify-end md:flex" style={{ bottom: `var(--assistant-composer-inset, ${bottomInset}px)` }}>
-      <span ref={pitchMeasure} aria-hidden="true" className="pointer-events-none absolute h-2 w-0" />
+      <span ref={pitchMeasure} aria-hidden="true" data-chat-index-pitch="" className="pointer-events-none absolute w-0" style={{ height: "calc(0.875rem / 0.85)" }} />
       <nav
         ref={rail}
         data-chat-index-rail=""
         data-scroll-edges={[first > 0 && "top", first < maxFirst && "bottom"].filter(Boolean).join(" ")}
         aria-label="Conversation index"
-        className="pointer-events-auto flex h-full w-full touch-none select-none flex-col items-end justify-center overflow-hidden"
+        className="pointer-events-auto flex h-full w-full touch-none select-none flex-col items-end justify-center overflow-hidden border-l border-border/50"
         onPointerLeave={() => { if (!dragging.current) setHover(null); }}
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -200,14 +204,14 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
                 tabIndex={index === focusIndex ? 0 : -1}
                 className="group flex w-full cursor-pointer items-center justify-end pr-1 outline-none"
                 style={{ height: layout.pitch }}
-                // Previews follow focus and a held pointer, never a passing one.
+                onPointerEnter={(event) => { if (event.pointerType !== "touch" && !dragging.current) preview(index, event.currentTarget); }}
                 onFocus={(event) => preview(index, event.currentTarget)}
                 onClick={(event) => { if (event.detail === 0) navigate(index); }}
               >
                 <span aria-hidden="true" className={cn(
                   "h-0.5 origin-right rounded-full transition-[transform,background-color] duration-150 group-focus-visible:scale-x-150 group-active:scale-x-150 motion-reduce:transition-none",
                   entry.role === "user" ? "w-2" : "w-4",
-                  selected ? "bg-primary" : "bg-text-tertiary/80 group-focus-visible:bg-foreground group-active:bg-foreground",
+                  selected ? "bg-success" : "bg-text-tertiary/80 group-focus-visible:bg-foreground group-active:bg-foreground",
                 )} />
               </button>
             );

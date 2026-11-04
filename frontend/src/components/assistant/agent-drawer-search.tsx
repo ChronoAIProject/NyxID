@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Search, X } from "lucide-react";
+import { Search, X } from "lucide-react";
 import {
   DrawerSearchContext,
   DRAWER_SEARCH_TABS,
@@ -276,7 +276,6 @@ export function AgentDrawerSearch({
             <Search aria-hidden className="size-4" />
           </button>
           <div className="agent-header-search-field flex min-h-8 items-center gap-1 rounded-full bg-overlay-strong px-2" inert={!open} aria-hidden={!open || undefined}>
-            <button type="button" data-icon-button="" aria-label="Close agent search" className="agent-header-search-back size-6 shrink-0 items-center justify-center rounded-full text-text-tertiary hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={closeSearch}><ArrowLeft aria-hidden className="size-3" /></button>
             <Search aria-hidden className="agent-header-search-glyph size-3 shrink-0 text-text-tertiary" />
             <input
               ref={input}

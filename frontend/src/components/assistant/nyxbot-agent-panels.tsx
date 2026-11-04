@@ -83,6 +83,7 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
         layoutDependency={compact}
         role="group"
         aria-label="Conversation controls"
+        data-chat-header-controls=""
         data-compact={compact}
         style={{ borderRadius: 12 }}
         className={cn(

@@ -69,27 +69,27 @@ Light mode uses exactly two neutral tones (zinc grey page, white cards) with no 
 - **Loading:** Google Fonts CDN
 
 ### Scale (in-app)
-Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. `text-12` is 12px at the default 1×.
+Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. New 1× equals the previous 0.85×: the themed root is 85% of the browser default (13.6px with a 16px browser default). Old non-default text preferences migrate once to `clamp(value / 0.85, 0.5, 2)` without rounding; old default preferences adopt the smaller baseline. Slider labels round to two decimals; migration retains the precise stored value. `text-12` is 10.2px at the new default 1×.
 
-| Size | Use |
-|------|-----|
-| 9px | Sidebar group labels (uppercase, tracking 1.5px, `text-text-tertiary`) |
-| 10px | Section labels (uppercase, tracking 1.5px), badge text, smallest overline text |
-| 11px | Timestamps, stat descriptions, tertiary text, status labels, pagination counters |
-| 12px | Body text, button text, nav items, table cells, input/select text, dropdown items, detail row values, breadcrumbs, page descriptions |
-| 13px | Sidebar nav items, card body text, `DetailSection` headers, standard mobile-card primary text |
-| 14px | Long-form welcome/marketing copy (e.g. onboarding takeover body, mobile nav items) |
-| 15px | Dialog titles, card headings ("Shortcuts", "Getting started"), mobile Activity service titles, wizard step titles |
-| 22px | Page titles on mobile (auto-scales to 28px at `sm`), `text-lg` mid-page section headings (`channel-bots`, `org-detail`) |
-| 28px | Page titles on `sm+` (`PageHeader`, `font-bold`, `letter-spacing: -0.03em`); dashboard greeting |
+| Token (new 1× = previous 0.85×) | Studio at new 1× | Use |
+|------|------|-----|
+| `text-9` | 7.65px | Sidebar group labels (uppercase, tracking 1.5px, `text-text-tertiary`) |
+| `text-10` | 8.5px | Section labels (uppercase, tracking 1.5px), badge text, smallest overline text |
+| `text-11` | 9.35px | Timestamps, stat descriptions, tertiary text, status labels, pagination counters |
+| `text-12` | 10.2px | Body text, button text, nav items, table cells, input/select text, dropdown items, detail row values, breadcrumbs, page descriptions |
+| `text-13` | 11.05px | Sidebar nav items, card body text, `DetailSection` headers, standard mobile-card primary text |
+| `text-14` | 11.9px | Long-form welcome/marketing copy (e.g. onboarding takeover body, mobile nav items) |
+| `text-15` | 12.75px | Dialog titles, card headings ("Shortcuts", "Getting started"), mobile Activity service titles, wizard step titles |
+| `text-22` | 18.7px | Page titles on mobile (auto-scales to 28px at `sm`), `text-lg` mid-page section headings (`channel-bots`, `org-detail`) |
+| `text-28` | 23.8px | Page titles on `sm+` (`PageHeader`, `font-bold`, `letter-spacing: -0.03em`); dashboard greeting |
 
 The assistant uses a reading scale scoped by `html.assistant-display`, including
-portaled menus and account settings: `text-9`/`text-10` resolve to 12px,
-`text-11` to 13px, `text-12` to 14px, and `text-13` to 15px at 1×. Chat messages
-and the composer use `text-16` (16px), with unitless line heights. Markdown
-headings use 16–24px, and code blocks and tables use 14px. These values all
+portaled menus and account settings: `text-9`/`text-10` resolve to 10.2px,
+`text-11` to 11.05px, `text-12` to 11.9px, and `text-13` to 12.75px at the new 1×. Chat messages
+and the composer use `text-16` (13.6px), with unitless line heights. Markdown
+headings use 13.6–20.4px, and code blocks and tables use 11.9px. These values all
 follow the selected text multiplier; spacing remains independent. Controls
-reserve room for their line height and a 1.5rem minimum pointer target.
+reserve room for their line height and a minimum pointer target of max(24px, 1.5rem). Touch inputs retain a 16px minimum to prevent iOS focus zoom.
 Settings rows wrap according to the space their content needs.
 Assistant interface icons use the surrounding label's font size (`1.125em`),
 including sidebar glyphs, portaled menus, and dialog controls. Icon gaps and
@@ -253,7 +253,7 @@ actions are destructive-colored rows in their own neutral group.
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
 multi-select lists. Selection lists use checkmark or switch rows, search when there are more than
 eight items, and scroll internally only for long lists. `GroupedFormScope viewport` gives
-the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`, naming its unsaved forms across tabs and drill-ins. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
+the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`. Use a single compact row with `py-2`, right-aligned Discard and Save changes; announce unsaved section names through sr-only live text in the “Unsaved changes” region, with no visible unsaved label. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
 form keeps its draft and local error; successful forms stay saved. Discard resets
 all dirty forms in that scope. Save uses `variant="primary"`; Discard uses ghost
@@ -288,9 +288,7 @@ footers meet 4.5:1 contrast against the page background as well as cards.
 Every edit Save first opens `Review changes`. Register a `changes()` describer
 with each form: compare its defaults with current values using an explicit
 allowlist of fields. Section headings use sentence-case display labels. Show human
-select labels and On/Off booleans under each field title: a tertiary Before line
-with the replaced value struck through, then a foreground After line. Clamp each
-value separately and offer Show more when it overflows. Lists use + added / − removed rows. Never
+select labels and On/Off booleans in one line: “Field: before → after”, with the replaced value tertiary and struck through, then the foreground new value. Truncate with ellipsis, retain the full line in its title and offer Show more when it overflows. Lists use separate single-line + added / − removed rows with the same expansion behavior. Never
 enumerate arbitrary form values or expose secret/token fields; sensitive
 destinations are described as changed without showing their contents. Keep
 editing returns to the draft. Save changes runs the existing callbacks and
@@ -306,6 +304,15 @@ Drawer deep links focus the selected panel heading; detail Back restores focus
 to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
 desktop. All spacing, text and icons follow the assistant display scale.
 
+The conversation index uses a narrow gutter with a left hairline and two tick
+lengths for user/assistant messages. Its uniform pitch is 14px at the new 1×,
+scales with text independently of spacing, and windows long threads rather than
+stretching or compressing the pitch. This dense graphical navigator explicitly
+opts out of text-button minimum dimensions. The current tick uses `success`;
+hover/focus shows a preview and click, drag and keyboard navigation jump to messages.
+Observe the toolbar size to keep all ticks below its controls, including wrapped
+compact headers.
+
 ### Agent drawer search
 
 The agent details drawer has matching circular Search and Close header icon
@@ -316,7 +323,7 @@ and retains Sheet dismissal semantics. Search expands into a compact inline fiel
 between the agent name and Close, with autofocus, a leading icon, a clear action
 and the same accessible name/placeholder. Below a 480px drawer container width,
 open search hides the avatar/name with a short transition and fills their header
-row, including a Close agent search back button. Measure the placeholder against
+row. The search glyph remains leading at every width; do not add a back arrow. Measure the placeholder against
 the available input width: shorten it to “Search {agent title}” when needed, then
 “Search agent” for unusually long names; its accessible name always stays full.
 Empty blur collapses it to its icon;
@@ -686,6 +693,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Rebase default text size to the previous 0.85×; restore dense rail and compact save chrome | The root baseline applies consistently in Studio and the assistant. Versioned migration preserves custom rendered sizes within bounds without changing spacing. Explicit rail geometry prevents general control scaling from stretching tick slots; compact bars and single-line reviews keep editing chrome small. |
 | 2026-11-04 | Compact titles, explicit change review and viewport save actions | Observer-driven headers retain search focus and compensate their height in the scroll content. One bar outside the scrolling viewport preserves access to dirty forms across tabs, detail pages and mobile keyboards. Allowlisted field diffs make edit saves reviewable without exposing credentials; section help adds searchable context. |
 | 2026-11-04 | Agent drawer search uses explicit live section registrations | Search groups results by tab and reveals exact rows or retained detail pages, preserving dirty drafts, save fences and dismissal guards. Search stays above the content region; keyboard and reduced-motion behavior are part of the pattern. |
 | 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and primary submit actions. Dialog footers stay visible; inline settings bars appear while dirty. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |

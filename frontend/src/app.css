@@ -128,7 +128,7 @@
   --spacing: 4px;
 
   /* ── Text scale (rem → follows the root font size set by Appearance) ──
-     `text-12` = 12px at the default 100%. Matches the DESIGN.md scale; use
+     `text-12` = 10.2px at the rebased default 85%. Matches the DESIGN.md scale; use
      these instead of `text-[12px]` so every size responds to the setting. */
   --text-9: 0.5625rem;
   --text-10: 0.625rem;
@@ -284,11 +284,11 @@ html.assistant-display body {
    pointer targets. The tab strip must contain the same padding as its tabs. */
 html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
   height: auto;
-  min-height: max(1.5rem, calc(1lh + var(--spacing) * 2));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
 html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) {
-  min-width: max(1.5rem, calc(1lh + var(--spacing) * 2));
+  min-width: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
 /* Interface icons follow the surrounding text, independently of density.
@@ -312,7 +312,7 @@ html.assistant-display :where(button, a, [role="menuitem"], [role="menuitemcheck
 
 /* Grouped rows own their insets; icon-button density must not shift their text. */
 html.assistant-display [data-grouped-row] {
-  min-height: calc(var(--spacing) * 11);
+  min-height: max(24px, calc(var(--spacing) * 11));
   padding-inline: calc(var(--spacing) * 4);
   padding-block: calc(var(--spacing) * 2.5);
 }
@@ -375,8 +375,8 @@ html.assistant-display :is([data-icon-button], .assistant-icon-button) {
 }
 
 html.assistant-display .assistant-icon-button {
-  min-width: max(1.5rem, calc(1lh + var(--spacing) * 2));
-  min-height: max(1.5rem, calc(1lh + var(--spacing) * 2));
+  min-width: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
 html.assistant-display [role="option"]:has(> [data-select-indicator]) {
@@ -392,11 +392,11 @@ html.assistant-display [data-select-indicator] {
 html.assistant-display [role="tablist"] {
   height: auto;
   flex-shrink: 0;
-  min-height: max(1.5rem, calc(1lh + var(--spacing) * 4));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 4));
 }
 
 html.assistant-display input[type="range"] {
-  min-height: 1.5rem;
+  min-height: max(24px, 1.5rem);
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark
@@ -1401,6 +1401,15 @@ html.theme-dark .assistant-halo--visible {
 [data-scroll-edges~="left"] { --scroll-fade-left: 20px; }
 [data-scroll-edges~="right"] { --scroll-fade-right: 20px; }
 
+/* The index is a dense graphical navigator, not a row of text controls.
+   Its measured pitch must also be its rendered pitch at every reading size. */
+html.assistant-display [data-chat-index-target] {
+  min-height: 0;
+  min-width: 0;
+  padding-block: 0;
+  flex: none;
+}
+
 [data-chat-index-rail] {
   mask-image: linear-gradient(to bottom,
     transparent, rgb(0 0 0 / 20%) calc(var(--scroll-fade-top) * .4),
@@ -1481,7 +1490,6 @@ html.theme-dark .assistant-halo--visible {
 .agent-header-icon:focus-visible { outline: 2px solid var(--color-input-focus); outline-offset: 2px; }
 .agent-header-icon[hidden] { display: none; }
 .agent-header-search { position: relative; min-width: 0; }
-.agent-header-search-back { display: none; }
 .agent-header-search-field { width: 100%; transform-origin: right center; }
 .agent-header-search[data-open="false"] .agent-header-search-field { position: absolute; right: 0; top: 0; width: 0; opacity: 0; visibility: hidden; overflow: hidden; }
 .agent-header-name, .agent-header-avatar { transform-origin: left center; }
@@ -1500,8 +1508,6 @@ html.theme-dark .assistant-halo--visible {
     transform: translateX(-0.25rem) scale(.95);
   }
   [data-agent-header][data-search-open="true"] .agent-header-name { left: calc(var(--spacing) * 10); }
-  .agent-header-search-back { display: inline-flex; }
-  .agent-header-search-glyph { display: none; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .agent-header-name, .agent-header-avatar, .agent-header-subtitle { transition: transform 240ms ease-out, opacity 240ms ease-out, visibility 240ms; }
