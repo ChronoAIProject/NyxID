@@ -500,7 +500,7 @@ function MobileNav({
       <nav className="flex-1 overflow-y-auto px-3 pb-4">
         {searchResults !== null ? (
           searchResults.length > 0 ? (
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {searchResults.map((item) => (
                 <button
                   key={`${item.to ?? "action"}-${item.label}`}
@@ -524,7 +524,7 @@ function MobileNav({
         ) : (
           <>
             <AssistantNavEntry mobile onClick={onClose} />
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {mainNav.map((item) => (
                 <MobileNavItem
                   key={item.to}
@@ -540,7 +540,7 @@ function MobileNav({
                 Approvals
               </span>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {APPROVALS_NAV.map((item) => (
                 <MobileNavItem
                   key={item.to}
@@ -556,7 +556,7 @@ function MobileNav({
                 Developer
               </span>
             </div>
-            <div className="flex flex-col gap-0.5">
+            <div className="shell-nav-stack">
               {DEVELOPER_NAV.map((item) => (
                 <MobileNavItem
                   key={item.to}
@@ -574,7 +574,7 @@ function MobileNav({
                     Admin
                   </span>
                 </div>
-                <div className="flex flex-col gap-0.5">
+                <div className="shell-nav-stack">
                   {adminNav.map((item) => (
                     <MobileNavItem
                       key={item.to}

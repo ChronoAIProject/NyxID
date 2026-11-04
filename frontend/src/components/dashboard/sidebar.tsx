@@ -317,7 +317,7 @@ export function Sidebar({
     <>
       <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
         <AssistantNavEntry collapsed={isCollapsed} onClick={onNavigate} />
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {mainNav.map((item) => (
             <NavItem
               key={item.to}
@@ -338,7 +338,7 @@ export function Sidebar({
             </span>
           )}
         </div>
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {APPROVALS_NAV.map((item) => (
             <NavItem
               key={item.to}
@@ -359,7 +359,7 @@ export function Sidebar({
             </span>
           )}
         </div>
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {DEVELOPER_NAV.map((item) => (
             <NavItem
               key={item.to}
@@ -382,7 +382,7 @@ export function Sidebar({
                 </span>
               )}
             </div>
-            <div className="flex flex-col gap-[2px]">
+            <div className="shell-nav-stack">
               {adminNav.map((item) => (
                 <NavItem
                   key={item.to}

@@ -33,6 +33,7 @@ import { AssistantLinkModal } from "./assistant-link-modals";
 import { WorkspacePageHeader } from "./workspace-page-header";
 import { ManageConnectionModal } from "./manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
+import { ServiceCardHeader } from "@/components/shared/service-card-header";
 import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
 import {
@@ -115,9 +116,12 @@ function PluginCard({
           onClick={onActivate}
         />
       ) : null}
-      <div className="pointer-events-none flex items-center gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-15 font-semibold text-muted-foreground">
-          {add ? <Plus aria-hidden className="size-[1.5em]" /> : item.iconSlug || item.iconUrl ? (
+      <ServiceCardHeader
+        name={item.name}
+        subtitleTitle={status}
+        className="pointer-events-none"
+        icon={
+          add ? <Plus aria-hidden className="size-[1.5em]" /> : item.iconSlug || item.iconUrl ? (
             <ServiceIcon
               slug={item.iconSlug}
               iconUrl={item.iconUrl}
@@ -125,16 +129,10 @@ function PluginCard({
             />
           ) : (
             item.initial
-          )}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p title={item.name} className="truncate text-15 font-medium">
-            {item.name}
-          </p>
-          <p
-            title={status}
-            className="mt-0.5 truncate text-13 text-text-tertiary"
-          >
+          )
+        }
+        subtitle={
+          <>
             {item.added && !item.disabled ? (
               <span
                 aria-hidden
@@ -142,9 +140,9 @@ function PluginCard({
               />
             ) : null}
             {status}
-          </p>
-        </div>
-      </div>
+          </>
+        }
+      />
       <p
         title={item.description}
         className="pointer-events-none line-clamp-2 break-words text-14 leading-relaxed text-muted-foreground"

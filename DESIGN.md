@@ -158,6 +158,13 @@ the safe area. `shell-page-stack` uses six spacing units between sections;
 shared `PageHeader` inside its sticky-title behavior: identical title line-height,
 description gap, action gap and wrapping. Shared shell navigation, group labels
 and account blocks own their padding, gaps, radii and icon dimensions.
+Every expanded, collapsed and mobile navigation stack uses `shell-nav-stack`,
+with half a spacing unit between rows. Service cards in Studio and Plugins share
+`ServiceCardHeader`: the card-title role with tight tracking and a ten-spacing-unit
+icon container. Both keep the same icon surface, border, corners and title gap.
+Toasts follow the app theme; titles use foreground and descriptions use
+muted-foreground on the actual toast surface, including typed notifications.
+All title, description and action text must meet 4.5:1 contrast.
 
 The only remaining `assistant-display` CSS rule exempts conversation-index tick
 slots from general control minimums. It is a transcript navigator, not a shared
@@ -480,8 +487,10 @@ title is a presentation mirror. The original action container becomes inert
 while the mirror action is available, avoiding duplicate tab stops. Mobile
 retains the page header. Reduced motion disables the short fade/slide.
 
-Plugin catalog cards share `PluginCard` and a `10.5rem` height in every section,
-including skill search results. Rem sizing follows the assistant text setting.
+Plugin catalog cards share `PluginCard`, including skill search results. Grid rows
+size equally to the largest card's content, with a minimum of five rem plus
+eighteen spacing units. Height grows with content and independent text/spacing
+settings; never fix card height or let actions escape into the next row.
 Names and status lines truncate with native titles, descriptions reserve two
 lines, and the footer stays at the bottom. The primary native button/link covers
 the card; secondary controls are siblings inside the footer. Neutral overlay

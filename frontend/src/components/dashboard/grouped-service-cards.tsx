@@ -41,6 +41,7 @@ import {
   matchingConnections,
 } from "@/lib/service-view";
 import { ServiceIcon } from "@/components/service-icon";
+import { ServiceCardHeader } from "@/components/shared/service-card-header";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -360,19 +361,12 @@ function GroupCard({
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
-            <Glide className="flex items-start gap-3">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
-                <ServiceIcon
-                  slug={group.iconSlug}
-                  iconUrl={group.iconUrl}
-                  size="md"
-                />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3
-                  id={headingId}
-                  className="text-15 font-semibold tracking-tight"
-                >
+            <Glide>
+              <ServiceCardHeader
+                name={group.name}
+                titleId={headingId}
+                icon={<ServiceIcon slug={group.iconSlug} iconUrl={group.iconUrl} size="md" />}
+                title={
                   <button
                     type="button"
                     onClick={() => onToggle(cardRef.current)}
@@ -382,37 +376,40 @@ function GroupCard({
                   >
                     {group.name}
                   </button>
-                </h3>
-                <p className="mt-0.5 text-13 text-muted-foreground">
-                  {matchingCount < count
-                    ? `${matchingCount} of ${count}`
-                    : count}{" "}
-                  {count === 1 ? "connection" : "connections"}
-                </p>
-              </div>
-              {group.connections.some((connection) => connection.offering_kind === "tool") && (
-                <Badge variant="secondary">Tool · your key</Badge>
-              )}
-              {!expanded && preferred?.preference_rank === 1 && (
-                <button
-                  type="button"
-                  onClick={() => onToggle(cardRef.current)}
-                  className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                  aria-label={`Preferred: ${preferred.label}`}
-                  title={group.connections
-                    .filter((connection) => connection.preference_rank != null)
-                    .map(
-                      (connection) =>
-                        `#${connection.preference_rank} · ${connection.label}`,
-                    )
-                    .join("\n")}
-                >
-                  <Badge variant="accent">Preferred: {preferred.label}</Badge>
-                </button>
-              )}
-              {disabled > 0 && (
-                <Badge variant="secondary">{disabled} disabled</Badge>
-              )}
+                }
+                subtitle={
+                  <>
+                    {matchingCount < count
+                      ? `${matchingCount} of ${count}`
+                      : count}{" "}
+                    {count === 1 ? "connection" : "connections"}
+                  </>
+                }
+              >
+                {group.connections.some((connection) => connection.offering_kind === "tool") && (
+                  <Badge variant="secondary">Tool · your key</Badge>
+                )}
+                {!expanded && preferred?.preference_rank === 1 && (
+                  <button
+                    type="button"
+                    onClick={() => onToggle(cardRef.current)}
+                    className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                    aria-label={`Preferred: ${preferred.label}`}
+                    title={group.connections
+                      .filter((connection) => connection.preference_rank != null)
+                      .map(
+                        (connection) =>
+                          `#${connection.preference_rank} · ${connection.label}`,
+                      )
+                      .join("\n")}
+                  >
+                    <Badge variant="accent">Preferred: {preferred.label}</Badge>
+                  </button>
+                )}
+                {disabled > 0 && (
+                  <Badge variant="secondary">{disabled} disabled</Badge>
+                )}
+              </ServiceCardHeader>
             </Glide>
             {!expanded && (
               <Glide className="shrink-0">

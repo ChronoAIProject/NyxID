@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { expectReadableToast } from "./contrast";
 
 const properties = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap", "rowGap", "minHeight", "minWidth", "lineHeight", "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius", "fontSize", "fontWeight"] as const;
 
@@ -12,13 +13,17 @@ async function readings(page: Page, selector: string) {
   })), [...properties]);
 }
 
-async function openRoute(page: Page, path: string, scale: number, density: number, theme: "light" | "dark") {
+async function openRoute(page: Page, path: string, scale: number, density: number, theme: "light" | "dark", mount = true) {
   await page.addInitScript(({ scale, density, theme }) => {
     localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: scale, density, mode: theme, motion: "reduce" }, version: 2 }));
     localStorage.setItem("nyxid.telemetry_consent.v3.test-user", JSON.stringify({ enabled: false, asked: true }));
   }, { scale, density, theme });
   await page.goto(`${path}?mock=1`);
   await expect(page.locator(".shell-page-content")).toBeVisible();
+  if (!mount) {
+    await page.evaluate(() => document.fonts.ready);
+    return;
+  }
   await page.evaluate(async () => {
     const module = await import("/e2e/fixtures/mount-treatment.ts");
     module.mountTreatment();
@@ -26,6 +31,125 @@ async function openRoute(page: Page, path: string, scale: number, density: numbe
   await expect(page.locator('[data-parity="input"]')).toBeVisible();
   await expect(page.locator('[data-parity="hidden-icon"]')).toBeHidden();
   await page.evaluate(() => document.fonts.ready);
+}
+
+async function navSiblingGaps(page: Page, density: number) {
+  const stacks = page.locator(".shell-nav-stack:visible");
+  await expect(stacks.first()).toBeVisible();
+  const gaps = await stacks.evaluateAll(stacks => stacks.flatMap(stack => {
+    const rows = [...stack.children].filter(child => child.matches(".shell-nav-item, .ui-icon-button"));
+    return rows.slice(1).filter((row, i) => rows[i]!.nextElementSibling === row).map(row => ({
+      previous: row.previousElementSibling!.textContent,
+      next: row.textContent || row.getAttribute("aria-label"),
+      gap: row.getBoundingClientRect().top - row.previousElementSibling!.getBoundingClientRect().bottom,
+    }));
+  }));
+  expect(gaps.length).toBeGreaterThan(0);
+  for (const pair of gaps) expect(pair.gap, JSON.stringify(pair)).toBeCloseTo(2 * density, 1);
+  return gaps;
+}
+
+async function pluginCardBounds(page: Page) {
+  const grids = await page.locator(".assistant-plugin-grid:visible").evaluateAll(grids => grids.map(grid => {
+    const cards = [...grid.querySelectorAll<HTMLElement>("[data-plugin-card]")];
+    return cards.map(card => {
+      const outer = card.getBoundingClientRect();
+      const children = [...card.children, ...card.querySelectorAll("button,a")].map(child => {
+        const box = child.getBoundingClientRect();
+        return { text: child.textContent?.trim(), left: box.left - outer.left, right: outer.right - box.right, top: box.top - outer.top, bottom: outer.bottom - box.bottom };
+      });
+      const overlaps = cards.filter(other => other !== card).filter(other => {
+        const b = other.getBoundingClientRect();
+        return outer.left < b.right && outer.right > b.left && outer.top < b.bottom && outer.bottom > b.top;
+      }).length;
+      return { name: card.querySelector("[data-service-card-title]")?.textContent, height: outer.height, children, overlaps };
+    });
+  }));
+  expect(grids.flat().length).toBeGreaterThan(1);
+  for (const cards of grids) for (const card of cards) {
+    expect(card.overlaps, String(card.name)).toBe(0);
+    expect(card.height, String(card.name)).toBeCloseTo(cards[0]!.height, 1);
+    for (const child of card.children) for (const edge of ["left", "right", "top", "bottom"] as const) {
+      expect(child[edge], JSON.stringify({ card: card.name, child, edge })).toBeGreaterThanOrEqual(-1);
+    }
+  }
+  return grids;
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) {
+  test(`normal and typed toast text meets contrast in each shell (${theme}, ${width})`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    const evidence = [];
+    for (const path of ["/approvals/history", "/assistant/approvals"]) {
+      await openRoute(page, path, 2, 1.4, theme);
+      for (const kind of ["toast", "toast:success", "toast:error", "toast:info", "toast:warning"]) {
+        await page.evaluate(kind => window.treatmentFixture.portal(kind), kind);
+        evidence.push({ path, kind, colors: await expectReadableToast(page) });
+        if (process.env.NYX_REVIEW_SHOTS && kind === "toast") {
+          await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+          await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${path.startsWith("/assistant") ? "assistant" : "studio"}-toast.png`) });
+        }
+        await page.evaluate(() => window.treatmentFixture.portal(""));
+        await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+      }
+    }
+    await test.info().attach("toast-contrast.json", { body: JSON.stringify(evidence, null, 2), contentType: "application/json" });
+    if (process.env.NYX_REVIEW_SHOTS) await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-toast-contrast.json`), JSON.stringify(evidence, null, 2));
+    await context.close();
+  });
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) for (const scale of [0.5, 1, 1.5, 2]) for (const density of [1, 1.4]) {
+  test(`real service headers, card bounds and nav stacks (${theme}, ${width}, text ${scale}×, spacing ${density}×)`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, isMobile: width === 390, hasTouch: width === 390, reducedMotion: "reduce" });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    const headers = [];
+    const evidence = [];
+    for (const path of ["/keys", "/assistant/plugins"]) {
+      const assistant = path.startsWith("/assistant");
+      await openRoute(page, path, scale, density, theme, false);
+      const service = page.locator("[data-service-card-header]").filter({ has: page.getByRole("heading", { name: "GitHub", exact: true }) });
+      await expect(service).toBeVisible();
+      const header = await service.evaluate(element => {
+        const title = element.querySelector("[data-service-card-title]")!;
+        const text = title.querySelector("button") ?? title;
+        const icon = element.querySelector("[data-service-card-icon]")!;
+        const style = getComputedStyle(text), box = icon.getBoundingClientRect(), iconStyle = getComputedStyle(icon);
+        return { fontSize: style.fontSize, fontWeight: style.fontWeight, tracking: style.letterSpacing, icon: { width: box.width, height: box.height, radius: iconStyle.borderRadius, padding: iconStyle.padding, background: iconStyle.backgroundColor, border: iconStyle.border } };
+      });
+      expect(header.fontSize).toBe(`${15 * 0.85 * scale}px`);
+      expect(header.fontWeight).toBe("600");
+      expect(header.icon.width).toBeCloseTo(40 * density, 1);
+      expect(header.icon.height).toBeCloseTo(40 * density, 1);
+      headers.push(header);
+      const cards = assistant ? await pluginCardBounds(page) : null;
+      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && (scale === 0.5 || scale === 1)) {
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await service.evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${assistant ? "plugins" : "keys"}.png`) });
+      }
+      if (width === 390) await page.getByRole("button", { name: assistant ? "Open chats" : "Open menu", exact: true }).click();
+      const nav = await navSiblingGaps(page, density);
+      let collapsed;
+      if (width === 1440) {
+        if (assistant) await page.getByRole("button", { name: "Hide sidebar", exact: true }).click();
+        else await page.evaluate(async () => (await import("/src/stores/theme-store.ts")).useThemeStore.getState().setSidebarMode("collapsed"));
+        collapsed = await navSiblingGaps(page, density);
+      }
+      evidence.push({ path, header, cards, nav, collapsed });
+    }
+    expect(headers[1]).toEqual(headers[0]);
+    expect(errors).toEqual([]);
+    const metrics = JSON.stringify({ theme, width, scale, density, evidence }, null, 2);
+    await test.info().attach("real-service-parity.json", { body: metrics, contentType: "application/json" });
+    if (process.env.NYX_REVIEW_SHOTS) await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${density}-service-parity.json`), metrics);
+    await context.close();
+  });
 }
 
 for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) for (const scale of [0.5, 1, 1.5, 2]) for (const density of [1, 1.4]) {
@@ -60,6 +184,7 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
         await page.evaluate(kind => window.treatmentFixture.portal(kind), kind);
         const selector = kind === "toast" ? "[data-sonner-toast]" : `[data-parity="${kind === "select" ? "select-content" : kind}"]`;
         await expect(page.locator(selector).first()).toBeVisible();
+        if (kind === "toast") await expectReadableToast(page);
         sample[kind] = Object.values(await readings(page, kind === "toast" ? "[data-sonner-toast], [data-sonner-toast] :is([data-title],[data-description],[data-button])" : `${selector}, ${selector} [data-parity], ${selector} [data-icon-button], ${selector} [data-select-indicator]`));
         if (process.env.NYX_TREATMENT_SHOTS && density === 1 && (scale === 1 || scale === 2) && ["dialog", "menu", "toast"].includes(kind)) {
           await mkdir(process.env.NYX_TREATMENT_SHOTS, { recursive: true });

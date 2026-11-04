@@ -1,9 +1,10 @@
-/* Rem dimensions follow the assistant reading scale across every catalog. */
+/* Equal rows follow the largest card's content, including independent spacing. */
 .assistant-plugin-grid {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+  grid-auto-rows: 1fr;
 }
 .assistant-plugin-card {
-  height: 10.5rem;
+  min-height: calc(5rem + var(--spacing) * 18);
 }
 .assistant-plugin-card > p {
   min-height: 3.25em;

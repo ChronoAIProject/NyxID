@@ -7,7 +7,7 @@ import { ApiError } from "@/lib/api-client";
 
 const data = vi.hoisted(() => ({
   channels: [] as unknown[], bots: [] as unknown[],
-  connect: vi.fn(), link: vi.fn(), pending: false,
+  connect: vi.fn(), link: vi.fn(), retryGateway: vi.fn(), pending: false,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   nyxBotOf: (agents: AssistantAgent[]) => agents.find((agent) => agent.kind === "nyxbot"),
@@ -15,6 +15,7 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useConnectNyxBotChannel: () => ({ isPending: data.pending, mutateAsync: data.connect }),
   useDisconnectNyxBotChannel: () => ({ isPending: false }),
   useLinkNyxBotChannel: () => ({ isPending: false, mutateAsync: data.link }),
+  useRetryNyxBotChannelGateway: () => ({ isPending: false, mutateAsync: data.retryGateway }),
 }));
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ data: data.bots, isPending: false }),
@@ -272,3 +273,46 @@ it.each([
     );
   },
 );
+
+
+it.each(["discord.invalid_intents", undefined])("2183 explains working relay fallback and retries explicitly with detail %s", async (detail) => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct",
+    gateway_native_activation: "gateway_rejected_request", gateway_native_activation_detail: detail,
+    gateway_next_retry_at: "2026-11-05T00:00:00Z", gateway_retry_available_at: "2026-11-04T01:00:00Z",
+    delivery_status: "ok" })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText("Working on NyxID relay.")).toBeVisible();
+  expect(screen.getByText(`Native gateway activation did not complete: ${detail ?? "gateway_rejected_request"}.`)).toBeVisible();
+  expect(screen.getByText(/Next automatic retry:/)).toBeVisible();
+  expect(screen.getByText(/does not confirm native gateway acceptance/)).toBeVisible();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Retry native gateway now" }));
+  expect(data.retryGateway).toHaveBeenCalledWith({ channelAgentId: "channel" });
+});
+
+it("2183 distinguishes native selection from confirmed delivery", () => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "gateway", gateway_source: { type: "discord", bot_id: "100" }, gateway_native_activation: "pending_discovery" })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText(/Native gateway selected.*pending_discovery/)).toBeVisible();
+  expect(screen.getByText(/Native delivery has not been confirmed/)).toBeVisible();
+  expect(screen.queryByText("Working on NyxID relay.")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Retry native gateway now" })).toBeNull();
+});
+
+it("2183 disables retry for an unverified owner and shows actionable refusal", async () => {
+  const row = nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", owner_linked: false, gateway_native_activation: "gateway_rejected_request" });
+  data.channels = [row];
+  const view = render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByRole("button", { name: "Retry native gateway now" })).toBeDisabled();
+  data.channels = [{ ...row, owner_linked: true }];
+  view.rerender(<ChannelBotsManager agents={[]} />);
+  data.retryGateway.mockRejectedValueOnce(new Error("native_gateway_retry_rate_limited"));
+  await userEvent.setup().click(screen.getByRole("button", { name: "Retry native gateway now" }));
+  expect(screen.getByText(/Wait ten minutes after the last gateway attempt/)).toBeVisible();
+});
+
+it("2183 never presents an older relay-sourced gateway as native", () => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "gateway" })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText(/Agent Event Gateway with NyxID relay intake/)).toBeVisible();
+  expect(screen.queryByText(/Native gateway selected/)).toBeNull();
+});

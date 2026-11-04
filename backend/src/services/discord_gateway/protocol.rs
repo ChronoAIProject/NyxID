@@ -270,7 +270,7 @@ where
                         let event = if value["t"] == "MESSAGE_CREATE" {
                             if value.to_string().len() > 256 * 1024 { failure = Some(Failure::Backpressure); continue; }
                             value
-                        } else { json!({"t":value["t"],"s":sequence}) };
+                        } else { super::roles::project(&value, bot_id) };
                         pending.push_back((cursor, event));
                     }
                     _ => {}

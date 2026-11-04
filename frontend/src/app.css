@@ -320,6 +320,7 @@ html:is(.theme-light, .theme-dark) svg[data-ui-icon] {
 @media (min-width: 1024px) { .shell-page-content { padding-inline: calc(var(--spacing) * 10); } }
 .shell-page-stack { display: flex; flex-direction: column; gap: calc(var(--spacing) * 6); }
 .shell-card-grid { gap: calc(var(--spacing) * 4); }
+.shell-nav-stack { display: flex; flex-direction: column; gap: calc(var(--spacing) * 0.5); }
 .shell-user-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 0; }
 .shell-user-avatar { display: flex; flex-shrink: 0; align-items: center; justify-content: center; padding: 0.375em; border-radius: var(--radius-lg); }
 html:is(.theme-light, .theme-dark) .shell-user-avatar svg { width: max(0.75rem, 1.125em); height: max(0.75rem, 1.125em); }

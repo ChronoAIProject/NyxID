@@ -492,7 +492,7 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
         </p>
       ) : null}
       <section aria-label="CMA activity">
-        <div className="mb-0.5 flex items-center justify-between gap-2">
+        <div className="mb-0.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
           <h4 className="text-12 font-medium text-text-tertiary">
             Recent actions
           </h4>
@@ -500,7 +500,7 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
             <Button
               variant="ghost"
               size="sm"
-              className="px-1"
+              className="max-w-full shrink-0 whitespace-normal break-words px-1 text-left"
               aria-expanded={expanded}
               aria-controls={historyId}
               onClick={() => setExpanded((value) => !value)}

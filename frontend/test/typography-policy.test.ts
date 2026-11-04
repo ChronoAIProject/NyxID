@@ -1,17 +1,20 @@
 import { describe, expect, it } from "vitest";
 // @ts-expect-error The lint guard is deliberately a standalone Node script.
 import { checkTypography, typographyViolations } from "../scripts/check-typography.mjs";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import postcss from "postcss";
 import { resolve } from "node:path";
 
 describe("typography policy", () => {
   it("never scopes shared treatment to the assistant shell", () => {
-    postcss.parse(readFileSync(resolve("src/app.css"), "utf8")).walkRules(rule => {
-      if (rule.selector.includes("assistant-display")) {
-        expect(rule.selector).toBe("html.assistant-display [data-chat-index-target]");
-      }
-    });
+    for (const file of readdirSync("src", { recursive: true }).filter(file => String(file).endsWith(".css"))) {
+      postcss.parse(readFileSync(resolve("src", String(file)), "utf8")).walkRules(rule => {
+        if (rule.selector.includes("assistant-display")) {
+          expect(String(file)).toBe("app.css");
+          expect(rule.selector).toBe("html.assistant-display [data-chat-index-target]");
+        }
+      });
+    }
     expect(readFileSync(resolve("src/hooks/use-theme.ts"), "utf8")).not.toContain("--assistant-density");
   });
   it("keeps source tokens canonical and role consumers scalable", () => {

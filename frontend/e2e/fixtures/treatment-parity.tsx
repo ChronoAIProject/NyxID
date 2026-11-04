@@ -44,7 +44,11 @@ export function TreatmentFixture() {
       portal: next => {
         toast.dismiss();
         setKind(next);
-        if (next === "toast") toast("Review completed", { description: "Review these changes.", duration: Infinity, action: { label: "Review changes", onClick() {} }, cancel: { label: "Dismiss", onClick() {} } });
+        if (next === "toast" || next.startsWith("toast:")) {
+          const variants: Record<string, typeof toast.success> = { success: toast.success, error: toast.error, info: toast.info, warning: toast.warning };
+          const show = variants[next.slice(6)] ?? toast;
+          show("Review completed", { description: "Review these changes.", duration: Infinity, action: { label: "Review changes", onClick() {} }, cancel: { label: "Dismiss", onClick() {} } });
+        }
       },
     };
   }, []);

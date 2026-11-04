@@ -324,3 +324,6 @@ async fn discord_provider_unknown_actors_cannot_verify_owner_and_media_has_no_fe
     assert!(stored.media.is_none());
     server.abort();
 }
+
+#[path = "nyxbot_discord_admission_tests.rs"]
+mod admission_tests;

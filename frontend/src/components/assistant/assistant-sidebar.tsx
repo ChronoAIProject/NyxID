@@ -631,7 +631,7 @@ function AgentsSection({
     // NyxBot pinned first; the server already orders the rest.
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
-    <div className="space-y-0.5">
+    <div className="shell-nav-stack">
       {agentOwnerSections(visible).map((section) => (
         <section key={section.id} aria-label={`${section.label} agents`}>
           <OwnerLabel>{section.label} agents</OwnerLabel>
@@ -736,7 +736,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
   // With no crews yet, the personal section still offers the first one.
   if (!sections.size) sections.set("personal", []);
   return (
-    <div className="space-y-0.5">
+    <div className="shell-nav-stack">
       {[...sections.entries()].map(([owner, groups]) => {
         const label = `${owner === "personal" ? "Personal" : (groups[0]?.owner?.name ?? "Organization")} crews`;
         return (
@@ -932,7 +932,7 @@ export function AssistantSidebar({
       )}
 
       <GroupLabel>Workspace</GroupLabel>
-      <div className="space-y-0.5 px-2">
+      <div className="shell-nav-stack px-2">
         {agents?.onHome ? (
           <button
             type="button"
@@ -1073,7 +1073,7 @@ export function AssistantSidebar({
             <div className="-mx-2">
               <GroupLabel>Chats</GroupLabel>
             </div>
-            <div className="space-y-0.5">{conversations.map(renderRow)}</div>
+            <div className="shell-nav-stack">{conversations.map(renderRow)}</div>
           </>
         ) : null}
       </nav>
@@ -1250,7 +1250,7 @@ function SidebarRail({
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar">
         <nav
           aria-label="Workspace and agents"
-          className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto overscroll-contain py-1 [scrollbar-width:none]"
+          className="shell-nav-stack min-h-0 w-full flex-1 items-center overflow-y-auto overscroll-contain py-1 [scrollbar-width:none]"
         >
           <RailItem label="Home">
             {agents?.onHome ? (
@@ -1363,7 +1363,7 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
       </PopoverTrigger>
       <PopoverContent side="right" align="start" className="w-72 p-2">
         <p className="px-2 py-1 text-14 font-medium">Previous chats</p>
-        <ul aria-label="Previous chats" className="max-h-80 space-y-0.5 overflow-y-auto">
+        <ul aria-label="Previous chats" className="max-h-80 shell-nav-stack overflow-y-auto">
           {conversations.map((chat) => (
             <li key={chat.id}>
               <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
@@ -1486,7 +1486,7 @@ function RailAgentChats({
       ) : !chats.length ? (
         <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p>
       ) : (
-        <ul aria-label={`${agentTitle(agent)} chats`} className="space-y-0.5">
+        <ul aria-label={`${agentTitle(agent)} chats`} className="shell-nav-stack">
           {chats.slice(0, RAIL_THREADS).map((chat) => (
             <li key={chat.id}>
               <button
