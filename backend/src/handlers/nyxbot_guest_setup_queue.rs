@@ -156,7 +156,7 @@ async fn resume(state: &AppState, id: &str) -> AppResult<Option<Inbound>> {
             | AppError::ErasurePreparing,
         ) => {
             retire(state, id).await?;
-            Ok(Some(Inbound::Silent))
+            Ok(Some(Inbound::Silent("refused_policy")))
         }
         outcome => outcome,
     };
@@ -261,7 +261,7 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         && agent_matches;
     if !allowed {
         retire(state, id).await?;
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_policy")));
     }
     if payload.origin.thread.is_some() {
         crate::services::channel_thread_follow_service::validate_delivery(

@@ -656,6 +656,7 @@ mod tests {
 
     fn make_api_key(id: &str, user_id: &str, allow_all: bool) -> ApiKey {
         ApiKey {
+            permission_policy_id: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             name: "test-agent-key".to_string(),

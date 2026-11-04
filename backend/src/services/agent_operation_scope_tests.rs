@@ -675,6 +675,7 @@ async fn key_fixture(
         .await
         .unwrap();
     let key = ApiKey {
+        permission_policy_id: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner.clone(),
         name: "agent".into(),

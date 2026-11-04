@@ -2197,6 +2197,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<ApiKey>(API_KEYS)
             .insert_one(ApiKey {
+                permission_policy_id: None,
                 id: key_id.clone(),
                 user_id: org_id,
                 name: "org-agent".to_string(),
@@ -2625,6 +2626,7 @@ mod tests {
 
         fn fixture_api_key(id: &str, owner_user_id: &str, name: &str) -> ApiKey {
             ApiKey {
+                permission_policy_id: None,
                 id: id.to_string(),
                 user_id: owner_user_id.to_string(),
                 name: name.to_string(),
@@ -3028,6 +3030,7 @@ mod tests {
             .unwrap();
 
         let make_key = |id: String, owner: String| ApiKey {
+            permission_policy_id: None,
             id,
             user_id: owner,
             name: "scheduled".to_string(),

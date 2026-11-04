@@ -490,7 +490,7 @@ pub(crate) async fn publish_reply(
         attachments: published_images,
         id: Uuid::new_v4().to_string(),
         group_id: b.group_id.clone(),
-        user_id: group.user_id,
+        user_id: group.user_id.clone(),
         seq: group.message_count,
         role: if failed { "notice" } else { "agent" }.into(),
         agent_id: Some(b.agent_id.clone()),
@@ -515,9 +515,10 @@ pub(crate) async fn publish_reply(
         created_at: Utc::now(),
     };
     db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
-        .insert_one(public)
-        .session(session)
+        .insert_one(&public)
+        .session(&mut *session)
         .await?;
+    notifications::enqueue(db, &group, &public, session).await?;
     Ok(())
 }
 

@@ -1,8 +1,8 @@
-import { cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useCollaborationAvailable } from "./use-collaboration-groups";
+import { useCollaborationAvailable, useCollaborationRead } from "./use-collaboration-groups";
 import { useAuthStore } from "@/stores/auth-store";
 const flags = vi.hoisted(() => ({ enabled: false }));
 vi.mock("@/hooks/use-feature-flag", () => ({
@@ -72,4 +72,29 @@ it("hides cached availability immediately when the flag is revoked", async () =>
   flags.enabled = false;
   rerender();
   expect(result.current.data).toBe(false);
+});
+
+
+it("marks the opened transcript read, monotonically, but skips legacy and hidden groups", async () => {
+  flags.enabled = true;
+  const positions: number[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    calls.push(endpoint);
+    positions.push((JSON.parse(String(init?.body)) as { last_seen_seq: number }).last_seen_seq);
+    return new Response(null, { status: 204 });
+  };
+  const { rerender } = renderHook(({ seq, enabled }) => useCollaborationRead("nyxg-group", seq, enabled), { wrapper, initialProps: { seq: 5, enabled: false } });
+  expect(calls).toEqual([]);
+  rerender({ seq: 5, enabled: true });
+  await waitFor(() => expect(positions).toEqual([5]));
+  rerender({ seq: 3, enabled: true });
+  expect(positions).toEqual([5]);
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  rerender({ seq: 8, enabled: true });
+  expect(positions).toEqual([5]);
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  act(() => document.dispatchEvent(new Event("visibilitychange")));
+  await waitFor(() => expect(positions).toEqual([5, 8]));
+  expect(calls).toEqual(["/assistant/nyxagent/groups/nyxg-group/read", "/assistant/nyxagent/groups/nyxg-group/read"]);
+  vi.restoreAllMocks();
 });
