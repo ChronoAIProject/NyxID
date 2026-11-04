@@ -471,6 +471,15 @@ name their business purpose and account scope, not the connection slug, UUID,
 HTTP verb or internal operation. Other actions retain their resource details
 with protocol wrappers removed. The voice model is instructed never to invent
 confirmation questions. Only a durable server read-back can ask for a decision.
+OpenAI read-back instructions contain fixed server text only. Card-derived questions,
+including organization names and targets, go through quoted commentary as one
+item when bounded; longer questions use at most four ordered sentence/clause
+parts. Each retains the conservative 480-byte payload cap (including quoting)
+for OpenAI's 500-token append limit; splits are at Unicode sentence/clause
+boundaries, never byte offsets. No detail is truncated, and an indivisible
+oversized question is refused before any part is sent. Only
+the complete matching output transcript plus audible playback arms the existing
+read-back decision gate; quoted content never becomes privileged instructions.
 
 Queued/running/background-service tasks and real approval waits refresh a
 separate `last_work_at` idle reference. The three-minute user-idle warning resumes
