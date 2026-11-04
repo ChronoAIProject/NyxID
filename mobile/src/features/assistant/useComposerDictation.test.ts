@@ -51,7 +51,7 @@ function recognizer(events: string[]) {
   return module;
 }
 
-function setup() {
+function setup({ chosen }: { chosen?: string } = {}) {
   let state = "active",
     focused = true,
     sheetOpen = false,
@@ -91,6 +91,9 @@ function setup() {
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/accessibility/workspaceAccessibility": {
       useWorkspaceAccessibility: () => ({ sheetOpen }),
+    },
+    "./voice/dictationLanguage": {
+      savedDictationLanguage: async () => chosen,
     },
     "./voice/dictationLocale": {
       dictationLocale: (phone: string | undefined, list: readonly string[]) => {
@@ -446,4 +449,16 @@ test("recognizer errors explain themselves; text heard before a failure stays fo
   assert.equal(late.h.value().phase, "review");
   assert.equal(late.h.value().error, undefined, "no-speech after words is not an error");
   late.h.unmount();
+});
+
+test("a chosen dictation language the recognizer supports wins over the phone's", async () => {
+  const chosen = setup({ chosen: "en-US" });
+  await chosen.begin();
+  assert.equal(chosen.native.options?.lang, "en-US");
+  chosen.h.unmount();
+  // A choice this iPhone cannot recognize falls back to the phone's language.
+  const unsupported = setup({ chosen: "xx-YY" });
+  await unsupported.begin();
+  assert.equal(unsupported.native.options?.lang, "en-GB");
+  unsupported.h.unmount();
 });

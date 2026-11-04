@@ -9,6 +9,7 @@ import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
 import { volumeLevel } from "./voice/dictationLevel";
 import { dictationLocale } from "./voice/dictationLocale";
+import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
 
 type Phase =
@@ -74,20 +75,21 @@ function release() {
   Recognizer.abort();
 }
 
+/** The chosen dictation language when still supported, else the iPhone's. */
 async function recognitionLanguage() {
+  const chosen = await savedDictationLanguage();
   let phone: string | undefined;
   try {
     phone = Intl.DateTimeFormat().resolvedOptions().locale;
   } catch {
-    return undefined;
+    phone = undefined;
   }
   try {
-    return dictationLocale(
-      phone,
-      (await Recognizer.getSupportedLocales({})).locales,
-    );
+    const supported = (await Recognizer.getSupportedLocales({})).locales;
+    if (chosen && supported.includes(chosen)) return chosen;
+    return phone ? dictationLocale(phone, supported) : undefined;
   } catch {
-    return phone;
+    return chosen ?? phone;
   }
 }
 

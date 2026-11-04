@@ -8,6 +8,8 @@ type Element = { type: string; props: Record<string, any> };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 function setup({ introSeen = true } = {}) {
   const events: string[] = [];
+  const menus: { onChange: (value: string) => void; options: unknown[] }[] = [];
+  const saved: { language?: string } = {};
   const levelListeners = new Set<(level: number) => void>();
   const storage = new Map<string, string>(
     introSeen ? [["nyxid.dictation_intro_seen", "1"]] : [],
@@ -64,6 +66,35 @@ function setup({ introSeen = true } = {}) {
     "react-native-safe-area-context": {
       useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
     },
+    "expo-linear-gradient": { LinearGradient: "LinearGradient" },
+    "expo-speech-recognition": {
+      ExpoSpeechRecognitionModule: {
+        getSupportedLocales: async () => ({ locales: ["en-US", "fr-FR"] }),
+      },
+    },
+    "../../components/settings/SettingsList": {
+      usePopupMenu: (options: {
+        onChange: (value: string) => void;
+        options: unknown[];
+      }) => {
+        menus.push(options);
+        return { anchor: { current: null }, open: () => {}, popup: null };
+      },
+    },
+    "./voice/dictationLocale": {
+      dictationLocale: (phone: string, list: readonly string[]) =>
+        list.includes(phone) ? phone : list[0],
+    },
+    "./voice/dictationLanguage": {
+      languageLabel: (locale: string) => `name:${locale}`,
+      languageOptions: (list: readonly string[]) =>
+        list.map((value) => ({ value, label: `name:${value}` })),
+      savedDictationLanguage: async () => saved.language,
+      saveDictationLanguage: async (value: string | undefined) => {
+        saved.language = value;
+        events.push(`language:${value ?? "auto"}`);
+      },
+    },
     "react-native": {
       ActivityIndicator: "ActivityIndicator",
       Keyboard: { dismiss: () => events.push("keyboard") },
@@ -72,7 +103,11 @@ function setup({ introSeen = true } = {}) {
       ScrollView: "ScrollView",
       Text: "Text",
       View: "View",
-      StyleSheet: { create: (styles: unknown) => styles },
+      StyleSheet: {
+        create: (styles: unknown) => styles,
+        hairlineWidth: 1,
+        absoluteFill: {},
+      },
     },
     "lucide-react-native": {
       Check: "Check",
@@ -130,6 +165,7 @@ function setup({ introSeen = true } = {}) {
     intro,
     storage,
     levelListeners,
+    menus,
     ...components,
   };
 }
@@ -403,7 +439,8 @@ test("copy says recognition happens on the iPhone in its language, not on a serv
     .flatMap((node) => [node.props.children].flat())
     .join(" ");
   assert.match(words, /recognized on your iPhone when available/);
-  assert.match(words, /Uses your iPhone's language/);
+  assert.match(words, /Current language/);
+  assert.match(words, /Tap to change/);
   assert.doesNotMatch(words, /server|automatically/i);
   x.dictation.phase = "listening";
   x.dictation.active = true;
@@ -411,10 +448,40 @@ test("copy says recognition happens on the iPhone in its language, not on a serv
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
   assert.ok(
-    panel.some(
-      (node) =>
-        node.type === "Text" &&
-        node.props.children === "Language: your iPhone's language",
+    panel.some((node) =>
+      String(node.props.accessibilityLabel ?? "").startsWith("Speech language"),
     ),
+    "the recording panel names the language and can change it",
   );
+});
+
+test("the language line names the current language and saves a new choice for the next recording", async () => {
+  const x = setup({ introSeen: false });
+  x.h.mount(() => x.ComposerDictationButton({ dictation: x.dictation }));
+  x.mic().props.onPress();
+  await x.h.settle();
+  const sheet = () =>
+    render(
+      (x.h.value().props.children as Element[]).find(
+        (child) => child.type !== "Pressable",
+      ),
+    ) as Element;
+  const line = all(sheet()).find((node) =>
+    String(node.props.accessibilityLabel ?? "").startsWith("Speech language"),
+  )!;
+  assert.ok(line, "the intro offers the language");
+  assert.ok(x.menus.length > 0, "tapping opens the shared pop-up menu");
+  const menu = x.menus.at(-1)!;
+  assert.equal(
+    (menu.options as { value: string }[])[0]!.value,
+    "automatic",
+    "following the iPhone comes first",
+  );
+  menu.onChange("fr-FR");
+  await x.h.settle();
+  assert.ok(x.events.includes("language:fr-FR"));
+  menu.onChange("automatic");
+  await x.h.settle();
+  assert.ok(x.events.includes("language:auto"));
+  x.h.unmount();
 });

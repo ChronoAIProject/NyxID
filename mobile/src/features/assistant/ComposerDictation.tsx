@@ -15,15 +15,23 @@ import {
   Check,
   Globe,
   Mic,
-  ShieldCheck,
-  Smartphone,
   Square,
   X,
 } from "lucide-react-native";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { LinearGradient } from "expo-linear-gradient";
+import { ExpoSpeechRecognitionModule as Recognizer } from "expo-speech-recognition";
+import { usePopupMenu } from "../../components/settings/SettingsList";
 import { formatElapsed } from "./voice/dictationLevel";
+import { dictationLocale } from "./voice/dictationLocale";
+import {
+  languageLabel,
+  languageOptions,
+  saveDictationLanguage,
+  savedDictationLanguage,
+} from "./voice/dictationLanguage";
 import type { ComposerDictationState } from "./useComposerDictation";
 
 const BAR_PITCH = 5;
@@ -38,6 +46,7 @@ export function ComposerDictationButton({
   const { colors } = useTheme();
   const held = useRef(false);
   const [intro, setIntro] = useState(false);
+  const language = useDictationLanguage(intro);
   const busy =
     dictation.phase === "permission" ||
     dictation.phase === "connecting" ||
@@ -95,6 +104,7 @@ export function ComposerDictationButton({
       </Pressable>
       <DictationIntro
         visible={intro}
+        language={language}
         onClose={() => setIntro(false)}
         onStart={() => {
           setIntro(false);
@@ -116,38 +126,115 @@ async function introSeen() {
 }
 
 /**
- * One-time explanation as a compact sheet over the chat (the mockup's
+ * The dictation language: the person's choice when the recognizer supports
+ * it, else the iPhone's. Changing it applies from the next recording.
+ */
+function useDictationLanguage(active: boolean) {
+  const [saved, setSaved] = useState<string>();
+  const [supported, setSupported] = useState<readonly string[]>([]);
+  useEffect(() => {
+    if (!active) return;
+    let live = true;
+    void savedDictationLanguage().then((value) => {
+      if (live) setSaved(value);
+    });
+    void Recognizer.getSupportedLocales({})
+      .then((result) => {
+        if (live) setSupported(result.locales);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [active]);
+  let phone: string | undefined;
+  try {
+    phone = Intl.DateTimeFormat().resolvedOptions().locale;
+  } catch {
+    phone = undefined;
+  }
+  const automatic = phone ? dictationLocale(phone, supported) ?? phone : undefined;
+  const current =
+    saved && (!supported.length || supported.includes(saved)) ? saved : automatic;
+  return {
+    value: saved ?? AUTOMATIC,
+    label: current ? languageLabel(current) : "Your iPhone's language",
+    options: [
+      {
+        value: AUTOMATIC,
+        label: "iPhone language",
+        detail: automatic ? languageLabel(automatic) : undefined,
+      },
+      ...languageOptions(supported),
+    ],
+    choose: (value: string) => {
+      const next = value === AUTOMATIC ? undefined : value;
+      setSaved(next);
+      void saveDictationLanguage(next);
+    },
+  };
+}
+const AUTOMATIC = "automatic";
+
+/** "Current language: English. Tap to change", opening the language menu. */
+function LanguageLine({
+  language,
+  note,
+  center = false,
+}: {
+  language: ReturnType<typeof useDictationLanguage>;
+  note?: string;
+  center?: boolean;
+}) {
+  const { colors } = useTheme();
+  const menu = usePopupMenu({
+    options: language.options,
+    value: language.value,
+    onChange: language.choose,
+  });
+  return (
+    <View ref={menu.anchor} collapsable={false}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Speech language, ${language.label}`}
+        accessibilityHint="Opens a menu to choose the dictation language"
+        hitSlop={8}
+        onPress={menu.open}
+      >
+        <Text
+          style={[
+            styles.languageLine,
+            center && styles.center,
+            { color: colors.textSecondary },
+          ]}
+        >
+          Current language:{" "}
+          <Text style={{ color: colors.primary }}>{language.label}</Text>.
+          Tap to change{note ? ` · ${note}` : ""}
+        </Text>
+      </Pressable>
+      {menu.popup}
+    </View>
+  );
+}
+
+/**
+ * One-time explanation as a floating card over the chat (the mockup's
  * "Speech to Text" card): what it does, microphone access, language, Start.
  */
 function DictationIntro({
   visible,
+  language,
   onClose,
   onStart,
 }: {
   visible: boolean;
+  language: ReturnType<typeof useDictationLanguage>;
   onClose: () => void;
   onStart: () => void;
 }) {
-  const { colors } = useTheme();
+  const { colors, mode } = useTheme();
   const insets = useSafeAreaInsets();
-  const rows = [
-    {
-      Icon: ShieldCheck,
-      title: "Microphone access",
-      detail:
-        "iOS asks for microphone and speech recognition access the first time. Recording stops when you tap Finish.",
-    },
-    {
-      Icon: Smartphone,
-      title: "Recognized on your iPhone",
-      detail: "Speech is recognized on your iPhone when available.",
-    },
-    {
-      Icon: Globe,
-      title: "Speech language",
-      detail: "Uses your iPhone's language.",
-    },
-  ];
   return (
     <Modal
       visible={visible}
@@ -163,85 +250,89 @@ function DictationIntro({
       />
       <View
         accessibilityViewIsModal
-        style={[
-          styles.intro,
-          {
-            backgroundColor: colors.bg,
-            paddingBottom: Math.max(insets.bottom, 16) + 12,
-          },
-        ]}
+        style={[styles.introFloat, { marginBottom: Math.max(insets.bottom, 12) + 4 }]}
       >
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Close"
-          onPress={onClose}
-          hitSlop={8}
-          style={[styles.introClose, { backgroundColor: colors.navActive }]}
+        <LinearGradient
+          colors={mode === "dark" ? ["#26242C", "#1D1B22"] : ["#FFFFFF", "#F2EFF5"]}
+          style={styles.intro}
         >
-          <X size={18} color={colors.textPrimary} />
-        </Pressable>
-        <View style={styles.introHead}>
-          <Mic size={30} color={colors.primary} />
-          <Text
-            accessibilityRole="header"
-            style={[styles.introTitle, { color: colors.textPrimary }]}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+            onPress={onClose}
+            hitSlop={8}
+            style={[styles.introClose, { backgroundColor: colors.card }]}
           >
-            Speech to Text
-          </Text>
-          <Text style={[styles.introLead, { color: colors.textSecondary }]}>
-            Speak instead of typing. You review the text before it goes into
-            your message, and nothing is sent on its own.
-          </Text>
-        </View>
-        <View
-          style={[styles.introCard, { backgroundColor: colors.groupedFill }]}
-        >
-          {rows.map(({ Icon, title, detail }, index) => (
+            <X size={18} color={colors.textPrimary} />
+          </Pressable>
+          <View style={styles.introHead}>
+            <Mic size={34} color={colors.textPrimary} />
+            <Text
+              accessibilityRole="header"
+              style={[styles.introTitle, { color: colors.textPrimary }]}
+            >
+              Speech to Text
+            </Text>
+            <Text style={[styles.introLead, { color: colors.textSecondary }]}>
+              Speak instead of typing to write faster. You review the text
+              before it goes into your message.
+            </Text>
+          </View>
+          <View style={[styles.introCard, { backgroundColor: colors.card }]}>
+            <View style={styles.introRow}>
+              <Mic size={18} color={colors.textMuted} />
+              <View style={styles.introRowText}>
+                <Text
+                  style={[styles.introRowTitle, { color: colors.textPrimary }]}
+                >
+                  Access permission
+                </Text>
+                <Text
+                  style={[styles.introRowDetail, { color: colors.textSecondary }]}
+                >
+                  Allow microphone and speech recognition access to turn your
+                  voice into text. Speech is recognized on your iPhone when
+                  available.
+                </Text>
+              </View>
+            </View>
             <View
-              key={title}
               style={[
                 styles.introRow,
-                index > 0 && {
+                {
                   borderTopWidth: StyleSheet.hairlineWidth,
                   borderTopColor: colors.borderSoft,
                 },
               ]}
             >
-              <Icon size={20} color={colors.textSecondary} />
-              <View style={{ flex: 1, gap: 2 }}>
+              <Globe size={18} color={colors.textMuted} />
+              <View style={styles.introRowText}>
                 <Text
                   style={[styles.introRowTitle, { color: colors.textPrimary }]}
                 >
-                  {title}
+                  Speech language
                 </Text>
-                <Text
-                  style={[
-                    styles.introRowDetail,
-                    { color: colors.textSecondary },
-                  ]}
-                >
-                  {detail}
-                </Text>
+                <LanguageLine language={language} />
               </View>
             </View>
-          ))}
-        </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Start dictation"
-          onPress={onStart}
-          style={({ pressed }) => [
-            styles.introStart,
-            {
-              backgroundColor: colors.textPrimary,
-              opacity: pressed ? 0.75 : 1,
-            },
-          ]}
-        >
-          <Text style={[styles.introStartLabel, { color: colors.bg }]}>
-            Start Dictation
-          </Text>
-        </Pressable>
+          </View>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Start dictation"
+            onPress={onStart}
+            style={({ pressed }) => [
+              styles.introStart,
+              {
+                backgroundColor: colors.textPrimary,
+                opacity: pressed ? 0.75 : 1,
+              },
+            ]}
+          >
+            <Text style={[styles.introStartLabel, { color: colors.bg }]}>
+              Let's Start
+            </Text>
+          </Pressable>
+        </LinearGradient>
       </View>
     </Modal>
   );
@@ -291,7 +382,9 @@ export function ComposerDictationReview({
  * one Finish (then Insert) action at the bottom. Nothing is sent from here.
  */
 function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
-  const { colors } = useTheme();
+  const { colors, mode } = useTheme();
+  const language = useDictationLanguage(true);
+  const [languageChanged, setLanguageChanged] = useState(false);
   const insets = useSafeAreaInsets();
   const scroller = useRef<ScrollView>(null);
   const { phase } = dictation;
@@ -329,13 +422,20 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
       <View
         style={[
           styles.panel,
-          {
-            backgroundColor: colors.bg,
-            paddingTop: insets.top + 4,
-            paddingBottom: Math.max(insets.bottom, 16),
-          },
+          { backgroundColor: colors.bg, paddingTop: insets.top + 4 },
         ]}
       >
+        {/* The page warms toward the panel, as in the mockup. */}
+        <LinearGradient
+          pointerEvents="none"
+          colors={
+            mode === "dark"
+              ? [colors.bg, colors.bg, "#2A1D2B"]
+              : [colors.bg, colors.bg, "#F3DAEE"]
+          }
+          locations={[0, 0.45, 1]}
+          style={StyleSheet.absoluteFill}
+        />
         <View style={styles.panelHeader}>
           <Pressable
             accessibilityRole="button"
@@ -422,35 +522,62 @@ function DictationPanel({ dictation }: { dictation: ComposerDictationState }) {
             {dictation.error}
           </Label>
         ) : null}
-        <View style={[styles.meter, { backgroundColor: colors.groupedFill }]}>
-          {capturing && (
-            <DictationWaveform subscribe={dictation.subscribeLevel} />
-          )}
-        </View>
-        <View style={styles.controls}>
+        {/* The mockup's white control panel: waveform, Finish, language. */}
+        <View
+          style={[
+            styles.dock,
+            {
+              backgroundColor: colors.card,
+              paddingBottom: Math.max(insets.bottom, 16),
+            },
+          ]}
+        >
+          <View style={styles.meter}>
+            {capturing && (
+              <DictationWaveform subscribe={dictation.subscribeLevel} />
+            )}
+          </View>
+          <View style={styles.controls}>
+            {phase === "review" ? (
+              <PillButton
+                label="Insert"
+                accessibilityLabel="Insert text"
+                icon={<Check size={16} color={colors.bg} strokeWidth={2.5} />}
+                onPress={dictation.insert}
+              />
+            ) : (
+              <PillButton
+                label="Finish"
+                accessibilityLabel="Finish dictation"
+                icon={
+                  <View style={[styles.finishRing, { borderColor: colors.bg }]}>
+                    <Square size={8} color={colors.bg} fill={colors.bg} />
+                  </View>
+                }
+                busy={phase === "stopping"}
+                disabled={phase !== "listening"}
+                onPress={dictation.stop}
+              />
+            )}
+          </View>
           {phase === "review" ? (
-            <PillButton
-              label="Insert"
-              accessibilityLabel="Insert text"
-              icon={<Check size={16} color={colors.bg} strokeWidth={2.5} />}
-              onPress={dictation.insert}
-            />
+            <Text style={[styles.footnote, { color: colors.textTertiary }]}>
+              Edit after inserting · Nothing is sent until you tap Send
+            </Text>
           ) : (
-            <PillButton
-              label="Finish"
-              accessibilityLabel="Finish dictation"
-              icon={<Square size={10} color={colors.bg} fill={colors.bg} />}
-              busy={phase === "stopping"}
-              disabled={phase !== "listening"}
-              onPress={dictation.stop}
+            <LanguageLine
+              center
+              language={{
+                ...language,
+                choose: (value) => {
+                  language.choose(value);
+                  setLanguageChanged(true);
+                },
+              }}
+              note={languageChanged ? "applies to your next recording" : undefined}
             />
           )}
         </View>
-        <Text style={[styles.footnote, { color: colors.textTertiary }]}>
-          {phase === "review"
-            ? "Edit after inserting · Nothing is sent until you tap Send"
-            : "Language: your iPhone's language"}
-        </Text>
       </View>
     </Modal>
   );
@@ -590,13 +717,24 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
   introBackdrop: { flex: 1 },
-  intro: {
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    paddingHorizontal: 24,
-    paddingTop: 16,
-    gap: 20,
+  // A floating card inset from the screen edges, as in the mockup.
+  introFloat: {
+    marginHorizontal: 12,
+    borderRadius: 34,
+    shadowColor: "#1A1530",
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
   },
+  intro: {
+    borderRadius: 34,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 20,
+    gap: 20,
+    overflow: "hidden",
+  },
+  introRowText: { flex: 1, gap: 3 },
   introClose: {
     alignSelf: "flex-end",
     width: 32,
@@ -640,12 +778,29 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     minHeight: 52,
   },
-  meter: {
-    height: 64,
-    borderRadius: 20,
-    paddingHorizontal: 14,
+  meter: { height: 56, justifyContent: "center" },
+  dock: {
+    marginHorizontal: -20,
+    borderTopLeftRadius: 32,
+    borderTopRightRadius: 32,
+    paddingTop: 18,
+    paddingHorizontal: 20,
+    gap: 10,
+    shadowColor: "#2A2540",
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: -4 },
+  },
+  finishRing: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    alignItems: "center",
     justifyContent: "center",
   },
+  languageLine: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
+  center: { textAlign: "center" },
   wave: {
     flex: 1,
     flexDirection: "row",
