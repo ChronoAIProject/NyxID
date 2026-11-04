@@ -16,7 +16,9 @@ a replay starts at the questions. It then has three parts:
 2. **Three intro screens.**
    - **Chief of staff, specialists and "You stay in control"** play recorded
      replays of the real assistant. The replays are captured in dev mock mode, so they contain
-     fixture data only. Web uses MP4 files in `frontend/public/onboarding/`;
+     fixture data only. Web uses VP9 WebM with an H.264 MP4 fallback and a poster
+     frame, imported from `frontend/src/assets/onboarding/` so the files are
+     content-hashed;
      mobile uses GIFs in `mobile/assets/onboarding/`. To regenerate them after
      a UI change, run `frontend/scripts/record-onboarding-clips.mjs`. It turns
      on two dev-only fixture switches: `partialText` (no placeholder stream)

@@ -1,4 +1,13 @@
 import { useState } from "react";
+import controlMp4 from "@/assets/onboarding/control.mp4";
+import controlWebm from "@/assets/onboarding/control.webm";
+import controlPoster from "@/assets/onboarding/control.webp";
+import chiefMp4 from "@/assets/onboarding/chief-of-staff.mp4";
+import chiefWebm from "@/assets/onboarding/chief-of-staff.webm";
+import chiefPoster from "@/assets/onboarding/chief-of-staff.webp";
+import specialistsMp4 from "@/assets/onboarding/specialists.mp4";
+import specialistsWebm from "@/assets/onboarding/specialists.webm";
+import specialistsPoster from "@/assets/onboarding/specialists.webp";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { ACCESS_MODE_DESCRIPTION, ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
 import { cn } from "@/lib/utils";
@@ -23,37 +32,52 @@ function WindowBar({ title }: { readonly title: string }) {
   );
 }
 
+const CLIPS = {
+  "chief-of-staff": { webm: chiefWebm, mp4: chiefMp4, poster: chiefPoster },
+  specialists: { webm: specialistsWebm, mp4: specialistsMp4, poster: specialistsPoster },
+  control: { webm: controlWebm, mp4: controlMp4, poster: controlPoster },
+} as const;
+
 /**
  * A recorded replay of the real assistant (dev mock mode, fixture data;
  * regenerate with `scripts/record-onboarding-clips.mjs`). Loops silently like
- * a GIF; with reduced motion it waits for the play control instead.
+ * a GIF: VP9 first, H.264 as the fallback, and a still frame while loading.
+ * With reduced motion it waits for the play control instead.
  */
 export function ReplayClip({
   clip,
   title,
   label,
 }: {
-  readonly clip: "chief-of-staff" | "specialists" | "control";
+  readonly clip: keyof typeof CLIPS;
   readonly title: string;
   /** What the replay shows, for assistive tech. */
   readonly label: string;
 }) {
   const reduced = useMediaQuery("(prefers-reduced-motion: reduce)");
+  const files = CLIPS[clip];
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-background shadow-sm">
       <WindowBar title={title} />
       <video
         key={clip}
-        src={`/onboarding/${clip}.mp4`}
         aria-label={label}
-        className="block aspect-[1280/864] w-full bg-background"
+        poster={files.poster}
+        className="block aspect-[1280/864] w-full bg-background object-cover"
         autoPlay={!reduced}
         controls={reduced}
         loop
         muted
         playsInline
         preload="auto"
-      />
+        // Some browsers ignore autoplay on a freshly inserted element.
+        onCanPlay={(event) => {
+          if (!reduced && event.currentTarget.paused) void event.currentTarget.play().catch(() => undefined);
+        }}
+      >
+        <source src={files.webm} type="video/webm" />
+        <source src={files.mp4} type="video/mp4" />
+      </video>
     </div>
   );
 }

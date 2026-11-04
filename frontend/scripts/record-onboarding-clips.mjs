@@ -6,8 +6,9 @@
 //   npm run dev -- --port 3101 --strictPort    # in another terminal
 //   node scripts/record-onboarding-clips.mjs [http://localhost:3101]
 //
-// Writes public/onboarding/<clip>.mp4 (web) and
-// ../mobile/assets/onboarding/<clip>.gif (mobile). Needs ffmpeg on PATH.
+// Writes src/assets/onboarding/<clip>.{webm,mp4,webp} (web: VP9, H.264 and a
+// poster frame) and ../mobile/assets/onboarding/<clip>.gif (mobile). Needs
+// ffmpeg (with libvpx) on PATH.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -17,7 +18,7 @@ import { chromium } from "playwright";
 
 const base = process.argv[2] ?? "http://localhost:3101";
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const webOut = path.join(root, "public", "onboarding");
+const webOut = path.join(root, "src", "assets", "onboarding");
 const mobileOut = path.join(root, "..", "mobile", "assets", "onboarding");
 const VIEWPORT = { width: 1000, height: 560 };
 const SCALE = 2;
@@ -123,6 +124,15 @@ for (const [name, run] of Object.entries(CLIPS)) {
     "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", concat,
     "-vf", "fps=30,scale=1280:-2:flags=lanczos", "-c:v", "libx264", "-preset", "slow",
     "-crf", "24", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", mp4,
+  ]);
+  execFileSync("ffmpeg", [
+    "-y", "-loglevel", "error", "-i", mp4, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0",
+    "-row-mt", "1", "-pix_fmt", "yuv420p", "-an", path.join(webOut, `${name}.webm`),
+  ]);
+  // A frame from the settled conversation, shown while the clip loads.
+  execFileSync("ffmpeg", [
+    "-y", "-loglevel", "error", "-sseof", "-1", "-i", mp4, "-frames:v", "1",
+    "-vf", "scale=960:-2:flags=lanczos", "-quality", "82", path.join(webOut, `${name}.webp`),
   ]);
   execFileSync("ffmpeg", [
     "-y", "-loglevel", "error", "-i", mp4, "-vf",
