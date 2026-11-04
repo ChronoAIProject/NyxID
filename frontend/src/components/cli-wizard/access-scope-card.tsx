@@ -17,7 +17,7 @@ import { PlatformServiceScope } from "@/components/shared/platform-service-scope
  */
 
 import { Checkbox } from "@/components/ui/checkbox"
-import { Label } from "@/components/ui/label"
+import { Label, FieldHelp } from "@/components/ui/label"
 import { ServiceIcon } from "@/components/service-icon"
 import { useKeys } from "@/hooks/use-keys"
 import { useNodes } from "@/hooks/use-nodes"
@@ -220,9 +220,9 @@ function AccessGroup({
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (
-                      <span className="ml-1.5 text-13 text-muted-foreground">
+                      <FieldHelp className="ml-1.5 text-muted-foreground">
                         ({item.secondary})
-                      </span>
+                      </FieldHelp>
                     ) : null}
                   </span>
                 </Label>

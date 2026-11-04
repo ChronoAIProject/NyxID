@@ -22,4 +22,10 @@ const Label = React.forwardRef<
 ));
 Label.displayName = LabelPrimitive.Root.displayName;
 
-export { Label };
+/** Explanatory text is separate from the field caption, even in a wrapping label. */
+function FieldHelp({ as: Component = "span", variant = "secondary", className, ...props }: React.ComponentPropsWithoutRef<"span"> & { as?: "span" | "p"; variant?: "secondary" | "body" | "emphasis" }) {
+  const role = { secondary: TEXT_STYLES.secondary, body: TEXT_STYLES.body, emphasis: TEXT_STYLES.secondaryEmphasis }[variant];
+  return <Component data-field-help="" className={cn(role, "text-muted-foreground", className)} {...props} />;
+}
+
+export { Label, FieldHelp };

@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { scheduleFormSchema } from "@/schemas/billing-credits";
 import { ServiceLimitsEditor } from "./service-limits-editor";
@@ -422,10 +422,10 @@ function ExpiryOption({
         onChange={onChange}
       />
       <span>
-        <span className="block type-row-title">{label}</span>
-        <span className="block text-13 text-muted-foreground">
+        <span className="block">{label}</span>
+        <FieldHelp className="block text-muted-foreground">
           {description}
-        </span>
+        </FieldHelp>
       </span>
     </Label>
   );

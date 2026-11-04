@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { describeChanges, changeList, recordChanges } from "@/lib/grouped-form-changes";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
@@ -382,9 +382,9 @@ export function MachineCapabilityForm({
               <Label>
                 <span className="min-w-0 flex-1">
                   {labels[key]}
-                  <span className="block type-secondary text-text-tertiary">
+                  <FieldHelp className="block text-text-tertiary">
                     {descriptions[key]}{!machine.ceiling[key] ? " · Off on node" : ""}
-                  </span>
+                  </FieldHelp>
                 </span>
                 <Checkbox
                   aria-label={labels[key]}

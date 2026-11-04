@@ -1,4 +1,5 @@
 import { Label } from "@/components/ui/label";
+import { NativeSelect } from "@/components/ui/native-select";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
@@ -594,16 +595,16 @@ export function VoicePanel({
               onOpenAutoFocus={(e) => e.preventDefault()}
             >
               <p className="font-medium">Voice settings</p>
-              <Label className="block">
+              <Label className="block min-w-0">
                 Voice source
-                <select
+                <NativeSelect
                   aria-label="Voice source"
                   value={selectionKey}
                   disabled={
                     settingsDisabled || options.isPending || options.isError
                   }
                   onChange={(e) => setSelected(e.target.value)}
-                  className="mt-1 h-9 w-full rounded-lg border border-input bg-background px-2"
+                  className="mt-1"
                 >
                   {!option && (
                     <option value="">Choose an available source</option>
@@ -619,29 +620,29 @@ export function VoicePanel({
                       {!o.available ? " · unavailable" : ""}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Label>
-              <Label className="block">
+              <Label className="block min-w-0">
                 Voice
-                <select
+                <NativeSelect
                   aria-label="Voice"
                   value={voiceName ?? ""}
                   disabled={settingsDisabled}
                   onChange={(e) =>
                     preferencesForm.setValue("voice", e.target.value)
                   }
-                  className="mt-1 h-9 w-full rounded-lg border border-input bg-background px-2"
+                  className="mt-1"
                 >
                   {option?.voice.voices.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.label}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </Label>
-              <Label className="block">
+              <Label className="block min-w-0">
                 Microphone
-                <select
+                <NativeSelect
                   aria-label="Microphone mode"
                   value={inputMode}
                   disabled={settingsDisabled}
@@ -651,13 +652,13 @@ export function VoicePanel({
                       e.target.value as typeof inputMode,
                     )
                   }
-                  className="mt-1 h-9 w-full rounded-lg border border-input bg-background px-2"
+                  className="mt-1"
                 >
                   <option value="automatic" disabled={isGrok}>
                     Automatic
                   </option>
                   <option value="push_to_talk">Hold to talk</option>
-                </select>
+                </NativeSelect>
               </Label>
               <Label className="flex items-center gap-2">
                 <input
@@ -922,16 +923,16 @@ export function VoicePanel({
       )}
       {!active && (
         <div className="mt-4 flex flex-wrap gap-3">
-          <Label>
+          <Label className="block min-w-0 flex-1 basis-48">
             Voice source
-            <select
+            <NativeSelect
               aria-label="Voice source"
               value={selectionKey}
               disabled={
                 settingsDisabled || options.isPending || options.isError
               }
               onChange={(e) => setSelected(e.target.value)}
-              className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
+              className="mt-1"
             >
               {!option && (
                 <option value="" disabled>
@@ -949,29 +950,29 @@ export function VoicePanel({
                   {!o.available ? " (not available yet)" : ""}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </Label>
-          <Label>
+          <Label className="block min-w-0 flex-1 basis-48">
             Voice
-            <select
+            <NativeSelect
               aria-label="Voice"
               value={voiceName ?? ""}
               disabled={settingsDisabled}
               onChange={(e) =>
                 preferencesForm.setValue("voice", e.target.value)
               }
-              className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
+              className="mt-1"
             >
               {option?.voice.voices.map((v) => (
                 <option key={v.id} value={v.id}>
                   {v.label}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </Label>
-          <Label>
+          <Label className="block min-w-0 flex-1 basis-48">
             Microphone
-            <select
+            <NativeSelect
               aria-label="Microphone mode"
               value={inputMode}
               disabled={settingsDisabled}
@@ -981,13 +982,13 @@ export function VoicePanel({
                   e.target.value as typeof inputMode,
                 )
               }
-              className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
+              className="mt-1"
             >
               <option value="push_to_talk">Hold to talk</option>
               <option value="automatic" disabled={isGrok}>
                 Automatic{isGrok ? " (not available in Grok beta)" : ""}
               </option>
-            </select>
+            </NativeSelect>
           </Label>
         </div>
       )}

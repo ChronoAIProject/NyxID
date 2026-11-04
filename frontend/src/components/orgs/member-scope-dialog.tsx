@@ -11,7 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/lib/api-client";
 import { useKeys } from "@/hooks/use-keys";
@@ -161,14 +161,14 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block type-row-title text-foreground">
+              <span className="block text-foreground">
                 Inherit from role default
               </span>
-              <span className="block text-13 text-muted-foreground">
+              <FieldHelp className="block text-muted-foreground">
                 {previewLoading
                   ? "Loading current role permissions..."
                   : `This member can access: ${inheritedSummary}`}
-              </span>
+              </FieldHelp>
             </span>
           </Label>
 
@@ -182,18 +182,18 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block type-row-title text-foreground">
+              <span className="block text-foreground">
                 Customize for this member
               </span>
-              <span className="block text-13 text-muted-foreground">
+              <FieldHelp className="block text-muted-foreground">
                 Custom scopes override role defaults until reset.
-              </span>
+              </FieldHelp>
               {scopeMode === "override" && member.scope_source === "inherit" && (
-                <span className="block type-secondary-emphasis text-amber-600 dark:text-amber-400">
+                <FieldHelp variant="emphasis" className="block text-amber-600 dark:text-amber-400">
                   Snapshot warning: saving will freeze this member at the
                   current role scope ({inheritedSummary}). Future changes to
                   the role default won't apply until you reset to inherit.
-                </span>
+                </FieldHelp>
               )}
             </span>
           </Label>
@@ -264,9 +264,9 @@ function MemberScopeForm({
                         <span className="block text-foreground">
                           {service.label}
                         </span>
-                        <span className="block text-13 text-muted-foreground">
+                        <FieldHelp className="block text-muted-foreground">
                           {service.slug}
-                        </span>
+                        </FieldHelp>
                       </Label>
                     </div>
                   );

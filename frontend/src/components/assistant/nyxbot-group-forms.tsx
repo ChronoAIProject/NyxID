@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { describeChanges, changeList } from "@/lib/grouped-form-changes";
 import { flushSync } from "react-dom";
 import { useCollaborationAvailable } from "@/hooks/use-collaboration-groups";
@@ -199,9 +199,9 @@ function AgentPicker({
                     <AgentAvatar agent={row} size="sm" />
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-foreground">{row.name}</span>
-                      <span className="block truncate text-13 text-text-tertiary">
+                      <FieldHelp className="block truncate text-text-tertiary">
                         {row.description}
-                      </span>
+                      </FieldHelp>
                     </span>
                   </Label>
                 </GroupedRow>

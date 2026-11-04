@@ -184,6 +184,7 @@ function NavItem({
       onClick={onClick}
       title={collapsed ? item.label : undefined}
       data-nav-collapsed={collapsed}
+      aria-current={active ? "page" : undefined}
       className={cn(
         "shell-nav-item group/nav flex items-center rounded-lg py-2 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",

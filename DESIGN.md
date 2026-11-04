@@ -126,6 +126,11 @@ or captions whose controls already have an accessible name. Keep native `htmlFor
 or wrapping-label associations for editable fields. Never put size, weight or
 line-height classes on these consumers. Inline grouped controls and stacked
 editor captions use the same field-label role; help text uses the secondary role.
+Use `FieldHelp` for explanatory descendants inside wrapping labels; it owns the
+secondary role (or the explicit body/emphasis helper variant). The caption itself
+inherits the label role. Shared `NativeSelect` owns the input role, bounded width
+and native picker semantics; it never inherits a wrapping label's weight. Its
+appearance reset retains the shared line box, with a decorative chevron.
 
 Line heights are unitless role values: body, secondary, caption, label, controls
 and card/dialog titles use `--line-body` (1.5); page titles use `--line-page-title`
@@ -153,8 +158,22 @@ emphasis or compact-data role. Their visual hierarchy follows the avatar size.
 The source guard rejects new size/weight pairs, local line-height assignments,
 native label wrappers and typography overrides on shared labels, including
 local class constants, template fragments and important (`!`) utilities. Sonner uses important shared toast roles so vendor
-styles cannot replace their weights or line boxes. Test fixtures
+styles cannot replace their weights or line boxes. Imported label aliases, inline
+style assignments and nested caption overrides are checked too. Complete roles
+cannot be combined with partial size assignments in JSX or CSS. Selected shell
+navigation declares its shared active role through `aria-current="page"`.
+Test fixtures
 and never-themed protocol/landing/blog pages are the documented source exclusions.
+
+Workspace sidebar glyphs animate only on row activation (click/tap or Enter/Space),
+never hover, pointer entry or focus. Each activation restarts one cycle from rest:
+Home's chimney rises, three smoke puffs finish, and the chimney sinks; the other
+icons complete their sequence once. All finish on lucide's rest frame. A brief
+in-memory timeline resumes the same cycle across SPA/sidebar remounts, including
+reopening the mobile drawer; navigation and drawer dismissal remain immediate.
+System and Settings → Display reduced motion both keep the icons at rest.
+Unavailable Workspace rows use the same `shell-nav-item` button treatment and
+insets, with muted color and `aria-disabled`; focus reveals “Coming soon”.
 
 Themed application source uses numeric roles, with `text-12` as the smallest role.
 Do not use Tailwind size aliases, arbitrary font sizes, fixed CSS `font-size` or
@@ -379,7 +398,7 @@ actions are destructive-colored rows in their own neutral group.
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
 multi-select lists. Selection lists use checkmark or switch rows, search when there are more than
 eight items, and scroll internally only for long lists. `GroupedFormScope viewport` gives
-the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`. Use a single compact row with `py-2`, right-aligned Discard and Save changes; announce unsaved section names through sr-only live text in the “Unsaved changes” region, with no visible unsaved label. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
+the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`. Use a compact row with `py-2`, right-aligned Discard and Save changes; wrap actions to another row when needed and allow long button labels to wrap within their insets. Announce unsaved section names through sr-only live text in the “Unsaved changes” region, with no visible unsaved label. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
 form keeps its draft and local error; successful forms stay saved. Discard resets
 all dirty forms in that scope. Save uses `variant="primary"`; Discard uses ghost

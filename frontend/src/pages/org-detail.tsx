@@ -44,7 +44,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -976,9 +976,9 @@ function RolePermissionCard({
                       <span className="block text-foreground">
                         {service.label}
                       </span>
-                      <span className="block text-13 text-muted-foreground">
+                      <FieldHelp className="block text-muted-foreground">
                         {service.slug}
-                      </span>
+                      </FieldHelp>
                     </Label>
                   </div>
                 );
@@ -1185,13 +1185,13 @@ function SettingsPanel({
                         }
                       />
                       <span className="space-y-1">
-                        <span className="block type-card-title text-foreground">
+                        <span className="block text-foreground">
                           Opt out of credential accept fingerprint verification
                         </span>
-                        <span className="block text-13 text-muted-foreground">
+                        <FieldHelp className="block text-muted-foreground">
                           This only skips the admin UX gate for this org. It
                           does not change the encrypted credential flow.
-                        </span>
+                        </FieldHelp>
                       </span>
                     </Label>
                     <FormMessage />

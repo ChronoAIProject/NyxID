@@ -13,7 +13,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   AlertTriangle,
@@ -836,19 +836,19 @@ function StandardConsentPage({
                                     {serviceDisplayName(service)}
                                   </span>
                                   {service.catalog_service_description?.trim() && (
-                                    <span
-                                      className="mt-1 line-clamp-2 break-words type-body text-muted-foreground"
+                                    <FieldHelp variant="body"
+                                      className="mt-1 line-clamp-2 break-words text-muted-foreground"
                                       title={
                                         service.catalog_service_description
                                       }
                                     >
                                       {service.catalog_service_description}
-                                    </span>
+                                    </FieldHelp>
                                   )}
                                   {serviceSecondaryText(service) && (
-                                    <span className="mt-1 block break-words type-secondary text-text-tertiary">
+                                    <FieldHelp className="mt-1 block break-words text-text-tertiary">
                                       {serviceSecondaryText(service)}
-                                    </span>
+                                    </FieldHelp>
                                   )}
                                 </Label>
                                 {orgName && (

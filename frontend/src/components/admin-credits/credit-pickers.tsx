@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
@@ -112,12 +112,12 @@ export function UserPicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate type-row-title">
+                <span className="block truncate">
                   {user.display_name || user.slug || user.email}
                 </span>
-                <span className="block truncate text-13 text-muted-foreground">
+                <FieldHelp className="block truncate text-muted-foreground">
                   {user.slug ? `Organization / ${user.slug}` : user.email}
-                </span>
+                </FieldHelp>
               </span>
             </Label>
           );
@@ -231,12 +231,12 @@ export function ServicePicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate type-row-title">
+                <span className="block truncate">
                   {service.name}
                 </span>
-                <span className="block truncate text-13 text-muted-foreground">
+                <FieldHelp className="block truncate text-muted-foreground">
                   {service.slug}
-                </span>
+                </FieldHelp>
               </span>
               <Badge variant="secondary" className="shrink-0">
                 {metric}
@@ -406,12 +406,12 @@ function MemberPicker({
               }
             />
             <span className="min-w-0 flex-1">
-              <span className="block truncate type-row-title">
+              <span className="block truncate">
                 {item.name}
               </span>
-              <span className="block truncate text-13 text-muted-foreground">
+              <FieldHelp className="block truncate text-muted-foreground">
                 {item.detail}
-              </span>
+              </FieldHelp>
             </span>
           </Label>
         ))}

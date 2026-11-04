@@ -386,6 +386,7 @@ function MobileNavItem({
     <Link
       to={item.to}
       onClick={onClick}
+      aria-current={active ? "page" : undefined}
       className={`flex items-center gap-3 rounded-xl px-4 py-3 shell-nav-item transition-colors ${
         active
           ? "bg-overlay-strong font-medium text-foreground"

@@ -46,6 +46,26 @@ describe("typography policy", () => {
   });
   it.each([
     '<label htmlFor="name">Name</label>',
+    '<Label style={{fontWeight:400}}>Name</Label>',
+    '<Label style={{fontSize:"var(--text-13)"}}>Name</Label>',
+    'const OVERRIDE={fontWeight:400}; <Label style={OVERRIDE}>Name</Label>',
+    '<Label {...{style:{fontWeight:400}}}>Name</Label>',
+    'const fontWeight=400; <Label style={{fontWeight}}>Name</Label>',
+    '<Label className="font-light">Name</Label>',
+    '<Label className="font-[450]">Name</Label>',
+    '<Label className="text-[length:var(--text-13)]">Name</Label>',
+    '<span className="type-body font-light">Body</span>',
+    '<span className="type-body font-[450]">Body</span>',
+    '<span className="type-body text-[length:var(--text-13)]">Body</span>',
+    '<Label><span className="type-secondary">Name</span><Input /></Label>',
+    '<Label asChild><span style={{fontWeight:400}}>Name</span></Label>',
+    'import {Label as Caption} from "@/components/ui/label"; <Caption className="type-secondary">Name</Caption>',
+    'import {Label as Caption} from "@/components/ui/label"; <Caption style={{fontSize:"var(--text-13)"}}>Name</Caption>',
+    'import * as Labels from "@/components/ui/label"; <Labels.Label className="text-13">Name</Labels.Label>',
+    '<span className="type-body text-13">Body</span>',
+    '<span className={cn(TEXT_STYLES.body, "text-13")}>Body</span>',
+    '<span className="type-body" style={{fontSize:"var(--text-13)"}}>Body</span>',
+    '<span className="type-body" style={{fontWeight:500}}>Body</span>',
     '<Label className="text-13">Name</Label>',
     'const LABEL = "type-secondary-emphasis"; <FormLabel className={LABEL}>Name</FormLabel>',
     'const SIZE = "text-13"; <span className={cn(SIZE, "font-medium")}>Caption</span>',
@@ -70,6 +90,9 @@ describe("typography policy", () => {
   it("allows role consumers and documented prose / unthemed exceptions", () => {
     expect(typographyViolations("components/custom-form.tsx", '<Label className="flex-1 text-foreground">Name</Label><p className="type-prose" />')).toEqual([]);
     expect(typographyViolations("components/ui/input.tsx", '"type-input unthemed:text-xs unthemed:leading-none"')).toEqual([]);
+    expect(typographyViolations("components/custom-form.tsx", '<Label>Name<FieldHelp>Shared explanatory text</FieldHelp><NativeSelect /></Label>')).toEqual([]);
+    expect(typographyViolations("components/custom-form.tsx", '<span className={title ? "type-card-title" : "text-14"} />')).toEqual([]);
+    expect(typographyViolations("components/custom-form.tsx", '<span className="type-body text-[#fff] [&_code]:text-14" />')).toEqual([]);
     expect(typographyViolations("components/label.css", '.label {line-height:1.2}')).not.toEqual([]);
     expect(typographyViolations("components/label.css", '.label {@apply type-field-label;line-height:var(--line-body)}')).toEqual([]);
   });
@@ -88,6 +111,9 @@ describe("typography policy", () => {
     expect(typographyViolations("components/example.tsx", source)).not.toEqual([]);
   });
   it("checks CSS consumers, font shorthands, and contextual overrides", () => {
+    expect(typographyViolations("components/probe.css", '.caption {@apply type-field-label;font-size:var(--text-13)}')).not.toEqual([]);
+    expect(typographyViolations("components/probe.css", '.caption {@apply type-body text-13}')).not.toEqual([]);
+    expect(typographyViolations("components/probe.css", '.caption {@apply type-body;@apply text-13}')).not.toEqual([]);
     expect(typographyViolations("other.css", ":root { --text-12: 1rem; }")).toHaveLength(2);
     expect(typographyViolations("other.css", ".label {font: 500 11px sans-serif; font-size: 0.75rem;}")).toHaveLength(3);
     expect(typographyViolations("app.css", "html { --text-12: 0.75rem; }")).toHaveLength(1);

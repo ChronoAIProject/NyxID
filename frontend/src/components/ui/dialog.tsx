@@ -138,8 +138,9 @@ const DialogFooter = ({
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
+    data-dialog-footer=""
     className={cn(
-      "mt-auto shrink-0 sticky bottom-0 z-10 -mx-5 bg-surface px-5 pt-4 flex flex-row gap-2 [&>button]:flex-1",
+      "mt-auto shrink-0 sticky bottom-0 z-10 -mx-5 bg-surface px-5 pt-4 flex flex-row flex-wrap gap-2 [&>button]:flex-1 [&>button]:max-w-full [&>button]:whitespace-normal [&>button]:break-words",
       "md:mt-0 md:shrink md:static md:z-auto md:mx-0 md:bg-transparent md:px-0 md:pt-0 md:gap-0 md:flex-row md:justify-end md:space-x-2 md:[&>button]:flex-none",
       className,
     )}

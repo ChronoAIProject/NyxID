@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { PublicationOperations } from "@/components/services/tool-publication";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -336,10 +336,10 @@ function AddToolDialog({
                     ))}
                 </SelectContent>
               </Select>
-              <p className="mt-1 text-13 text-muted-foreground">
+              <FieldHelp as="p" className="mt-1 text-muted-foreground">
                 Copies transport and operations as drafts. Credentials stay with
                 the source.
-              </p>
+              </FieldHelp>
             </Label>
           )}
           {["name", "slug", "supplier"].map((name) => (

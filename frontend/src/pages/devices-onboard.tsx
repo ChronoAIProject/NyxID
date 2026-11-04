@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -390,9 +390,9 @@ export function DevicesOnboardPage() {
                                         <span className="block truncate text-foreground">
                                           {service.label}
                                         </span>
-                                        <span className="block truncate font-mono text-14 text-muted-foreground">
+                                        <FieldHelp variant="body" className="block truncate font-mono text-muted-foreground">
                                           {service.slug}
-                                        </span>
+                                        </FieldHelp>
                                       </Label>
                                     </div>
                                   );

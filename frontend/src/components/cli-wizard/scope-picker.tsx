@@ -107,7 +107,7 @@ function ScopeChip({
         onChange={onToggle}
         value={scope}
       />
-      <span className="text-13">{scope}</span>
+      <span>{scope}</span>
     </Label>
   )
 }

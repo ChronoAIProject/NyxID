@@ -119,14 +119,16 @@ function ComingSoonItem({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div
+        <button
+          type="button"
           aria-disabled="true"
-          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item text-muted-foreground opacity-50"
+          data-keep-drawer-open=""
+          className="shell-nav-item flex w-full cursor-not-allowed items-center text-left text-muted-foreground opacity-50"
         >
           <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate">{label}</span>
           {trailing}
-        </div>
+        </button>
       </TooltipTrigger>
       <TooltipContent side="right">Coming soon</TooltipContent>
     </Tooltip>

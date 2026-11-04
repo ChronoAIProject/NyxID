@@ -226,8 +226,9 @@ export function GroupedSelectTrigger({
 export function GroupedSaveBar({ className, ...props }: ComponentProps<"div">) {
   return (
     <div
+      data-grouped-save-bar=""
       className={cn(
-        "sticky bottom-0 z-10 flex shrink-0 items-center justify-end gap-2 border-t border-border/50 bg-background px-4 py-2",
+        "sticky bottom-0 z-10 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border/50 bg-background px-4 py-2 [&>button]:max-w-full [&>button]:shrink-0 [&>button]:whitespace-normal [&>button]:break-words",
         className,
       )}
       {...props}

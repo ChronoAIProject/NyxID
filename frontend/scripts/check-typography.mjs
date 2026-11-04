@@ -26,7 +26,10 @@ export function typographyViolations(file, source) {
       const themed = text.split(/\s+/).filter(token => !token.startsWith('unthemed:'))
         .map(token => token.replace(/(^|:)!/g, '$1').replace(/!$/, '')).join(' ');
       if (/(?:^|\s)(?:\S*:)?leading-/.test(themed)) fail(offset, 'line-height belongs to a shared typography role');
-      if (/(?:^|\s)(?:\S*:)?(?:text-\d+|type-[\w-]+)\b/.test(themed) && /(?:^|\s)(?:\S*:)?font-(normal|medium|semibold|bold)\b/.test(themed)) {
+      if (/(?:^|\s)(?:\S*:)?type-[\w-]+\b/.test(themed) && /(?:^|\s)(?:(?!\[)[\w-]+:)*text-(?:\d+\b|\[[.\d]+(?:px|rem|em)\]|\[(?:length:|[^\]]*--text-)[^\]]*\])/.test(themed)) {
+        fail(offset, 'complete typography roles cannot be combined with partial size assignments');
+      }
+      if (/(?:^|\s)(?:\S*:)?(?:text-\d+|type-[\w-]+)\b/.test(themed) && /(?:^|\s)(?:\S*:)?font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[[^\]]+\])(?:\s|$)/.test(themed)) {
         fail(offset, 'size, weight and line-height must come from one shared typography role');
       }
     }
@@ -40,6 +43,15 @@ export function typographyViolations(file, source) {
   };
   if (file.endsWith('.css')) {
     const css = postcss.parse(source);
+    if (!excluded(file) && file !== 'typography.css') css.walkRules(rule => {
+      const applies = rule.nodes.filter(node => node.type === 'atrule' && node.name === 'apply');
+      if (applies.length > 1) classes(applies.map(node => node.params).join(' '), rule.source.start.offset);
+      if (rule.nodes.some(node => node.type === 'atrule' && node.name === 'apply' && /\btype-[\w-]+/.test(node.params))) {
+        for (const node of rule.nodes) if (node.type === 'decl' && /^(font|font-size)$/.test(node.prop)) {
+          fail(node.source.start.offset, 'complete typography roles cannot be overridden by font declarations');
+        }
+      }
+    });
     css.walkRules(rule => {
       if (!/\.nb-(primary|secondary|provider)\b|\.nb-device-login\s*>\s*button/.test(rule.selector)) return;
       const declarations = Object.fromEntries(rule.nodes.filter(node => node.type === 'decl').map(node => [node.prop, node.value]));
@@ -65,14 +77,21 @@ export function typographyViolations(file, source) {
   } else if (!excluded(file)) {
     // Most modules cannot contain a violation. Keep the repository scan cheap
     // enough for the default test timeout, including on a busy CI worker.
-    const needsAst = /<label\b|<legend\b|fontSize|font-display|\bfont\s*:|\blineHeight\s*:|leading-|text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl|\[)/.test(source)
-      || /<(?:Label|FormLabel|GroupedLabel)\b[^>]*className/.test(source)
-      || (/font-(?:normal|medium|semibold|bold)/.test(source) && /text-\d|type-|TEXT_STYLES\./.test(source));
+    const needsAst = /<label\b|<legend\b|fontSize|fontWeight|font-display|\bfont\s*:|\blineHeight\s*:|leading-|type-|TEXT_STYLES|(?:Label|ui\/label)|text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl|\[)/.test(source)
+      || (/font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[)/.test(source) && /text-\d|type-|TEXT_STYLES\./.test(source));
     if (!needsAst) return errors;
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, file.endsWith('tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
     const constants = new Map();
+    const labelNames = new Set(['Label', 'FormLabel', 'GroupedLabel']);
     function findConstants(node) {
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) constants.set(node.name.text, node.initializer);
+      if (ts.isImportDeclaration(node) && /(?:^|\/)(?:label|form|grouped-fields)$/.test(node.moduleSpecifier.text)) {
+        const bindings = node.importClause?.namedBindings;
+        if (bindings && ts.isNamedImports(bindings)) for (const item of bindings.elements) {
+          if (labelNames.has((item.propertyName ?? item.name).text)) labelNames.add(item.name.text);
+        }
+        if (bindings && ts.isNamespaceImport(bindings)) for (const name of ['Label', 'FormLabel', 'GroupedLabel']) labelNames.add(`${bindings.name.text}.${name}`);
+      }
       ts.forEachChild(node, findConstants);
     }
     findConstants(ast);
@@ -86,15 +105,56 @@ export function typographyViolations(file, source) {
       ts.forEachChild(node, child => { fragments.push(...classFragments(child, seen)); });
       return fragments;
     }
+    const combine = lists => lists.reduce((left, right) => left.flatMap(a => right.map(b => `${a} ${b}`)), ['']);
+    function classVariants(node, seen = new Set()) {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+      if (ts.isIdentifier(node) && constants.has(node.text) && !seen.has(node.text)) return classVariants(constants.get(node.text), new Set([...seen, node.text]));
+      if (ts.isConditionalExpression(node)) return [...classVariants(node.whenTrue, seen), ...classVariants(node.whenFalse, seen)];
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) return ['', ...classVariants(node.right, seen)];
+      if (ts.isPropertyAccessExpression(node) && node.expression.getText(ast) === 'TEXT_STYLES') return ['type-shared-role'];
+      if (ts.isCallExpression(node)) return combine(node.arguments.map(arg => classVariants(arg, seen)));
+      if (ts.isTemplateExpression(node)) return combine([[node.head.text], ...node.templateSpans.flatMap(span => [classVariants(span.expression, seen), [span.literal.text]])]);
+      if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression) && constants.has(node.expression.text)) {
+        const object = constants.get(node.expression.text);
+        if (ts.isObjectLiteralExpression(object)) return object.properties.flatMap(property => ts.isPropertyAssignment(property) ? classVariants(property.initializer, seen) : ['']);
+      }
+      return classFragments(node, seen);
+    }
+    const isOpening = node => ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node);
+    const isLabel = node => isOpening(node) && labelNames.has(node.tagName.getText(ast));
+    const typography = /(?:type-[\w-]+|text-(?:\d+|\[(?:length:|[^\]]*--text-))|font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[)|leading-)/;
+    function styleOverrides(node, seen = new Set()) {
+      if (ts.isIdentifier(node) && constants.has(node.text) && !seen.has(node.text)) return styleOverrides(constants.get(node.text), new Set([...seen, node.text]));
+      if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && /^(?:font|fontSize|fontWeight|lineHeight)$/.test(node.name.getText(ast).replace(/["']/g, ''))) return true;
+      let found = false;
+      ts.forEachChild(node, child => { if (styleOverrides(child, seen)) found = true; });
+      return found;
+    }
+    // Controls and explicitly separated help text own their roles; caption
+    // descendants (including asChild) must retain the shared label role.
+    function insideLabelCaption(node) {
+      for (let parent = node.parent; parent; parent = parent.parent) {
+        if (!ts.isJsxElement(parent)) continue;
+        const opening = parent.openingElement;
+        if (isLabel(opening)) return true;
+        if (/^(?:GroupedInput|GroupedTextarea|Input|Textarea|NativeSelect|Select\w*|Button|Badge|FormControl|FormDescription|GroupedDescription|FieldHelp|input|textarea|select|button)$/.test(opening.tagName.getText(ast))) return false;
+      }
+      return false;
+    }
     function visit(node) {
       if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(ast) === 'label') fail(node.getStart(ast), 'form labels must use the shared Label/FormLabel/GroupedLabel implementation');
       if (ts.isJsxOpeningElement(node) && node.tagName.getText(ast) === 'legend' && !(ts.isJsxElement(node.parent.parent) && node.parent.parent.openingElement.tagName.getText(ast) === 'Label')) fail(node.getStart(ast), 'fieldset captions must use Label asChild to retain native legend semantics');
-      if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && /^(Label|FormLabel|GroupedLabel)$/.test(node.tagName.getText(ast))) {
+      if (isOpening(node)) {
         const attribute = node.attributes.properties.find(property => ts.isJsxAttribute(property) && property.name.getText(ast) === 'className');
-        if (attribute && /(?:type-[\w-]+|text-\d+|font-(?:normal|medium|semibold|bold)|leading-)/.test(classFragments(attribute).join(' ').replace(/unthemed:[\w-]+/g, ''))) fail(attribute.getStart(ast), 'field labels own their typography; consumers may only customize layout and color');
+        const style = node.attributes.properties.find(property => ts.isJsxAttribute(property) && property.name.getText(ast) === 'style');
+        const spreadOverride = node.attributes.properties.some(property => ts.isJsxSpreadAttribute(property) && styleOverrides(property.expression));
+        const fragments = attribute ? classFragments(attribute).join(' ').replace(/unthemed:[\w-]+/g, '') : '';
+        const caption = isLabel(node) || (!/^(?:GroupedInput|GroupedTextarea|Input|Textarea|NativeSelect|Select\w*|Button|Badge|FormControl|FormDescription|GroupedDescription|FieldHelp|input|textarea|select|button)$/.test(node.tagName.getText(ast)) && insideLabelCaption(node));
+        if (caption && ((attribute && typography.test(fragments)) || (style && styleOverrides(style)) || spreadOverride)) fail(node.getStart(ast), 'field labels and their captions own their typography; consumers may only customize layout and color');
+        else if (/\btype-[\w-]+/.test(fragments) && ((style && styleOverrides(style)) || spreadOverride)) fail(node.getStart(ast), 'complete typography roles cannot be overridden by inline typography');
       }
       if (ts.isJsxAttribute(node) && node.name.getText(ast) === 'className' && node.initializer && ts.isJsxExpression(node.initializer)) {
-        classes(classFragments(node.initializer).join(' '), node.getStart(ast));
+        for (const variant of classVariants(node.initializer.expression ?? node.initializer)) classes(variant, node.getStart(ast));
       }
       if (ts.isTemplateExpression(node) && node.getText(ast).includes('TEXT_STYLES.')) {
         classes(node.head.text + node.templateSpans.map(span => `${span.expression.getText(ast).startsWith('TEXT_STYLES.') ? ' type-shared-role ' : ' '}${span.literal.text}`).join(''), node.getStart(ast));

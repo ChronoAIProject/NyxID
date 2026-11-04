@@ -24,9 +24,12 @@ async function openDisplay(page: Page) {
 
 async function chooseScale(dialog: Locator, label: string, value: number) {
   const slider = dialog.getByRole("slider", { name: label, exact: true });
-  await slider.press("Home");
-  if (value === 2) await slider.press("End");
-  else for (let step = 0; step < Math.round((value - 0.5) * 100); step++) await slider.press("ArrowRight");
+  // This is a layout matrix, not a test of 150 native key repeats. Dispatch the
+  // native range input event once; display-scale.spec covers real keyboard steps.
+  await slider.evaluate((element, next) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(element, String(next));
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  }, value);
   await expect(slider).toHaveValue(String(value));
 }
 
@@ -119,7 +122,8 @@ for (const width of [320, 1280]) {
       expect(send!.y + send!.height).toBeLessThanOrEqual(900);
       await expectPaddedIcon(page.getByRole("button", { name: "Send message", exact: true }), spacing, true);
 
-      await page.reload();
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await composerInput(page).waitFor({ state: "visible" });
       await expect.poll(() => composerInput(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(13.6 * textScale, 2);
       const reopened = await openDisplay(page);
       await expect(reopened.getByRole("slider", { name: "Text size", exact: true })).toHaveValue(String(textScale));

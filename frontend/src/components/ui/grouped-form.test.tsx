@@ -22,7 +22,7 @@ it("uses a primary submit, ghost Discard and an opaque separated dirty-only bar"
   await userEvent.click(screen.getByRole("button", { name: "Edit profile" }));
   const bar = screen.getByRole("region", { name: "Unsaved changes" });
   expect(bar).toHaveClass("border-t", "border-border/50", "bg-background", "py-2");
-  expect(bar).not.toHaveClass("flex-wrap");
+  expect(bar).toHaveClass("flex-wrap");
   expect(within(bar).getByText("Unsaved: profile")).toHaveClass("sr-only");
   expect(within(bar).getByText("Unsaved: profile")).toHaveAttribute("aria-live", "polite");
   expect(screen.getByRole("button", { name: "Save changes" })).toHaveClass("nyx-gradient-vivid");

@@ -2,6 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { expectReadableToast } from "./contrast";
+import { expectActionTextContained, expectInternalContainment } from "./containment";
 import type { QueryClient } from "@tanstack/react-query";
 
 const properties = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap", "rowGap", "minHeight", "minWidth", "lineHeight", "letterSpacing", "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius", "fontSize", "fontWeight"] as const;
@@ -349,6 +350,10 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
         await page.evaluate(kind => window.treatmentFixture.portal(kind), kind);
         const selector = kind === "toast" ? "[data-sonner-toast]" : `[data-parity="${kind === "select" ? "select-content" : kind}"]`;
         await expect(page.locator(selector).first()).toBeVisible();
+        if (kind === "dialog" || kind === "sheet") {
+          await expectInternalContainment(page.locator(selector));
+          await expectActionTextContained(page.locator(`${selector} [data-dialog-footer], ${selector} [data-grouped-save-bar]`));
+        }
         if (kind === "toast") await expectReadableToast(page);
         sample[kind] = Object.values(await readings(page, kind === "toast" ? "[data-sonner-toast], [data-sonner-toast] :is([data-title],[data-description],[data-button])" : `${selector}, ${selector} [data-parity], ${selector} [data-icon-button], ${selector} [data-select-indicator]`));
         if (process.env.NYX_TREATMENT_SHOTS && density === 1 && (scale === 1 || scale === 2) && ["dialog", "menu", "toast"].includes(kind)) {
@@ -365,6 +370,15 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
       const nav = page.locator(assistant ? '.shell-nav-item[href="/assistant/plugins"]' : '.shell-nav-item[href="/dashboard"]').filter({ visible: true }).first();
       await expect(nav).toBeVisible();
       sample.nav = Object.values(await readings(page, assistant ? '.shell-nav-item[href="/assistant/plugins"]:visible' : '.shell-nav-item[href="/dashboard"]:visible'))[0];
+      await expect(nav).toHaveCSS("font-weight", "400");
+      const selectedNav = page.locator('.shell-nav-item[aria-current="page"]:visible');
+      await expect(selectedNav.first()).toBeVisible();
+      for (const selected of await selectedNav.all()) await expect(selected).toHaveCSS("font-weight", "500");
+      sample.selectedNav = Object.values(await readings(page, assistant ? '.shell-nav-item[href="/assistant/approvals"]:visible' : '.shell-nav-item[href="/approvals/history"]:visible'))[0];
+      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && [1, 2].includes(scale)) {
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${assistant ? "assistant" : "studio"}-selected-nav.png`) });
+      }
       sample.groupLabel = Object.values(await readings(page, '.shell-group-label:visible'))[0];
       if (width === 390) await page.getByRole("button", { name: assistant ? "Close chats" : "Close menu", exact: true }).last().click();
       if (width === 390 && !assistant) await expect(page.getByRole("button", { name: "Close menu", exact: true })).toHaveCount(0);
@@ -454,6 +468,12 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
       } else if (path.includes("panel=")) container = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
       else container = page.locator(".shell-page-content");
       await settleLayout(page);
+      await expectInternalContainment(container);
+      await expectActionTextContained(container.locator('[data-dialog-footer]:visible, [data-grouped-save-bar]:visible'));
+      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && scale === 2 && (path === "/triggers" || path === "/assistant/automations")) {
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${path === "/triggers" ? "studio" : "assistant"}-footer-max-scale.png`) });
+      }
       const initial = await realFormLabels(container, scale);
       const textRoles = await container.locator("h2, p[id], input:not([type=hidden]), button[type=submit]").evaluateAll(elements => elements.filter(element => element.getClientRects().length).map(element => {
         const style = getComputedStyle(element);
@@ -489,6 +509,14 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
         await container.getByRole("combobox", { name: "Inbound verification", exact: true }).click();
         await page.getByRole("option", { name: "HMAC-SHA256", exact: true }).click();
         extra.push(...await realFormLabels(container, scale));
+      } else if (path.includes("panel=")) {
+        const limit = container.getByRole("spinbutton").first();
+        const current = Number(await limit.inputValue());
+        await limit.fill(String(current === 0 ? 1 : 0));
+        const actions = container.locator('[data-grouped-save-bar]');
+        await expect(actions).toBeVisible();
+        await expectActionTextContained(actions);
+        if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && scale === 2) await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-settings-dirty-footer-max-scale.png`) });
       }
       evidence.push({ path, initial, extra, textRoles });
     }

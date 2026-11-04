@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { Check, Loader2, MessageSquareText, Send } from "lucide-react";
@@ -123,13 +123,13 @@ export function InputCard({
                   value={option.option_id}
                 />
                 <span className="min-w-0">
-                  <span className="block font-medium text-foreground">
+                  <span className="block text-foreground">
                     {option.label}
                   </span>
                   {option.description ? (
-                    <span className="mt-0.5 block text-13 text-muted-foreground">
+                    <FieldHelp className="mt-0.5 block text-muted-foreground">
                       {option.description}
-                    </span>
+                    </FieldHelp>
                   ) : null}
                 </span>
               </Label>

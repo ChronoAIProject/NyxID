@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -272,9 +272,9 @@ export function DeveloperAppsPage() {
                           >
                             {scope.label}
                             {scope.required && (
-                              <span className="ml-1 text-13 text-muted-foreground">
+                              <FieldHelp className="ml-1 text-muted-foreground">
                                 (required)
-                              </span>
+                              </FieldHelp>
                             )}
                           </Label>
                           {"hint" in scope && scope.hint && (

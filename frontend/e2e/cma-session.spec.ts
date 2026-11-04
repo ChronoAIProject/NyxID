@@ -778,6 +778,9 @@ test("keeps unpinned work in its verified source and pins across every route, re
     `/assistant?mock=1&c=${source.conversation}&agent=${source.specialist}`,
   );
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  // Source content can arrive before the authoritative pin read. Wait for the
+  // actual unpinned control before checking its state, not the preceding card.
+  await panel.getByRole("button", { name: "Pin CMA session" }).waitFor({ state: "visible" });
   await expect(
     panel.getByRole("button", { name: "Pin CMA session" }),
   ).toHaveAttribute("aria-pressed", "false");

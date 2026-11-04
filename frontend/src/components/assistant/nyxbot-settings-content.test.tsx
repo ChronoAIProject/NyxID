@@ -9,6 +9,7 @@ import {
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -296,7 +297,7 @@ function renderPage() {
       </Dialog>
     </QueryClientProvider>,
   );
-  return userEvent.setup();
+  return userEvent.setup({ delay: null });
 }
 
 it("exposes phone setup only after the server enables the adapter rollout", async () => {
@@ -432,8 +433,7 @@ it("validates specialist limits against the server limits before saving", async 
   await confirmChanges();
   expect(await within(page).findByText("Must be at most 32")).toBeVisible();
   expect(writes).toEqual([]);
-  await user.clear(live);
-  await user.type(live, "12");
+  fireEvent.change(live, { target: { value: "12" } });
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() =>
@@ -689,8 +689,7 @@ it("keeps dirty values and reports a failed General save inline", async () => {
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
-  await user.clear(live);
-  await user.type(live, "12");
+  fireEvent.change(live, { target: { value: "12" } });
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent(
@@ -706,14 +705,12 @@ it("saves dirty General and Automation forms in order through one bar with indep
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
-  await user.clear(live);
-  await user.type(live, "12");
+  fireEvent.change(live, { target: { value: "12" } });
   await user.click(
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
   );
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
-  await user.clear(hourly);
-  await user.type(hourly, "4");
+  fireEvent.change(hourly, { target: { value: "4" } });
   expect(
     screen.getAllByRole("region", { name: "Unsaved changes" }),
   ).toHaveLength(1);
@@ -749,15 +746,13 @@ it("keeps failed General changes dirty while Automation preferences succeed", as
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
-  await user.clear(live);
-  await user.type(live, "12");
+  fireEvent.change(live, { target: { value: "12" } });
   saveError = true;
   await user.click(
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
   );
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
-  await user.clear(hourly);
-  await user.type(hourly, "4");
+  fireEvent.change(hourly, { target: { value: "4" } });
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() => expect(writes).toHaveLength(2));
@@ -780,7 +775,7 @@ it("keeps failed General changes dirty while Automation preferences succeed", as
 });
 
 it("defaults new private chat posting off on legacy responses and saves without changing existing chats", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   renderPage();
   const connected = await screen.findByRole("list", {
     name: "Connected channel bots",
@@ -823,7 +818,7 @@ it("defaults new private chat posting off on legacy responses and saves without 
   });
 });
 it("keeps the posting switch unchanged and exposes a save failure", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   renderPage();
   postsError = true;
   const connected = await screen.findByRole("list", {

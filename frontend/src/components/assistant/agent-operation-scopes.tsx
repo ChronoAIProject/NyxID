@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { DrawerSearchRevealContext } from "@/lib/drawer-search";
 import { SectionInfo } from "@/components/ui/section-info";
 import { describeChanges, changeList } from "@/lib/grouped-form-changes";
@@ -475,24 +475,24 @@ export function OperationSelectionForm({
                           <span className="block break-all font-mono">
                             {operation.method} {operation.path}
                           </span>
-                          <span className="block type-secondary text-text-tertiary">
+                          <FieldHelp className="block text-text-tertiary">
                             {operation.summary}
-                          </span>
+                          </FieldHelp>
                           <span className="flex gap-1">
                             {operation.read_only ? (
-                              <span className="type-secondary text-text-tertiary">
+                              <FieldHelp className="text-text-tertiary">
                                 Read only
-                              </span>
+                              </FieldHelp>
                             ) : null}
                             {operation.changes_existing ? (
-                              <span className="type-secondary text-warning">
+                              <FieldHelp className="text-warning">
                                 Changes existing
-                              </span>
+                              </FieldHelp>
                             ) : null}
                             {savedInputs[operation.endpoint_id] ? (
-                              <span className="type-secondary text-text-tertiary">
+                              <FieldHelp className="text-text-tertiary">
                                 Value limits
-                              </span>
+                              </FieldHelp>
                             ) : null}
                           </span>
                         </span>

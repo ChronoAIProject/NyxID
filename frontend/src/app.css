@@ -335,6 +335,9 @@ html:is(.theme-light, .theme-dark) .shell-user-block { min-width: 0; min-height:
   min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
   border-radius: var(--radius-lg);
 }
+.shell-nav-item[aria-current="page"] {
+  @apply type-active-nav-item;
+}
 html:is(.theme-light, .theme-dark) .shell-nav-item[data-nav-collapsed="true"] {
   justify-content: center;
   column-gap: 0;
@@ -436,7 +439,7 @@ html:is(.theme-light, .theme-dark) [data-grouped-list] [data-slot="grouped-selec
 
 html:is(.theme-light, .theme-dark) [data-grouped-row] > * { margin-block: 0; }
 
-html:is(.theme-light, .theme-dark) button:has(> svg.lucide):not([data-icon-button]) {
+html:is(.theme-light, .theme-dark) button:has(> svg.lucide):not([data-icon-button]):not(.shell-nav-item) {
   flex-wrap: wrap;
 }
 
@@ -1163,114 +1166,54 @@ html.theme-dark .assistant-halo--visible {
   }
 }
 
-/* ── Sidebar nav easter eggs (`sidebar-nav-glyphs.tsx`) ──
-   Played only while the glyph carries `data-playing`, which the component
-   sets on row hover (never under reduced motion) and clears at an iteration
-   boundary after two plays or once the pointer has left, so every loop
-   starts and ends on the lucide rest frame.
-   Transform origins are viewBox units. The plugin tile is drawn per frame
-   in the component instead. */
-
-/* The Home chimney follows hover exactly (`data-hovering`): it pops up
-   from below the roof line with an overshoot and sinks back on leave.
-   Transitions rather than keyframes, so a quick leave-and-return reverses
-   from wherever it is. The smoke runs while the component keeps the puffs
-   mounted; they wait for the chimney (delay set inline) and scale about
-   their own centre. */
-.nav-glyph-chimney {
-  transform: translateY(5px);
-  transition: transform 180ms ease-in;
+/* Workspace glyphs play one activation cycle, then restore lucide's rest
+   frame. A negative delay resumes the same timeline after SPA navigation. */
+.nav-glyph-chimney { transform: translateY(5px); }
+[data-playing] .nav-glyph-chimney {
+  animation: nav-glyph-chimney var(--nav-glyph-duration) ease-out 1 both;
+  animation-delay: var(--nav-glyph-offset);
 }
-
-[data-hovering] .nav-glyph-chimney {
-  transform: none;
-  transition: transform 520ms cubic-bezier(0.34, 1.8, 0.64, 1);
+@keyframes nav-glyph-chimney {
+  0%, 100% { transform: translateY(5px); }
+  13% { transform: translateY(-0.5px); }
+  21%, 86% { transform: translateY(0); }
 }
-
-.nav-glyph-smoke {
-  opacity: 0;
-  transition: opacity 250ms ease-in;
-}
-
-[data-hovering] > .nav-glyph-smoke {
-  opacity: 1;
-  transition: none;
-}
-
 .nav-glyph-smoke-puff {
   transform-box: fill-box;
   transform-origin: center;
   opacity: 0;
-  animation: nav-glyph-smoke 2.2s ease-out 2 backwards;
+  animation: nav-glyph-smoke 1.5s ease-out 1 both;
 }
-
 @keyframes nav-glyph-smoke {
-  0% {
-    opacity: 0;
-    transform: translate(0, 0) scale(0.6);
-  }
-  15% {
-    opacity: 0.9;
-  }
-  50% {
-    transform: translate(0.6px, -3.5px) scale(1.1);
-  }
-  100% {
-    opacity: 0;
-    transform: translate(2.5px, -7px) scale(1.6);
-  }
+  0% { opacity: 0; transform: translate(0, 0) scale(0.6); }
+  15% { opacity: 0.9; }
+  50% { transform: translate(0.6px, -3.5px) scale(1.1); }
+  100% { opacity: 0; transform: translate(2.5px, -7px) scale(1.6); }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .nav-glyph-chimney,
-  [data-hovering] .nav-glyph-chimney {
-    transition: none;
-  }
-}
-
-/* A short bright segment of the trace runs left to right across the screen,
-   then the screen stays dark for a beat. `pathLength=100` on the path makes
-   the dash units percentages of the trace; with a 28-unit dash, offset 28
-   parks it wholly before the start and -100 wholly past the end. */
 .nav-glyph-heartbeat {
   opacity: 0;
   stroke-dasharray: 28 200;
   stroke-dashoffset: 28;
 }
-
 [data-playing] > .nav-glyph-heartbeat {
   opacity: 1;
-  animation: nav-glyph-heartbeat 2s linear infinite;
+  animation: nav-glyph-heartbeat var(--nav-glyph-duration) linear 1 both;
+  animation-delay: var(--nav-glyph-offset);
 }
-
 @keyframes nav-glyph-heartbeat {
-  0% {
-    stroke-dashoffset: 28;
-  }
-  70%,
-  100% {
-    stroke-dashoffset: -100;
-  }
+  0% { stroke-dashoffset: 28; }
+  70%, 100% { stroke-dashoffset: -100; }
 }
-
-[data-playing] > .nav-glyph-minute-hand,
-[data-playing] > .nav-glyph-hour-hand {
+[data-playing] .nav-glyph-minute-hand,
+[data-playing] .nav-glyph-hour-hand {
   transform-origin: 16px 16.2px;
-  animation: nav-glyph-hand 2.2s ease-in-out infinite;
+  animation: nav-glyph-hand var(--nav-glyph-duration) ease-in-out 1 both;
+  animation-delay: var(--nav-glyph-offset);
 }
-
-[data-playing] > .nav-glyph-minute-hand {
-  --nav-glyph-hand-turn: 720deg;
-}
-
-[data-playing] > .nav-glyph-hour-hand {
-  --nav-glyph-hand-turn: 360deg;
-}
-
+[data-playing] .nav-glyph-minute-hand { --nav-glyph-hand-turn: 720deg; }
+[data-playing] .nav-glyph-hour-hand { --nav-glyph-hand-turn: 360deg; }
 @keyframes nav-glyph-hand {
-  to {
-    transform: rotate(var(--nav-glyph-hand-turn));
-  }
+  to { transform: rotate(var(--nav-glyph-hand-turn)); }
 }
 
 /* ── Card hover glow ── */

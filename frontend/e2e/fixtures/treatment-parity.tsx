@@ -6,6 +6,7 @@ import { Button, type ButtonProps } from "../../src/components/ui/button";
 import { Input } from "../../src/components/ui/input";
 import { Textarea } from "../../src/components/ui/textarea";
 import { Label } from "../../src/components/ui/label";
+import { NativeSelect } from "../../src/components/ui/native-select";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "../../src/components/ui/card";
 import { Badge } from "../../src/components/ui/badge";
 import { Switch } from "../../src/components/ui/switch";
@@ -63,6 +64,7 @@ export function TreatmentFixture() {
     <div data-parity="account-block" className="shell-user-block"><div data-parity="account-avatar" className="shell-user-avatar"><Search /></div><div data-parity="account-copy" className="shell-user-copy"><p data-parity="account-name" className="shell-user-name">Reader</p><p data-parity="account-email" className="shell-user-email">reader@example.test</p></div></div>
     <Label data-parity="label" htmlFor="parity-name">Name</Label>
     <Input data-parity="input" id="parity-name" defaultValue="Reader" />
+    <NativeSelect data-parity="native-select" aria-label="Native selection"><option>Selected option</option></NativeSelect>
     <Textarea data-parity="textarea" defaultValue="Notes" />
     <div data-parity="search" className="flex items-center gap-2 rounded-full bg-muted px-3 py-1 text-14"><Search className="size-[1.125em]" /><Input aria-label="Search entries" className="border-0 px-0" /></div>
     <Select value="one"><SelectTrigger data-parity="select-trigger"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="one">Option</SelectItem></SelectContent></Select>

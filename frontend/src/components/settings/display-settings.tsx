@@ -1,4 +1,4 @@
-import { Label } from "@/components/ui/label";
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useRef, useState, type ReactNode } from "react";
 import { Check, Monitor, Moon, Palette, PanelLeft, RotateCcw, SlidersHorizontal, Sun, SunMoon, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -356,7 +356,7 @@ function ColorEditor() {
               <li key={key} className="flex flex-wrap items-center gap-2">
                 <Label asChild><span className="min-w-0 flex-1">
                   {label}
-                  {customized && <span className="ml-2 text-13 text-text-tertiary">Customized</span>}
+                  {customized && <FieldHelp className="ml-2 text-text-tertiary">Customized</FieldHelp>}
                 </span></Label>
                 <input
                   type="color"
