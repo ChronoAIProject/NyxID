@@ -192,14 +192,17 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
         set_test_approval_preference(&state.db, &actor, false).await;
         mount_healthy(&server, &id).await;
         let mut request = request();
+        *request.uri_mut() = format!("/api/v1/proxy/s/same-slug/invalid-operation?_nyxid_via={id}")
+            .parse()
+            .unwrap();
         request
             .extensions_mut()
             .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
-        let response = Box::pin(super::super::proxy::proxy_request(
+        let response = Box::pin(super::super::proxy::proxy_request_by_slug(
             State(state),
             auth(&actor),
             TelemetryContext::default(),
-            Path((id, "invalid-operation".into())),
+            Path(("same-slug".into(), "invalid-operation".into())),
             request,
         ))
         .await
