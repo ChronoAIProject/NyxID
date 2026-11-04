@@ -194,7 +194,7 @@ export function AdminServiceAccountsPage() {
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">Failed to load service accounts</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : accounts.length === 0 ? (
@@ -202,7 +202,7 @@ export function AdminServiceAccountsPage() {
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">No service accounts found</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {search
                 ? "No service accounts match your search."
                 : "There are no service accounts to display."}
@@ -237,8 +237,8 @@ export function AdminServiceAccountsPage() {
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{sa.name}</p>
-                    <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                    <p className="text-14 font-medium truncate">{sa.name}</p>
+                    <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                       {sa.client_id}
                     </p>
                   </div>
@@ -246,7 +246,7 @@ export function AdminServiceAccountsPage() {
                     {sa.is_active ? "Active" : "Inactive"}
                   </Badge>
                 </div>
-                <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+                <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
                   <span>Created {formatDate(sa.created_at)}</span>
                 </div>
               </div>
@@ -289,8 +289,8 @@ export function AdminServiceAccountsPage() {
                       }
                     }}
                   >
-                    <TableCell className="font-medium">{sa.name}</TableCell>
-                    <TableCell className="font-mono text-xs">
+                    <TableCell className="font-normal">{sa.name}</TableCell>
+                    <TableCell className="font-mono text-14">
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
@@ -299,7 +299,7 @@ export function AdminServiceAccountsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell
-                      className="max-w-[200px] truncate text-xs"
+                      className="max-w-[200px] truncate text-14"
                       title={sa.allowed_scopes}
                     >
                       {sa.allowed_scopes}
@@ -365,7 +365,7 @@ export function AdminServiceAccountsPage() {
               <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-sm text-amber-700 dark:text-amber-400">
+                  <p className="text-14 text-amber-700 dark:text-amber-400">
                     Save these credentials now. The client secret cannot be
                     retrieved later.
                   </p>
@@ -374,11 +374,11 @@ export function AdminServiceAccountsPage() {
 
               <div className="space-y-3">
                 <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">
+                  <p className="mb-1 text-13 font-medium text-muted-foreground">
                     Client ID
                   </p>
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono">
+                    <code className="flex-1 rounded bg-muted px-2 py-1 text-14 font-mono">
                       {createdResult.client_id}
                     </code>
                     <Button
@@ -398,11 +398,11 @@ export function AdminServiceAccountsPage() {
                 </div>
 
                 <div>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">
+                  <p className="mb-1 text-13 font-medium text-muted-foreground">
                     Client Secret
                   </p>
                   <div className="flex items-center gap-2">
-                    <code className="flex-1 rounded bg-muted px-2 py-1 text-sm font-mono break-all">
+                    <code className="flex-1 rounded bg-muted px-2 py-1 text-14 font-mono break-all">
                       {createdResult.client_secret}
                     </code>
                     <Button

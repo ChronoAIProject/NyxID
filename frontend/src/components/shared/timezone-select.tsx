@@ -49,7 +49,7 @@ export function TimezoneSelect({
           aria-invalid={invalid}
           className={
             grouped
-              ? "h-auto min-h-8 max-w-full gap-2 whitespace-normal px-0 text-right font-normal"
+              ? "h-auto min-h-8 max-w-full gap-2 whitespace-normal px-0 text-right font-medium"
               : "w-full justify-between"
           }
         >

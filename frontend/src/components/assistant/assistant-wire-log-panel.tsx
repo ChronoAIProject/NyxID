@@ -252,7 +252,7 @@ function ResponseCapture({
           ) : null}
         </div>
       ) : capture.body ? (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-12 leading-normal text-muted-foreground">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 leading-normal text-muted-foreground">
           {capture.body.text}
         </pre>
       ) : (
@@ -287,7 +287,7 @@ function WireLogPayload({
             Reconstructed request assembled by NyxID before credential and
             identity injection; headers are an allowlisted subset.
           </p>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-12 leading-normal text-muted-foreground">
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 leading-normal text-muted-foreground">
             {requestJson(envelope)}
           </pre>
         </section>

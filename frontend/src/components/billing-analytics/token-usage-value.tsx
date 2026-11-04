@@ -47,7 +47,7 @@ export function TokenUsageValue({
       </TooltipTrigger>
       <TooltipContent
         collisionPadding={12}
-        className="w-80 max-w-[calc(100vw-1.5rem)] space-y-3 border border-border bg-card p-3 text-14 text-foreground"
+        className="w-80 max-w-[calc(100vw-1.5rem)] space-y-3 border border-border bg-card p-3 text-13 text-foreground"
       >
         <div>
           <p className="font-medium">

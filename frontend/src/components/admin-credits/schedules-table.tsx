@@ -57,7 +57,7 @@ export function SchedulesTable({
               key={schedule.id}
               className="max-sm:grid max-sm:gap-1 max-sm:p-3 max-sm:[&>td]:min-w-0 max-sm:[&>td]:whitespace-normal max-sm:[&>td]:break-words max-sm:[&>td]:px-0"
             >
-              <TableCell className="font-medium">
+              <TableCell className="font-normal">
                 {formatExactCredits(
                   exactCredits(
                     schedule.amount,

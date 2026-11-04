@@ -78,7 +78,7 @@ export function ArtifactBlock({
         )}
       </div>
       {open && block.preview && (
-        <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-12 leading-relaxed text-muted-foreground">
+        <pre className="whitespace-pre-wrap border-t border-border/50 bg-overlay px-4 py-3 font-mono text-14 leading-relaxed text-muted-foreground">
           {block.preview}
         </pre>
       )}

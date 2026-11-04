@@ -146,7 +146,7 @@ export function BillingActivity() {
                     axisLine={false}
                     tickFormatter={dateLabel}
                     tick={{
-                      fontSize: 10,
+                      fontSize: "var(--text-13)",
                       fill: "var(--color-muted-foreground)",
                     }}
                     interval="preserveStartEnd"

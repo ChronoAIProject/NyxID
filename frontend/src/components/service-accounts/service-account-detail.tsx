@@ -317,7 +317,7 @@ function ServiceAccountDetailEditor({
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">
+        <h3 className="mb-2 text-15 font-semibold">
           Service account not found
         </h3>
         <p className="mb-4 text-14 text-muted-foreground">
@@ -424,7 +424,7 @@ function ServiceAccountDetailEditor({
           <p className="px-4 py-3 text-14 text-muted-foreground">
             Provider connections for org-owned service accounts aren't yet
             available here. Use the{" "}
-            <code className="rounded bg-muted px-1 font-mono text-xs">
+            <code className="rounded bg-muted px-1 font-mono text-14">
               nyxid
             </code>{" "}
             CLI or API for now.
@@ -556,7 +556,7 @@ function ServiceAccountDetailEditor({
                       <FormLabel className="text-14 font-medium">
                         Active
                       </FormLabel>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Inactive accounts cannot authenticate.
                       </p>
                     </div>
@@ -626,7 +626,7 @@ function ServiceAccountDetailEditor({
               </div>
 
               <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">
+                <p className="mb-1 text-13 font-medium text-muted-foreground">
                   New Client Secret
                 </p>
                 <div className="flex items-center gap-2">

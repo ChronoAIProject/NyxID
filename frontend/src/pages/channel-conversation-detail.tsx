@@ -160,7 +160,7 @@ export function MessageCard({ message }: { readonly message: ChannelMessageItem 
         {/* Header */}
         <div
           className={cn(
-            "mb-1 flex items-center gap-2 text-xs",
+            "mb-1 flex items-center gap-2 text-13",
             isInbound ? "text-muted-foreground" : "text-muted-foreground",
           )}
         >
@@ -247,7 +247,7 @@ export function InitiatedMessageSettings({
 
   return (
     <DetailSection title="Agent-initiated messages">
-      <div className="space-y-1 p-5 text-xs text-muted-foreground">
+      <div className="space-y-1 p-5 text-13 text-muted-foreground">
         <p>Editing: {conversation.capabilities?.edit ? "Supported" : "Unavailable"}</p>
         <p>Receive media: {conversation.capabilities?.media?.inbound.join(", ") || "None"}</p>
         <p>Send media: {conversation.capabilities?.media?.outbound.join(", ") || "None"}</p>
@@ -454,7 +454,7 @@ export function ChannelConversationDetailPage() {
         <div className="flex flex-wrap items-center gap-2 text-14 text-muted-foreground">
           <Badge variant="secondary">{bot.platform}</Badge>
           <span>Conversation ID:</span>
-          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
+          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-14">
             {conversationId.slice(0, 16)}
           </code>
         </div>
@@ -478,15 +478,15 @@ export function ChannelConversationDetailPage() {
           onRetryBotOwner={() => void refetchBot()}
         />
       )}
-      {activities.length > 0 && <h2 className="text-lg font-medium">Message history</h2>}
+      {activities.length > 0 && <h2 className="text-15 font-medium">Message history</h2>}
       {/* Message list */}
       {error ? (
         <ErrorBanner
           message="Failed to load messages. Please try again."
           onRetry={refetch}
         />
-      ) : isLoading ? <p className="text-xs text-muted-foreground">Loading message history…</p> : messages.length === 0 && activities.length > 0 ? (
-        <p className="text-xs text-muted-foreground">No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.</p>
+      ) : isLoading ? <p className="text-13 text-muted-foreground">Loading message history…</p> : messages.length === 0 && activities.length > 0 ? (
+        <p className="text-13 text-muted-foreground">No ordinary messages in this route. Encrypted chat and own-post notifications appear in Received activities above.</p>
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />
@@ -494,7 +494,7 @@ export function ChannelConversationDetailPage() {
             <p className="text-14 font-medium text-muted-foreground">
               No Messages
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               No messages in this conversation yet.
             </p>
           </div>

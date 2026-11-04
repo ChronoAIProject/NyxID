@@ -93,7 +93,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
-          <label className="w-36 space-y-1 text-13 text-muted-foreground">
+          <label className="w-36 space-y-1 text-14 text-muted-foreground">
             Vote
             <Select
               value={vote}
@@ -112,7 +112,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
               </SelectContent>
             </Select>
           </label>
-          <label className="w-36 space-y-1 text-13 text-muted-foreground">
+          <label className="w-36 space-y-1 text-14 text-muted-foreground">
             Agent
             <Select
               value={agentKind}
@@ -140,7 +140,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
               setModel(typeof value === "string" ? value.trim() : "");
             }}
           >
-            <label className="space-y-1 text-13 text-muted-foreground">
+            <label className="space-y-1 text-14 text-muted-foreground">
               Model
               <Input
                 key={model}

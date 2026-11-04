@@ -224,7 +224,7 @@ export function DevicesOnboardPage() {
                           }}
                         >
                           <FormControl>
-                            <SelectTrigger className="h-11 text-sm">
+                            <SelectTrigger className="h-11 text-14">
                               <SelectValue placeholder="Personal account" />
                             </SelectTrigger>
                           </FormControl>
@@ -253,7 +253,7 @@ export function DevicesOnboardPage() {
                         <FormControl>
                           <Input
                             {...field}
-                            className="h-11 text-sm"
+                            className="h-11 text-14"
                             maxLength={128}
                             placeholder="Kitchen Camera"
                             value={field.value ?? ""}
@@ -275,7 +275,7 @@ export function DevicesOnboardPage() {
                             <Input
                               {...field}
                               autoComplete="off"
-                              className="h-11 text-sm"
+                              className="h-11 text-14"
                               maxLength={32}
                               placeholder="MyHomeNetwork"
                               value={field.value ?? ""}
@@ -296,7 +296,7 @@ export function DevicesOnboardPage() {
                             <Input
                               {...field}
                               autoComplete="off"
-                              className="h-11 text-sm"
+                              className="h-11 text-14"
                               maxLength={63}
                               minLength={8}
                               placeholder="At least 8 characters"
@@ -412,7 +412,7 @@ export function DevicesOnboardPage() {
 
                   <div className="flex justify-end">
                     <Button
-                      className="h-11 w-full text-sm sm:w-auto"
+                      className="h-11 w-full text-14 sm:w-auto"
                       disabled={onboardDevice.isPending}
                       isLoading={onboardDevice.isPending}
                       type="submit"
@@ -490,7 +490,7 @@ function OnboardSuccess({
 
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button
-            className="h-11 w-full text-sm sm:w-auto"
+            className="h-11 w-full text-14 sm:w-auto"
             disabled={isRevoking}
             isLoading={isRevoking}
             onClick={onRevoke}
@@ -503,7 +503,7 @@ function OnboardSuccess({
             Revoke QR
           </Button>
           <Button
-            className="h-11 w-full text-sm sm:w-auto"
+            className="h-11 w-full text-14 sm:w-auto"
             disabled={!qrDataUrl}
             onClick={onPrint}
             type="button"

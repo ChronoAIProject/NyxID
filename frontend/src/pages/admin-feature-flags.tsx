@@ -798,7 +798,7 @@ function FlagTableRows({
         <TableRow className="bg-muted/30 hover:bg-muted/30">
           <TableCell
             colSpan={FLAG_TABLE_COLUMNS}
-            className="py-1.5 text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+            className="py-1.5 text-12 font-medium uppercase tracking-[1.5px] text-text-tertiary"
           >
             {section.label}
             <span className="ml-2 font-normal tabular-nums">
@@ -1190,7 +1190,7 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
-          className="text-13 font-normal"
+          className="text-14 font-medium"
         >
           Description — what this flag controls
         </Label>
@@ -1207,7 +1207,7 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-owner-${flag.key}`}
-          className="text-13 font-normal"
+          className="text-14 font-medium"
         >
           Owner — who to ask about it
         </Label>
@@ -1351,11 +1351,11 @@ function AccountSearchPicker({
       {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
+            <p className="px-3 py-2 text-13 text-muted-foreground">
               Searching…
             </p>
           ) : results.length === 0 ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
+            <p className="px-3 py-2 text-13 text-muted-foreground">
               {isOrg
                 ? "No organizations match this search."
                 : "No users match this search."}
@@ -1375,11 +1375,11 @@ function AccountSearchPicker({
         showDefaults && (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
             {defaultsLoading ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">
+              <p className="px-3 py-2 text-13 text-muted-foreground">
                 Loading…
               </p>
             ) : defaults.length === 0 ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">
+              <p className="px-3 py-2 text-13 text-muted-foreground">
                 {isOrg
                   ? "No organizations to suggest."
                   : "No users to suggest."}
@@ -1423,7 +1423,7 @@ function AccountOption({
       // Suppress the input's blur so the click lands before the dropdown closes.
       onMouseDown={(event) => event.preventDefault()}
       onClick={() => onPick(account)}
-      className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
+      className="block w-full border-b border-border/40 px-3 py-2 text-left text-13 last:border-b-0 hover:bg-muted/50"
     >
       <span className="block truncate font-medium">
         {accountLabel(account, isOrg)}
@@ -1468,13 +1468,13 @@ function FlagsEmptyState({
       <div>
         <p
           className={cn(
-            "text-sm font-medium",
+            "text-14 font-medium",
             error ? "text-destructive" : "text-foreground",
           )}
         >
           {title}
         </p>
-        <p className="text-xs text-muted-foreground">{subtitle}</p>
+        <p className="text-13 text-muted-foreground">{subtitle}</p>
       </div>
     </div>
   );

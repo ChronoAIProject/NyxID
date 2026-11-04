@@ -164,7 +164,7 @@ function MemberScopeForm({
               <span className="block text-14 font-medium text-foreground">
                 Inherit from role default
               </span>
-              <span className="block text-xs text-muted-foreground">
+              <span className="block text-13 text-muted-foreground">
                 {previewLoading
                   ? "Loading current role permissions..."
                   : `This member can access: ${inheritedSummary}`}
@@ -185,11 +185,11 @@ function MemberScopeForm({
               <span className="block text-14 font-medium text-foreground">
                 Customize for this member
               </span>
-              <span className="block text-xs text-muted-foreground">
+              <span className="block text-13 text-muted-foreground">
                 Custom scopes override role defaults until reset.
               </span>
               {scopeMode === "override" && member.scope_source === "inherit" && (
-                <span className="block text-xs font-medium text-amber-600 dark:text-amber-400">
+                <span className="block text-13 font-medium text-amber-600 dark:text-amber-400">
                   Snapshot warning: saving will freeze this member at the
                   current role scope ({inheritedSummary}). Future changes to
                   the role default won't apply until you reset to inherit.
@@ -214,7 +214,7 @@ function MemberScopeForm({
               >
                 Allow all org services
               </Label>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 When enabled, the member can use every current and future
                 service this org owns.
               </p>
@@ -224,7 +224,7 @@ function MemberScopeForm({
 
         {scopeMode === "override" && !allowAll && (
           <div className="space-y-2">
-            <Label className="text-xs font-medium text-muted-foreground">
+            <Label className="text-14 font-medium text-muted-foreground">
               Services
             </Label>
             {keysLoading ? (
@@ -234,7 +234,7 @@ function MemberScopeForm({
                 <Skeleton className="h-8 w-full" />
               </div>
             ) : orgServices.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              <div className="rounded-lg border border-dashed border-border p-4 text-center text-13 text-muted-foreground">
                 This org has no services yet. Add one under AI Services first.
               </div>
             ) : (
@@ -264,7 +264,7 @@ function MemberScopeForm({
                         <span className="block text-14 font-medium text-foreground">
                           {service.label}
                         </span>
-                        <span className="block text-xs text-muted-foreground">
+                        <span className="block text-13 text-muted-foreground">
                           {service.slug}
                         </span>
                       </Label>

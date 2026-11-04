@@ -76,7 +76,7 @@ export function UserPicker({
           .map((id) => (
             <label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2 text-14"
             >
               <Checkbox
                 checked
@@ -194,7 +194,7 @@ export function ServicePicker({
           .map((id) => (
             <label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2 text-14"
             >
               <Checkbox
                 checked
@@ -374,7 +374,7 @@ function MemberPicker({
           .map((id) => (
             <label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2 text-14"
             >
               <Checkbox
                 checked

@@ -182,7 +182,7 @@ function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = 
       />
     </QueryClientProvider>,
   );
-  return { onDeleted, user: userEvent.setup({ delay: null }) };
+  return { onDeleted, user: userEvent.setup({ delay: null, pointerEventsCheck: 0 }) };
 }
 
 // Set up draft values in one render; keyboard/focus behavior uses user-event below.
@@ -1240,7 +1240,7 @@ it("indexes NyxBot's full-access row without specialist-only profile or lifecycl
 it("honors an incoming tab deep link while searching and preserves the mounted profile draft", async () => {
   const props = { agentId: String(agent.id), agents: [], open: true, onOpenChange: vi.fn(), onDeleted: vi.fn() };
   const { rerender } = render(<QueryClientProvider client={client}><AgentDetailsSheet {...props} /></QueryClientProvider>);
-  const user = userEvent.setup({ delay: null });
+  const user = userEvent.setup({ delay: null, pointerEventsCheck: 0 });
   const role = await screen.findByLabelText("Role");
   appendText(role, " draft");
   const search = await openSearch(user);

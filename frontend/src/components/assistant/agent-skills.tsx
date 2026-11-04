@@ -131,7 +131,7 @@ function TestResult({
       {data.excerpt ? (
         <pre
           aria-label={`${data.name} SKILL.md excerpt`}
-          className="max-h-60 overflow-auto whitespace-pre-wrap break-words py-2 text-13"
+          className="max-h-60 overflow-auto whitespace-pre-wrap break-words py-2 text-14"
         >
           {data.excerpt}
         </pre>

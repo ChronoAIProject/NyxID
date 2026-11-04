@@ -168,6 +168,7 @@ frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/public-paths.ts
 frontend/src/lib/telemetry.ts
 frontend/src/lib/theme-colors.ts
+frontend/src/lib/typography.ts
 frontend/src/lib/utils.ts
 frontend/src/lib/zod-csp.ts
 frontend/src/pages/cli-pair/reserve-action.ts

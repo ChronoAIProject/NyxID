@@ -153,7 +153,7 @@ export function NotificationSetupCard() {
                   Approval protection is active
                 </span>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
+              <p className="mt-1 text-13 text-muted-foreground">
                 {settings?.global_approval_mode === "writes_only"
                   ? "Writes and destructive operations require approval; reads and stateless model inference can proceed. "
                   : "AI agents must request your approval before accessing services. "}
@@ -175,20 +175,20 @@ export function NotificationSetupCard() {
                   Review approvals on the web
                 </span>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
+              <p className="mt-1 text-13 text-muted-foreground">
                 Approval remains required while notifications are unavailable. Review pending requests in the Approval History page. Notifications are optional and delivery can fail.
               </p>
             </div>
           )}
 
           {approvalEnabled && (approvalSuspended || !webAvailable) && (
-            <p role="status" className="text-xs text-amber-600">
+            <p role="status" className="text-13 text-amber-600">
               {approvalSuspended ? "Server reports approval is suspended. " : "Web-only approval support is unconfirmed. "}
               Keep a configured notification channel enabled until the server confirms required web approval.
             </p>
           )}
           {deliveryConfigured === undefined && (
-            <p className="text-xs text-muted-foreground">Notification provider configuration is unknown.</p>
+            <p className="text-13 text-muted-foreground">Notification provider configuration is unknown.</p>
           )}
 
           {/* Channel rows -- always shown so users can add more channels */}
@@ -202,7 +202,7 @@ export function NotificationSetupCard() {
                 />
                 <div>
                   <p className="text-15 font-medium">Telegram</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Receive approval requests via bot
                   </p>
                 </div>
@@ -230,7 +230,7 @@ export function NotificationSetupCard() {
                 />
                 <div>
                   <p className="text-15 font-medium">NyxID Mobile App</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Approve from your phone (iOS & Android)
                   </p>
                 </div>
@@ -270,12 +270,12 @@ export function NotificationSetupCard() {
             )}
 
             {!hasChannel && webAvailable && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Review pending requests in Approval History on the web. You can also connect Telegram or the mobile app for optional notifications.
               </p>
             )}
             {!hasChannel && !webAvailable && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Web-only approval support is unconfirmed. Connect and enable a notification channel before turning on approval protection on this server.
               </p>
             )}
@@ -296,14 +296,14 @@ export function NotificationSetupCard() {
           {linkData && (
             <div className="space-y-4">
               <div className="rounded-lg bg-muted p-4 text-center">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Send this to @{linkData.bot_username}
                 </p>
-                <code className="mt-2 block text-lg font-semibold">
+                <code className="mt-2 block text-14 font-normal">
                   /start {linkData.link_code}
                 </code>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 This code expires in{" "}
                 {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
               </p>

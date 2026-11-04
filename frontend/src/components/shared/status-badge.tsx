@@ -64,7 +64,7 @@ export function StatusBadge({ domain, statusKey, className }: StatusBadgeProps) 
           </span>
         </TooltipTrigger>
         <TooltipContent className="max-w-xs space-y-1">
-          <p className="text-xs">{meta.tooltip}</p>
+          <p className="text-13">{meta.tooltip}</p>
           {meta.remediation ? (
             <Link
               to={meta.remediation.href}

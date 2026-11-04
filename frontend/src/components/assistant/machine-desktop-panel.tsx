@@ -471,7 +471,7 @@ export function MachineDesktopPanel({
               title={value === "secure" ? "Secure browser" : "Dev browser"}
               disabled={controls && display !== value}
               className={cn(
-                "h-6 min-h-0 px-2 text-13",
+                "h-6 min-h-0 px-2 text-14",
                 display === value ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
               )}
               onClick={() => {
@@ -512,7 +512,7 @@ export function MachineDesktopPanel({
             <SelectTrigger
               aria-label="Desktop context"
               title={contexts.isError ? "Separated contexts are unavailable on this machine" : "Workspace and browser"}
-              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-13 [&>span]:min-w-0 [&>span]:truncate"
+              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-14 [&>span]:min-w-0 [&>span]:truncate"
             >
               <SelectValue />
             </SelectTrigger>

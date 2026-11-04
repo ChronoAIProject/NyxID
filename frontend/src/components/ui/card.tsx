@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
@@ -36,7 +37,7 @@ const CardTitle = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "text-15 font-semibold leading-none tracking-tight",
+      `${TEXT_STYLES.cardTitle} font-semibold leading-none tracking-tight`,
       className,
     )}
     {...props}
@@ -50,7 +51,7 @@ const CardDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn("text-14 text-muted-foreground", className)}
+    className={cn(`${TEXT_STYLES.secondary} text-muted-foreground unthemed:text-14`, className)}
     {...props}
   />
 ));

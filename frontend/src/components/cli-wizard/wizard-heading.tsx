@@ -18,11 +18,11 @@ export function WizardHeading({
   return (
     <div className="flex flex-col items-center gap-2 text-center">
       {eyebrow}
-      <h2 className="text-xl font-semibold leading-tight text-foreground sm:text-2xl">
+      <h2 className="text-22 font-bold leading-tight text-foreground sm:text-28">
         {title}
       </h2>
       {children ? (
-        <div className="max-w-md text-sm text-muted-foreground">{children}</div>
+        <div className="max-w-md text-14 text-muted-foreground">{children}</div>
       ) : null}
     </div>
   )

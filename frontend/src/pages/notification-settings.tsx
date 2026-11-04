@@ -592,7 +592,7 @@ export function NotificationSettingsPage() {
                           <p className="text-14 font-medium">
                             {device.device_name ?? "Unknown device"}
                           </p>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Registered{" "}
                             {new Date(
                               device.registered_at,
@@ -864,7 +864,7 @@ export function NotificationSettingsPage() {
                           <p className="text-14 font-medium">
                             {config.service_name}
                           </p>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {config.user_service_slug
                               ? `${config.user_service_slug} — `
                               : ""}
@@ -902,7 +902,7 @@ export function NotificationSettingsPage() {
                           <TabsContent value="simple" className="mt-3">
                             <div className="flex flex-col gap-3">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-xs text-muted-foreground">
+                                <span className="text-13 text-muted-foreground">
                                   Mode:
                                 </span>
                                 <Select
@@ -915,7 +915,7 @@ export function NotificationSettingsPage() {
                                     )
                                   }
                                 >
-                                  <SelectTrigger className="h-7 w-[180px] text-xs">
+                                  <SelectTrigger className="h-7 w-[180px] text-14">
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
@@ -927,7 +927,7 @@ export function NotificationSettingsPage() {
                                     </SelectItem>
                                   </SelectContent>
                                 </Select>
-                                <span className="text-xs text-muted-foreground">
+                                <span className="text-13 text-muted-foreground">
                                   {config.approval_mode === "grant"
                                     ? "Approval creates a reusable grant"
                                     : "Every request needs fresh approval"}
@@ -937,7 +937,7 @@ export function NotificationSettingsPage() {
                                 {approvalVerbs.map((verb) => (
                                   <label
                                     key={verb}
-                                    className="flex items-center gap-2 text-xs text-muted-foreground"
+                                    className="flex items-center gap-2 text-14 text-muted-foreground"
                                   >
                                     <Switch
                                       checked={enabledVerbs.includes(verb)}
@@ -998,14 +998,14 @@ export function NotificationSettingsPage() {
           {linkData && (
             <div className="space-y-4">
               <div className="rounded-lg bg-muted p-4 text-center">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Send this to @{linkData.bot_username}
                 </p>
-                <code className="mt-2 block text-lg font-semibold">
+                <code className="mt-2 block text-14 font-normal">
                   /start {linkData.link_code}
                 </code>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 This code expires in{" "}
                 {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
               </p>
@@ -1114,7 +1114,7 @@ export function NotificationSettingsPage() {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Shows your configured AI services. To add a new one, go to
                 the Keys page.
               </p>
@@ -1122,7 +1122,7 @@ export function NotificationSettingsPage() {
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
                 <p className="text-14 font-medium">Require Approval</p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Whether this service requires approval for programmatic
                   access.
                 </p>
@@ -1158,7 +1158,7 @@ export function NotificationSettingsPage() {
                       <SelectItem value="grant">Time-based grant</SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {selectedApprovalMode === "grant"
                       ? "Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires."
                       : "Every API request requires a fresh approval. No grant is created."}
@@ -1172,7 +1172,7 @@ export function NotificationSettingsPage() {
                     {approvalVerbs.map((verb) => (
                       <label
                         key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-xs text-muted-foreground"
+                        className="flex items-center justify-between rounded-lg border border-border p-3 text-14 text-muted-foreground"
                       >
                         <span>{approvalVerbLabels[verb]}</span>
                         <Switch

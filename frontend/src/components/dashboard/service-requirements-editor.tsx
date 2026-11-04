@@ -57,7 +57,7 @@ export function ServiceRequirementsView({
                 <p className="text-14 font-medium">
                   {provider?.name ?? req.provider_name}
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {req.injection_method === "bearer"
                     ? "Bearer token"
                     : req.injection_method === "header"

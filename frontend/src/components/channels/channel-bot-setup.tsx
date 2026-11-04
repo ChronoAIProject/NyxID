@@ -294,12 +294,12 @@ export function ChannelBotSetup({
       )}
 
       {catalog.isLoading && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           Loading platforms...
         </p>
       )}
       {catalog.isError && (
-        <p role="alert" className="text-xs text-destructive">
+        <p role="alert" className="text-13 text-destructive">
           Unable to load platforms.{" "}
           <button type="button" onClick={() => void catalog.refetch()}>
             Retry
@@ -321,7 +321,7 @@ export function ChannelBotSetup({
                 <p className="text-15 font-medium">
                   {createdBot?.label || label || "Channel bot created"}
                 </p>
-                <p className="text-xs leading-relaxed text-muted-foreground">
+                <p className="text-13 leading-relaxed text-muted-foreground">
                   {stayInPlace && connectedBotId
                     ? `${connectedBotLabel || label || "Your bot"} is connected. NyxBot will continue in this chat.`
                     : createdBot?.webhook_secret
@@ -345,7 +345,7 @@ export function ChannelBotSetup({
             />
           )}
           {Boolean(createdBot?.setup_instructions?.length) && (
-            <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
+            <ol className="list-decimal space-y-2 pl-4 text-13 text-muted-foreground">
               {createdBot?.setup_instructions?.map((instruction) => (
                 <li key={instruction}>{instruction}</li>
               ))}
@@ -419,7 +419,7 @@ export function ChannelBotSetup({
                     />
                     <p
                       id="scope-description"
-                      className="text-xs text-muted-foreground"
+                      className="text-13 text-muted-foreground"
                     >
                       {scopeDescription ??
                         (fullPage
@@ -452,7 +452,7 @@ export function ChannelBotSetup({
                       </SelectContent>
                     </Select>
                     {errors.platform && (
-                      <p className="text-xs text-destructive">
+                      <p className="text-13 text-destructive">
                         {errors.platform.message}
                       </p>
                     )}
@@ -464,7 +464,7 @@ export function ChannelBotSetup({
                           label: label || undefined,
                           target_org_id: targetOrgId ?? undefined,
                         }}
-                        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+                        className="inline-flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
                       >
                         <ExternalLink className="size-3" aria-hidden="true" />
                         Open full setup page
@@ -489,14 +489,14 @@ export function ChannelBotSetup({
                     {...register("label")}
                   />
                   {labelOptional && (
-                    <p id="label-hint" className="text-xs text-muted-foreground">
+                    <p id="label-hint" className="text-13 text-muted-foreground">
                       {lookingUpBot
                         ? "Looking up your bot's name..."
                         : "Optional. Leave blank to use the name from your bot token."}
                     </p>
                   )}
                   {errors.label && (
-                    <p className="text-xs text-destructive">
+                    <p className="text-13 text-destructive">
                       {errors.label.message}
                     </p>
                   )}
@@ -505,7 +505,7 @@ export function ChannelBotSetup({
             )}
           >
             {platform === "telegram" && !fullPage && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 To connect an existing Telegram manager, enter its bot token
                 here. NyxID keeps its bot creation webhook and adds conversation
                 routing. You can then choose a public default agent or an exact
@@ -520,7 +520,7 @@ export function ChannelBotSetup({
                 <summary className="cursor-pointer text-14 font-medium">
                   {setupNote.title}
                 </summary>
-                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                <p className="mt-2 text-13 leading-relaxed text-muted-foreground">
                   {setupNote.text}
                 </p>
               </details>
@@ -538,10 +538,10 @@ export function ChannelBotSetup({
                   {...register(field.name)}
                 />
                 {field.hint && (
-                  <p className="text-xs text-muted-foreground">{field.hint}</p>
+                  <p className="text-13 text-muted-foreground">{field.hint}</p>
                 )}
                 {errors[field.name] && (
-                  <p className="text-xs text-destructive">
+                  <p className="text-13 text-destructive">
                     {errors[field.name]?.message}
                   </p>
                 )}

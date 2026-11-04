@@ -94,7 +94,7 @@ export function McpConnectionInfo() {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           NyxID exposes a single MCP endpoint that provides tools for all your
           connected services. Connect your MCP client once and it will
           automatically discover tools from every service you have enabled.
@@ -102,11 +102,11 @@ export function McpConnectionInfo() {
       </div>
 
       <div>
-        <p className="mb-1 text-xs font-medium text-muted-foreground">
+        <p className="mb-1 text-13 font-medium text-muted-foreground">
           MCP Proxy URL
         </p>
         <div className="relative">
-          <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all">
+          <code className="block rounded bg-muted px-3 py-2 pr-10 text-14 break-all">
             {mcpUrl}
           </code>
           <CopyButton text={mcpUrl} label="MCP proxy URL" />
@@ -115,7 +115,7 @@ export function McpConnectionInfo() {
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">
+          <p className="text-13 font-medium text-muted-foreground">
             Cursor Configuration
           </p>
           <Badge variant="secondary" className="text-12">
@@ -123,7 +123,7 @@ export function McpConnectionInfo() {
           </Badge>
         </div>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {cursorConfig}
           </pre>
           <CopyButton text={cursorConfig} label="Cursor config" />
@@ -132,7 +132,7 @@ export function McpConnectionInfo() {
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">
+          <p className="text-13 font-medium text-muted-foreground">
             Claude Code Configuration
           </p>
           <Badge variant="secondary" className="text-12">
@@ -140,7 +140,7 @@ export function McpConnectionInfo() {
           </Badge>
         </div>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {claudeCodeConfig}
           </pre>
           <CopyButton text={claudeCodeConfig} label="Claude Code config" />
@@ -149,7 +149,7 @@ export function McpConnectionInfo() {
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">
+          <p className="text-13 font-medium text-muted-foreground">
             Codex Configuration
           </p>
           <Badge variant="secondary" className="text-12">
@@ -157,7 +157,7 @@ export function McpConnectionInfo() {
           </Badge>
         </div>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-14">
             {codexConfig}
           </pre>
           <CopyButton text={codexConfig} label="Codex config" />
@@ -165,8 +165,8 @@ export function McpConnectionInfo() {
       </div>
 
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-xs font-medium mb-1">How it works</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 font-medium mb-1">How it works</p>
+        <p className="text-13 text-muted-foreground">
           When an MCP client connects, NyxID authenticates via OAuth in your
           browser. Once authenticated, the proxy exposes tools from all your
           connected services. Tool calls are forwarded to each service's API

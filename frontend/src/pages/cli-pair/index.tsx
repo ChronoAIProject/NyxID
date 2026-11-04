@@ -697,7 +697,7 @@ function EnterCodeForm({
           autoFocus={!prefilled}
           autoComplete="off"
           spellCheck={false}
-          className="font-mono text-lg tracking-widest"
+          className="font-mono text-14 tracking-widest"
         />
       </div>
       {error ? (
@@ -911,7 +911,7 @@ function ResumedCreateWarningPanel({
         that first tab may still be finishing, or it may have
         already created the resource.
       </WizardHeading>
-      <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
+      <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-13 text-muted-foreground">
         Check your {manageLabel} first — if a new entry is there,
         the first tab succeeded and you can close this tab. If
         nothing shows up after a minute, use "Cancel Pairing"

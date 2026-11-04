@@ -76,7 +76,7 @@ export function BillingLaneFields({
         </p>
       )}
       {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No lane prices are configured. Legacy billing below still applies.
         </p>
       )}
@@ -94,7 +94,7 @@ export function BillingLaneFields({
               key={field}
               className="space-y-3 rounded-lg border border-border/50 p-3"
             >
-              <div className="text-xs font-medium">
+              <div className="text-13 font-medium">
                 {field === "byok_pricing"
                   ? "Your own key"
                   : "NyxID platform key"}
@@ -315,7 +315,7 @@ export function BillingLaneFields({
         })}
       </div>
       {(form.watch("byok_pricing") || form.watch("platform_key_pricing")) && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Billing lanes supersede legacy platform billing below. A lane set to
           Free has no lane charge. Resale billing remains separate.
         </p>

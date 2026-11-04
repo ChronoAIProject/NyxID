@@ -1539,7 +1539,7 @@ function RemoteMachineClientSetup() {
           <GroupedRow key={name} className="block space-y-1">
             <p className="text-13 font-normal text-text-tertiary">{name} · {path}</p>
             <div className="relative">
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono text-13 font-normal leading-relaxed">{value}</pre>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono text-14 font-normal leading-relaxed">{value}</pre>
               <Button size="icon" variant="ghost" className="absolute right-0 top-0"
                 aria-label={`Copy ${name} HTTP MCP config`}
                 onClick={() =>

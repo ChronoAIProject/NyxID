@@ -83,7 +83,7 @@ export function OrgJoinPage() {
                 <p className="text-14 font-medium text-foreground">
                   Could not join organization
                 </p>
-                <p className="text-xs text-muted-foreground">{state.message}</p>
+                <p className="text-13 text-muted-foreground">{state.message}</p>
               </div>
               <Button
                 variant="outline"

@@ -207,7 +207,7 @@ export function FilterBar({
           {(["from", "to"] as const).map((bound) => (
             <label
               key={bound}
-              className="flex items-center gap-2 whitespace-nowrap text-13 text-muted-foreground"
+              className="flex items-center gap-2 whitespace-nowrap text-14 text-muted-foreground"
             >
               <span>
                 {bound === "from" ? "Start (UTC)" : "End (UTC, exclusive)"}
@@ -255,7 +255,7 @@ export function PanelControls({
 }) {
   return (
     <div className="space-y-4">
-      <label className="block space-y-1.5 text-12 font-medium text-muted-foreground">
+      <label className="block space-y-1.5 text-14 font-medium text-muted-foreground">
         Panel title
         <Input
           value={panel.title}

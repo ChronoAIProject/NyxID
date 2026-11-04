@@ -115,8 +115,8 @@ export function BillingWalletCard({
         {wallet.suspended && <Badge variant="destructive">Suspended</Badge>}
       </CardHeader>
       <CardContent>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 basis-48 grow">
             <div className="flex items-center gap-1.5">
               <span className="text-13 text-muted-foreground">
                 Available
@@ -142,7 +142,7 @@ export function BillingWalletCard({
                 </Tooltip>
               )}
             </div>
-            <div className="mt-1 truncate text-28 font-semibold leading-tight">
+            <div className="mt-1 break-words text-28 font-semibold leading-tight">
               {formatCredits(wallet.available ?? wallet.available_credits)}
             </div>
             <div className="mt-1 text-13 text-muted-foreground">

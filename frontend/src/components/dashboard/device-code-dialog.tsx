@@ -242,11 +242,11 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-5">
             {/* User code display */}
             <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <p className="text-13 font-medium uppercase tracking-wider text-muted-foreground">
                 Your code
               </p>
               <div className="flex items-center gap-3">
-                <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
+                <code className="text-28 font-semibold tracking-[0.3em] font-mono text-primary-text">
                   {userCode}
                 </code>
                 <Button
@@ -285,7 +285,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
             </div>
 
             {/* Polling status */}
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center justify-between text-13 text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 <span>Waiting for authentication...</span>

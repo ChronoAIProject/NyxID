@@ -539,7 +539,7 @@ export function ChartView({
                 {onSelect && slice.id && panel.top !== 0 ? (
                   <Button
                     variant="link"
-                    className="h-auto min-w-0 justify-start p-0 text-13 text-foreground"
+                    className="h-auto min-w-0 justify-start p-0 text-14 text-foreground"
                     title={`Filter to ${slice.label}`}
                     onClick={() => onSelect(slice.id!)}
                   >

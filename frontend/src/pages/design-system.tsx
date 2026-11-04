@@ -281,12 +281,12 @@ export function DesignSystemPage() {
               <Separator />
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Card Title — 16px (base) / semibold</p>
-                <h3 className="text-base font-semibold">Card Title</h3>
+                <h3 className="text-14 font-semibold">Card Title</h3>
               </div>
               <Separator />
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Body — 14px (text-sm) / normal</p>
-                <p className="text-sm">Body text for descriptions and content paragraphs.</p>
+                <p className="text-14">Body text for descriptions and content paragraphs.</p>
               </div>
               <Separator />
               <div>
@@ -314,13 +314,13 @@ export function DesignSystemPage() {
           <div className="mt-6">
             <ComponentShowcase title="Text Colors">
               <div className="space-y-2">
-                <p className="text-foreground text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-foreground</code> Primary text — headings, titles, important content</p>
-                <p className="text-muted-foreground text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-muted-foreground</code> Secondary text — descriptions, body copy</p>
-                <p className="text-text-tertiary text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-text-tertiary</code> Tertiary text — placeholders, overlines, captions</p>
-                <p className="text-nyx-secondary-400 text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-nyx-secondary-400</code> Accent text — links, active states</p>
-                <p className="text-success text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-success</code> Success state</p>
-                <p className="text-warning text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-warning</code> Warning state</p>
-                <p className="text-destructive text-15"><code className="text-nyx-secondary-400 text-13 font-mono mr-3">text-destructive</code> Destructive / error state</p>
+                <p className="text-foreground text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-foreground</code> Primary text — headings, titles, important content</p>
+                <p className="text-muted-foreground text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-muted-foreground</code> Secondary text — descriptions, body copy</p>
+                <p className="text-text-tertiary text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-text-tertiary</code> Tertiary text — placeholders, overlines, captions</p>
+                <p className="text-nyx-secondary-400 text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-nyx-secondary-400</code> Accent text — links, active states</p>
+                <p className="text-success text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-success</code> Success state</p>
+                <p className="text-warning text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-warning</code> Warning state</p>
+                <p className="text-destructive text-15"><code className="text-nyx-secondary-400 text-14 font-mono mr-3">text-destructive</code> Destructive / error state</p>
               </div>
             </ComponentShowcase>
           </div>
@@ -333,32 +333,32 @@ export function DesignSystemPage() {
               <div className="flex flex-wrap gap-6 items-end">
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-xl border border-border bg-muted" />
-                  <code className="text-13 font-mono text-text-tertiary">rounded-xl</code>
+                  <code className="text-14 font-mono text-text-tertiary">rounded-xl</code>
                   <span className="text-12 text-text-tertiary">Cards, dialogs, selects</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-lg border border-border bg-muted" />
-                  <code className="text-13 font-mono text-text-tertiary">rounded-lg</code>
+                  <code className="text-14 font-mono text-text-tertiary">rounded-lg</code>
                   <span className="text-12 text-text-tertiary">Buttons, inputs, items</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-[8px] border border-border bg-muted" />
-                  <code className="text-13 font-mono text-text-tertiary">rounded-[8px]</code>
+                  <code className="text-14 font-mono text-text-tertiary">rounded-[8px]</code>
                   <span className="text-12 text-text-tertiary">Icon containers</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-[6px] border border-border bg-muted" />
-                  <code className="text-13 font-mono text-text-tertiary">rounded-[6px]</code>
+                  <code className="text-14 font-mono text-text-tertiary">rounded-[6px]</code>
                   <span className="text-12 text-text-tertiary">Small elements, kbds</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-[10px] border border-border bg-muted" />
-                  <code className="text-13 font-mono text-text-tertiary">rounded-[10px]</code>
+                  <code className="text-14 font-mono text-text-tertiary">rounded-[10px]</code>
                   <span className="text-12 text-text-tertiary">Badges (pill)</span>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <div className="h-16 w-16 rounded-full border border-border bg-muted" />
-                  <code className="text-13 font-mono text-text-tertiary">rounded-full</code>
+                  <code className="text-14 font-mono text-text-tertiary">rounded-full</code>
                   <span className="text-12 text-text-tertiary">Status dots, chips</span>
                 </div>
               </div>
@@ -656,7 +656,7 @@ export function DesignSystemPage() {
               </TableHeader>
               <TableBody>
                 <TableRow>
-                  <TableCell className="font-medium">openai-prod</TableCell>
+                  <TableCell className="font-normal">openai-prod</TableCell>
                   <TableCell><Badge variant="success">Active</Badge></TableCell>
                   <TableCell>API Key</TableCell>
                   <TableCell className="text-right">
@@ -665,7 +665,7 @@ export function DesignSystemPage() {
                   </TableCell>
                 </TableRow>
                 <TableRow>
-                  <TableCell className="font-medium">anthropic-dev</TableCell>
+                  <TableCell className="font-normal">anthropic-dev</TableCell>
                   <TableCell><Badge variant="warning">Expiring</Badge></TableCell>
                   <TableCell>OAuth</TableCell>
                   <TableCell className="text-right">
@@ -825,19 +825,19 @@ export function DesignSystemPage() {
               <div className="flex flex-wrap gap-6 items-end">
                 <div className="flex flex-col items-center gap-2">
                   <Cable className="h-3 w-3 text-text-tertiary" />
-                  <code className="text-12 font-mono text-text-tertiary">12px</code>
+                  <code className="text-14 font-mono text-text-tertiary">12px</code>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <Cable className="h-3.5 w-3.5 text-text-tertiary" />
-                  <code className="text-12 font-mono text-text-tertiary">14px</code>
+                  <code className="text-14 font-mono text-text-tertiary">14px</code>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <Cable className="h-4 w-4 text-text-tertiary" />
-                  <code className="text-12 font-mono text-text-tertiary">16px</code>
+                  <code className="text-14 font-mono text-text-tertiary">16px</code>
                 </div>
                 <div className="flex flex-col items-center gap-2">
                   <Cable className="h-[18px] w-[18px] text-text-tertiary" />
-                  <code className="text-12 font-mono text-text-tertiary">18px</code>
+                  <code className="text-14 font-mono text-text-tertiary">18px</code>
                 </div>
               </div>
               <div className="mt-4 rounded-lg bg-muted/50 p-3">
@@ -863,7 +863,7 @@ export function DesignSystemPage() {
                     >
                       <div className="min-w-0">
                         <p className="truncate text-15 font-medium text-foreground">{label}</p>
-                        <code className="text-12 text-text-tertiary">{platform}</code>
+                        <code className="text-14 text-text-tertiary">{platform}</code>
                       </div>
                       {ICON_SIZE_OPTIONS.map(({ value, label: sizeLabel }) => (
                         <div key={sizeLabel} className="flex h-10 items-center justify-center">
@@ -908,7 +908,7 @@ export function DesignSystemPage() {
                       >
                         <div className="min-w-0 py-2">
                           <p className="truncate text-14 font-medium text-foreground">{iconAuditLabel(slug)}</p>
-                          <code className="truncate text-12 text-text-tertiary">{slug}</code>
+                          <code className="truncate text-14 text-text-tertiary">{slug}</code>
                         </div>
                         {ICON_SIZE_OPTIONS.map(({ value, label }) => (
                           <div key={label} className="flex h-12 items-center justify-center">
@@ -1112,7 +1112,7 @@ export function DesignSystemPage() {
                 },
                 {
                   rule: "Table cell text size is consistent at 13px",
-                  detail: "All primary table cell content uses text-15 (set in the base TableCell). Secondary metadata can use text-13 or text-12. Never use text-sm (14px) or text-xs (12px) for primary content.",
+                  detail: "All primary table cell content uses text-15 (set in the base TableCell). Secondary metadata can use text-13 or text-12. Never use text-14 (14px) or text-13 (12px) for primary content.",
                   code: 'Base: text-15 | Secondary: text-13 text-muted-foreground',
                 },
                 {
@@ -1134,7 +1134,7 @@ export function DesignSystemPage() {
                 <div key={item.rule} className="rounded-xl border border-border/50 bg-card p-5 space-y-2">
                   <p className="text-15 font-semibold text-foreground">{item.rule}</p>
                   <p className="text-14 text-muted-foreground">{item.detail}</p>
-                  <code className="block text-13 font-mono text-nyx-secondary-400 bg-muted rounded-lg px-3 py-2">
+                  <code className="block text-14 font-mono text-nyx-secondary-400 bg-muted rounded-lg px-3 py-2">
                     {item.code}
                   </code>
                 </div>

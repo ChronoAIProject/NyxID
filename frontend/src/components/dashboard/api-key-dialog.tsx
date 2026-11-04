@@ -98,7 +98,7 @@ export function ApiKeyDialog({
                 maxLength={2048}
                 autoComplete="url"
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Your self-hosted {provider.name} instance URL
               </p>
             </div>
@@ -117,7 +117,7 @@ export function ApiKeyDialog({
               maxLength={4096}
               autoComplete="off"
             />
-            <p className="text-xs text-muted-foreground">Max 4096 characters</p>
+            <p className="text-13 text-muted-foreground">Max 4096 characters</p>
           </div>
 
           <div className="space-y-2">
@@ -132,7 +132,7 @@ export function ApiKeyDialog({
           </div>
 
           {isPending && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Validating your credentials with {provider.name}...
             </p>
           )}

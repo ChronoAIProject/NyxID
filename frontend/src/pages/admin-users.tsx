@@ -171,7 +171,7 @@ export function AdminUsersPage() {
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">Failed to load users</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : users.length === 0 ? (
@@ -179,7 +179,7 @@ export function AdminUsersPage() {
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">No users found</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {search ? "No users match your search." : "There are no users to display."}
             </p>
           </div>
@@ -258,7 +258,7 @@ export function AdminUsersPage() {
                       }
                     }}
                   >
-                    <TableCell className="font-medium">{user.email}</TableCell>
+                    <TableCell className="font-normal">{user.email}</TableCell>
                     <TableCell>
                       {user.display_name ?? (
                         <span className="text-muted-foreground">--</span>

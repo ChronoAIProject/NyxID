@@ -37,14 +37,14 @@ export function DiscoveryEndpoints({
 
   return (
     <div>
-      <p className="mb-2 text-xs font-medium text-muted-foreground">
+      <p className="mb-2 text-13 font-medium text-muted-foreground">
         Discovery Endpoints
       </p>
       <div className="space-y-1">
         {endpoints.map((ep) => (
           <div
             key={ep.label}
-            className="flex items-center justify-between text-xs"
+            className="flex items-center justify-between text-13"
           >
             <span className="text-muted-foreground">{ep.label}</span>
             <div className="flex items-center gap-1">

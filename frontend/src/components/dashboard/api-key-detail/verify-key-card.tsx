@@ -208,7 +208,7 @@ export function VerifyKeyCard({
         <div className="space-y-1.5">
           <label
             htmlFor="verify-key-paste"
-            className="text-13 font-medium text-foreground"
+            className="text-14 font-medium text-foreground"
           >
             Agent key
           </label>
@@ -232,7 +232,7 @@ export function VerifyKeyCard({
           <div className="space-y-1.5">
             <label
               htmlFor="verify-key-slug-picker"
-              className="text-13 font-medium text-foreground"
+              className="text-14 font-medium text-foreground"
             >
               Test against
             </label>

@@ -151,7 +151,7 @@ export function ServiceViewToolbar({
           <Button
             variant={filters.source === "all" ? "outline" : "secondary"}
             size={stuck ? "icon" : "default"}
-            className="shrink-0 rounded-full"
+            className="min-w-0 max-w-full h-auto whitespace-normal rounded-full break-words"
             aria-label={`Service view: ${filters.source === "all" ? "All services" : SOURCE_LABELS[filters.source]}`}
             aria-pressed={filters.source !== "all"}
             onClick={() =>
@@ -214,7 +214,7 @@ export function ServiceViewToolbar({
           <Button
             variant={filters.show_auto_connected ? "outline" : "secondary"}
             size={stuck ? "icon" : "default"}
-            className="shrink-0 rounded-full"
+            className="min-w-0 max-w-full h-auto whitespace-normal rounded-full break-words"
             aria-pressed={filters.show_auto_connected}
             aria-label={`Auto-connected services: ${filters.show_auto_connected ? "shown" : "hidden"}`}
             onClick={() =>
@@ -231,8 +231,8 @@ export function ServiceViewToolbar({
             )}
             {!stuck && (
               <>
-                Auto-connected:{" "}
-                {filters.show_auto_connected ? "Included" : "Hidden"}
+                <span className="min-w-0 break-words">Auto-connected:{" "}
+                {filters.show_auto_connected ? "Included" : "Hidden"}</span>
                 <span className="text-muted-foreground tabular-nums">
                   {autoConnected}
                 </span>
@@ -392,7 +392,7 @@ export function ServiceViewToolbar({
               {selections.map((selection) => (
                 <div
                   key={`${selection.field}:${selection.id}`}
-                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-xs"
+                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-13"
                 >
                   {selection.icon}
                   <span
@@ -422,7 +422,7 @@ export function ServiceViewToolbar({
                 </div>
               ))}
               {filters.search && (
-                <div className="flex max-w-full items-center rounded-md border border-border/80 bg-muted/25 text-xs">
+                <div className="flex max-w-full items-center rounded-md border border-border/80 bg-muted/25 text-13">
                   <button
                     type="button"
                     className="min-w-0 truncate px-2"
@@ -449,7 +449,7 @@ export function ServiceViewToolbar({
               {applied.map(({ key, label, value }) => (
                 <div
                   key={key}
-                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-xs"
+                  className="flex max-w-full items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 pl-2 text-13"
                 >
                   <span className="truncate">
                     <span className="text-muted-foreground">{label}:</span>{" "}
@@ -492,7 +492,7 @@ export function ServiceViewToolbar({
         )}
 
         {!stuck && view.saveError && (
-          <p role="alert" className="px-3 pb-2 text-xs text-destructive">
+          <p role="alert" className="px-3 pb-2 text-13 text-destructive">
             {view.saveError}
           </p>
         )}

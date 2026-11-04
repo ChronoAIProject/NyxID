@@ -61,60 +61,79 @@ Light mode uses exactly two neutral tones (zinc grey page, white cards) with no 
 - The ambient status line at the top of the viewport is colored by node-fleet health: success gradient when healthy, warning when draining, destructive when offline (`AmbientStatusLine`, 2px, fixed top)
 
 ## Typography
-- **Display/Hero:** Space Grotesk 500 — page titles, stat values, card headings. Techy and sharp.
-- **Body:** Manrope 400 — all body text, descriptions, row content. Geometric but warm.
-- **UI/Labels:** Manrope 500 — nav items, button labels, form labels
+- **Display/Headings:** Mona Sans — page titles, metric values and card headings use the weights in the role table.
+- **Body:** Mona Sans 400 — body text, descriptions and row content.
+- **UI/Labels:** Mona Sans 500 — button labels and form labels; navigation uses 400 at rest and 500 when active.
 - **Data/Tables:** JetBrains Mono 400 — timestamps, log entries, API paths, code snippets. Supports tabular-nums.
 - **Logo:** Playfair Display 400 — NyxID wordmark only (used on landing/legal pages; the logged-in app shows only the icon). Letterspace: 1px. Color: `#c4b5fd`.
 - **Loading:** Google Fonts CDN
 
 ### Scale (in-app)
-Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. New 1× equals the previous 0.85×: the themed root is 85% of the browser default (13.6px with a 16px browser default). Old non-default text preferences migrate once to `clamp(value / 0.85, 0.5, 2)` without rounding; old default preferences adopt the smaller baseline. Slider labels round to two decimals; migration retains the precise stored value. `text-12` is 11.9px at the new default 1× on every themed surface.
 
-| Token (themed 1×, root 13.6px) | Every themed surface | Use |
-|------|------|-----|
-| `text-9` | 10.2px | Compact badges and sidebar group labels |
-| `text-10` | 10.2px | Section labels, table headers and badge text |
-| `text-11` | 11.05px | Timestamps, tertiary text and status labels |
-| `text-12` | 11.9px | Body text, button labels, table cells and input/select text |
-| `text-13` | 12.75px | Sidebar items, card body text and detail row titles |
-| `text-14` | 11.9px | Welcome/marketing copy |
-| `text-15` | 12.75px | Dialog titles and card headings |
-| `text-16` | 13.6px | Chat messages, composer and larger body text |
-| `text-17` | 14.45px | Emphasized body text |
-| `text-20` | 17px | Section headings |
-| `text-22` | 18.7px | Mobile page titles |
-| `text-24` | 20.4px | Large section headings |
-| `text-28` | 23.8px | Page titles at `sm` and above |
-| `text-36` | 30.6px | Display titles |
+Numeric tokens have one universal definition: `text-N = N/16rem`, on every surface,
+including unthemed content. Define each `--text-N` once in `app.css`'s `@theme`;
+never override token values for a surface, theme, or breakpoint. The defined
+numbers are 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 22, 24, 28, and 36.
 
-Studio, NyxBot, public auth pages using the app theme, and portaled menus/dialogs
-share the same root reading tokens (`html.theme-light` / `html.theme-dark`) and
-unitless base body line height of 1.5. Adding `assistant-display` does not change
-font-size tokens or body line height. The same `text-*` class always resolves to
-the same size, including `text-16` in chat and Studio. These values follow the
-selected text multiplier; spacing remains independent. Landing/blog keep their
-never-themed `@theme` size defaults and body line height. Component-specific
-leading utilities can express prose, labels or compact headings without changing
-the shared font sizes.
+Themed Studio, NyxBot, auth, docs, legal pages and body portals share the root
+scale and a unitless body line-height of 1.5. At a 16px browser default,
+`text-N` renders `N × 0.85 × text multiplier` CSS pixels. New 1× has the previous
+0.85× root (13.6px); `text-14` is 11.9px and `text-16` is 13.6px at 1×.
+Landing/blog and standalone unthemed protocol pages retain their browser-default
+root. Numeric token definitions are identical there; shared primitives use explicit
+`unthemed:` assignments where necessary to preserve public presentation.
 
-Assistant controls reserve room for their line height and a minimum pointer
-target of max(24px, 1.5rem). Touch inputs retain a 16px minimum to prevent iOS focus
-zoom. Settings rows wrap according to the space their content needs.
-Assistant interface icons use the surrounding label's font size (`1.125em`),
-including sidebar glyphs, portaled menus, and dialog controls. Icon gaps and
-padding use `em` multiplied by the user's density, so increasing text size
-also increases the space around each icon. Controls use automatic height and
-content width, with relative minimum targets; labelled controls and settings
-rows wrap within the available width. Avoid fixed dimensions on icon buttons.
-Use unitless line heights for helper text. Attachment cards grow with their
-labels and controls; thumbnail limits must not constrain the card's text.
-On iOS, inputs have a 16px minimum to prevent focus zoom and still grow with
-larger text preferences.
+Settings → Display offers text multipliers 0.5×–2×, in 0.01× steps. Previous custom
+preferences migrate once to `clamp(value / 0.85, 0.5, 2)` without rounding;
+previous default users adopt the smaller root. No additional migration accompanies
+token standardization. Slider labels round to two decimals. Spacing independently
+scales the 4px `--spacing` unit from 0.5×–2×, with the same step. Dragging previews
+the multiplier; release applies it, and native keyboard adjustments apply directly.
 
-> **Off-scale sizes in use** (not endorsed; reconcile when touching the file): `text-2xl` on `StatCard` values in `developer-apps.tsx`; `text-22 font-bold` on node-detail metric values; `text-3xl md:text-5xl font-normal` on the `developer-app-detail` not-found heading; `text-base` on `ApprovalSetupWizard` `CardTitle`; `text-9` badges on `channel-conversation-detail`. New code should snap to the scale above.
+Use these semantic roles in both shells and all themed overlays. Shared primitive
+assignments live in `lib/typography.ts`; numeric classes in markup follow this table.
 
-Mobile Activity cards lead with the service name at 15px; the action and URL use secondary text at 12px. Service names may wrap to two lines.
+| Role | Token | Weight | Default CSS px (1×) |
+|---|---|---:|---:|
+| Desktop page title | `text-28` | 700 | 23.8 |
+| Mobile page title | `text-22` | 700 | 18.7 |
+| Section heading | `text-20` | 600 | 17 |
+| Card / dialog / sheet title | `text-15` | 600 | 12.75 |
+| Navigation item, inactive / active | `text-15` | 400 / 500 | 12.75 |
+| Body / page description / table cell | `text-14` | 400 | 11.9 |
+| Form label / button / action link / tab | `text-14` | 500 | 11.9 |
+| Input / select value / menu item | `text-14` | 400 | 11.9 |
+| Helper / secondary caption / timestamp | `text-13` | 400 | 11.05 |
+| Field validation error | `text-13` | 500 | 11.05 |
+| Tooltip | `text-13` | 400 | 11.05 |
+| Group label / badge | `text-12` | 500 | 10.2 |
+| Table column heading | `text-12` | 600 | 10.2 |
+| Account name | `text-14` | 500 | 11.9 |
+| Account email | `text-12` | 400 | 10.2 |
+| Toast title | `text-15` | 500 | 12.75 |
+| Toast description | `text-14` | 400 | 11.9 |
+| Toast action / cancel | `text-14` | 500 | 11.9 |
+| Transcript / composer prose | `text-16` | 400 | 13.6 |
+| Prominent metric | `text-28` | 600 | 23.8 |
+| Code / terminal | `text-14` | 400 | 11.9 |
+
+Themed application source uses numeric roles, with `text-12` as the smallest role.
+Do not use Tailwind size aliases, arbitrary font sizes, fixed CSS `font-size` or
+`font:` shorthands. CSS consumers read `var(--text-N)`; SVG charts use the same
+variables. Canvas consumers read `computedTextSize(N)` and refresh when Display
+changes. Sonner actions/cancel explicitly set the button role to override vendor
+fixed sizing. The source guard runs with lint; compiled-CSS and real-component
+browser tests cover both shells, portals, all five audit scales, and touch targets.
+
+Shared controls reserve their line height and at least a 24px pointer target,
+including dialog/sheet close and icon buttons at the smallest Display setting.
+On coarse pointers, editable inputs use `max(16px, var(--text-14))` to prevent iOS
+focus zoom without changing their semantic role above that floor. Controls and
+label/value rows wrap with available space; essential monetary values stay complete.
+Shell navigation icons share `1.125em` sizing, labels and account footer roles.
+Assistant-only icon, density and control-layout rules do not remap typography.
+
+Mobile Activity cards lead with the service name in `text-15 font-semibold`; the action uses `text-14 font-medium` and the URL uses secondary `text-13`. Service names may wrap to two lines.
 
 ## Components
 
@@ -135,7 +154,7 @@ shapes retain their meaning.
 
 ### Buttons
 - **Height:** default `h-8`, sm `h-7`, lg `h-9`, icon `h-8 w-8`
-- **Text:** `text-12 font-medium`
+- **Text:** `text-14 font-medium`
 - **Radius:** `rounded-lg` (8px)
 - **Icon size:** `size-3` (12px) inside buttons
 - **Gap:** `gap-1.5` between icon and text
@@ -143,14 +162,14 @@ shapes retain their meaning.
 - **Variants:** default (ghost border), primary (gradient — used as the dominant dialog/CTA submit), destructive, outline, secondary, ghost, link
 - **Loading:** `isLoading` prop shows `Loader2` spinner + children, disables button. Some legacy pages still use a label-swap (`{mutation.isPending ? "Creating..." : "Add"}`) — prefer `isLoading` for new code.
 - **Rule:** Edit Save buttons are disabled while pristine, invalid or pending. Create actions are disabled only while invalid or pending; valid prefilled defaults can be submitted.
-- **`AddCtaButton`** (shared) — the standard "create" trigger on every list page header. `h-8`, `rounded-lg`, `border-hairline` idle / `border-hairline-strong` hover, `text-12 text-text-tertiary`, with a 22×22 inset icon container (`rounded-[6px]`, `border-hairline`, `bg-overlay`, 12px Plus icon). Distinct from `variant="primary"` — used when the button is the page-level "add" affordance.
+- **`AddCtaButton`** (shared) — the standard "create" trigger on every list page header. `h-8`, `rounded-lg`, `border-hairline` idle / `border-hairline-strong` hover, `text-14 text-text-tertiary`, with a 22×22 inset icon container (`rounded-[6px]`, `border-hairline`, `bg-overlay`, 12px Plus icon). Distinct from `variant="primary"` — used when the button is the page-level "add" affordance.
 
 ### Composer toolbar
-NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside the composer border below its full-width textarea, with send/stop/mic on the right; composers without a toolbar keep the existing inline layout.
+NyxAgent permission/model controls use a wrapping `h-7 text-13` toolbar inside the composer border below its full-width textarea, with send/stop/mic on the right; composers without a toolbar keep the existing inline layout.
 
 ### Inputs
 - **Height:** `h-8`
-- **Text:** `text-12`
+- **Text:** `text-14`
 - **Padding:** `px-3 py-1.5`
 - **Radius:** `rounded-lg`
 - **Border:** `border-input`, focus: `border-input-focus`
@@ -158,7 +177,7 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 
 ### Selects
 - **Trigger height:** `h-8`
-- **Text:** `text-12`
+- **Text:** `text-14`
 - **Padding:** `px-3 py-1.5`
 - **Trigger radius:** `rounded-lg`
 - **Item radius:** `rounded-md`
@@ -167,7 +186,7 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 
 ### Badges
 - **Padding:** `px-2 py-0.5`
-- **Text:** `text-10 font-medium`
+- **Text:** `text-12 font-medium`
 - **Radius:** `rounded-md`
 - **Variants:** `default` (purple), `secondary` (`bg-muted`), `destructive`, `success`, `warning`, `info`, `accent` (purple, slightly softer fill)
 - **Dark = tuned tint, light = solid fill (theme-split).** Dark is the primary surface: the base (unprefixed) classes are the tint `border-{color}/30 bg-{color}/{10|15} text-{color}` and are left as-is. Light mode deviates to a SOLID fill via the `light:` variant — `light:border-transparent light:bg-{color} light:text-white` — because the low-opacity tint loses contrast on a light canvas. Every color-carrying variant follows this in `components/ui/badge.tsx`. `secondary` is the neutral badge: it keeps its `bg-muted` fill in dark, but in light its fill matches the canvas and vanishes, so it deviates to an OUTLINE (`light:bg-transparent light:border-muted-foreground` — border in the same `muted-foreground` as its text). `{color}` is a semantic token (`destructive`/`success`/`warning`/`info`/`nyx-500`/`nyx-secondary-500`). The `light:`/`dark:` variants are class-scoped to `html.theme-{light,dark}` in `app.css`; never-themed public pages (landing/blog) keep the dark base. Do NOT give a pill a single *theme-blind* raw-palette class as its only color (e.g. `text-red-200 bg-red-500/10` with no variant) — the `-200`/`-300` tints wash out in light; always pair a dark tint with a `light:` solid.
@@ -176,10 +195,10 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 
 ### Tables
 - **Head height:** `h-8`
-- **Head text:** `text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary`
+- **Head text:** `text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary`
 - **Head padding:** `px-3`
 - **Cell padding:** `px-3 py-2.5`
-- **Cell text:** `text-12 text-foreground`
+- **Cell text:** `text-14 text-foreground`
 - **Row border:** `border-b border-border`
 - **Container:** wrap tables in `rounded-xl border border-border/50 bg-card overflow-hidden` for the desktop view of a list page
 - **Rules:**
@@ -195,8 +214,8 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 ### Tabs
 - **List height:** `h-8`
 - **Trigger padding:** `px-3 py-2`
-- **Trigger text:** `text-12`
-- **Active state:** `font-medium text-foreground` + 2px bottom indicator line
+- **Trigger text:** `text-14 font-medium`
+- **Active state:** `text-foreground` + 2px bottom indicator line
 - **Content margin:** Two equivalent patterns are in use — either `mt-6` on each `TabsContent` (e.g. `keys.tsx`, `org-detail.tsx`) or `space-y-6` on the parent `<Tabs>` wrapper (e.g. `settings.tsx`, `consents.tsx`). Both produce the same 24px gap between trigger row and content. Pick one per page; the legacy `mt-3` only survives in primitive demos.
 - **Indicator:** animated sliding `bg-primary` bar
 
@@ -205,15 +224,15 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 - **Gap:** `gap-4`
 - **Radius:** `rounded-xl`
 - **Title:** `text-15 font-semibold`
-- **Description:** `text-sm text-muted-foreground`
-- **Close button:** top-right, `h-4 w-4` X icon
+- **Description:** `text-14 text-muted-foreground`
+- **Close button:** top-right, shared minimum 24px target with an inset X icon
 - **Submit button:** `variant="primary"` is the default treatment for the affirmative action; Cancel is `variant="outline"` or `variant="ghost"` to its left
 
 ### Dropdown Menus
 - **Content radius:** `rounded-xl`
 - **Content padding:** `p-2`
 - **Item padding:** `px-3 py-1.5`
-- **Item text:** `text-12`
+- **Item text:** `text-14`
 - **Item radius:** `rounded-md`
 - **Item gap:** `gap-2`
 - **Hover:** `bg-overlay-strong`
@@ -232,15 +251,15 @@ NyxAgent permission/model controls use a wrapping `h-7 text-11` toolbar inside t
 ### Tooltips
 - **Radius:** `rounded-[6px]`
 - **Padding:** `px-3 py-1.5`
-- **Text:** `text-xs`
+- **Text:** `text-13 font-normal`
 
 ### Grouped lists (assistant forms)
 
 NyxBot forms use iOS inset grouped lists from
 `components/ui/grouped-list.tsx`. Stack sibling groups with `space-y-6` on the
-`bg-background` canvas. Each group has an optional sentence-case `text-12
+`bg-background` canvas. Each group has an optional sentence-case `text-14
 text-text-tertiary` heading above, one `rounded-xl bg-card border
-border-border/50` surface, and an optional `text-11 text-text-tertiary` footer
+border-border/50` surface, and an optional `text-13 text-text-tertiary` footer
 below. The subtle border provides contrast in light mode and also works with
 custom theme tokens. Headings and footers use `px-4`.
 
@@ -257,7 +276,7 @@ Groups never contain another group, card or outlined control. Use borderless
 Short fields can pair a leading label and trailing value; longer fields grow
 under their label. Validation text is destructive and linked with
 `aria-describedby` (the shared Form primitives provide these links). Put
-field-specific explanations directly below their field in `text-11 text-text-tertiary`; reserve the group footer for shared context, warnings and errors. Never concatenate unrelated field help in a footer. Destructive
+field-specific explanations directly below their field in `text-13 text-text-tertiary`; reserve the group footer for shared context, warnings and errors. Never concatenate unrelated field help in a footer. Destructive
 actions are destructive-colored rows in their own neutral group.
 
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
@@ -306,7 +325,7 @@ fences, reports successful section names in a toast, and retains failed drafts
 and local errors. Create dialogs keep their direct Create action.
 
 `components/ui/segmented-control.tsx` wraps Radix Tabs: a `bg-muted` track,
-raised `bg-card shadow-sm` selected segment, `text-12` labels, arrow-key
+raised `bg-card shadow-sm` selected segment, `text-14` labels, arrow-key
 navigation and associated tab panels. Segments size to their labels and wrap
 onto another line when the assistant text scale needs more space. Keep inactive form panels mounted and
 hidden so switching tabs or returning from a detail view preserves drafts.
@@ -351,7 +370,7 @@ row. The search glyph remains leading at every width; do not add a back arrow. M
 the available input width: shorten it to “Search {agent title}” when needed, then
 “Search agent” for unusually long names; its accessible name always stays full.
 Empty blur collapses it to its icon;
-a nonempty query keeps it open. Search and tabs use compact spacing (`text-12`, minimum 24px targets)
+a nonempty query keeps it open. Search and tabs use compact spacing (`text-14`, minimum 24px targets)
 and scale with the assistant reading setting. Nonempty searches replace the
 visible panels with inset result groups named for their tabs. Results are native
 buttons with a title, a breadcrumb subtitle and emphasized matching text; a polite
@@ -465,7 +484,7 @@ Top bar spans full width. Sidebar + content sit below it. The right panel is **o
 - **Border:** `border-b border-border/60`
 - **Logo zone (desktop):** width tracks the sidebar (`var(--sidebar-width)`), 16px left padding, NyxID icon (`h-5 w-5`), links to `/dashboard`
 - **Logo zone (mobile):** when not on a root page, replaced with a back arrow (`window.history.back()`); otherwise the icon links to `/dashboard`
-- **Breadcrumbs:** rendered inline left of the actions on `md+`. `text-12`; intermediate crumbs are links (`text-text-tertiary` → `text-foreground` on hover), the last crumb is plain `text-muted-foreground` with `aria-current="page"`. `lib/studio-breadcrumbs.ts` resolves each Studio route and its URL-selected subsection. Parent links explicitly select the appropriate `tab` or `view` and clear unrelated action/callback parameters. Detail pages register their entity name via `useBreadcrumbLabel(label)`; parent entity names can be registered with an explicit path. Permission-dependent tabs publish the visible section via `useBreadcrumbSection(tab)`.
+- **Breadcrumbs:** rendered inline left of the actions on `md+`. `text-14`; intermediate crumbs are links (`text-text-tertiary` → `text-foreground` on hover), the last crumb is plain `text-muted-foreground` with `aria-current="page"`. `lib/studio-breadcrumbs.ts` resolves each Studio route and its URL-selected subsection. Parent links explicitly select the appropriate `tab` or `view` and clear unrelated action/callback parameters. Detail pages register their entity name via `useBreadcrumbLabel(label)`; parent entity names can be registered with an explicit path. Permission-dependent tabs publish the visible section via `useBreadcrumbSection(tab)`.
 - **Actions (right):** Search trigger (opens command palette, shows `/` keybind hint), profile dropdown (icon button → menu with name/email/Settings/Log out), GitHub link. All actions use the same `border-hairline` chrome.
 - **Mobile:** profile dropdown + hamburger (`Menu`) that opens the full-screen `MobileNav`
 
@@ -476,17 +495,17 @@ Triggered by the search button or `/` key. Searches all sidebar destinations plu
 - **3 modes:** Expanded (200px), Collapsed (52px), Expand on hover (52px in flow + 200px overlay)
 - **Mode persistence:** `localStorage` key `nyxid:sidebar-mode`. The current width is also written to `--sidebar-width` so the top-bar logo zone can match it.
 - **No logo** — logo lives in the top bar
-- **Section labels** (when expanded): `text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary/50`, prefixed with horizontal padding `px-3 my-2`. Labels: "Approvals", "Developer", "Admin". The "Main" group has no label (it leads).
+- **Section labels** (when expanded): `text-12 font-medium uppercase tracking-[1.5px] text-text-tertiary/50`, prefixed with horizontal padding `px-3 my-2`. Labels: "Approvals", "Developer", "Admin". The "Main" group has no label (it leads).
 - **Collapsed mode:** label is replaced with a short divider line (`mx-auto w-3 border-t border-border/40`) so the visual separation survives.
 - **Active nav item:** `bg-overlay-strong font-medium text-foreground`, icon: `text-nyx-secondary-400`
 - **Hover:** `bg-overlay`
-- **Shared shell typography:** Studio and NyxBot use `shell-nav-item` (`text-13`, normal at rest / medium when active), `shell-group-label` (`text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary`), and `shell-user-name` / `shell-user-email` (`text-12 font-medium` / `text-10`). User blocks use those same roles in mobile navigation and portaled account menus.
+- **Shared shell typography:** Studio and NyxBot use `shell-nav-item` (`text-15`, normal at rest / medium when active), `shell-group-label` (`text-12 font-medium uppercase tracking-[1.5px] text-text-tertiary`), and `shell-user-name` / `shell-user-email` (`text-14 font-medium` / `text-12`). User blocks use those same roles in mobile navigation and portaled account menus.
 - **Nav item:** icons in both shells use `max(0.75rem, 1.125em)` relative to the shared nav label, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Labels use the remaining row width and truncate only when their text exceeds it. Collapse transitions via `max-width: 0 → 100%` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
 - **Sidebar control:** bottom popover with 3 mode options, active option indicated by purple-filled `Circle` dot
 - **Expand on hover:** outer `<aside>` is 52px in document flow, inner `<div>` is absolutely positioned and transitions width with shadow on the expanded state. 120ms enter delay, 250ms leave delay (via refs) to prevent flicker. Content is never blocked.
 
 ### Mobile Nav
-Full-screen takeover (`fixed inset-0 z-[80]`) with `slide-in-from-bottom` enter / `slide-out-to-bottom` exit. Header with NyxID icon + wordmark + close button. Search input (`h-10 rounded-xl`) at top — typing filters the same `ALL_ITEMS` list as the command palette. Sections mirror the sidebar (Main → Approvals → Developer → Admin) with shared `shell-nav-item` (`text-13`) items in `rounded-xl px-4 py-3` rows; active state is a highlighted full-width row (`bg-overlay-strong font-medium text-foreground`), not a fixed-size square. Footer: a user-info row (`h-8 w-8` icon tile holding a Lucide `User` glyph — not an avatar image — plus name and email) above two full-width split buttons (Settings / Log out, both `rounded-xl py-2.5`), safe-area-aware bottom padding.
+Full-screen takeover (`fixed inset-0 z-[80]`) with `slide-in-from-bottom` enter / `slide-out-to-bottom` exit. Header with NyxID icon + wordmark + close button. Search input (`h-10 rounded-xl`) at top — typing filters the same `ALL_ITEMS` list as the command palette. Sections mirror the sidebar (Main → Approvals → Developer → Admin) with shared `shell-nav-item` (`text-15`) items in `rounded-xl px-4 py-3` rows; active state is a highlighted full-width row (`bg-overlay-strong font-medium text-foreground`), not a fixed-size square. Footer: a user-info row (`h-8 w-8` icon tile holding a Lucide `User` glyph — not an avatar image — plus name and email) above two full-width split buttons (Settings / Log out, both `rounded-xl py-2.5`), safe-area-aware bottom padding.
 
 ### Right Panel
 - **Width:** `w-[280px]`
@@ -563,7 +582,7 @@ Every content page starts with `<PageHeader title description? actions? leading?
 - Layout: flex column on mobile, `sm:flex-row sm:items-start sm:justify-between sm:gap-4`
 - Title: `text-22 sm:text-28 font-bold leading-none tracking-tight`, inline `letterSpacing: -0.03em`. The mobile downshift to 22px is intentional — never override.
 - `leading` slot: 32–48px avatar/icon to the left of the title (`OrgAvatar`, status dot, color chip)
-- `description`: `text-12 text-muted-foreground` directly below the title group
+- `description`: `text-14 text-muted-foreground` directly below the title group
 - `actions` slot: right-aligned, `flex items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
 - A few legacy pages (`provider-list`, `developer-apps`, `guide`, `ai-setup`) still hand-roll a header. They typically also miss the `text-22 sm:text-28` responsive downshift (e.g. `provider-list.tsx:129` and `ai-setup.tsx:266` both hardcode `text-28`), so on mobile their titles overflow. New code uses `PageHeader`; when touching a legacy page, migrate it.
 
@@ -586,9 +605,9 @@ PageHeader (title, optional filter Select in actions, AddCtaButton)
 ```
 
 - **Responsive split:** `flex flex-col gap-3 md:hidden` mobile cards + `hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden` desktop table. Both views render the same data — never show one without the other.
-- **Mobile card anatomy:** `rounded-xl border border-border/50 bg-card p-4`, primary text `text-13 font-semibold`, metadata rows `text-11`, single trailing action button (`h-7 w-7` or `h-8 w-8` ghost icon) absolutely positioned top-right; multiple actions go in a 3-dot dropdown.
+- **Mobile card anatomy:** `rounded-xl border border-border/50 bg-card p-4`, primary text `text-15 font-semibold`, metadata rows `text-13`, single trailing action button (`h-7 w-7` or `h-8 w-8` ghost icon) absolutely positioned top-right; multiple actions go in a 3-dot dropdown.
 - A few list pages (`service-list`, `provider-list`, `orgs`) use a **card grid** instead of a table: `grid gap-4 sm:grid-cols-2 lg:grid-cols-3`. Use a card grid when each item is more "tile-like" than "row-like" (has a distinguishing icon and ≤3 fields).
-- **Multi-list pages:** some pages stack more than one list on a single route (e.g. `channel-bots.tsx` shows the bots list and the device-channels list one above the other). Each list keeps its own list-page recipe (mini PageHeader-style `text-lg` section heading → toolbar → responsive split). Don't tab-ify or accordion these unless the page would otherwise scroll past two screens.
+- **Multi-list pages:** some pages stack more than one list on a single route (e.g. `channel-bots.tsx` shows the bots list and the device-channels list one above the other). Each list keeps its own list-page recipe (`text-20 font-semibold` section heading → toolbar → responsive split). Don't tab-ify or accordion these unless the page would otherwise scroll past two screens.
 
 ### Detail page
 The default shape for any "one thing in detail" page (`key-detail`, `api-key-detail`, `node-detail`, `service-detail`, `provider-detail`, `channel-bot-detail`, `org-detail`, `admin-user-detail`):
@@ -613,8 +632,8 @@ PageHeader (title = entity name, leading = avatar/status, actions = Edit/Delete/
 - Tab-based detail pages (`org-detail`) live inside a single `<Tabs>` directly under `PageHeader`. Role-gated tabs render an inline "Only admins can manage X" Card as their content rather than being hidden — preserves the tab's existence for muscle memory.
 
 ### `DetailSection` + `DetailRow`
-- `DetailSection`: `rounded-xl border border-border/50 bg-card overflow-hidden` with a header strip (`border-b border-border/50 px-4 py-2.5`, title `text-13 font-semibold`) and `divide-y divide-border/30` body.
-- `DetailRow`: `flex items-center justify-between px-4 py-2.5 text-12`. Left = label in `text-muted-foreground`. Right = value (`font-medium text-foreground` by default, or a `Badge` if `badge` prop set), optionally followed by a `h-6 w-6` ghost copy button when `copyable`.
+- `DetailSection`: `rounded-xl border border-border/50 bg-card overflow-hidden` with a header strip (`border-b border-border/50 px-4 py-2.5`, title `text-15 font-semibold`) and `divide-y divide-border/30` body.
+- `DetailRow`: `flex items-center justify-between px-4 py-2.5 text-14`. Left = label in `text-muted-foreground`. Right = value (`font-medium text-foreground` by default, or a `Badge` if `badge` prop set), optionally followed by a `h-6 w-6` ghost copy button when `copyable`.
 - For inline editable fields (display value + pencil → input + check/X), use the local pattern from `key-detail.tsx` (don't reinvent).
 - For embedded forms inside a `DetailSection`, pad the form area with `p-5` and right-align the submit button (`flex justify-end`).
 
@@ -622,31 +641,31 @@ PageHeader (title = entity name, leading = avatar/status, actions = Edit/Delete/
 ```
 flex flex-col items-center justify-center gap-1 py-12 text-center
   ↳ <Illustration className="h-64 w-64 text-muted-foreground/30" />   (or h-48 w-48 inside a section)
-  ↳ <p className="text-12 font-medium text-muted-foreground/30">Headline</p>
-  ↳ <p className="text-xs text-muted-foreground/30">Optional supporting line.</p>
+  ↳ <p className="text-14 font-medium text-muted-foreground/30">Headline</p>
+  ↳ <p className="text-13 text-muted-foreground/30">Optional supporting line.</p>
   ↳ <AddCtaButton ... />   (optional)
 ```
 
 Illustrations live in `components/icons/empty-state/` — pick a thematically relevant one (mystery box, magic key, dish antenna, robot…). Never use a generic Lucide icon at this size.
 
 ### Error state
-- Inline retryable errors: `<ErrorBanner message onRetry?>` from `components/shared/error-banner.tsx`. `rounded-xl border border-destructive/15 bg-destructive/[0.04] px-4 py-3`, 36×36 icon tile, message in `text-12 text-destructive`, optional `Retry` button on the right.
+- Inline retryable errors: `<ErrorBanner message onRetry?>` from `components/shared/error-banner.tsx`. `rounded-xl border border-destructive/15 bg-destructive/[0.04] px-4 py-3`, 36×36 icon tile, message in `text-14 text-destructive`, optional `Retry` button on the right.
 - Page-level fetch failure: same shape as the empty state, but with an error-flavored headline ("Failed to load X") and the same illustration tone.
 
 ### Code blocks
 Two flavors, used everywhere docs/credentials/configs appear (`guide`, `ai-setup`, `integration-guide`, `key-detail`, `nodes`):
 
-- **Block:** `<pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-xs leading-relaxed">…`. Optional filename `Badge` above. Copy button absolutely positioned top-right (`absolute top-2 right-2 h-7 w-7` or `h-8 w-8`, ghost icon button, swaps to a green `Check` for ~2s after copy).
-- **Inline chip:** `<code className="rounded bg-muted px-1.5 py-0.5 text-xs">snippet</code>` for short identifiers in prose.
+- **Block:** `<pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-14 leading-relaxed">…`. Optional filename `Badge` above. Copy button absolutely positioned top-right (`absolute top-2 right-2 h-7 w-7` or `h-8 w-8`, ghost icon button, swaps to a green `Check` for ~2s after copy).
+- **Inline chip:** `<code className="rounded bg-muted px-1.5 py-0.5 text-14">snippet</code>` for short identifiers in prose.
 - **`CopyableField`** (shared) — single-line value with a copy button. `rounded-xl border border-border bg-muted font-mono` body + absolutely-positioned `h-8 w-8` (or `h-7 w-7` `size="sm"`) copy button at right-center. Use for tokens, IDs, URIs displayed once.
 
 ### Settings rows
-For toggle/select/input rows inside a settings card: `flex items-center justify-between rounded-lg border border-border p-4`, label + `text-12 text-muted-foreground` description column on the left, control on the right. Used in `notification-settings`, the form-row pattern in MFA/email settings, etc.
+For toggle/select/input rows inside a settings card: `flex items-center justify-between rounded-lg border border-border p-4`, label + `text-14 text-muted-foreground` description column on the left, control on the right. Used in `notification-settings`, the form-row pattern in MFA/email settings, etc.
 
 ### Banners & callouts
-- **Info / "important context"**: `rounded-xl border border-{color}/15 bg-{color}/[0.04] px-4 py-3` with a 36×36 `bg-{color}/10` icon tile and message text in `text-12 text-{color}` (or muted). Color picks: `success` (org-shared credential), `info`/`primary` (tip), `warning`/amber (pending action), `destructive` (error).
+- **Info / "important context"**: `rounded-xl border border-{color}/15 bg-{color}/[0.04] px-4 py-3` with a 36×36 `bg-{color}/10` icon tile and message text in `text-14 text-{color}` (or muted). Color picks: `success` (org-shared credential), `info`/`primary` (tip), `warning`/amber (pending action), `destructive` (error).
 - **Pending-webhook / blocked state** (large, page-spanning): `rounded-xl border border-amber-500/30 bg-amber-500/10 p-6 text-center` with a centered illustration. Use when the user must take action elsewhere before the page becomes useful.
-- **Empty/info microblock** (inline inside a card): `rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground`.
+- **Empty/info microblock** (inline inside a card): `rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground`.
 
 ### Danger zone
 Bottom of any settings tab that has a destructive action: a separate `Card` with `border-destructive/40`, `CardTitle className="text-destructive"`, description in `text-destructive/70`, action button right-aligned. Always visually segregated from the regular settings form above (don't mix destructive actions into the main form).
@@ -655,7 +674,7 @@ Bottom of any settings tab that has a destructive action: a separate `Card` with
 For client secrets, service-account credentials, and node registration tokens, use the `ClientSecretDialog` shape:
 - Dialog title: "Save … Secret" / "New …"
 - `DialogDescription`: "This … is shown only once. Copy and store it securely now."
-- Each value rendered as a mono code block (`rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs`) with an inline `h-7 w-7` copy button
+- Each value rendered as a mono code block (`rounded-lg border border-border bg-muted px-3 py-2 font-mono text-14`) with an inline `h-7 w-7` copy button
 - Dismiss button: `variant="primary"` labeled "I have saved it" (not "Close" / "Done")
 
 ### Search bar
@@ -663,7 +682,7 @@ Used on every searchable list (admin lists, sessions, etc.):
 ```
 flex items-center gap-2
   ↳ relative wrapper:
-      Input  className="h-8 pl-9 text-12"
+      Input  className="h-8 pl-9 text-14"
       Search icon: absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-text-tertiary
   ↳ Button variant="outline">Search</Button>
   ↳ Button variant="ghost" if query>Clear</Button>
@@ -671,11 +690,11 @@ flex items-center gap-2
 
 ### Pagination
 Used at the bottom of any paginated list. `flex items-center justify-between` row:
-- Left: count text in `text-11 text-text-tertiary` ("Showing 1–25 of 137")
+- Left: count text in `text-13 text-text-tertiary` ("Showing 1–25 of 137")
 - Right: prev / "Page X of Y" / next group, prev/next as `h-8 w-8` outline icon buttons with `ChevronLeft`/`ChevronRight`
 
 ### Stat cards / mini-grid
-For a row of small KPIs inside a card or section: `grid gap-3 grid-cols-2 sm:grid-cols-4` of `rounded-xl border border-border/50 bg-overlay p-4 text-center` tiles. Value is the dominant element (snap to a defined scale step — 28px or, where space is tight, 22px), label below in `text-11`. The standalone `StatCard` used on `developer-apps` is a related but slightly different pattern that should be reconciled.
+For a row of small KPIs inside a card or section: `grid gap-3 grid-cols-2 sm:grid-cols-4` of `rounded-xl border border-border/50 bg-overlay p-4 text-center` tiles. Value is the dominant element (snap to a defined scale step — 28px or, where space is tight, 22px), label below in `text-13`. The standalone `StatCard` used on `developer-apps` is a related but slightly different pattern that should be reconciled.
 
 ### Ambient status line
 A 2px gradient bar pinned to the very top of the viewport (`fixed top-0 left-0 right-0 z-[60]`), driven by `useNodes()`. Healthy = success-green gradient; draining = amber; offline nodes present = destructive red, animated pulse. Defaults to **healthy green** when the user has no nodes at all — the bar is always present and never empty. Every page sees it; pages should not draw their own equivalent.
@@ -690,7 +709,7 @@ A 2px gradient bar pinned to the very top of the viewport (`fixed top-0 left-0 r
 The dashboard (after onboarding completes) follows this composition top-to-bottom:
 
 1. **Optional `OnboardingChecklist`** — only when no API keys exist; see Onboarding above.
-2. **Greeting** — `text-22 sm:text-28 font-bold leading-[1.1]` inline `letterSpacing: -0.03em`, "Welcome back, {name}". Email below at `text-12 text-muted-foreground`.
+2. **Greeting** — `text-22 sm:text-28 font-bold leading-[1.1]` inline `letterSpacing: -0.03em`, "Welcome back, {name}". Email below at `text-14 text-muted-foreground`.
 3. **Status grid + Security Posture row** — `flex flex-col md:flex-row gap-4`:
    - Left: `flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3` of 6 `StatusCell`s (Email, MFA, Services, API Keys, Nodes, Approvals). Each cell is its own `rounded-xl border border-border/50 bg-card px-4 py-3` link with a 32×32 icon tile, 10px uppercase label, 13px value.
    - Right: `AccountPostureCard` — `w-[280px] rounded-xl border border-border/50 bg-card`, header (icon + "Security Posture" + colored status label), 4-item checklist with semantic icon coloring, footer with `0 of 4` counter and a `h-1.5` progress bar filled with `nyx-gradient-vivid`.
@@ -718,6 +737,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Canonical text numbers and shared semantic roles | Every text-N is N/16rem, defined once. A simultaneous markup/CSS migration preserves the current reading sizes; a separate change corrects semantic roles using the table above. Studio, NyxBot, auth/docs, charts, Billing, onboarding and portals use the same roles and weights. Root 0.85 rebase and spacing preferences are unchanged. Touch fields floor the input role at 16px; shared targets floor at 24px. |
 | 2026-11-04 | One reading scale across Studio and NyxBot | The themed root owns the reading tokens and 1.5 body line height, so route changes and portals cannot change a token’s rendered size. Control sizing and density stay scoped to the assistant; shared navigation icons follow their labels in both shells. Never-themed landing/blog defaults remain separate. |
 | 2026-11-04 | Rebase default text size to the previous 0.85×; restore dense rail and compact save chrome | The root baseline applies consistently in Studio and the assistant. Versioned migration preserves custom rendered sizes within bounds without changing spacing. Explicit rail geometry prevents general control scaling from stretching tick slots; compact bars and single-line reviews keep editing chrome small. |
 | 2026-11-04 | Compact titles, explicit change review and viewport save actions | Observer-driven headers retain search focus and compensate their height in the scroll content. One bar outside the scrolling viewport preserves access to dirty forms across tabs, detail pages and mobile keyboards. Allowlisted field diffs make edit saves reviewable without exposing credentials; section help adds searchable context. |

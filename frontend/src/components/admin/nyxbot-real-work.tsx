@@ -159,7 +159,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                   </span>
                 )}
               </TableCell>
-              <TableCell className="font-medium tabular-nums">
+              <TableCell className="font-normal tabular-nums">
                 {w.merchants}
               </TableCell>
               <TableCell>{w.internal_owners}</TableCell>
@@ -209,7 +209,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                 <TableBody>
                   {w.owners.map((o) => (
                     <TableRow key={o.owner_id}>
-                      <TableCell className="font-mono text-13">
+                      <TableCell className="font-mono text-14">
                         {o.owner_id}
                       </TableCell>
                       <TableCell>

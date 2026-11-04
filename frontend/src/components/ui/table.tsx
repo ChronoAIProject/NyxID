@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import { cn } from "@/lib/utils";
 
@@ -11,7 +12,7 @@ const Table = React.forwardRef<HTMLTableElement, TableProps>(
     <div className={cn("relative w-full overflow-auto", containerClassName)}>
       <table
         ref={ref}
-        className={cn("w-full caption-bottom text-sm", className)}
+        className={cn(`w-full caption-bottom ${TEXT_STYLES.body} unthemed:text-sm`, className)}
         {...props}
       />
     </div>
@@ -80,7 +81,7 @@ const TableHead = React.forwardRef<
   <th
     ref={ref}
     className={cn(
-      "h-8 px-3 text-left align-middle text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary [&:has([role=checkbox])]:pr-0",
+      `h-8 px-3 text-left align-middle ${TEXT_STYLES.tableHeader} font-semibold uppercase tracking-[1.5px] text-text-tertiary [&:has([role=checkbox])]:pr-0`,
       className,
     )}
     {...props}
@@ -95,7 +96,7 @@ const TableCell = React.forwardRef<
   <td
     ref={ref}
     className={cn(
-      "px-3 py-2.5 align-middle text-14 text-foreground [&:has([role=checkbox])]:pr-0",
+      `px-3 py-2.5 align-middle ${TEXT_STYLES.tableCell} text-foreground [&:has([role=checkbox])]:pr-0`,
       className,
     )}
     {...props}
@@ -109,7 +110,7 @@ const TableCaption = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <caption
     ref={ref}
-    className={cn("mt-4 text-sm text-muted-foreground", className)}
+    className={cn(`mt-4 ${TEXT_STYLES.meta} text-muted-foreground unthemed:text-sm`, className)}
     {...props}
   />
 ));

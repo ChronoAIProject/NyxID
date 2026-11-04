@@ -149,7 +149,7 @@ export function NyxbotUsage() {
             >
               Last 30 days
             </Button>
-            <label className="space-y-1 text-13 text-muted-foreground">
+            <label className="space-y-1 text-14 text-muted-foreground">
               From
               <Input
                 type="date"
@@ -159,7 +159,7 @@ export function NyxbotUsage() {
                 }
               />
             </label>
-            <label className="space-y-1 text-13 text-muted-foreground">
+            <label className="space-y-1 text-14 text-muted-foreground">
               To
               <Input
                 type="date"

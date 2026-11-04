@@ -433,7 +433,7 @@ export function LearningDraftEditor({
                   <FormControl>
                     <Textarea
                       aria-label={`File ${index + 1} content`}
-                      className="font-mono text-13"
+                      className="font-mono text-14"
                       readOnly={readOnly}
                       {...field}
                     />

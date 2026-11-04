@@ -130,7 +130,7 @@ export function ApiKeyTable({
         <CogsIcon className="h-64 w-64 text-muted-foreground/30" />
         <div className="space-y-1">
           <p className="text-14 font-medium text-muted-foreground">No API keys yet</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Create one to get started.
           </p>
         </div>
@@ -190,7 +190,7 @@ export function ApiKeyTable({
                   <div className="flex items-start justify-between gap-2 pr-8">
                     <div className="min-w-0">
                       <p className="truncate text-14 font-medium text-foreground">{key.name}</p>
-                      <code className="text-13 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+                      <code className="text-14 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1">
@@ -242,7 +242,7 @@ export function ApiKeyTable({
                 {renderActions(key)}
               </div>
               <p className="pr-10 text-15 font-semibold text-foreground truncate">{key.name}</p>
-              <code className="text-13 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
+              <code className="text-14 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
               <div className="mt-2 flex flex-wrap gap-1">
                 {key.platform && <Badge variant="secondary">{key.platform}</Badge>}
                 {key.platform === "nyxid-assistant" && (
@@ -303,7 +303,7 @@ export function ApiKeyTable({
                           <OrgAvatar
                             avatarUrl={source.avatar_url ?? null}
                             displayName={source.org_name}
-                            className="h-3.5 w-3.5 text-[0.5rem]"
+                            className="h-3.5 w-3.5 text-12"
                           />
                           {ownerLabel}
                         </span>
@@ -314,7 +314,7 @@ export function ApiKeyTable({
                   </TableCell>
 
                   <TableCell>
-                    <code className="font-mono text-13 text-muted-foreground">
+                    <code className="font-mono text-14 text-muted-foreground">
                       {key.key_prefix}••••••••
                     </code>
                   </TableCell>

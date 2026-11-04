@@ -171,7 +171,7 @@ export function TelegramNew({
 
   if (configuration.isPending)
     return (
-      <p role="status" className="text-sm text-muted-foreground">
+      <p role="status" className="text-14 text-muted-foreground">
         Checking Telegram setup…
       </p>
     );
@@ -192,7 +192,7 @@ export function TelegramNew({
     return (
       <div className="space-y-3">
         {error && <ErrorBanner message={error.message} />}
-        <p className="text-sm text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           An administrator needs to configure a manager bot in Admin → Platform
           Credentials → Telegram — bot creation. You can use Telegram bot token
           to connect an existing bot.
@@ -215,24 +215,24 @@ export function TelegramNew({
     <div className={fullPage ? "space-y-4 break-words" : "space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5"}>
       {error && <ErrorBanner message={error.message} />}
       {link && begin.error && (
-        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-sm underline underline-offset-4">
+        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-14 underline underline-offset-4">
           Open existing Telegram setup
         </a>
       )}
       {(connecting && request?.auto_connect) || connected ? (
         <div className="space-y-3">
-          <p role="status" className="flex items-center gap-2 text-sm">
+          <p role="status" className="flex items-center gap-2 text-14">
             {connected ? <Check className="size-3 text-success" /> : <Loader2 className="size-3 animate-spin" />}
             {connected ? `@${request?.bot_username} is connected.` : `Connecting @${request?.bot_username}…`}
           </p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             You can close this {stayInPlace ? "dialog" : "page"}. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
           </p>
-          {request?.connection_error && <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>}
+          {request?.connection_error && <p role="status" className="text-13 text-muted-foreground">{request.connection_error}</p>}
         </div>
       ) : fullPage ? (
         <div className="space-y-4">
-          <p className="text-xs leading-relaxed text-muted-foreground">
+          <p className="text-13 leading-relaxed text-muted-foreground">
             Choose your bot’s name and username in Telegram. NyxID connects it automatically when you finish.
           </p>
           {canLaunch && (
@@ -249,32 +249,32 @@ export function TelegramNew({
             </Button>
           )}
           {launchUrl && canLaunch && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Telegram didn’t open?{" "}
               <a className="ph-no-capture underline" href={launchUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open Telegram</a>
             </p>
           )}
           {connecting && (
-            <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
+            <p role="status" className="flex items-center gap-2 text-13 text-muted-foreground">
               <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
               {`Connecting @${request?.bot_username}…`}
             </p>
           )}
           {connecting && request?.connection_error && (
-            <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>
+            <p role="status" className="text-13 text-muted-foreground">{request.connection_error}</p>
           )}
         </div>
       ) : <ol aria-label="Telegram setup steps" className="space-y-4">
         <li className="flex gap-3">
           <span
-            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-xs"
+            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-13"
             aria-hidden="true"
           >
             {creating ? <Check className="size-3 text-success" /> : "1"}
           </span>
           <div className="space-y-2">
-            <p className="text-sm font-medium">Continue in Telegram</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-14 font-medium">Continue in Telegram</p>
+            <p className="text-13 text-muted-foreground">
               Create a new bot for the account selected above. NyxID will
               connect it automatically when you finish Telegram’s form.
             </p>
@@ -293,7 +293,7 @@ export function TelegramNew({
               </Button>
             )}
             {launchUrl && canLaunch && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Telegram didn’t open?{" "}
                 <a
                   className="ph-no-capture underline"
@@ -313,30 +313,30 @@ export function TelegramNew({
           aria-current={creating && !connected ? "step" : undefined}
         >
           <span
-            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-xs"
+            className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-13"
             aria-hidden="true"
           >
             {connected ? <Check className="size-3 text-success" /> : "2"}
           </span>
           <div className="space-y-2">
-            <p className="text-sm font-medium">Create your bot</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-14 font-medium">Create your bot</p>
+            <p className="text-13 text-muted-foreground">
               In the setup chat, tap <strong>Create bot</strong> and finish
               Telegram’s name and username form. Tap <strong>Start</strong>{" "}
               first if Telegram asks.
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               You can stay in Telegram. This page updates automatically when the
               connection is complete.
             </p>
             {connecting && (
-              <p role="status" className="flex items-center gap-2 text-sm">
+              <p role="status" className="flex items-center gap-2 text-14">
                 <Loader2 className="size-3 animate-spin" aria-hidden="true" />
                 {`Connecting @${request?.bot_username}…`}
               </p>
             )}
             {connecting && request?.connection_error && (
-              <p role="status" className="text-xs text-muted-foreground">
+              <p role="status" className="text-13 text-muted-foreground">
                 {request.connection_error}
               </p>
             )}
@@ -349,7 +349,7 @@ export function TelegramNew({
           recoveryUrl={recovery && recovery.actor === actor && recovery.id === request.id && recovery.revision === request.revision && request.can_open_creation_form && recoveryUnexpired ? recovery.url : undefined} />
       )}
       {request && !request.auto_connect && !terminal && (
-        <div className="space-y-2 rounded-lg border border-border p-3 text-xs">
+        <div className="space-y-2 rounded-lg border border-border p-3 text-13">
           <p>
             This setup was started with the previous flow. Finish its Telegram
             approval, then complete the saved connection below{fullPage ? "." : ", or cancel and start again."}
@@ -367,7 +367,7 @@ export function TelegramNew({
         </div>
       )}
       {terminal && (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           {request?.status === "expired"
             ? "This setup expired. Start again to create a new bot."
             : request?.status === "suspended"
@@ -377,7 +377,7 @@ export function TelegramNew({
       )}
       {!fullPage && request && !terminal && !connected && (
         <div className="space-y-2 border-t border-border pt-3">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Setting up: {request.label}.{" "}
             {request.status !== "provisioning" && (
               <>

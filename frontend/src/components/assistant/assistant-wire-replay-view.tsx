@@ -171,7 +171,7 @@ export function AssistantWireReplayView({
               Diagnostic only
             </span>
           </div>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-12 leading-normal text-muted-foreground">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-14 leading-normal text-muted-foreground">
             {JSON.stringify(replay.actorFacts, null, 2)}
           </pre>
         </section>

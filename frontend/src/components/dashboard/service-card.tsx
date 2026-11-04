@@ -86,7 +86,7 @@ export function ServiceCard({
             }
             size="md"
           />
-          <h3 className="truncate text-lg font-normal text-foreground">
+          <h3 className="truncate text-15 font-normal text-foreground">
             {service.name}
           </h3>
         </div>
@@ -116,7 +116,7 @@ export function ServiceCard({
 
       {/* Target + Routing */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-text-tertiary">{secondaryLabel}</span>
+        <span className="text-13 text-text-tertiary">{secondaryLabel}</span>
         {nodeLabel && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -132,7 +132,7 @@ export function ServiceCard({
               </span>
             </TooltipTrigger>
             <TooltipContent>
-              <p className="text-xs">
+              <p className="text-13">
                 Your routing: {node?.name ?? service.node_id}
                 {node?.status ? ` (${node.status})` : ""}
               </p>

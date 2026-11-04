@@ -17,7 +17,7 @@ export function VoiceInferenceFields({
   const validation = value ? voiceMetadataSchema.safeParse(value) : null;
   return (
     <div className="space-y-3 rounded-lg border p-3">
-      <label className="block text-xs">
+      <label className="block text-14">
         Voice protocol
         <select
           aria-label="Voice protocol"
@@ -54,7 +54,7 @@ export function VoiceInferenceFields({
         <>
           {(["models", "voices"] as const).map((field) => (
             <fieldset key={field} className="space-y-2">
-              <legend className="text-xs font-medium">
+              <legend className="text-13 font-medium">
                 {field === "models" ? "Voice models" : "Provider voices"}
               </legend>
               {value[field].map((item, index) => (
@@ -90,7 +90,7 @@ export function VoiceInferenceFields({
                     }
                   />
                   {field === "models" && (
-                    <label className="text-xs">
+                    <label className="text-14">
                       <input
                         type="radio"
                         name="default-voice-model"
@@ -147,7 +147,7 @@ export function VoiceInferenceFields({
               </Button>
             </fieldset>
           ))}
-          <label className="block text-xs">
+          <label className="block text-14">
             Usage source
             <select
               aria-label="Voice usage source"
@@ -166,7 +166,7 @@ export function VoiceInferenceFields({
               <option value="server_measured">Server measured (xAI)</option>
             </select>
           </label>
-          <fieldset className="flex flex-wrap gap-3 text-xs">
+          <fieldset className="flex flex-wrap gap-3 text-13">
             <legend>Reported billing units</legend>
             {VOICE_BILLING_METRICS.map((metric) => (
               <label key={metric}>
@@ -187,12 +187,12 @@ export function VoiceInferenceFields({
               </label>
             ))}
           </fieldset>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Models and voices must be available at the provider. Prices are
             configured separately below.
           </p>
           {validation && !validation.success && (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               {validation.error.issues[0]?.message}
             </p>
           )}

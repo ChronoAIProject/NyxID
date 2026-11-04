@@ -49,7 +49,7 @@ export function AgentPluginsSection() {
                 Copy command
               </Button>
             </div>
-            <pre className="whitespace-pre-wrap break-all font-mono text-13 leading-5 text-muted-foreground">
+            <pre className="whitespace-pre-wrap break-all font-mono text-14 leading-5 text-muted-foreground">
               {command}
             </pre>
           </div>

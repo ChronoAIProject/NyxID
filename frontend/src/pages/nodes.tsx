@@ -163,14 +163,14 @@ function RegisterNodeDialog({
                 value={createdToken.token}
               />
               <div className="rounded-lg bg-muted p-3 space-y-2">
-                <p className="text-xs font-medium text-text-tertiary">
+                <p className="text-13 font-medium text-text-tertiary">
                   Run on your node
                 </p>
                 <div>
                   <p className="text-12 text-muted-foreground mb-0.5">
                     File-based storage (default, works on servers)
                   </p>
-                  <code className="text-xs text-foreground break-all">
+                  <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag}
                   </code>
@@ -180,7 +180,7 @@ function RegisterNodeDialog({
                     OS keychain storage (macOS Keychain, Windows Credential
                     Manager)
                   </p>
-                  <code className="text-xs text-foreground break-all">
+                  <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag} --keychain
                   </code>
@@ -499,7 +499,7 @@ export function NodesPage() {
                           {node.name}
                         </span>
                         {node.metadata?.agent_version && (
-                          <span className="ml-2 text-xs text-muted-foreground">
+                          <span className="ml-2 text-13 text-muted-foreground">
                             v{node.metadata.agent_version}
                           </span>
                         )}

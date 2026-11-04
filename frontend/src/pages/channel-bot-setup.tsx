@@ -69,7 +69,7 @@ export function ChannelBotSetupLinksPage() {
           onRetry={catalog.refetch}
         />
       ) : platforms.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No channels are currently available for setup.
         </p>
       ) : (
@@ -152,7 +152,7 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
         />
       ) : !descriptor?.enabled ? (
         <div className="space-y-4 text-center">
-          <p role="status" className="text-xs text-muted-foreground">
+          <p role="status" className="text-13 text-muted-foreground">
             {descriptor
               ? `${descriptor.display_name} setup is currently unavailable.`
               : "This channel is not supported."}

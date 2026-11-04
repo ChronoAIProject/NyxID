@@ -179,7 +179,7 @@ function PanelSection({
 }) {
   return (
     <section className="space-y-3 p-3" aria-label={title}>
-      <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+      <h4 className="inline-flex items-center gap-2 text-14 font-medium">
         <Icon className="size-4 text-primary-text" aria-hidden="true" /> {title}
       </h4>
       {children}
@@ -602,7 +602,7 @@ export function ServiceConnectionTable({
                     aria-label={`Agent key access for ${key.label}`}
                     data-insight-view="access"
                     data-connection-id={key.id}
-                    className="inline-flex items-center gap-1.5 rounded-sm text-xs font-medium text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                    className="inline-flex items-center gap-1.5 rounded-sm text-13 font-medium text-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <UsersRound className="size-3.5 shrink-0" />
                     <span
@@ -693,7 +693,7 @@ export function ServiceConnectionTable({
                         data-insight-view="billing"
                         data-connection-id={key.id}
                         className={cn(
-                          "block max-w-full rounded-sm text-left text-xs hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring",
+                          "block max-w-full rounded-sm text-left text-13 hover:text-primary-text focus-visible:outline-2 focus-visible:outline-ring",
                           billingCategory === "not_billable"
                             ? "w-fit"
                             : "w-full",

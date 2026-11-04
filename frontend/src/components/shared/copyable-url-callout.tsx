@@ -48,7 +48,7 @@ export function CopyableUrlCallout({
         className,
       )}
     >
-      <p className="text-xs font-medium text-foreground">{label}</p>
+      <p className="text-13 font-medium text-foreground">{label}</p>
       <div className="relative">
         <code className="flex min-h-[40px] items-center break-all rounded-lg border border-border bg-background px-3 py-2 pr-11 font-mono text-14 leading-relaxed text-foreground">
           {url}
@@ -70,14 +70,14 @@ export function CopyableUrlCallout({
         </Button>
       </div>
       {description ? (
-        <p className="text-xs text-muted-foreground">{description}</p>
+        <p className="text-13 text-muted-foreground">{description}</p>
       ) : null}
       {docsHref ? (
         <a
           href={docsHref}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
         >
           Learn more →
           <ExternalLink className="h-3 w-3" aria-hidden="true" />

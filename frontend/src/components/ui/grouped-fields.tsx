@@ -30,7 +30,7 @@ export function GroupedLabel({
 }: ComponentProps<typeof FormLabel>) {
   return (
     <FormLabel
-      className={cn("text-13 font-normal text-text-tertiary", className)}
+      className={cn("text-14 font-medium text-text-tertiary", className)}
       {...props}
     />
   );

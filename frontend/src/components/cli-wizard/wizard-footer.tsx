@@ -27,7 +27,7 @@ export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
       <footer className={FOOTER_CLASS}>
         <span>
           Served locally from{" "}
-          <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs">
+          <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-14">
             {localOrigin ?? window.location.host}
           </code>
         </span>

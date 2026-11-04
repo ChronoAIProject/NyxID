@@ -184,7 +184,7 @@ export function DevicesBindPage() {
                         <Input
                           {...field}
                           autoComplete="one-time-code"
-                          className="h-11 font-mono text-base"
+                          className="h-11 font-mono text-14"
                           inputMode="text"
                           maxLength={14}
                           placeholder="XXXX-XXXX-XXXX"
@@ -218,7 +218,7 @@ export function DevicesBindPage() {
                         }}
                       >
                         <FormControl>
-                          <SelectTrigger className="h-11 text-sm">
+                          <SelectTrigger className="h-11 text-14">
                             <SelectValue placeholder="Personal account" />
                           </SelectTrigger>
                         </FormControl>
@@ -247,7 +247,7 @@ export function DevicesBindPage() {
                       <FormControl>
                         <Input
                           {...field}
-                          className="h-11 text-sm"
+                          className="h-11 text-14"
                           maxLength={200}
                           placeholder="Hallway camera"
                           value={field.value ?? ""}
@@ -352,7 +352,7 @@ export function DevicesBindPage() {
 
                 <div className="flex justify-end">
                   <Button
-                    className="h-11 w-full text-sm sm:w-auto"
+                    className="h-11 w-full text-14 sm:w-auto"
                     disabled={approveDevice.isPending}
                     isLoading={approveDevice.isPending}
                     type="submit"

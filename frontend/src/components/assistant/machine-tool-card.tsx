@@ -54,7 +54,7 @@ export function MachineToolCard({
   return (
     <section
       aria-label="Machine action"
-      className={`${RECEIPT_MAX_W} my-2 min-w-0 space-y-2 rounded-lg border border-hairline bg-overlay/35 p-3 text-xs`}
+      className={`${RECEIPT_MAX_W} my-2 min-w-0 space-y-2 rounded-lg border border-hairline bg-overlay/35 p-3 text-13`}
     >
       <div className="flex flex-wrap items-center gap-2">
         <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden />
@@ -177,7 +177,7 @@ function CommandExcerpt({ endpoint }: { readonly endpoint: string }) {
   if (failed) return <p role="status">Excerpt unavailable.</p>;
   if (text === undefined) return <p role="status">Loading excerpt…</p>;
   return (
-    <pre data-scroll-fade="" className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-13">
+    <pre data-scroll-fade="" className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-overlay p-2 font-mono text-14">
       {text}
     </pre>
   );

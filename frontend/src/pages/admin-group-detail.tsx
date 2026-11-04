@@ -211,10 +211,10 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
+        <h3 className="mb-2 font-display text-15 font-semibold">
           Group not found
         </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
+        <p className="mb-4 text-14 text-muted-foreground">
           The group you are looking for does not exist or has been deleted.
         </p>
         <Button
@@ -271,7 +271,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <DetailSection title="Inherited Roles">
         <div className="px-4 py-3">
           {group.roles.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No roles assigned to this group.
             </p>
           ) : (
@@ -315,7 +315,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
             <TableBody>
               {members.map((member) => (
                 <TableRow key={member.id}>
-                  <TableCell className="font-medium">{member.email}</TableCell>
+                  <TableCell className="font-normal">{member.email}</TableCell>
                   <TableCell>
                     {member.display_name ?? (
                       <span className="text-muted-foreground">--</span>
@@ -504,7 +504,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="add-member-id">
+              <label className="text-14 font-medium" htmlFor="add-member-id">
                 User ID
               </label>
               <Input

@@ -38,7 +38,7 @@ function MiniLineChart({
 }) {
   if (buckets.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         No recent activity.
       </p>
     );
@@ -147,7 +147,7 @@ export function ApiKeyUsageDashboard({
                       {usage.platform ?? "agent"}
                     </Badge>
                   </TableCell>
-                  <TableCell className="text-foreground font-semibold">
+                  <TableCell className="text-foreground font-normal">
                     {usage.request_count}
                   </TableCell>
                   <TableCell>

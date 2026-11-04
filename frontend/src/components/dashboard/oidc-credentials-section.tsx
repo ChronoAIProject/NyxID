@@ -79,7 +79,7 @@ export function OidcCredentialsSection({
             <ButtonIcon><Eye className="h-3 w-3" /></ButtonIcon>
             Reveal Credentials
           </Button>
-          <p className="mt-1 text-xs text-muted-foreground">
+          <p className="mt-1 text-13 text-muted-foreground">
             Credentials should be stored securely and never shared publicly.
           </p>
         </div>
@@ -92,18 +92,18 @@ export function OidcCredentialsSection({
               <AlertTriangle className="h-4 w-4" />
               Store this secret securely
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               The client secret provides full access to this OIDC client. Never
               expose it in client-side code or version control.
             </p>
           </div>
 
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">
+            <p className="mb-1 text-13 font-medium text-muted-foreground">
               Client Secret
             </p>
             <div className="flex items-center gap-2">
-              <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-xs">
+              <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-14">
                 {secretVisible
                   ? credentials.client_secret
                   : "***".padEnd(32, "*")}
@@ -136,7 +136,7 @@ export function OidcCredentialsSection({
           <Separator />
 
           <div>
-            <p className="mb-2 text-xs font-medium text-muted-foreground">
+            <p className="mb-2 text-13 font-medium text-muted-foreground">
               Redirect URIs
             </p>
             <RedirectUriEditor
@@ -149,11 +149,11 @@ export function OidcCredentialsSection({
             <>
               <Separator />
               <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">
+                <p className="mb-1 text-13 font-medium text-muted-foreground">
                   Delegation Scopes
                 </p>
                 <p className="text-14">{credentials.delegation_scopes}</p>
-                <p className="mt-1 text-xs text-muted-foreground">
+                <p className="mt-1 text-13 text-muted-foreground">
                   Scopes this client can request via token exchange (RFC 8693).
                   Empty means token exchange is disabled.
                 </p>
@@ -187,7 +187,7 @@ export function OidcCredentialsSection({
                 <p className="text-14 font-medium text-destructive">
                   This will invalidate the current secret immediately.
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   All existing integrations using the current secret will stop
                   working until updated with the new secret.
                 </p>

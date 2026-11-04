@@ -199,7 +199,7 @@ function SessionDetails({
         aria-expanded={open}
         aria-controls={contentId}
         onClick={() => setOpen((value) => !value)}
-        className="w-full justify-between px-1 text-12 focus-visible:ring-2 focus-visible:ring-ring"
+        className="w-full justify-between px-1 text-14 focus-visible:ring-2 focus-visible:ring-ring"
       >
         Session details
         <ChevronDown

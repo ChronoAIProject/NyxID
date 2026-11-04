@@ -91,7 +91,7 @@ export function AccessModeSwitcher({
             });
         }}
       >
-        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-13">
+        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-14">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

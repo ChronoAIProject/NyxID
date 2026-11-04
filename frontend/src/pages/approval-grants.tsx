@@ -204,7 +204,7 @@ export function ApprovalGrantsPage() {
               <TableBody>
                 {grants.map((grant) => (
                   <TableRow key={grant.id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       <div className="flex items-center gap-2">
                         <span>{grant.service_name}</span>
                         {grant.org_scoped && (
@@ -237,7 +237,7 @@ export function ApprovalGrantsPage() {
                           {formatDate(grant.expires_at)}
                         </span>
                         {isExpiringSoon(grant.expires_at) && (
-                          <Badge variant="warning" className="text-xs">
+                          <Badge variant="warning" className="text-12">
                             Expiring soon
                           </Badge>
                         )}

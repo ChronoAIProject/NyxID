@@ -300,10 +300,10 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
+        <h3 className="mb-2 font-display text-15 font-semibold">
           Account source unavailable
         </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
+        <p className="mb-4 text-14 text-muted-foreground">
           Source absence does not establish erasure completion. Inspect durable progress below.
         </p>
         <Button
@@ -495,22 +495,22 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
             <TableBody>
               {sessions.map((session) => (
                 <TableRow key={session.id}>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-mono text-14">
                     {session.ip_address ?? "--"}
                   </TableCell>
                   <TableCell
-                    className="max-w-[200px] truncate text-xs"
+                    className="max-w-[200px] truncate text-14"
                     title={session.user_agent ?? undefined}
                   >
                     {session.user_agent ?? "--"}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-14">
                     {formatRelativeTime(session.created_at)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-14">
                     {formatDate(session.expires_at)}
                   </TableCell>
-                  <TableCell className="text-muted-foreground text-xs">
+                  <TableCell className="text-muted-foreground text-14">
                     {formatRelativeTime(session.last_active_at)}
                   </TableCell>
                   <TableCell>
@@ -780,7 +780,7 @@ function UserRolesSection({
 
         {directRoles.length > 0 && (
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">
+            <p className="mb-1 text-13 font-medium text-muted-foreground">
               Direct Roles
             </p>
             <div className="flex flex-wrap gap-2">
@@ -806,7 +806,7 @@ function UserRolesSection({
 
         {inheritedRoles.length > 0 && (
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">
+            <p className="mb-1 text-13 font-medium text-muted-foreground">
               Inherited from Groups
             </p>
             <div className="flex flex-wrap gap-2">
@@ -821,7 +821,7 @@ function UserRolesSection({
 
         {effectivePermissions.length > 0 && (
           <div>
-            <p className="mb-1 text-xs font-medium text-muted-foreground">
+            <p className="mb-1 text-13 font-medium text-muted-foreground">
               Effective Permissions
             </p>
             <div className="flex flex-wrap gap-1">
@@ -829,7 +829,7 @@ function UserRolesSection({
                 <Badge
                   key={perm}
                   variant="secondary"
-                  className="font-mono text-xs"
+                  className="font-mono text-12"
                 >
                   {perm}
                 </Badge>
@@ -839,7 +839,7 @@ function UserRolesSection({
         )}
 
         {directRoles.length === 0 && inheritedRoles.length === 0 && (
-          <p className="text-sm text-muted-foreground">No roles assigned.</p>
+          <p className="text-14 text-muted-foreground">No roles assigned.</p>
         )}
       </div>
 
@@ -902,7 +902,7 @@ function UserGroupsSection({ userId }: { readonly userId: string }) {
     <DetailSection title="Groups">
       <div className="px-4 py-3">
         {groups.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No group memberships.</p>
+          <p className="text-14 text-muted-foreground">No group memberships.</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {groups.map((group) => (

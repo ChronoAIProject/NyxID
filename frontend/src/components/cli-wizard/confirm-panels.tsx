@@ -233,7 +233,7 @@ export function ApiKeyCreateConfirm({
                   side="right"
                   align="start"
                   sideOffset={8}
-                  className="max-w-[340px] whitespace-normal px-5 py-4 text-15 leading-[1.55]"
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
                 >
                   <div className="flex flex-col gap-4">
                     <p>
@@ -285,7 +285,7 @@ export function ApiKeyCreateConfirm({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Tags the key for audit attribution + per-agent rate limits.
           </p>
         </div>
@@ -317,7 +317,7 @@ export function ApiKeyCreateConfirm({
                   </option>
                 ))}
             </select>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               Org-owned keys authenticate as the org; every admin of
               the selected org can rotate or delete them.
             </p>
@@ -1012,7 +1012,7 @@ export function DeveloperAppCreateConfirm({
             }}
             placeholder="openid profile email"
           />
-          <p className="text-xs text-muted-foreground">Space-separated.</p>
+          <p className="text-13 text-muted-foreground">Space-separated.</p>
         </Field>
         <Field label="Delegation scopes (optional)" htmlFor="pair-app-delegation">
           <Input
@@ -1027,7 +1027,7 @@ export function DeveloperAppCreateConfirm({
         <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
           <div className="flex flex-col gap-0.5">
             <Label htmlFor="pair-app-broker">Broker capability</Label>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Allow this app to broker downstream credentials.
             </p>
           </div>
@@ -1274,7 +1274,7 @@ export function MfaSetupConfirm({
           />
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Couldn't render the QR code. Use the otpauth URL below instead.
         </p>
       )}
@@ -1282,7 +1282,7 @@ export function MfaSetupConfirm({
       <div className="flex flex-col gap-1.5">
         <Label>Or enter the secret manually</Label>
         <div className="flex items-center gap-2">
-          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm">
+          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-14">
             {secretRevealed ? secret : "•".repeat(Math.max(secret?.length ?? 12, 12))}
           </code>
           <Button

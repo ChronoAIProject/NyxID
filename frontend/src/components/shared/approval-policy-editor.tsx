@@ -113,14 +113,14 @@ export function ApprovalPolicyEditor({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-muted-foreground">Default:</span>
+        <span className="text-13 text-muted-foreground">Default:</span>
         <Select
           value={draftDefaultEffect}
           onValueChange={(value) =>
             setDraftDefaultEffect(value as ApprovalEffect)
           }
         >
-          <SelectTrigger className="h-8 w-[190px] text-xs">
+          <SelectTrigger className="h-8 w-[190px] text-14">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -134,7 +134,7 @@ export function ApprovalPolicyEditor({
       </div>
 
       {draftRules.length === 0 ? (
-        <div className="rounded-lg bg-overlay px-3 py-2 text-xs text-muted-foreground">
+        <div className="rounded-lg bg-overlay px-3 py-2 text-13 text-muted-foreground">
           No advanced rules configured.
         </div>
       ) : (
@@ -160,12 +160,12 @@ export function ApprovalPolicyEditor({
               </div>
 
               <div className="space-y-2">
-                <span className="text-xs text-muted-foreground">Methods</span>
+                <span className="text-13 text-muted-foreground">Methods</span>
                 <div className="flex flex-wrap gap-2">
                   {approvalMethods.map((method) => (
                     <label
                       key={method}
-                      className="flex items-center gap-2 text-xs text-muted-foreground"
+                      className="flex items-center gap-2 text-14 text-muted-foreground"
                     >
                       <Checkbox
                         checked={rule.methods.includes(method)}
@@ -181,7 +181,7 @@ export function ApprovalPolicyEditor({
               </div>
 
               <div className="space-y-2">
-                <label className="text-xs text-muted-foreground">
+                <label className="text-14 text-muted-foreground">
                   Resource pattern
                 </label>
                 <Input
@@ -200,7 +200,7 @@ export function ApprovalPolicyEditor({
                 {approvalVerbs.map((verb) => (
                   <label
                     key={verb}
-                    className="flex items-center gap-2 text-xs text-muted-foreground"
+                    className="flex items-center gap-2 text-14 text-muted-foreground"
                   >
                     <Checkbox
                       checked={rule.verbs.includes(verb)}
@@ -221,7 +221,7 @@ export function ApprovalPolicyEditor({
                     updateRule(index, { effect: value as ApprovalEffect })
                   }
                 >
-                  <SelectTrigger className="h-8 w-[170px] text-xs">
+                  <SelectTrigger className="h-8 w-[170px] text-14">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -239,7 +239,7 @@ export function ApprovalPolicyEditor({
                       updateRule(index, { mode: value as ApprovalMode })
                     }
                   >
-                    <SelectTrigger className="h-8 w-[170px] text-xs">
+                    <SelectTrigger className="h-8 w-[170px] text-14">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -257,7 +257,7 @@ export function ApprovalPolicyEditor({
       <div className="flex flex-wrap gap-2">
         <Button
           variant="outline"
-          className="h-8 text-xs"
+          className="h-8 text-14"
           onClick={addRule}
           disabled={disabled || draftRules.length >= 50}
         >
@@ -268,7 +268,7 @@ export function ApprovalPolicyEditor({
         </Button>
         <Button
           variant="primary"
-          className="h-8 text-xs"
+          className="h-8 text-14"
           onClick={() => onSave(draftRules, draftDefaultEffect)}
           disabled={disabled}
         >

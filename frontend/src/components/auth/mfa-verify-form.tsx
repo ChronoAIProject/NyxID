@@ -190,7 +190,7 @@ export function MfaCodeFields({
                 aria-label={
                   recoveryMode ? "Recovery code" : "Authenticator code"
                 }
-                className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
+                className="min-w-0 font-mono text-14 tracking-normal sm:text-14"
                 {...field}
                 ref={inputRef ?? field.ref}
               />

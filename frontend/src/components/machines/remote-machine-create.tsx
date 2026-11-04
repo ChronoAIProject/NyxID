@@ -295,7 +295,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
             name="name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel className="text-13 font-normal text-text-tertiary">
+                <FormLabel className="text-14 font-medium text-text-tertiary">
                   Machine name
                 </FormLabel>
                 <FormControl>

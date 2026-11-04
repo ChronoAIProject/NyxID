@@ -32,7 +32,7 @@ export function PublicationOperations({
         >
           <div>
             <span className="font-medium">{op.name}</span>
-            <code className="ml-2 text-13 text-text-tertiary">
+            <code className="ml-2 text-14 text-text-tertiary">
               {op.method} {op.path}
             </code>
           </div>

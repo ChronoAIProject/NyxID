@@ -332,7 +332,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               key={field.key}
               type="button"
               className={cn(
-                "flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                "flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
                 selected
                   ? "bg-accent text-accent-foreground"
                   : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
@@ -437,7 +437,7 @@ function DataTableFilterEditor<FilterKey extends string>({
     <div className="flex min-w-0 flex-col">
       <div className="border-b border-border/70 px-3 py-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-xs font-semibold text-foreground">
+          <p className="truncate text-13 font-semibold text-foreground">
             {field.label}{" "}
             <span className="font-normal text-muted-foreground">
               {field.operator}
@@ -467,7 +467,7 @@ function DataTableFilterEditor<FilterKey extends string>({
               role="checkbox"
               aria-checked={partiallySelected ? "mixed" : allSelected}
               className={cn(
-                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
                 allSelected || partiallySelected
                   ? "border-primary/45 bg-primary/[0.07] text-foreground"
                   : "border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/35 hover:bg-muted/35 hover:text-foreground",
@@ -512,7 +512,7 @@ function DataTableFilterEditor<FilterKey extends string>({
                 aria-pressed={multiple ? undefined : checked}
                 title={option.label === option.value ? undefined : option.value}
                 className={cn(
-                  "flex min-h-11 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                  "flex min-h-11 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-13 outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
                   checked
                     ? "border-primary/40 bg-primary/10 text-foreground"
                     : "border-transparent text-muted-foreground hover:border-border hover:bg-accent/50 hover:text-foreground",
@@ -603,7 +603,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
           maxLength={MAX_CUSTOM_VALUE_LENGTH}
           aria-label={`Custom ${field.label} value`}
           placeholder={`Contains…`}
-          className="h-11 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-input-focus focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-9"
+          className="h-11 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-13 outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-input-focus focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-9"
           onChange={(event) => setDraft(event.target.value)}
         />
         <Button type="submit" variant="outline" size="sm" disabled={!canAdd}>
@@ -691,7 +691,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
     <div className="flex min-w-0 flex-col">
       <div className="border-b border-border/70 px-3 py-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-xs font-semibold text-foreground">
+          <p className="truncate text-13 font-semibold text-foreground">
             {field.label}{" "}
             <span className="font-normal text-muted-foreground">
               {mode === "dates" ? "on any selected date" : "between"}
@@ -719,7 +719,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                 type="button"
                 aria-pressed={mode === "dates"}
                 className={cn(
-                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
                   mode === "dates"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
@@ -735,7 +735,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                 type="button"
                 aria-pressed={mode === "range"}
                 className={cn(
-                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
                   mode === "range"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
@@ -824,7 +824,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         )}
 
         {!valid && (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             The end date must be on or after the start date.
           </p>
         )}
@@ -981,7 +981,7 @@ export function DataTableFilterChips<
         <div
           role="group"
           aria-label={`${allFieldsLabel} search`}
-          className="flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9"
+          className="flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-13 md:min-h-9"
         >
           <button
             type="button"
@@ -1018,7 +1018,7 @@ export function DataTableFilterChips<
             key={searchFilter.field}
             role="group"
             aria-label={`${label} search, matches any term`}
-            className="flex min-h-11 max-w-full flex-wrap items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9"
+            className="flex min-h-11 max-w-full flex-wrap items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-13 md:min-h-9"
           >
             <span className="flex items-center px-2.5 py-1.5">
               <span className="font-medium text-foreground">{label}</span>{" "}
@@ -1098,7 +1098,7 @@ export function DataTableFilterChips<
           return (
             <div
               key={`${field.key}:${custom === true ? "custom" : "values"}`}
-              className="flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9"
+              className="flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-13 md:min-h-9"
             >
               <button
                 type="button"
@@ -1134,7 +1134,7 @@ export function DataTableFilterChips<
         type="button"
         variant="ghost"
         size="sm"
-        className="h-11 px-2 text-xs text-muted-foreground md:h-9"
+        className="h-11 px-2 text-14 text-muted-foreground md:h-9"
         onClick={onClear}
       >
         Clear filters

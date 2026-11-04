@@ -10,39 +10,40 @@
   .service-category > h4 {
     display: flex;
     gap: 12px;
-    font-size: 12px;
-    font-weight: 500;
+    font-size: var(--text-15);
+    font-weight: 600;
     margin-bottom: 12px;
   }
   .service-category > h4 > span {
-    font-size: 10px;
+    font-size: var(--text-13);
     font-weight: 400;
     color: var(--color-muted-foreground);
   }
   .fine-print {
-    font-size: 11px;
+    font-size: var(--text-13);
     line-height: 1.7;
     color: var(--color-muted-foreground);
   }
   .empty-inline {
     padding: 24px 0;
-    font-size: 12px;
+    font-size: var(--text-14);
     color: var(--color-muted-foreground);
   }
   .usage-column-labels {
     display: flex;
     justify-content: space-between;
     padding: 10px 0;
-    font-size: 10px;
+    font-size: var(--text-12);
     letter-spacing: 0.5px;
     text-transform: uppercase;
     color: var(--color-text-tertiary);
     border-bottom: 1px solid var(--color-border);
+    font-weight: 600;
   }
   .usage-status {
     display: block;
     margin-top: 5px;
-    font: 400 10px var(--font-sans);
+    font: 400 var(--text-13) var(--font-sans);
     color: var(--color-muted-foreground);
   }
   .usage-status.text-warning {
@@ -57,19 +58,20 @@
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    font-size: 11px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .usage-column-labels {
     padding-left: 8px;
     padding-right: 28px;
+    font-weight: 600;
   }
   .all-metrics > summary {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 12px 24px;
-    font-size: 11px;
+    font-size: var(--text-13);
     border-top: 1px solid var(--color-border);
   }
   .all-metrics > summary strong {
@@ -78,7 +80,7 @@
   .all-metrics > summary span {
     color: var(--color-muted-foreground);
     margin-left: auto;
-    font-size: 10px;
+    font-size: var(--text-13);
   }
   .all-metrics > summary:hover,
   .expandable-service > summary:hover {
@@ -93,7 +95,8 @@
   }
   .expanded-metrics h3 {
     margin-bottom: 12px;
-    font-size: 12px;
+    font-size: var(--text-15);
+    font-weight: 600;
   }
   .split-facts {
     margin: 0;
@@ -105,7 +108,7 @@
     gap: 16px;
     padding: 8px 0;
     border-bottom: 1px solid var(--color-border);
-    font-size: 11px;
+    font-size: var(--text-13);
   }
   .split-facts dt {
     color: var(--color-muted-foreground);
@@ -113,20 +116,21 @@
   }
   .split-facts dd {
     font-family: "JetBrains Mono", monospace;
-    font-size: 10px;
+    font-size: var(--text-13);
     text-align: right;
     overflow-wrap: anywhere;
     min-width: 0;
   }
   .expanded-metrics .fine-print {
     margin-top: 14px;
-    font-size: 10px;
+    font-size: var(--text-13);
   }
   .expandable-usage {
     border-top: 1px solid var(--color-border);
   }
   .expandable-usage > .usage-column-labels {
     padding: 12px 16px;
+    font-weight: 600;
   }
   .expandable-service {
     border-bottom: 1px solid var(--color-border);
@@ -145,25 +149,25 @@
     flex: 1;
   }
   .expandable-name strong {
-    font-size: 12px;
+    font-size: var(--text-14);
     font-weight: 500;
     display: block;
     overflow-wrap: anywhere;
   }
   .expandable-name small {
     display: block;
-    font-size: 10px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
     margin-top: 4px;
   }
   .row-credit {
     font-family: "JetBrains Mono", monospace;
-    font-size: 12px;
+    font-size: var(--text-14);
     text-align: right;
   }
   .row-credit small {
     font-family: var(--font-sans);
-    font-size: 10px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .detailed-usage {
@@ -194,7 +198,7 @@
     padding: 12px 0;
     border-top: 1px solid var(--color-border);
     color: var(--color-muted-foreground);
-    font-size: 0.6875rem;
+    font-size: var(--text-13);
   }
   .usage-group-disclosure[open] > summary > svg {
     transform: rotate(180deg);
@@ -220,13 +224,14 @@
     .expandable-usage > .usage-column-labels {
       padding-left: 4px;
       padding-right: 4px;
+      font-weight: 600;
     }
     .expandable-service > summary {
       padding: 16px 4px;
       gap: 8px;
     }
     .row-credit {
-      font-size: 11px;
+      font-size: var(--text-13);
     }
     .row-credit small {
       display: block;
@@ -242,12 +247,12 @@
       max-width: 56%;
     }
     .split-facts dd {
-      font-size: 10px;
+      font-size: var(--text-13);
     }
   }
   .tabbed-billing {
     margin-top: 24px;
-    font-size: 12px;
+    font-size: var(--text-14);
   }
   .tabbed-billing h3,
   .tabbed-billing h4 {
@@ -285,8 +290,8 @@
     flex-shrink: 0;
   }
   .benefit-meter-caption {
-    font-size: 10px;
-    line-height: 16px;
+    font-size: var(--text-13);
+    line-height: 1.5;
     text-align: right;
     white-space: nowrap;
     color: var(--color-muted-foreground);
@@ -315,8 +320,9 @@
     margin-top: 20px;
   }
   .benefit-expanded h4 {
-    font-size: 12px;
+    font-size: var(--text-15);
     margin-bottom: 8px;
+    font-weight: 600;
   }
   .benefit-expanded .split-facts {
     max-width: 720px;
@@ -334,24 +340,25 @@
     border-left: 1px solid var(--color-border);
   }
   .summary-family h3 {
-    font-size: 12px;
+    font-size: var(--text-15);
     margin-bottom: 16px;
+    font-weight: 600;
   }
   .summary-family > strong {
     display: block;
-    font-size: 28px;
+    font-size: var(--text-28);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }
   .summary-family > strong small {
-    font-size: 11px;
+    font-size: var(--text-13);
     font-weight: 400;
     color: var(--color-muted-foreground);
   }
   .summary-family > p {
     margin-top: 4px;
-    font-size: 11px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .summary-family dl {
@@ -362,7 +369,7 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
-    font-size: 11px;
+    font-size: var(--text-13);
     margin-top: 8px;
   }
   .summary-family dt {
@@ -377,7 +384,8 @@
     margin-top: 20px;
   }
   .usage-results .service-category > h4 {
-    font-size: 12px;
+    font-size: var(--text-15);
+    font-weight: 600;
   }
   .history-heading {
     flex-direction: row;
@@ -403,7 +411,7 @@
     gap: 4px 12px;
     padding: 10px 0;
     border-bottom: 1px solid var(--color-border);
-    font-size: 12px;
+    font-size: var(--text-14);
   }
   .grants-mobile > li:last-child {
     border-bottom: 0;
@@ -413,7 +421,7 @@
   }
   .grants-mobile small {
     grid-column: 1 / -1;
-    font-size: 11px;
+    font-size: var(--text-13);
     line-height: 1.6;
     color: var(--color-muted-foreground);
   }
@@ -446,7 +454,8 @@
       padding: 16px;
     }
     .summary-family > strong {
-      font-size: 22px;
+      font-size: var(--text-28);
+      font-weight: 600;
     }
     .summary-family dl > div {
       flex-wrap: wrap;
@@ -469,10 +478,12 @@
     .summary-family h3 {
       margin: 0;
       align-self: center;
+      font-weight: 600;
     }
     .summary-family > strong {
       text-align: right;
-      font-size: 22px;
+      font-size: var(--text-28);
+      font-weight: 600;
     }
     .summary-family > p {
       margin: 0;
@@ -535,14 +546,14 @@
   }
   .compact-benefit-label > strong {
     display: block;
-    font-size: 12px;
-    line-height: 18px;
+    font-size: var(--text-14);
+    line-height: 1.5;
     font-weight: 500;
     overflow-wrap: anywhere;
   }
   .compact-benefit-label > span {
     display: block;
-    font-size: 11px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
     margin-top: 4px;
   }
@@ -553,7 +564,7 @@
     justify-content: end;
     gap: 6px;
     height: 18px;
-    font-size: 11px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .benefit-summary-metric {
@@ -580,11 +591,11 @@
   }
   .compact-coverage > span > span,
   .compact-coverage > small {
-    font-size: 11px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .compact-coverage strong {
-    font-size: 11px;
+    font-size: var(--text-13);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
@@ -695,7 +706,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
+    font-size: var(--text-13);
   }
   .stack-legend > li > span {
     color: var(--color-muted-foreground);
@@ -744,7 +755,7 @@
 }
 .billing-benefit-help-content {
   max-width: min(330px, calc(100vw - 32px));
-  font-size: 12px;
+  font-size: var(--text-14);
   line-height: 1.6;
   padding: 12px;
 }
@@ -768,7 +779,7 @@
     border: 1px solid var(--color-border);
     border-radius: 6px;
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
     font-variant-numeric: tabular-nums;
   }
@@ -796,7 +807,8 @@
   }
   .usage-search > input {
     padding-left: 32px;
-    font-size: 11px;
+    font-size: var(--text-14);
+    font-weight: 400;
   }
   @container usage-explorer (max-width: 600px) {
     .usage-explorer-heading {
@@ -933,7 +945,7 @@
     width: 100%;
     margin-top: 2px;
     color: var(--color-muted-foreground);
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .allowance-gauge-legend > span {
     display: inline-flex;
@@ -969,21 +981,21 @@
     gap: 8px 14px;
     padding: 14px 16px;
     background: color-mix(in srgb, var(--color-foreground) 2.5%, transparent);
-    font-size: 0.6875rem;
+    font-size: var(--text-13);
   }
   .allowance-period > strong {
     font-weight: 500;
   }
   .allowance-period > span {
     color: var(--color-muted-foreground);
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .allowance-period dl {
     flex-basis: 100%;
     display: flex;
     flex-wrap: wrap;
     gap: 8px 24px;
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .allowance-period dl > div {
     display: flex;
@@ -1003,7 +1015,7 @@
     align-items: center;
     gap: 16px;
     margin-bottom: 12px;
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .allowance-balance > header > strong {
     font-weight: 500;
@@ -1017,17 +1029,17 @@
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .allowance-balance dd {
     margin-top: 5px;
     font:
-      500 0.6875rem "JetBrains Mono",
+      500 var(--text-13) "JetBrains Mono",
       monospace;
     overflow-wrap: anywhere;
   }
   .allowance-balance .allowance-remaining dd {
-    font-size: 0.9375rem;
+    font-size: var(--text-15);
     color: var(--color-foreground);
   }
   .billing-detail-pagination,
@@ -1036,7 +1048,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    font-size: 0.625rem;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
     padding-top: 12px;
   }
@@ -1074,19 +1086,19 @@
   }
   .funding-visual h4 {
     margin-bottom: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: var(--text-15);
+    font-weight: 600;
   }
   .funding-visual-total {
     flex-shrink: 0;
     font:
-      500 0.9375rem "JetBrains Mono",
+      500 var(--text-15) "JetBrains Mono",
       monospace;
     text-align: right;
     overflow-wrap: anywhere;
   }
   .funding-visual-total small {
-    font: 400 0.625rem var(--font-sans);
+    font: 400 var(--text-13) var(--font-sans);
     color: var(--color-muted-foreground);
   }
   .funding-track {
@@ -1121,7 +1133,7 @@
     align-items: start;
     gap: 7px;
     min-width: 0;
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .funding-legend-swatch {
     width: 8px;
@@ -1140,7 +1152,7 @@
   }
   .funding-legend-item strong {
     font:
-      500 0.6875rem "JetBrains Mono",
+      500 var(--text-13) "JetBrains Mono",
       monospace;
     color: var(--color-foreground);
     overflow-wrap: anywhere;
@@ -1167,8 +1179,8 @@
     margin-bottom: 12px;
   }
   .usage-quantity-chart h4 {
-    font-size: 0.75rem;
-    font-weight: 500;
+    font-size: var(--text-15);
+    font-weight: 600;
     margin-bottom: 4px;
   }
   .quantity-unit-panel {
@@ -1186,14 +1198,14 @@
     display: flex;
     align-items: center;
     gap: calc(var(--spacing) * 1.5);
-    font-size: 0.6875rem;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .quantity-chart-totals dd {
     margin-top: calc(var(--spacing) * 1.5);
     color: var(--color-foreground);
     font:
-      500 0.9375rem "JetBrains Mono",
+      500 var(--text-15) "JetBrains Mono",
       monospace;
     overflow-wrap: anywhere;
   }
@@ -1203,7 +1215,7 @@
     flex-shrink: 0;
   }
   .quantity-axis-label {
-    font-size: 0.625rem;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
     margin-bottom: 4px;
   }
@@ -1211,13 +1223,13 @@
     margin: 2px 0 12px;
     text-align: center;
     color: var(--color-muted-foreground);
-    font-size: 0.625rem;
+    font-size: var(--text-13);
   }
   .quantity-exact-values {
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px solid var(--color-border);
-    font-size: 0.625rem;
+    font-size: var(--text-13);
     color: var(--color-muted-foreground);
   }
   .quantity-exact-values dl {
@@ -1236,7 +1248,7 @@
   }
   .quantity-exact-values dd {
     font:
-      500 0.6875rem "JetBrains Mono",
+      500 var(--text-13) "JetBrains Mono",
       monospace;
     margin-top: 5px;
     color: var(--color-foreground);
@@ -1305,7 +1317,7 @@
 .billing-stack-tooltip {
   --stack-bg: var(--color-popover);
   max-width: min(300px, calc(100vw - 32px));
-  font-size: 11px;
+  font-size: var(--text-13);
 }
 .billing-stack-tooltip > p {
   margin-bottom: 6px;

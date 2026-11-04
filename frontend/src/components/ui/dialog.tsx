@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import { DialogFocusReturnContext } from "./dialog-focus-return";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import * as React from "react";
@@ -93,7 +94,7 @@ const DialogContent = React.forwardRef<
       </div>
       <DialogPrimitive.Close
         data-icon-button=""
-        className="absolute right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground"
+        className="inline-flex min-h-control min-w-control items-center justify-center absolute right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground"
         style={{ top: "max(1rem, var(--sat, env(safe-area-inset-top, 0px)))" }}
       >
         <X className="h-4 w-4" />
@@ -159,7 +160,7 @@ const DialogTitle = React.forwardRef<
   <DialogPrimitive.Title
     ref={ref}
     className={cn(
-      "text-15 font-semibold leading-none tracking-tight",
+      `${TEXT_STYLES.dialogTitle} font-semibold leading-none tracking-tight`,
       className,
     )}
     {...props}
@@ -173,7 +174,7 @@ const DialogDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Description
     ref={ref}
-    className={cn("text-sm text-muted-foreground", className)}
+    className={cn(`${TEXT_STYLES.body} text-muted-foreground unthemed:text-sm`, className)}
     {...props}
   />
 ));

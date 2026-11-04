@@ -71,7 +71,7 @@ export function OwnerSelect({
           aria-label="Destination owner"
           aria-expanded={open && !disabled}
           disabled={disabled}
-          className="h-auto min-h-10 w-full justify-between gap-3 text-left font-normal"
+          className="h-auto min-h-10 w-full justify-between gap-3 text-left font-medium"
         >
           {value ? (
             <span className="min-w-0">
@@ -79,7 +79,7 @@ export function OwnerSelect({
                 {value.display_name || value.email}
               </span>
               {value.display_name && (
-                <span className="block truncate text-xs text-muted-foreground">
+                <span className="block truncate text-13 text-muted-foreground">
                   {value.email}
                 </span>
               )}
@@ -114,7 +114,7 @@ export function OwnerSelect({
                   ? "Search people or enter exact email…"
                   : "Search organizations or enter ID…"
               }
-              className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+              className="h-10 w-full bg-transparent text-14 outline-none placeholder:text-muted-foreground"
             />
           </div>
           <Command.List
@@ -122,12 +122,12 @@ export function OwnerSelect({
             aria-busy={loading}
           >
             {loading && (
-              <p role="status" className="p-3 text-sm text-muted-foreground">
+              <p role="status" className="p-3 text-14 text-muted-foreground">
                 Searching…
               </p>
             )}
             {!loading && !owners.error && candidates.length === 0 && (
-              <p className="p-3 text-sm text-muted-foreground">
+              <p className="p-3 text-14 text-muted-foreground">
                 No matching owners.
               </p>
             )}
@@ -140,7 +140,7 @@ export function OwnerSelect({
                   onChange(owner);
                   setOpen(false);
                 }}
-                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
+                className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-14 data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground"
               >
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">
@@ -152,7 +152,7 @@ export function OwnerSelect({
                         : ""}
                   </span>
                   {owner.display_name && (
-                    <span className="block truncate text-xs text-muted-foreground">
+                    <span className="block truncate text-13 text-muted-foreground">
                       {owner.email}
                     </span>
                   )}
@@ -164,7 +164,7 @@ export function OwnerSelect({
             ))}
           </Command.List>
           {owners.error && (
-            <div className="p-3 text-sm">
+            <div className="p-3 text-14">
               <p role="alert" className="text-destructive">
                 Could not load owners.
               </p>

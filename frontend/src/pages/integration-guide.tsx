@@ -40,7 +40,7 @@ function CodeBlock({
         {label}
       </Badge>
       <div className="relative">
-        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-14 leading-relaxed text-foreground">
           {code}
         </pre>
         <Button
@@ -70,7 +70,7 @@ function StepCard({
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-3">
-          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-primary text-13 font-semibold text-primary-foreground">
             {index}
           </span>
           {title}

@@ -393,7 +393,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                 ) : null}
               </summary>
               {tool.result ? (
-                <pre data-scroll-fade="" className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-12 text-text-tertiary">
+                <pre data-scroll-fade="" className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-14 text-text-tertiary">
                   {tool.result.slice(0, 500)}
                 </pre>
               ) : null}
@@ -914,7 +914,7 @@ export function ChatMessageEntry({
       <p
         role="note"
         aria-label="Conversation context reset"
-        className="text-xs text-text-tertiary"
+        className="text-13 text-text-tertiary"
       >
         {message.content}
       </p>

@@ -210,7 +210,7 @@ export function UpstreamScopePicker({
 
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-xs">Scopes</Label>
+      <Label className="text-14">Scopes</Label>
       {pills.length > 0 ? (
         <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
@@ -365,7 +365,7 @@ export function UpstreamScopePicker({
         </div>
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {locked.size > 0
           ? "Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above."
           : grantedSet

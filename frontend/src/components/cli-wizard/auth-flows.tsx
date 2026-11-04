@@ -1127,7 +1127,7 @@ export function OAuthFlow({
               href={documentationUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-1 text-13 text-muted-foreground underline-offset-2 hover:underline"
             >
               How to create an OAuth app
               <ExternalLink className="h-3 w-3" />
@@ -1156,14 +1156,14 @@ export function OAuthFlow({
                     setClientId("");
                     setClientSecret("");
                   }}
-                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-14 transition-colors ${
                     copyFromKeyId === conn.id
                       ? "border-primary bg-primary/5"
                       : "border-border hover:border-primary/50"
                   }`}
                 >
                   <span className="flex-1 truncate">{conn.slug}</span>
-                  <span className="shrink-0 text-xs text-muted-foreground">
+                  <span className="shrink-0 text-13 text-muted-foreground">
                     {conn.oauthClientId}
                   </span>
                 </button>
@@ -1173,7 +1173,7 @@ export function OAuthFlow({
                 onClick={() => {
                   setCopyFromKeyId(null);
                 }}
-                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors ${
+                className={`flex items-center gap-2 rounded-md border px-3 py-2 text-left text-14 transition-colors ${
                   !copyFromKeyId
                     ? "border-primary bg-primary/5"
                     : "border-border hover:border-primary/50"
@@ -1711,17 +1711,17 @@ export function DeviceCodeFlow({
         <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4">
           <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs uppercase tracking-wide text-muted-foreground">
+              <span className="text-13 uppercase tracking-wide text-muted-foreground">
                 Code
               </span>
               {secondsRemaining > 0 ? (
-                <span className="text-xs tabular-nums text-muted-foreground">
+                <span className="text-13 tabular-nums text-muted-foreground">
                   Expires in {formatRemaining(secondsRemaining)}
                 </span>
               ) : null}
             </div>
             <div className="flex items-center gap-2">
-              <code className="rounded bg-background px-3 py-1.5 font-mono text-lg">
+              <code className="rounded bg-background px-3 py-1.5 font-mono text-14">
                 {code}
               </code>
               <Button
@@ -1734,7 +1734,7 @@ export function DeviceCodeFlow({
             </div>
           </div>
           <div className="flex flex-col gap-1">
-            <span className="text-xs uppercase tracking-wide text-muted-foreground">
+            <span className="text-13 uppercase tracking-wide text-muted-foreground">
               Visit
             </span>
             <a
@@ -1747,7 +1747,7 @@ export function DeviceCodeFlow({
               <ExternalLink className="h-3.5 w-3.5" />
             </a>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <div className="flex items-center gap-2 text-13 text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />
             Waiting for authorization...
           </div>

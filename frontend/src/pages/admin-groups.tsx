@@ -145,7 +145,7 @@ export function AdminGroupsPage() {
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">Failed to load groups</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : groups.length === 0 ? (
@@ -153,7 +153,7 @@ export function AdminGroupsPage() {
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">No groups found</p>
-            <p className="text-xs text-muted-foreground">There are no groups to display.</p>
+            <p className="text-13 text-muted-foreground">There are no groups to display.</p>
           </div>
         </div>
       ) : (
@@ -184,16 +184,16 @@ export function AdminGroupsPage() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{group.name}</p>
-                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                  <p className="text-14 font-medium truncate">{group.name}</p>
+                  <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                     {group.slug}
                   </p>
                 </div>
-                <Badge variant="secondary" className="text-xs">
+                <Badge variant="secondary" className="text-12">
                   {String(group.member_count)} member{group.member_count !== 1 ? "s" : ""}
                 </Badge>
               </div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+              <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
                 <span>Created {formatDate(group.created_at)}</span>
               </div>
             </div>
@@ -236,14 +236,14 @@ export function AdminGroupsPage() {
                     }
                   }}
                 >
-                  <TableCell className="font-medium">{group.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-normal">{group.name}</TableCell>
+                  <TableCell className="font-mono text-14">
                     {group.slug}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
                       {group.roles.length === 0 ? (
-                        <span className="text-muted-foreground text-xs">
+                        <span className="text-muted-foreground text-13">
                           None
                         </span>
                       ) : (
@@ -251,7 +251,7 @@ export function AdminGroupsPage() {
                           <Badge
                             key={role.id}
                             variant="secondary"
-                            className="text-xs"
+                            className="text-12"
                           >
                             {role.name}
                           </Badge>
@@ -260,7 +260,7 @@ export function AdminGroupsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-muted-foreground text-13">
                       {String(group.member_count)}
                     </span>
                   </TableCell>

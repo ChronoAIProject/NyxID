@@ -308,7 +308,7 @@ export function OrgDetailPage() {
                 </div>
                 {avatarUrlInput.trim() !== "" &&
                   !isValidHttpUrl(avatarUrlInput.trim()) && (
-                    <p className="text-xs text-destructive">
+                    <p className="text-13 text-destructive">
                       Must be a full URL with a domain, e.g.
                       https://example.com/avatar.png
                     </p>
@@ -369,7 +369,7 @@ export function OrgDetailPage() {
               <BenchesIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
                 <p className="text-14 font-medium text-muted-foreground">No Members</p>
-                <p className="text-xs text-muted-foreground">No members yet.</p>
+                <p className="text-13 text-muted-foreground">No members yet.</p>
               </div>
             </div>
           ) : (
@@ -405,8 +405,8 @@ export function OrgDetailPage() {
                       )}
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <RoleBadge role={member.role} />
-                        <Badge variant={scopeList != null ? "info" : "secondary"} className="text-xs">{scopeLabel}</Badge>
-                        {member.scope_source === "override" && <Badge variant="info" className="text-xs">Custom scope</Badge>}
+                        <Badge variant={scopeList != null ? "info" : "secondary"} className="text-12">{scopeLabel}</Badge>
+                        {member.scope_source === "override" && <Badge variant="info" className="text-12">Custom scope</Badge>}
                       </div>
                       <div className="mt-3 text-13 text-muted-foreground">
                         Joined {formatRelativeTime(member.created_at) ?? "—"}
@@ -583,7 +583,7 @@ export function OrgDetailPage() {
                           return (
                             <TableRow key={invite.id}>
                               <TableCell>
-                                <span className="break-all text-xs text-foreground">
+                                <span className="break-all text-13 text-foreground">
                                   {invite.nonce}
                                 </span>
                               </TableCell>
@@ -599,7 +599,7 @@ export function OrgDetailPage() {
                                   <Badge variant="info">Pending</Badge>
                                 )}
                               </TableCell>
-                              <TableCell className="break-all text-xs text-muted-foreground">
+                              <TableCell className="break-all text-14 text-muted-foreground">
                                 {usedBy}
                               </TableCell>
                               <TableCell
@@ -913,12 +913,12 @@ function RolePermissionCard({
             <p className="text-15 font-semibold text-foreground">
               {roleLabel(role)}
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {scopeSummary(scope.allowed_service_ids)}
             </p>
           </div>
           {scope.is_default && (
-            <Badge variant="secondary" className="text-13">
+            <Badge variant="secondary" className="text-12">
               Default
             </Badge>
           )}
@@ -941,11 +941,11 @@ function RolePermissionCard({
         </div>
 
         <div className="space-y-2">
-          <Label className="text-xs font-medium text-muted-foreground">
+          <Label className="text-14 font-medium text-muted-foreground">
             Services
           </Label>
           {services.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border p-4 text-center text-13 text-muted-foreground">
               This org has no services yet.
             </div>
           ) : (
@@ -977,7 +977,7 @@ function RolePermissionCard({
                       <span className="block text-14 font-medium text-foreground">
                         {service.label}
                       </span>
-                      <span className="block text-xs text-muted-foreground">
+                      <span className="block text-13 text-muted-foreground">
                         {service.slug}
                       </span>
                     </Label>
@@ -1127,7 +1127,7 @@ function SettingsPanel({
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       URL-friendly identifier. Pass to --org or use in
                       slug-based API paths. Auto-generated from the display name
                       on org creation; admins can edit later.
@@ -1164,7 +1164,7 @@ function SettingsPanel({
                         {...field}
                       />
                     </FormControl>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       Shown in admin surfaces and used as the org user's
                       identity. Leave blank to clear.
                     </p>
@@ -1189,7 +1189,7 @@ function SettingsPanel({
                         <span className="block text-15 font-medium text-foreground">
                           Opt out of credential accept fingerprint verification
                         </span>
-                        <span className="block text-xs text-muted-foreground">
+                        <span className="block text-13 text-muted-foreground">
                           This only skips the admin UX gate for this org. It
                           does not change the encrypted credential flow.
                         </span>
@@ -1220,7 +1220,7 @@ function SettingsPanel({
         <CardContent className="flex flex-col gap-4 p-4">
           <div>
             <p className="text-14 font-medium text-foreground">Danger zone</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Deleting the organization removes memberships and invites. Shared
               services stay in place so admins can rescue credentials.
             </p>

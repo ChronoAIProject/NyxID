@@ -136,7 +136,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                 <p className="text-13 text-muted-foreground">
                   {op.description}
                 </p>
-                <code className="break-all text-13">
+                <code className="break-all text-14">
                   {op.method} {op.path}
                 </code>
                 {operationPriced && (

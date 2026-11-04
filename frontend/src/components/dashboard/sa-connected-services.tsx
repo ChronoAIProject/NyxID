@@ -163,7 +163,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
               <TableBody>
                 {saConnections.map((conn) => (
                   <TableRow key={conn.service_id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       {conn.service_name}
                     </TableCell>
                     <TableCell>
@@ -274,7 +274,7 @@ function ConnectServiceDropdown({
             {s.requires_user_credential && (
               <KeyRound className="ml-1 h-3 w-3 text-muted-foreground" />
             )}
-            <Badge variant="secondary" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-12">
               {s.service_category}
             </Badge>
           </DropdownMenuItem>

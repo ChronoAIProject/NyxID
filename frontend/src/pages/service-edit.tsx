@@ -331,7 +331,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Private services are only visible to you.
                   </p>
                   <FormMessage />
@@ -347,7 +347,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   <p className="text-14 font-medium">
                     Developer App Scoping
                   </p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Select which developer apps grant access to this service.
                     Users who log in through a selected app will have this
                     service auto-provisioned in their AI Services. Remove
@@ -403,14 +403,14 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           />
                           <Label
                             htmlFor={`app-${app.id}`}
-                            className="text-14 font-normal"
+                            className="text-14 font-medium"
                           >
                             {app.client_name}
                             {!app.is_active ? " (inactive)" : ""}
                           </Label>
                           <Badge
                             variant="secondary"
-                            className="ml-auto text-xs"
+                            className="ml-auto text-12"
                           >
                             {app.client_type}
                           </Badge>
@@ -509,7 +509,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <FormControl>
                           <Input placeholder="ubuntu, deploy" {...field} />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Comma-separated SSH usernames allowed for this
                           service.
                         </p>
@@ -550,7 +550,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Optional. Used to auto-discover API endpoints.
                       </p>
                       <FormMessage />
@@ -570,7 +570,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Optional. Used to document WebSocket and streaming
                         protocols.
                       </p>
@@ -596,7 +596,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                 <div>
                   <p className="mb-1 text-14 font-medium">Auth Type</p>
                   <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
-                  <p className="mt-1 text-xs text-muted-foreground">
+                  <p className="mt-1 text-13 text-muted-foreground">
                     Auth type cannot be changed after creation.
                   </p>
                 </div>
@@ -608,7 +608,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <h3 className="text-15 font-semibold">
                         Identity Propagation
                       </h3>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Configure how user identity is forwarded to this
                         downstream service during proxy requests.
                       </p>
@@ -676,7 +676,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <h3 className="text-15 font-semibold">
                           Service Metadata
                         </h3>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Rich metadata for AI agent discovery. Helps agents
                           understand what this service is, where to find docs,
                           and what it supports.
@@ -796,7 +796,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                                 {...field}
                               />
                             </FormControl>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-13 text-muted-foreground">
                               Comma-separated downstream permissions required
                               for key actions.
                             </p>
@@ -817,7 +817,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                                 {...field}
                               />
                             </FormControl>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-13 text-muted-foreground">
                               Comma-separated skill names/paths relevant for AI
                               tools.
                             </p>
@@ -862,7 +862,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           <p className="text-14 font-medium">
                             Default request headers
                           </p>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Headers NyxID injects on every proxied request for
                             this service. Non-overridable headers replace
                             caller-supplied values; overridable ones yield to
@@ -899,7 +899,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
                       <div className="space-y-2">
                         <p className="text-14 font-medium">Capabilities</p>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Flags describing what this service supports through
                           NyxID proxy.
                         </p>
@@ -927,7 +927,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             >
                               <Label
                                 htmlFor={`cap-${key}`}
-                                className="text-xs font-normal"
+                                className="text-14 font-medium"
                               >
                                 {label}
                               </Label>
@@ -948,7 +948,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <h3 className="text-15 font-semibold">
                           Forward Access Token
                         </h3>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Forward the caller&apos;s NyxID access token as
                           Authorization: Bearer to this service.
                         </p>
@@ -957,7 +957,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="forward-access-token"
-                          className="text-14 font-normal"
+                          className="text-14 font-medium"
                         >
                           Forward Access Token
                         </Label>
@@ -985,7 +985,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <h3 className="text-15 font-semibold">Billing</h3>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Services are free by default: usage is metered for
                           observability but never charged. Enable platform
                           billing to reserve and charge wallet credits for
@@ -997,7 +997,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="platform-billable"
-                          className="text-14 font-normal"
+                          className="text-14 font-medium"
                         >
                           Charge wallet credits (platform billing)
                         </Label>
@@ -1014,11 +1014,11 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <div className="space-y-1">
                           <Label
                             htmlFor="platform-charge-nyxid-credentials-only"
-                            className="text-14 font-normal"
+                            className="text-14 font-medium"
                           >
                             Charge only NyxID-provided credentials
                           </Label>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Charge NyxID master keys and shared OAuth apps.
                             Users bringing their own credentials are metered for
                             observability without platform charges.
@@ -1042,7 +1042,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="space-y-2">
-                          <Label className="text-14 font-normal">
+                          <Label className="text-14 font-medium">
                             Charge by
                           </Label>
                           <Select
@@ -1107,11 +1107,11 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         )}
                       </div>
                       {service.billing?.platform_pricing?.sync_error && (
-                        <p className="text-xs text-destructive">
+                        <p className="text-13 text-destructive">
                           {service.billing.platform_pricing.sync_error}
                         </p>
                       )}
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Auto meters tokens for llm- services, bytes for SSH and
                         WebSocket connections, and requests otherwise. An empty
                         price keeps the Lago-authored plan rate.
@@ -1124,7 +1124,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <h3 className="text-15 font-semibold">
                           Delegation Token Injection
                         </h3>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           When enabled, NyxID injects a short-lived delegation
                           token (X-NyxID-Delegation-Token) when proxying
                           requests to this service. The downstream service can
@@ -1136,7 +1136,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="inject-delegation-token"
-                          className="text-14 font-normal"
+                          className="text-14 font-medium"
                         >
                           Inject delegation token
                         </Label>
@@ -1161,7 +1161,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                               <FormControl>
                                 <Input placeholder="llm:proxy" {...field} />
                               </FormControl>
-                              <p className="text-xs text-muted-foreground">
+                              <p className="text-13 text-muted-foreground">
                                 Space-separated scopes for the delegation token.
                                 Defaults to &quot;llm:proxy&quot; if left empty.
                                 Available scopes:{" "}

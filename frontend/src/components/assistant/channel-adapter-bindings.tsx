@@ -371,7 +371,7 @@ function BindingCard({
               closes.
             </DialogDescription>
           </DialogHeader>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-overlay p-3 text-13">
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-overlay p-3 text-14">
             {secret}
           </pre>
         </DialogContent>

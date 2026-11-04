@@ -66,11 +66,11 @@ export function DisplayOncePanel({
         <Button variant="primary" onClick={onAcknowledge} disabled={isAcknowledging} className="w-full">
           {isAcknowledging ? "Notifying CLI..." : ackButtonLabel}
         </Button>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           This value will not be shown again. Confirm you have saved it before closing this
           tab.
         </p>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           <strong>Lost it?</strong> If you don&apos;t copy this now,
           you&apos;ll need to rotate the credential to get a new one. (Old
           value stops working immediately on rotate.)
@@ -156,7 +156,7 @@ export function RecoveryCodesPanel({
             {revealed ? "Hide" : "Reveal"}
           </Button>
         </div>
-        <div className="grid grid-cols-1 gap-1.5 rounded-md border bg-muted/40 p-3 font-mono text-sm sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-1.5 rounded-md border bg-muted/40 p-3 font-mono text-14 sm:grid-cols-2">
           {codes.map((c, i) => (
             <code key={i} className="select-text">
               {revealed ? c : "•".repeat(Math.max(c.length, 12))}
@@ -185,7 +185,7 @@ export function RecoveryCodesPanel({
       </div>
 
       <Button onClick={onAcknowledged}>I have saved them — close</Button>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         After closing, these codes cannot be retrieved. Re-run{" "}
         <code className="font-mono">nyxid mfa setup</code> to mint a new set if you didn't
         save them.
@@ -215,7 +215,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+      <label className="text-14 font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </label>
       <div className="flex items-center gap-2">

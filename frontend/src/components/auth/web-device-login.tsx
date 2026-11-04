@@ -187,7 +187,7 @@ export function WebDeviceLogin({
         >
           Continue with the NyxID app
         </h2>
-        <p className="mx-auto mt-1.5 max-w-[340px] text-[0.78125rem] leading-relaxed text-muted-foreground">
+        <p className="mx-auto mt-1.5 max-w-[340px] text-14 leading-relaxed text-muted-foreground">
           Approve this sign-in from a phone that&apos;s already signed in to
           NyxID.
         </p>
@@ -299,7 +299,7 @@ export function WebDeviceLogin({
           <CheckCircle2 className="mx-auto size-6 text-success" />
           <h3 className="text-15 font-semibold">Restricted terminal login</h3>
           <p className="text-14 unthemed:text-12 text-muted-foreground">This browser remains signed out.</p>
-          <code data-sensitive className="block font-mono text-24">{deviceLogin.loginCode.code}</code>
+          <code data-sensitive className="block font-mono text-14">{deviceLogin.loginCode.code}</code>
           <p className="text-14 unthemed:text-12">Terminal command: <code>nyxid login --code</code></p>
           <p className="text-14 unthemed:text-12 text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
         </section>

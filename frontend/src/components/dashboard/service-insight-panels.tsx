@@ -70,7 +70,7 @@ export function InsightsUnavailable({
 }) {
   return (
     <div
-      className="flex items-center justify-between gap-4 p-3 text-xs text-muted-foreground"
+      className="flex items-center justify-between gap-4 p-3 text-13 text-muted-foreground"
       role="status"
     >
       <p>
@@ -153,7 +153,7 @@ function UsageDayTooltip({
   const day = active ? payload?.[0]?.payload.source : undefined;
   if (!day) return null;
   return (
-    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
+    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-13 shadow-md">
       <p className="font-medium">{shortDay(day.day)} (UTC)</p>
       <p className="tabular-nums">
         {day.calls.toLocaleString()} {day.calls === 1 ? "call" : "calls"}
@@ -473,7 +473,7 @@ function WindowTooltip({
   const slot = active ? payload?.[0]?.payload : undefined;
   if (!slot) return null;
   return (
-    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
+    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-13 shadow-md">
       <p className="font-medium">{slot.label}</p>
       <p className="tabular-nums">
         {slot.calls.toLocaleString()} {slot.calls === 1 ? "call" : "calls"}
@@ -509,7 +509,7 @@ function ConnectionUsage({
       : null;
   return (
     <section
-      className="space-y-3 border-t border-border/60 pt-4 text-xs"
+      className="space-y-3 border-t border-border/60 pt-4 text-13"
       aria-labelledby={`usage-history-${connection.id}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -549,13 +549,13 @@ function ConnectionUsage({
           <dl className="grid gap-3 sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">Calls</dt>
-              <dd className="mt-1 text-sm font-medium tabular-nums">
+              <dd className="mt-1 text-14 font-medium tabular-nums">
                 {summary.calls.toLocaleString()}
               </dd>
             </div>
             <div>
               <dt className="text-muted-foreground">Usage</dt>
-              <dd className="mt-1 text-sm font-medium tabular-nums">
+              <dd className="mt-1 text-14 font-medium tabular-nums">
                 {summary.quantities
                   .map(
                     ({ metric, quantity }) =>
@@ -566,7 +566,7 @@ function ConnectionUsage({
             </div>
             <div>
               <dt className="text-muted-foreground">NyxID credits used</dt>
-              <dd className="mt-1 text-sm font-medium tabular-nums">
+              <dd className="mt-1 text-14 font-medium tabular-nums">
                 {!summary.billable
                   ? "None"
                   : summary.charged == null
@@ -679,12 +679,12 @@ function ConnectionBillingPanel({
       aria-label={`Billing for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+        <h4 className="inline-flex items-center gap-2 text-14 font-medium">
           <CreditCard className="size-4 text-primary-text" /> Billing
         </h4>
         {insight.billing?.context !== "configuration" &&
           !!insight.usage?.access.keys.length && (
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex items-center gap-2 text-13">
               <span className="text-muted-foreground">Show for</span>
               <Select value={caller} onValueChange={setCaller}>
                 <SelectTrigger
@@ -708,10 +708,10 @@ function ConnectionBillingPanel({
       {plain ? (
         <>
           <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-            <p className="text-sm font-medium">
+            <p className="text-14 font-medium">
               {chargedAnyway ? "Credits were charged recently" : plain.headline}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               {chargedAnyway
                 ? `${formatExactCredits(recentCharged!)} NyxID credits were charged in the last 7 days for calls through ${connection.slug}, so don't treat this connection as free. ${plain.detail}`
                 : plain.detail}
@@ -727,7 +727,7 @@ function ConnectionBillingPanel({
             >
               Details
             </h5>
-            <dl className="grid gap-3 text-xs sm:grid-cols-3">
+            <dl className="grid gap-3 text-13 sm:grid-cols-3">
               <div>
                 <dt className="text-muted-foreground">Whose key or app</dt>
                 <dd className="mt-1 font-medium">{plain.key.title}</dd>
@@ -800,7 +800,7 @@ export function ConnectionInsightPanel({
         aria-label={`Agent key access for ${connection.label}`}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+          <h4 className="inline-flex items-center gap-2 text-14 font-medium">
             <UsersRound className="size-4 text-primary-text" />{" "}
             {usage.access.basis === "configuration"
               ? "Agent keys in scope"
@@ -816,7 +816,7 @@ export function ConnectionInsightPanel({
         {usage.access.keys.length ? (
           <div className="overflow-x-auto">
             <table
-              className="w-full text-left text-xs"
+              className="w-full text-left text-13"
               aria-label="Agent keys with access"
             >
               <thead className="text-muted-foreground">
@@ -866,7 +866,7 @@ export function ConnectionInsightPanel({
             </table>
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {usage.access.visibility === "unavailable"
               ? "Agent key inventory could not be loaded."
               : usage.access.incomplete
@@ -886,7 +886,7 @@ export function ConnectionInsightPanel({
           </Button>
         )}
         {usage.access.truncated && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Showing a limited set of keys. Open Agent keys to review the full
             inventory.
           </p>
@@ -906,7 +906,7 @@ export function ConnectionInsightPanel({
   if (usage.activity.tracking === "unavailable")
     return (
       <section
-        className="space-y-2 p-3 text-xs"
+        className="space-y-2 p-3 text-13"
         aria-label={`Recent requests for ${connection.label}`}
       >
         <h4 className="font-medium">Request attribution unavailable</h4>
@@ -923,7 +923,7 @@ export function ConnectionInsightPanel({
       aria-label={`Recent requests for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+        <h4 className="inline-flex items-center gap-2 text-14 font-medium">
           <Activity className="size-4 text-primary-text" /> Recent requests
         </h4>
         <span className="text-13 text-muted-foreground">
@@ -936,7 +936,7 @@ export function ConnectionInsightPanel({
       {usage.activity.requests.length ? (
         <div className="overflow-x-auto">
           <table
-            className="w-full text-left text-xs"
+            className="w-full text-left text-13"
             aria-label="Recent connection requests"
           >
             <thead className="text-muted-foreground">
@@ -987,7 +987,7 @@ export function ConnectionInsightPanel({
           </table>
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No requests with exact connection attribution were recorded in this
           period.
         </p>

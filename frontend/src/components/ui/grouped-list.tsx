@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import { DrawerSectionInfoContext, drawerSectionInfo } from "@/lib/drawer-section-info";
 import { SectionInfo } from "./section-info";
 import { useDrawerSearchTarget, type DrawerSearchMetadata } from "@/lib/drawer-search";
@@ -62,7 +63,7 @@ export function GroupedList({
           <h3
             aria-label={title}
             id={id}
-            className="flex items-center gap-1 break-words px-4 text-14 font-medium text-text-tertiary"
+            className={`flex items-center gap-1 break-words px-4 ${TEXT_STYLES.groupHeading} font-medium text-text-tertiary`}
           >
             <span>{title}</span>
             {help && <SectionInfo title={title} >{help}</SectionInfo>}
@@ -118,7 +119,7 @@ export function GroupedRow({
       data-drawer-search-target={search?.id}
       data-grouped-row=""
       className={cn(
-        "relative not-first:before:absolute not-first:before:left-4 not-first:before:right-0 not-first:before:top-0 not-first:before:h-px not-first:before:bg-border/50 flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-left text-14 font-medium text-foreground",
+        `relative not-first:before:absolute not-first:before:left-4 not-first:before:right-0 not-first:before:top-0 not-first:before:h-px not-first:before:bg-border/50 flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-left ${TEXT_STYLES.fieldLabel} text-foreground`,
         leading && "not-first:before:left-11",
         interactive &&
           "cursor-pointer transition-colors hover:bg-overlay active:bg-overlay-strong focus-visible:outline-none disabled:cursor-not-allowed disabled:text-text-tertiary disabled:hover:bg-transparent",

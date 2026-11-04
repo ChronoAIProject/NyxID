@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import { FormViewportContext } from "@/lib/form-viewport";
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
@@ -21,7 +22,7 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none focus:bg-accent data-[state=open]:bg-accent",
+      "flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-14 outline-none focus:bg-accent data-[state=open]:bg-accent",
       inset && "pl-8",
       className,
     )}
@@ -114,7 +115,7 @@ const DropdownMenuLabel = React.forwardRef<
   <DropdownMenuPrimitive.Label
     ref={ref}
     className={cn(
-      "px-3.5 py-2 text-15 font-medium text-muted-foreground",
+      `px-3.5 py-2 ${TEXT_STYLES.groupHeading} font-medium text-muted-foreground unthemed:text-15`,
       inset && "pl-8",
       className,
     )}

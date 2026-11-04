@@ -172,7 +172,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
       <div className="flex flex-col gap-1.5">
         <label
           htmlFor="catalog-search"
-          className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+          className="text-14 font-medium uppercase tracking-wide text-muted-foreground"
         >
           Search
         </label>
@@ -241,7 +241,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
 
 function SectionLabel({ children }: { readonly children: React.ReactNode }) {
   return (
-    <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="text-13 font-medium uppercase tracking-wide text-muted-foreground">
       {children}
     </div>
   )
@@ -275,7 +275,7 @@ function CatalogCard({
         </span>
       </div>
       {entry.description ? (
-        <span className="line-clamp-2 text-xs text-muted-foreground">
+        <span className="line-clamp-2 text-13 text-muted-foreground">
           {entry.description}
         </span>
       ) : null}
@@ -296,7 +296,7 @@ function CustomCard({ onClick }: { readonly onClick: () => void }) {
       <span className="text-15 font-semibold text-foreground">
         Custom / self-hosted…
       </span>
-      <span className="text-xs text-muted-foreground">
+      <span className="text-13 text-muted-foreground">
         For anything that isn't in the catalog above — paste your own
         endpoint URL + credential.
       </span>

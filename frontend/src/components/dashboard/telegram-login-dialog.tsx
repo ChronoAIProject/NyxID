@@ -157,7 +157,7 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-4 py-4">
               <div ref={widgetContainerRef} className="flex justify-center" />
-              <p className="text-xs text-muted-foreground text-center">
+              <p className="text-13 text-muted-foreground text-center">
                 A Telegram popup will open. Sign in and confirm to connect your
                 account.
               </p>

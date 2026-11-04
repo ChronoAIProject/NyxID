@@ -98,7 +98,7 @@ function ConnectionReconnect({
     <Button
       size="sm"
       variant="link"
-      className="mt-1 flex h-auto p-0 text-13"
+      className="mt-1 flex h-auto p-0 text-14"
       onClick={() => onReconnect(connection)}
     >
       <RefreshCw className="size-3" />

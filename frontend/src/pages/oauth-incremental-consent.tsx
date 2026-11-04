@@ -160,7 +160,7 @@ export function OAuthIncrementalConsentPage({
             <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
               <NyxidIcon className="size-8" />
             </div>
-            <span className="text-xs font-medium text-foreground">NyxID</span>
+            <span className="text-13 font-medium text-foreground">NyxID</span>
           </div>
           <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
             Update service access
@@ -526,14 +526,14 @@ export function OAuthIncrementalConsentPage({
               </>
             )}
           </div>
-          <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground sm:px-8">
+          <div className="border-t border-border px-5 py-3 text-center text-13 text-muted-foreground sm:px-8">
             Signed in as{" "}
             <span className="break-all text-foreground">
               {email || "your NyxID account"}
             </span>
           </div>
         </div>
-        <p className="mt-5 text-center text-xs text-muted-foreground">
+        <p className="mt-5 text-center text-13 text-muted-foreground">
           Application access via NyxID
         </p>
       </div>

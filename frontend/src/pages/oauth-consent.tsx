@@ -78,14 +78,14 @@ function ConsentShell({
         {heading}
         <div className="connect-link-card overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm">
           <div className="p-5 sm:p-8">{children}</div>
-          <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground sm:px-8">
+          <div className="border-t border-border px-5 py-3 text-center text-13 text-muted-foreground sm:px-8">
             {preview ? "Preview · " : ""}Signed in as{" "}
             <span className="break-all text-foreground">
               {email || "your NyxID account"}
             </span>
           </div>
         </div>
-        <p className="mt-5 text-center text-xs text-muted-foreground">
+        <p className="mt-5 text-center text-13 text-muted-foreground">
           Application access via NyxID
         </p>
       </div>
@@ -562,7 +562,7 @@ function StandardConsentPage({
             <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
               <NyxidIcon className="size-8" />
             </div>
-            <span className="text-xs font-medium text-foreground">NyxID</span>
+            <span className="text-13 font-medium text-foreground">NyxID</span>
           </div>
           <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
             {bindingReview
@@ -628,7 +628,7 @@ function StandardConsentPage({
                   <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
                     {identityScopeSummary(identityScopes)}
                   </p>
-                  <code className="mt-1 block break-all text-13 text-muted-foreground">
+                  <code className="mt-1 block break-all text-14 text-muted-foreground">
                     {identityScopes.join(" ")}
                   </code>
                 </div>
@@ -655,7 +655,7 @@ function StandardConsentPage({
                         <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
                           {meta.description}
                         </p>
-                        <code className="mt-1 block break-all text-13 text-muted-foreground">
+                        <code className="mt-1 block break-all text-14 text-muted-foreground">
                           {item}
                         </code>
                       </>
@@ -830,7 +830,7 @@ function StandardConsentPage({
                               <div className="min-w-0">
                                 <Label
                                   htmlFor={`oauth-service-${service.id}`}
-                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-15 leading-5 text-foreground`}
+                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-14 font-medium leading-5 text-foreground`}
                                 >
                                   <span className="block break-words font-medium">
                                     {serviceDisplayName(service)}

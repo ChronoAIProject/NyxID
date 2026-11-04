@@ -73,7 +73,7 @@ export function ScopePicker({
       </div>
       <p
         className={
-          isEmpty ? "text-xs text-destructive" : "text-xs text-muted-foreground"
+          isEmpty ? "text-13 text-destructive" : "text-13 text-muted-foreground"
         }
       >
         {isEmpty ? "At least one scope is required." : hint}
@@ -107,7 +107,7 @@ function ScopeChip({
         onChange={onToggle}
         value={scope}
       />
-      <span className="text-xs">{scope}</span>
+      <span className="text-13">{scope}</span>
     </label>
   )
 }

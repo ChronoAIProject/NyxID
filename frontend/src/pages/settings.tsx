@@ -209,11 +209,11 @@ function ProfileTab() {
               Email
             </label>
             {user?.email_verified ? (
-              <Badge variant="success" className="text-xs">
+              <Badge variant="success" className="text-12">
                 Verified
               </Badge>
             ) : (
-              <Badge variant="warning" className="text-xs">
+              <Badge variant="warning" className="text-12">
                 Not verified
               </Badge>
             )}
@@ -690,7 +690,7 @@ function SecurityTab() {
               autoFocus
             />
             {deleteEmailError && (
-              <p className="text-xs text-destructive">{deleteEmailError}</p>
+              <p className="text-13 text-destructive">{deleteEmailError}</p>
             )}
           </div>
 
@@ -776,7 +776,7 @@ function McpTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-medium">MCP (Model Context Protocol)</h3>
+        <h3 className="text-15 font-medium">MCP (Model Context Protocol)</h3>
         <p className="text-14 text-muted-foreground">
           Install NyxID as an MCP server in your client of choice.
         </p>
@@ -801,7 +801,7 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
+              <p className="text-13 font-medium text-muted-foreground">
                 Or copy manually
               </p>
               <Badge variant="secondary" className="text-12">
@@ -809,7 +809,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
                 {cursorConfig}
               </pre>
               <CopyInlineButton text={cursorConfig} label="Cursor config" />
@@ -828,7 +828,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-14 break-all font-mono">
               {claudeCommand}
             </code>
             <CopyInlineButton text={claudeCommand} label="CLI command" />
@@ -836,7 +836,7 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
+              <p className="text-13 font-medium text-muted-foreground">
                 Or add manually
               </p>
               <Badge variant="secondary" className="text-12">
@@ -844,7 +844,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
                 {claudeConfig}
               </pre>
               <CopyInlineButton
@@ -866,7 +866,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-14 break-all font-mono">
               {codexCommand}
             </code>
             <CopyInlineButton text={codexCommand} label="CLI command" />
@@ -874,7 +874,7 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
+              <p className="text-13 font-medium text-muted-foreground">
                 Or add manually
               </p>
               <Badge variant="secondary" className="text-12">
@@ -882,7 +882,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
                 {codexConfig}
               </pre>
               <CopyInlineButton text={codexConfig} label="Codex config" />
@@ -893,7 +893,7 @@ function McpTab() {
 
       <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
         <p className="mb-1 text-15 font-medium">How it works</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
           OAuth flow in your browser to authenticate. Once authenticated, the
           proxy exposes tools from all your connected services. Tool calls are

@@ -67,7 +67,7 @@ export function AccessScopeCard({
         <h3 id="access-scope-title" className="text-15 font-semibold">
           Access Scope
         </h3>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Restrict which services and nodes this key can access via proxy.
         </p>
       </div>
@@ -196,11 +196,11 @@ function AccessGroup({
 
       {allowAll ? null : (
         <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-background/40 p-3">
-          <p className="text-xs text-muted-foreground">{listLabel}</p>
+          <p className="text-13 text-muted-foreground">{listLabel}</p>
           {loading ? (
-            <p className="text-xs text-muted-foreground">Loading…</p>
+            <p className="text-13 text-muted-foreground">Loading…</p>
           ) : items.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               None available. Add one first, then come back.
             </p>
           ) : (
@@ -220,7 +220,7 @@ function AccessGroup({
                   <span className="truncate">
                     {item.primary}
                     {item.secondary ? (
-                      <span className="ml-1.5 text-xs text-muted-foreground">
+                      <span className="ml-1.5 text-13 text-muted-foreground">
                         ({item.secondary})
                       </span>
                     ) : null}

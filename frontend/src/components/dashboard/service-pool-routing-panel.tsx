@@ -72,7 +72,7 @@ export function ServicePoolRoutingPanel({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+          <div className="flex flex-wrap items-center gap-2 text-14 font-medium">
             <ServicePoolIcon className="size-4 shrink-0" />
             <span>{pool.name}</span>
             <Badge variant="secondary" className="gap-1.5">
@@ -84,11 +84,11 @@ export function ServicePoolRoutingPanel({
             </Badge>
             {!pool.is_active && <Badge variant="secondary">Disabled</Badge>}
           </div>
-          <code className="block break-all text-xs text-primary-text">
+          <code className="block break-all text-14 text-primary-text">
             /api/v1/proxy/s/{pool.slug}
           </code>
           {ai && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               AI chat · Gateway model <code>pool:{pool.slug}</code>
             </p>
           )}
@@ -100,7 +100,7 @@ export function ServicePoolRoutingPanel({
           </Button>
         )}
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-13">
         <span>{poolFailoverLabel(pool)}</span>
         {priority && (
           <>
@@ -119,13 +119,13 @@ export function ServicePoolRoutingPanel({
           </>
         )}
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {priority
           ? "Lower priority runs first; ineligible and cooling connections are skipped. Use this pool slug to apply its routing policy."
           : "Each request selects one eligible connection. Rotation applies when you call this pool slug."}
       </p>
       {ai ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Eligibility for POST chat/completions · refreshed every 15s
         </p>
       ) : (
@@ -136,7 +136,7 @@ export function ServicePoolRoutingPanel({
             setOperation({ method, path: path.trim() || "/" });
           }}
         >
-          <label className="space-y-1 text-xs text-muted-foreground">
+          <label className="space-y-1 text-14 text-muted-foreground">
             <span>Method</span>
             <select
               aria-label={`Method for ${pool.name}`}
@@ -151,7 +151,7 @@ export function ServicePoolRoutingPanel({
               )}
             </select>
           </label>
-          <label className="min-w-36 flex-1 space-y-1 text-xs text-muted-foreground">
+          <label className="min-w-36 flex-1 space-y-1 text-14 text-muted-foreground">
             <span>Operation path</span>
             <Input
               aria-label={`Operation path for ${pool.name}`}
@@ -170,7 +170,7 @@ export function ServicePoolRoutingPanel({
         </form>
       )}
       {health.isError && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           Eligibility could not be loaded. Saved routing is shown; connection
           health is unverified.
         </p>
@@ -208,7 +208,7 @@ export function ServicePoolRoutingPanel({
                   data-service-connection-row={member.user_service_id}
                   className="[&>td]:align-top [&>td]:py-3"
                 >
-                  <TableCell className="text-xs">
+                  <TableCell className="text-14">
                     <p>
                       {priority
                         ? `Priority ${member.priority ?? 0}`
@@ -222,7 +222,7 @@ export function ServicePoolRoutingPanel({
                       </p>
                     )}
                   </TableCell>
-                  <TableCell className="space-y-1 text-xs">
+                  <TableCell className="space-y-1 text-14">
                     <div className="flex items-center gap-1.5">
                       {key && (
                         <ServiceIcon
@@ -241,7 +241,7 @@ export function ServicePoolRoutingPanel({
                       </span>
                     </div>
                     {(key?.slug || candidate?.slug) && (
-                      <code className="block truncate text-13 text-muted-foreground">
+                      <code className="block truncate text-14 text-muted-foreground">
                         {key?.slug ?? candidate?.slug}
                       </code>
                     )}
@@ -267,7 +267,7 @@ export function ServicePoolRoutingPanel({
                       </p>
                     )}
                   </TableCell>
-                  <TableCell className="space-y-1 text-xs">
+                  <TableCell className="space-y-1 text-14">
                     <p>{billingModelLabel(billing)}</p>
                     <p className="text-13 text-muted-foreground">
                       {billing?.context === "configuration"
@@ -281,7 +281,7 @@ export function ServicePoolRoutingPanel({
                         : "Rate not reported"}
                     </p>
                   </TableCell>
-                  <TableCell className="space-y-1 text-xs">
+                  <TableCell className="space-y-1 text-14">
                     <Badge
                       variant={
                         member.enabled && candidate?.eligible
@@ -319,7 +319,7 @@ export function ServicePoolRoutingPanel({
           </TableBody>
         </Table>
         {!members.length && (
-          <p className="p-4 text-xs text-muted-foreground">
+          <p className="p-4 text-13 text-muted-foreground">
             No connections in this pool.
           </p>
         )}
@@ -331,7 +331,7 @@ export function ServicePoolRoutingPanel({
         bills the acting person.
       </p>
       {priority && (
-        <details className="text-xs text-muted-foreground">
+        <details className="text-13 text-muted-foreground">
           <summary className="w-fit cursor-pointer">
             Failover conditions
           </summary>

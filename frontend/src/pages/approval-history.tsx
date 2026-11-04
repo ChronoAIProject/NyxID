@@ -210,7 +210,7 @@ export function ApprovalHistoryPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="flex-1 h-8 text-xs"
+                      className="flex-1 h-8 text-14"
                       onClick={() =>
                         setDecideTarget({
                           id: request.id,
@@ -226,7 +226,7 @@ export function ApprovalHistoryPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="flex-1 h-8 text-xs"
+                      className="flex-1 h-8 text-14"
                       onClick={() =>
                         setDecideTarget({
                           id: request.id,
@@ -346,7 +346,7 @@ export function ApprovalHistoryPage() {
                           <div className="flex justify-end gap-1">
                             <Button
                               variant="ghost"
-                              className="h-7 text-xs"
+                              className="h-7 text-14"
                               onClick={() =>
                                 setDecideTarget({
                                   id: request.id,
@@ -361,7 +361,7 @@ export function ApprovalHistoryPage() {
                             </Button>
                             <Button
                               variant="ghost"
-                              className="h-7 text-xs"
+                              className="h-7 text-14"
                               onClick={() =>
                                 setDecideTarget({
                                   id: request.id,

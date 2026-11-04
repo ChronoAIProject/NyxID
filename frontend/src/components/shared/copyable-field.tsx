@@ -31,8 +31,8 @@ export function CopyableField({
     }
   }
 
-  const textSize = size === "sm" ? "text-12 unthemed:text-10" : "text-xs";
-  const labelSize = size === "sm" ? "text-12 unthemed:text-10" : "text-xs";
+  const textSize = size === "sm" ? "text-12 unthemed:text-10" : "text-13";
+  const labelSize = size === "sm" ? "text-12 unthemed:text-10" : "text-13";
   const btnSize = size === "sm" ? "h-7 w-7" : "h-8 w-8";
   const padding = size === "sm" ? "px-3 py-2" : "px-4 py-3.5";
   const minH = size === "sm" ? "min-h-[36px]" : "min-h-[44px]";
@@ -46,7 +46,7 @@ export function CopyableField({
         <code
           className={
             grouped
-              ? "flex min-h-8 items-center break-all pr-10 font-mono text-13 unthemed:text-11 font-normal text-foreground"
+              ? "flex min-h-8 items-center break-all pr-10 font-mono text-14 unthemed:text-11 font-normal text-foreground"
               : `flex items-center rounded-xl border border-border bg-muted font-mono ${padding} pr-10 ${minH} ${textSize} break-all text-foreground`
           }
         >

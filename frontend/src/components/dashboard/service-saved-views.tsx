@@ -65,7 +65,7 @@ export function ServiceSavedViews({
         >
           <div>
             <h3 className="text-15 font-semibold">Saved views</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               Save named filter combinations. The default opens when you return
               to AI Services.
             </p>
@@ -79,7 +79,7 @@ export function ServiceSavedViews({
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    className="min-w-0 flex-1 rounded p-1 text-left text-xs font-medium hover:bg-accent"
+                    className="min-w-0 flex-1 rounded p-1 text-left text-13 font-medium hover:bg-accent"
                     onClick={() => {
                       onRestore(saved.filters, saved.id);
                       setOpen(false);
@@ -153,7 +153,7 @@ export function ServiceSavedViews({
                   </Button>
                 </div>
                 {pendingDelete === saved.id && (
-                  <div className="mt-2 flex items-center gap-2 text-xs">
+                  <div className="mt-2 flex items-center gap-2 text-13">
                     <span>Delete this view?</span>
                     <Button
                       size="sm"
@@ -179,7 +179,7 @@ export function ServiceSavedViews({
             ))}
           </div>
           {view.workspace.views.length === 0 && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               No saved views yet. Set your filters, then save a view below.
             </p>
           )}
@@ -220,7 +220,7 @@ export function ServiceSavedViews({
             {form.formState.errors.name && (
               <p
                 id="service-view-name-error"
-                className="text-xs text-destructive"
+                className="text-13 text-destructive"
               >
                 {form.formState.errors.name.message}
               </p>
@@ -238,7 +238,7 @@ export function ServiceSavedViews({
               Save new view
             </Button>
             {view.workspace.views.length >= 20 && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 You can save up to 20 views.
               </p>
             )}
@@ -249,7 +249,7 @@ export function ServiceSavedViews({
             </p>
           )}
           {view.saveError && (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               {view.saveError}
             </p>
           )}

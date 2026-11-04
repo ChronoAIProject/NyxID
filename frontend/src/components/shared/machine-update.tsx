@@ -252,7 +252,7 @@ export function MachineUpdate({
           {status.updater.digest ? (
             <details>
               <summary className="cursor-pointer">Updater image digest</summary>
-              <code className="block break-all pt-2 text-xs">{status.updater.digest}</code>
+              <code className="block break-all pt-2 text-14">{status.updater.digest}</code>
             </details>
           ) : null}
         </div>

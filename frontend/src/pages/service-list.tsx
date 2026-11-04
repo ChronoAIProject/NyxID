@@ -64,7 +64,7 @@ export function ServiceListPage() {
             <p className="text-14 font-medium text-muted-foreground">
               No services yet
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Add a service to get started.
             </p>
           </div>

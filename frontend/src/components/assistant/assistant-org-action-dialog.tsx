@@ -523,8 +523,8 @@ export function AssistantOrgActionDialog({
             {(action === "member_add" || action === "invite") &&
             allowedServiceIds !== undefined ? (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium">Allowed services</p>
-                <p className="break-all font-mono text-xs text-muted-foreground">
+                <p className="text-13 font-medium">Allowed services</p>
+                <p className="break-all font-mono text-13 text-muted-foreground">
                   {allowedServiceIds.length > 0
                     ? allowedServiceIds.join(", ")
                     : "No services"}
@@ -537,10 +537,10 @@ export function AssistantOrgActionDialog({
             action !== "member_remove" &&
             action !== "member_update_role" &&
             action !== "invite" ? (
-              <p className="font-mono text-xs text-muted-foreground">{orgId}</p>
+              <p className="font-mono text-13 text-muted-foreground">{orgId}</p>
             ) : null}
             {destructive && (
-              <label className="flex items-start gap-2 text-xs">
+              <label className="flex items-start gap-2 text-14">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
@@ -554,7 +554,7 @@ export function AssistantOrgActionDialog({
           </div>
         ) : null}
         {error ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

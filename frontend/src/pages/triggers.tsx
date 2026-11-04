@@ -597,7 +597,7 @@ export function TriggersPage() {
               <TableBody>
                 {triggers.map((trigger) => (
                   <TableRow key={trigger.id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       {trigger.label}
                     </TableCell>
                     <TableCell>{deliveryLabel(trigger)}</TableCell>
@@ -610,7 +610,7 @@ export function TriggersPage() {
                         {titleCase(trigger.status)}
                       </Badge>
                     </TableCell>
-                    <TableCell className="font-mono text-13 text-text-tertiary">
+                    <TableCell className="font-mono text-14 text-text-tertiary">
                       {formatDateTime(trigger.created_at)}
                     </TableCell>
                     <TableCell className="text-right">

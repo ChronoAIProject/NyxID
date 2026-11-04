@@ -59,7 +59,7 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
   if (consent.legacy_unrestricted) {
     return (
       <div className="space-y-1">
-        <Badge variant="warning" className="text-xs">
+        <Badge variant="warning" className="text-12">
           Legacy grant
         </Badge>
         <p className="text-13 text-muted-foreground">
@@ -71,7 +71,7 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
 
   if (consent.allow_all_services) {
     return (
-      <Badge variant="secondary" className="text-xs">
+      <Badge variant="secondary" className="text-12">
         All services
       </Badge>
     );
@@ -79,7 +79,7 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
 
   if (allowedServiceIds.length === 0) {
     return (
-      <Badge variant="secondary" className="text-xs">
+      <Badge variant="secondary" className="text-12">
         No services
       </Badge>
     );
@@ -91,7 +91,7 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
         <Badge
           key={service.id}
           variant={service.deleted ? "destructive" : "secondary"}
-          className="text-xs"
+          className="text-12"
           title={
             service.deleted
               ? "Deleted service"
@@ -197,7 +197,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
         <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
           <p className="text-14 font-medium text-muted-foreground">No Authorized Apps</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             No applications have been authorized.
           </p>
         </div>
@@ -229,7 +229,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
             </p>
             <div className="mt-2 flex flex-wrap gap-1">
               {consent.scopes.split(" ").map((scope) => (
-                <Badge key={scope} variant="secondary" className="text-xs">
+                <Badge key={scope} variant="secondary" className="text-12">
                   {scope}
                 </Badge>
               ))}
@@ -280,7 +280,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               </p>
               <div className="mt-2 flex flex-wrap gap-1">
                 {consent.scopes.split(" ").map((scope) => (
-                  <Badge key={scope} variant="secondary" className="text-xs">
+                  <Badge key={scope} variant="secondary" className="text-12">
                     {scope}
                   </Badge>
                 ))}
@@ -326,7 +326,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
             <TableBody>
               {consents.map((consent) => (
                 <TableRow key={consent.id}>
-                  <TableCell className="font-medium">
+                  <TableCell className="font-normal">
                     {consent.client_name}
                   </TableCell>
                   <TableCell>
@@ -335,7 +335,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                         <Badge
                           key={scope}
                           variant="secondary"
-                          className="text-xs"
+                          className="text-12"
                         >
                           {scope}
                         </Badge>
@@ -467,7 +467,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
         <BiometricLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
           <p className="text-14 font-medium text-muted-foreground">No Authorizations</p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
           </p>
         </div>
@@ -508,7 +508,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
             </p>
             <div className="mt-2 flex flex-wrap gap-1">
               {binding.scopes.map((scope) => (
-                <Badge key={scope} variant="secondary" className="text-xs">
+                <Badge key={scope} variant="secondary" className="text-12">
                   {scope}
                 </Badge>
               ))}
@@ -561,7 +561,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               </p>
               <div className="mt-2 flex flex-wrap gap-1">
                 {binding.scopes.map((scope) => (
-                  <Badge key={scope} variant="secondary" className="text-xs">
+                  <Badge key={scope} variant="secondary" className="text-12">
                     {scope}
                   </Badge>
                 ))}
@@ -600,7 +600,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
             <TableBody>
               {bindings.map((binding) => (
                 <TableRow key={binding.binding_hash}>
-                  <TableCell className="font-medium">
+                  <TableCell className="font-normal">
                     {binding.client_name ?? binding.client_id}
                   </TableCell>
                   <TableCell
@@ -618,7 +618,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                         <Badge
                           key={scope}
                           variant="secondary"
-                          className="text-xs"
+                          className="text-12"
                         >
                           {scope}
                         </Badge>

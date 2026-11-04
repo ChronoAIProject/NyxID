@@ -172,7 +172,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
 
             {setupData?.secret && (
               <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Or enter this code manually:
                 </p>
                 <code className="block rounded-lg bg-muted p-2 text-center font-mono text-14 select-all">
@@ -208,7 +208,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                           inputMode="numeric"
                           autoComplete="one-time-code"
                           aria-label="Enter 6-digit verification code"
-                          className="text-center font-mono text-lg tracking-widest"
+                          className="text-center font-mono text-14 tracking-widest"
                           {...field}
                         />
                       </FormControl>

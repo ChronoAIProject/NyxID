@@ -175,7 +175,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
           if (draft.trim()) changeFilter({ model: draft.trim() });
         }}
       >
-        <label className="min-w-0 space-y-1 text-13 text-muted-foreground">
+        <label className="min-w-0 space-y-1 text-14 text-muted-foreground">
           Billing model
           <Input
             value={draft}

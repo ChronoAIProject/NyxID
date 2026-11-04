@@ -181,7 +181,7 @@ export function ProviderListPage() {
                       <FormControl>
                         <Input placeholder="github" {...field} />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Lowercase letters, digits, and hyphens only.
                       </p>
                       <FormMessage />
@@ -288,7 +288,7 @@ export function ProviderListPage() {
                             <SelectItem value="both">Admin or User</SelectItem>
                           </SelectContent>
                         </Select>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Choose whether users rely on admin-managed OAuth apps,
                           bring their own, or can use either.
                         </p>
@@ -385,7 +385,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Optional. Used to revoke tokens on disconnect.
                           </p>
                           <FormMessage />
@@ -405,7 +405,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Comma-separated list of scopes.
                           </p>
                           <FormMessage />
@@ -422,7 +422,7 @@ export function ProviderListPage() {
                           <FormControl>
                             <Input placeholder="OAuth client ID" {...field} />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {watchedCredentialMode === "admin"
                               ? "Required in admin mode."
                               : "Optional. Leave blank to require users to supply their own OAuth app credentials."}
@@ -445,7 +445,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {watchedCredentialMode === "admin"
                               ? "Required for OAuth 2.0 admin credentials."
                               : "Optional. Only set this when configuring an admin fallback OAuth app."}
@@ -462,7 +462,7 @@ export function ProviderListPage() {
                         <FormItem className="flex items-center justify-between rounded-lg border p-3">
                           <div className="space-y-0.5">
                             <FormLabel>Supports PKCE</FormLabel>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-13 text-muted-foreground">
                               Enable Proof Key for Code Exchange.
                             </p>
                           </div>
@@ -482,7 +482,7 @@ export function ProviderListPage() {
                         <FormItem className="flex items-center justify-between rounded-lg border p-3">
                           <div className="space-y-0.5">
                             <FormLabel>Authorization nonce required</FormLabel>
-                            <p className="text-xs text-muted-foreground">
+                            <p className="text-13 text-muted-foreground">
                               Generate a fresh nonce for each hosted OAuth
                               authorization attempt.
                               Enable only when the provider requires it, after
@@ -520,7 +520,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Endpoint to request a device code (RFC 8628 step 1).
                           </p>
                           <FormMessage />
@@ -540,7 +540,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Endpoint to poll for token (RFC 8628 step 3).
                           </p>
                           <FormMessage />
@@ -594,7 +594,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Comma-separated list of scopes.
                           </p>
                           <FormMessage />
@@ -614,7 +614,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {watchedCredentialMode === "admin"
                               ? "Required in admin mode."
                               : "Optional. Needed only when configuring an admin fallback client."}
@@ -637,7 +637,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Optional for public OAuth clients.
                           </p>
                           <FormMessage />
@@ -663,7 +663,7 @@ export function ProviderListPage() {
                           <FormControl>
                             <Input placeholder="NyxIdBot" {...field} />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Enter the BotFather username. A leading
                             <span> @</span> is optional.
                           </p>
@@ -685,7 +685,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             BotFather token used to verify Telegram Login Widget
                             callbacks.
                           </p>
@@ -733,7 +733,7 @@ export function ProviderListPage() {
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Link where users can generate an API key.
                           </p>
                           <FormMessage />
@@ -772,7 +772,7 @@ export function ProviderListPage() {
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">No Providers</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Add a provider to get started.
             </p>
           </div>
@@ -801,7 +801,7 @@ export function ProviderListPage() {
                   </div>
                   <div>
                     <CardTitle>{provider.name}</CardTitle>
-                    <CardDescription className="text-xs">
+                    <CardDescription className="text-13">
                       {provider.slug}
                     </CardDescription>
                   </div>
@@ -810,7 +810,7 @@ export function ProviderListPage() {
               <CardContent>
                 <div className="flex flex-col gap-2">
                   {provider.description && (
-                    <p className="text-xs text-muted-foreground line-clamp-2">
+                    <p className="text-13 text-muted-foreground line-clamp-2">
                       {provider.description}
                     </p>
                   )}
@@ -826,7 +826,7 @@ export function ProviderListPage() {
                         {provider.is_active ? "Active" : "Inactive"}
                       </Badge>
                     </div>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-13 text-muted-foreground">
                       {formatDate(provider.created_at)}
                     </span>
                   </div>

@@ -104,7 +104,7 @@ export function TokenMetricPicker({
           className={cn(
             "min-w-0 justify-between",
             compact
-              ? "h-6 w-full border-0 px-0 text-12 uppercase shadow-none"
+              ? "h-6 w-full border-0 px-0 text-14 uppercase shadow-none"
               : "w-full sm:w-auto sm:min-w-40",
           )}
         >

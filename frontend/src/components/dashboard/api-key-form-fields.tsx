@@ -57,7 +57,7 @@ export function ApiKeyResourceFields({
                     <FormLabel>
                       {kind === "services" ? "Services" : "Nodes"}
                     </FormLabel>
-                    <label className="flex items-center gap-2 text-14 unthemed:text-12">
+                    <label className="flex items-center gap-2 text-14 unthemed:text-14">
                       <Checkbox
                         checked={field.value ?? false}
                         onCheckedChange={(checked) => {
@@ -82,7 +82,7 @@ export function ApiKeyResourceFields({
                         <label
                           key={resource.id}
                           htmlFor={`${prefix}-${kind}-${resource.id}`}
-                          className="flex items-start gap-2 text-14 unthemed:text-12"
+                          className="flex items-start gap-2 text-14 unthemed:text-14"
                         >
                           <Checkbox
                             id={`${prefix}-${kind}-${resource.id}`}
@@ -178,7 +178,7 @@ export function ApiKeyScopesField({ form }: Props) {
               return (
                 <label
                   key={scope}
-                  className="flex cursor-pointer items-center gap-2 text-14 unthemed:text-12"
+                  className="flex cursor-pointer items-center gap-2 text-14 unthemed:text-14"
                 >
                   <Checkbox
                     checked={isSelected}
@@ -209,7 +209,7 @@ export function ApiKeyExpiryField({ form, allowNeverExpires = true }: Props & {
       {allowNeverExpires && (
         <FormField control={form.control} name="never_expires" render={({ field }) => (
           <FormItem>
-            <label className="flex items-center gap-2 text-14 unthemed:text-12">
+            <label className="flex items-center gap-2 text-14 unthemed:text-14">
               <Checkbox checked={field.value ?? false} onCheckedChange={(checked) => {
                 field.onChange(checked === true);
                 form.setValue("expires_at", checked === true ? null
@@ -228,7 +228,7 @@ export function ApiKeyExpiryField({ form, allowNeverExpires = true }: Props & {
             <DatePicker value={field.value ?? null} onChange={field.onChange}
               minDate={new Date().toISOString().slice(0, 10)} placeholder="90 days by default" />
           </FormControl>
-          <p className="text-xs text-muted-foreground">A blank date defaults to 90 days.</p>
+          <p className="text-13 text-muted-foreground">A blank date defaults to 90 days.</p>
           <FormMessage />
         </FormItem>
       )} />}

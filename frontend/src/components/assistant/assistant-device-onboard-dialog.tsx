@@ -188,7 +188,7 @@ export function AssistantDeviceOnboardDialog({
                   id="assistant-device-qr-payload"
                   readOnly
                   value={result.qrPayload}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}

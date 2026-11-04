@@ -1,3 +1,4 @@
+import { useTextSize } from "@/hooks/use-text-size";
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
@@ -77,6 +78,7 @@ function QuantityPanel({
   comparison: Dimension;
   onChooseMetrics: () => void;
 }) {
+  const tokenSize = useTextSize(13);
   const [page, setPage] = useState(0);
   const empty = metrics.length === 0;
   const totals = metricTotals(rows);
@@ -179,10 +181,11 @@ function QuantityPanel({
             >
               <CartesianGrid vertical={false} strokeDasharray="3 3" />
               <XAxis
+                height={Math.max(30, tokenSize * 2.5)}
                 dataKey="key"
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
+                tick={{ fontSize: tokenSize, fill: "var(--color-muted-foreground)" }}
                 minTickGap={16}
                 tickFormatter={(value) => {
                   const text =
@@ -195,11 +198,11 @@ function QuantityPanel({
                 tickFormatter={compact}
                 tickLine={false}
                 axisLine={false}
-                width={44}
+                width={Math.max(44, tokenSize * 4)}
                 tick={
                   empty
                     ? false
-                    : { fontSize: 10, fill: "var(--color-muted-foreground)" }
+                    : { fontSize: tokenSize, fill: "var(--color-muted-foreground)" }
                 }
                 domain={[0, empty ? 1 : yMax]}
                 ticks={empty ? [0, 0.25, 0.5, 0.75, 1] : undefined}

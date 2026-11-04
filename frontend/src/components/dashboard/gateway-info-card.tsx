@@ -47,8 +47,8 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <CardTitle className="text-base">LLM Gateway</CardTitle>
-            <CardDescription className="text-xs">
+            <CardTitle className="text-15">LLM Gateway</CardTitle>
+            <CardDescription className="text-13">
               Route LLM requests through NyxID with your connected provider
               credentials.
             </CardDescription>
@@ -77,7 +77,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
         <CopyableField label="Gateway URL" value={gatewayUrl} />
 
         <div className="rounded-xl border border-border/50 bg-muted/30 p-3">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             The gateway accepts OpenAI-compatible requests and routes them to
             the correct provider based on the model name. Your provider
             credentials are injected server-side.
@@ -86,7 +86,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
 
         {readyProviders.length > 0 && (
           <div>
-            <p className="mb-2 text-xs font-medium text-muted-foreground">
+            <p className="mb-2 text-13 font-medium text-muted-foreground">
               Ready Providers
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -94,7 +94,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
                 <Badge
                   key={p.provider_slug}
                   variant="secondary"
-                  className="text-xs"
+                  className="text-12"
                 >
                   {p.provider_name}
                 </Badge>
@@ -104,17 +104,17 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
         )}
 
         <div>
-          <p className="mb-2 text-xs font-medium text-muted-foreground">
+          <p className="mb-2 text-13 font-medium text-muted-foreground">
             Agent Key
           </p>
           <AgentKeyPicker onSelect={setPickedKey} />
         </div>
 
         <div>
-          <p className="mb-1 text-xs font-medium text-muted-foreground">
+          <p className="mb-1 text-13 font-medium text-muted-foreground">
             Example Request
           </p>
-          <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-13 overflow-x-auto whitespace-pre-wrap break-all">
+          <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-14 overflow-x-auto whitespace-pre-wrap break-all">
             {exampleCurl}
           </pre>
           <p className="mt-1 text-12 text-muted-foreground">

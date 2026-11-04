@@ -460,7 +460,7 @@ export function NodeDetailPage() {
             </div>
             {node.metrics.last_error && (
               <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
-                <div className="flex items-center gap-2 text-xs font-medium text-destructive">
+                <div className="flex items-center gap-2 text-13 font-medium text-destructive">
                   <Activity className="h-3 w-3" />
                   Last Error
                   {node.metrics.last_error_at && (
@@ -469,7 +469,7 @@ export function NodeDetailPage() {
                     </span>
                   )}
                 </div>
-                <p className="mt-1 text-xs text-destructive/80">
+                <p className="mt-1 text-13 text-destructive/80">
                   {node.metrics.last_error}
                 </p>
               </div>
@@ -672,11 +672,11 @@ export function NodeDetailPage() {
                       <TableRow key={credential.id}>
                         <TableCell>
                           <div className="space-y-1">
-                            <code className="text-xs">
+                            <code className="text-14">
                               {credential.service_slug}
                             </code>
                             {credential.label && (
-                              <p className="text-xs text-muted-foreground">
+                              <p className="text-13 text-muted-foreground">
                                 {credential.label}
                               </p>
                             )}
@@ -686,7 +686,7 @@ export function NodeDetailPage() {
                           {injectionMethodLabel(credential.injection_method)}
                         </TableCell>
                         <TableCell>
-                          <code className="text-xs text-muted-foreground">
+                          <code className="text-14 text-muted-foreground">
                             {credential.field_name}
                           </code>
                         </TableCell>
@@ -780,7 +780,7 @@ export function NodeDetailPage() {
                 </li>
               </ul>
               {transferIsNoop && (
-                <p className="mt-2 text-xs text-destructive">
+                <p className="mt-2 text-13 text-destructive">
                   Choose a different owner before transferring.
                 </p>
               )}
@@ -883,16 +883,16 @@ export function NodeDetailPage() {
                   value={rotatedCredentials.signing_secret}
                 />
                 <div className="rounded-lg bg-muted p-3">
-                  <p className="mb-1 text-xs font-medium text-text-tertiary">
+                  <p className="mb-1 text-13 font-medium text-text-tertiary">
                     Run on your node
                   </p>
-                  <code className="text-xs text-foreground break-all">
+                  <code className="text-14 text-foreground break-all">
                     nyxid node rekey --auth-token{" "}
                     {rotatedCredentials.auth_token} --signing-secret{" "}
                     {rotatedCredentials.signing_secret}
                   </code>
                 </div>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   <strong>Lost it?</strong> If you don&apos;t copy this now,
                   you&apos;ll need to rotate the credential to get a new one.
                   (Old value stops working immediately on rotate.)

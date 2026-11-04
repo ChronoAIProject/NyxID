@@ -143,7 +143,7 @@ export function AssistantNodeRegisterTokenDialog({
                   id="assistant-node-registration-token"
                   readOnly
                   value={result.token}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}

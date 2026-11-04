@@ -153,7 +153,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
     <div>
       <GroupedList title="Replace credential">
         <GroupedRow>
-          <label className="w-full text-13 font-normal text-text-tertiary">
+          <label className="w-full text-14 font-medium text-text-tertiary">
             New credential
             <GroupedInput
               type="password"

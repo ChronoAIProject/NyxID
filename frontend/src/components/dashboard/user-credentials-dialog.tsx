@@ -187,7 +187,7 @@ export function UserCredentialsDialog({
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Leave blank for public clients that do not use a client
                         secret.
                       </p>
@@ -278,7 +278,7 @@ function ExistingCredentialsInfo({
   return (
     <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-14">
       <Badge variant="success">Configured</Badge>
-      <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+      <div className="flex flex-col gap-0.5 text-13 text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}
         {credentials.updated_at && (
           <span>Updated {formatDate(credentials.updated_at)}</span>

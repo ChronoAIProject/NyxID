@@ -104,7 +104,7 @@ function SidebarGroups({
                     to="/docs/$"
                     params={{ _splat: page.slug }}
                     onClick={onNavigate}
-                    className={`block rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    className={`block rounded-md px-3 py-1.5 text-14 transition-colors ${
                       active
                         ? "bg-overlay-strong font-medium text-foreground"
                         : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -211,7 +211,7 @@ export function DocsLayout({
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
+              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-14 text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
             >
               <Search className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Search</span>
@@ -231,7 +231,7 @@ export function DocsLayout({
             </a>
             <a
               href={isAuthed ? "/dashboard" : "/login"}
-              className="rounded-lg bg-primary px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-nyx-600"
+              className="rounded-lg bg-primary px-4 py-1.5 text-14 font-semibold text-white transition-colors hover:bg-nyx-600"
             >
               {isAuthed ? "Dashboard" : "Log in"}
             </a>
@@ -267,7 +267,7 @@ export function DocsLayout({
                         <a
                           href={`#${item.id}`}
                           aria-current={active ? "location" : undefined}
-                          className={`-ml-px block border-l pl-3 text-sm transition-colors ${
+                          className={`-ml-px block border-l pl-3 text-14 transition-colors ${
                             active
                               ? "border-nyx-700 font-medium text-foreground dark:border-nyx-secondary-400"
                               : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"

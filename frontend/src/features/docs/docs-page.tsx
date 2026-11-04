@@ -286,16 +286,16 @@ export function DocsPage() {
       )}
       {status === "missing" && (
         <div className="max-w-3xl rounded-2xl border border-border bg-card p-10 text-center">
-          <p className="font-mono text-xs tracking-widest text-text-tertiary uppercase">404</p>
-          <h1 className="mt-3 font-display text-2xl font-semibold tracking-tight text-foreground">Page not found</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
+          <p className="font-mono text-13 tracking-widest text-text-tertiary uppercase">404</p>
+          <h1 className="mt-3 font-display text-22 sm:text-28 font-bold tracking-tight text-foreground">Page not found</h1>
+          <p className="mt-2 text-14 text-muted-foreground">
             This docs page doesn’t exist (yet). Try search, or pick a section from the sidebar.
           </p>
         </div>
       )}
       {status === "ok" && doc && (
         <article ref={contentRef} className="max-w-3xl">
-          <h1 className="mb-6 font-display text-3xl font-bold tracking-tight text-foreground md:text-4xl">{title}</h1>
+          <h1 className="mb-6 font-display text-22 sm:text-28 font-bold tracking-tight text-foreground">{title}</h1>
           <DocMarkdown markdown={doc.body} baseHref={baseHref} />
         </article>
       )}

@@ -878,7 +878,7 @@ export function GroupedServiceCards({
           </MotionConfig>
         )
       ) : (
-        <p className="py-10 text-center text-sm text-muted-foreground">
+        <p className="py-10 text-center text-14 text-muted-foreground">
           {keys.length
             ? filters.source === "personal"
               ? "No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform."

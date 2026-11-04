@@ -99,7 +99,7 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
           <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/5 bg-white/5 text-[#c6ef68]">
             <CmaGlyph className="size-6" />
           </span>
-          <h3 className="min-w-0 flex-1 text-sm font-semibold tracking-tight">Delegated to CMA</h3>
+          <h3 className="min-w-0 flex-1 text-14 font-semibold tracking-tight">Delegated to CMA</h3>
           <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-13 font-medium", tones[tone])}>
             <span aria-hidden className={cn("size-1.5 rounded-full bg-current", pending && tone === "active" && "motion-safe:animate-pulse")} />
             {label}

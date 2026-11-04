@@ -18,7 +18,7 @@
   color: var(--nb-text);
   min-height: 100dvh;
   font-family: "Nyxbot Inter", Arial, sans-serif;
-  font-size: 13px;
+  font-size: var(--text-14);
   line-height: 1.5;
   letter-spacing: 0;
   color-scheme: light;
@@ -82,25 +82,25 @@
   border-radius: 7px;
   background: var(--nb-accent);
   color: #fff;
-  font-size: 12px;
+  font-size: var(--text-14);
   font-weight: 700;
   flex-shrink: 0;
 }
 .nb-setup-brand strong {
-  font-size: 20px;
-  line-height: 28px;
+  font-size: var(--text-20);
+  line-height: 1.5;
   font-weight: 700;
 }
 .nb-setup-brand > span:last-child {
   color: var(--nb-muted);
-  font-size: 12px;
+  font-size: var(--text-14);
 }
 .nb-setup-return {
   display: flex;
   align-items: center;
   gap: 8px;
   color: #4589ad;
-  font-size: 12px;
+  font-size: var(--text-14);
   flex-shrink: 0;
 }
 .nb-setup-return .nb-brand-icon {
@@ -139,8 +139,8 @@
   padding-bottom: 18px;
   border-bottom: 2px solid var(--nb-line);
   color: var(--nb-muted);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: var(--text-14);
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 .nb-bot-result {
@@ -172,7 +172,7 @@
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--nb-note-bg);
-  font-size: 10px;
+  font-size: var(--text-13);
 }
 [data-state="complete"] > .nb-setup-step-number {
   background: var(--nb-success);
@@ -190,8 +190,8 @@
 .nb-setup-content h1 {
   margin: 0;
   font-family: inherit;
-  font-size: 24px;
-  font-weight: 600;
+  font-size: var(--text-22);
+  font-weight: 700;
   line-height: 1.3;
   letter-spacing: 0;
   overflow-wrap: anywhere;
@@ -199,11 +199,12 @@
 }
 .nyxbot-onboarding.nb-setup .nb-setup-content h1:focus {
   outline: none;
+  font-weight: 700;
 }
 .nb-setup-subtitle {
   margin: 10px 0 24px;
   color: var(--nb-muted);
-  font-size: 14px;
+  font-size: var(--text-14);
   line-height: 1.5;
 }
 .nb-source-account {
@@ -211,8 +212,8 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  font-size: 12px;
-  line-height: 18px;
+  font-size: var(--text-14);
+  line-height: 1.5;
 }
 .nb-source-account > span:first-child {
   display: flex;
@@ -255,12 +256,12 @@
   height: 32px;
 }
 .nb-source-option strong {
-  font-size: 13px;
+  font-size: var(--text-14);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
 .nb-source-option > span:last-child {
-  font-size: 11px;
+  font-size: var(--text-13);
   color: var(--nb-muted);
 }
 .nb-source-option[aria-disabled="true"] {
@@ -274,7 +275,7 @@
   height: 28px;
   margin: 2px;
   border: 1.5px solid currentColor;
-  font-size: 26px;
+  font-size: var(--text-28);
   line-height: 1;
 }
 .nb-source-services {
@@ -295,12 +296,12 @@
   margin-top: 2px;
 }
 .nb-source-services strong {
-  font-size: 14px;
+  font-size: var(--text-14);
   font-weight: 600;
 }
 .nb-source-services p {
   color: var(--nb-muted);
-  font-size: 12px;
+  font-size: var(--text-14);
   margin: 2px 0 0;
 }
 .nb-source-permissions {
@@ -311,7 +312,7 @@
   border-radius: 6px;
   background: var(--nb-note-bg);
   color: var(--nb-muted);
-  font-size: 12px;
+  font-size: var(--text-14);
   line-height: 1.5;
 }
 .nb-source-permissions svg {
@@ -337,7 +338,7 @@
   min-height: 48px;
   padding: 10px 12px;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: var(--text-14);
   box-shadow: none;
   gap: 8px;
 }
@@ -376,7 +377,8 @@
     margin-top: 48px;
   }
   .nb-setup-content h1 {
-    font-size: 28px;
+    font-size: var(--text-28);
+    font-weight: 700;
   }
   .nb-setup-footer {
     margin: 0 24px;
@@ -404,9 +406,9 @@
   gap: 10px;
 }
 .nb-auth-brand strong {
-  font-size: 20px;
+  font-size: var(--text-20);
   font-weight: 700;
-  line-height: 28px;
+  line-height: 1.5;
 }
 .nb-auth-logo {
   display: grid;
@@ -431,19 +433,20 @@
 .nb-auth-content h1 {
   margin: 0;
   font-family: inherit;
-  font-size: 24px;
-  font-weight: 600;
+  font-size: var(--text-22);
+  font-weight: 700;
   line-height: 1.33;
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
 .nyxbot-onboarding.nb-auth .nb-auth-content h1:focus {
   outline: none;
+  font-weight: 700;
 }
 .nb-auth-subtitle {
   margin: 20px 0;
   color: var(--nb-muted);
-  font-size: 14px;
+  font-size: var(--text-14);
 }
 .nb-auth-footer {
   width: 100%;
@@ -454,7 +457,7 @@
 .nyxbot-onboarding .nb-auth-footer .nb-secondary {
   min-height: 48px;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: var(--text-14);
   gap: 10px;
 }
 .nyxbot-onboarding .nb-auth-footer .nb-secondary:disabled {
@@ -486,8 +489,9 @@
   border: 1px solid var(--nb-line);
   border-radius: 6px;
   padding: 4px;
-  font-size: 11px;
+  font-size: var(--text-14);
   min-height: 28px;
+  font-weight: 400;
 }
 .nb-tools button {
   display: grid;
@@ -517,18 +521,19 @@
 .nb-header h1 {
   margin: 0;
   font-family: inherit;
-  font-size: 19px;
-  font-weight: 600;
+  font-size: var(--text-22);
+  font-weight: 700;
   line-height: 1.3;
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
 .nb-header h1:focus {
   outline: none;
+  font-weight: 700;
 }
 .nb-header p {
   margin: 6px 0 0;
-  font-size: 12px;
+  font-size: var(--text-14);
   color: var(--nb-muted);
 }
 .nb-progress {
@@ -550,7 +555,7 @@
 }
 .nb-intro {
   margin: 14px 0;
-  font-size: 13px;
+  font-size: var(--text-14);
   line-height: 1.5;
   text-align: center;
   color: var(--nb-muted);
@@ -575,7 +580,7 @@
   color: #fff;
   font-family: "Nyxbot Inter", Arial, sans-serif;
   padding: 10px 12px;
-  font-size: 12px;
+  font-size: var(--text-14);
   line-height: 1.5;
 }
 .nb-footer {
@@ -598,7 +603,7 @@
   min-height: 44px;
   padding: 10px 12px;
   border-radius: 9px;
-  font-size: 13px;
+  font-size: var(--text-14);
   font-weight: 600;
   line-height: 1.4;
   white-space: normal;
@@ -640,7 +645,7 @@
   border-radius: 6px;
   background: var(--nb-bg);
   color: var(--nb-text);
-  font-size: 14px;
+  font-size: var(--text-14);
   font-weight: 400;
   line-height: 1.5;
   white-space: normal;
@@ -657,8 +662,8 @@
   color: var(--nb-muted);
 }
 .nyxbot-onboarding .nb-provider .nb-brand-icon {
-  width: 28px;
-  height: 28px;
+  width: max(28px, 1.25em);
+  height: max(28px, 1.25em);
 }
 .nb-brand-icon {
   width: 38px;
@@ -695,12 +700,12 @@
 .nb-notion {
   color: var(--nb-text);
   font:
-    bold 30px Georgia,
+    bold var(--text-28) Georgia,
     serif;
   border: 1px solid var(--nb-muted);
   border-radius: 5px;
-  width: 32px;
-  height: 32px;
+  width: 1.25em;
+  height: 1.25em;
   margin: 3px;
 }
 .nb-facebook {
@@ -714,7 +719,7 @@
   background: var(--nb-bg);
   color: var(--nb-text);
   border-radius: 6px;
-  font-size: 14px;
+  font-size: var(--text-14);
   font-weight: 400;
   line-height: 1.5;
   gap: 14px;
@@ -723,7 +728,7 @@
 }
 .nb-signup {
   margin: 22px 0 0;
-  font-size: 13px;
+  font-size: var(--text-14);
   color: var(--nb-muted);
 }
 .nb-signup a {
@@ -755,12 +760,12 @@
   position: relative;
 }
 .nb-tile strong {
-  font-size: 13px;
+  font-size: var(--text-14);
   font-weight: 600;
   overflow-wrap: anywhere;
 }
 .nb-tile > span:last-child {
-  font-size: 11px;
+  font-size: var(--text-13);
   color: var(--nb-muted);
 }
 .nb-tile[data-selected="true"] {
@@ -807,7 +812,7 @@
   margin: 16px 0;
   display: grid;
   gap: 9px;
-  font-size: 12px;
+  font-size: var(--text-14);
   color: var(--nb-muted);
 }
 .nb-instructions a {
@@ -826,8 +831,9 @@
   background: var(--nb-bg);
   color: var(--nb-text);
   border-color: var(--nb-line);
-  font-size: 16px;
+  font-size: var(--text-14);
   border-radius: 9px;
+  font-weight: 400;
 }
 .nb-token-field input {
   padding-right: 46px;
@@ -845,7 +851,7 @@
 }
 .nb-small {
   color: var(--nb-muted);
-  font-size: 11px;
+  font-size: var(--text-13);
   line-height: 1.5;
   margin-top: 10px;
 }
@@ -888,11 +894,11 @@
   flex-shrink: 0;
 }
 .nb-setup .nb-channel-tiles strong {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: var(--text-14);
+  line-height: 1.5;
 }
 .nb-setup .nb-channel-tiles .nb-tile > span:last-child {
-  line-height: 16px;
+  line-height: 1.5;
 }
 .nb-setup .nb-channel-tiles > div.nb-tile {
   flex-direction: row;
@@ -916,15 +922,15 @@
 }
 .nb-channel-unavailable-copy span {
   color: var(--nb-muted);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: var(--text-13);
+  line-height: 1.5;
 }
 .nb-setup .nb-instructions {
   margin: 16px 0 20px;
   padding-left: 18px;
   gap: 8px;
   color: var(--nb-text);
-  line-height: 18px;
+  line-height: 1.5;
 }
 .nb-setup .nb-instructions li {
   padding-left: 8px;
@@ -940,8 +946,8 @@
 }
 .nb-channel-form label {
   color: var(--nb-muted);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: var(--text-14);
+  line-height: 1.5;
   font-weight: 500;
 }
 .nyxbot-onboarding.nb-setup .nb-token-field input {
@@ -954,14 +960,14 @@
   gap: 10px;
   margin: 20px 0 0;
   color: var(--nb-muted);
-  font-size: 11px;
-  line-height: 16px;
+  font-size: var(--text-13);
+  line-height: 1.5;
 }
 .nb-channel-token-note svg {
   flex-shrink: 0;
 }
 .nb-notice {
-  font-size: 12px;
+  font-size: var(--text-14);
   line-height: 1.6;
   border-left: 3px solid var(--nb-accent);
   background: var(--nb-selected);
@@ -984,7 +990,7 @@
   justify-content: center;
   gap: 6px;
   color: #12805c;
-  font-size: 12px;
+  font-size: var(--text-14);
 }
 .nb-cap-options {
   display: grid;
@@ -1012,7 +1018,7 @@
 }
 .nb-cap-option small {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--text-13);
   color: var(--nb-accent);
 }
 .nb-next {
@@ -1022,7 +1028,7 @@
   border-radius: 16px;
   padding: 6px 12px;
   text-align: center;
-  font-size: 11px;
+  font-size: var(--text-13);
   margin-top: 16px;
 }
 .nb-link-reasons {
@@ -1033,7 +1039,7 @@
   display: grid;
   gap: 10px;
   color: var(--nb-muted);
-  font-size: 12px;
+  font-size: var(--text-14);
 }
 .nb-link-reasons li {
   display: flex;
@@ -1045,7 +1051,7 @@
 }
 .nb-code-label {
   display: block;
-  font-size: 12px;
+  font-size: var(--text-14);
   color: var(--nb-muted);
   margin-bottom: 6px;
 }

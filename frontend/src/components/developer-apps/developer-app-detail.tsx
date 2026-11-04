@@ -178,7 +178,7 @@ export function DeveloperAppDetail({
   if (!app) {
     return (
       <div className="space-y-4">
-        <h2 className="text-3xl md:text-5xl font-normal tracking-tight">
+        <h2 className="text-28 md:text-36 font-normal tracking-tight">
           Developer App
         </h2>
         <p className="text-muted-foreground">
@@ -234,7 +234,7 @@ export function DeveloperAppDetail({
             </Badge>
           </div>
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">
               Client ID
             </p>
             <p className="break-all font-mono text-14 text-foreground">
@@ -242,7 +242,7 @@ export function DeveloperAppDetail({
             </p>
           </div>
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">
               Created At
             </p>
             <p className="text-14 text-foreground">
@@ -263,7 +263,7 @@ export function DeveloperAppDetail({
           {app.redirect_uris.map((uri) => (
             <div
               key={uri}
-              className="break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs"
+              className="break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-13"
             >
               {uri}
             </div>
@@ -388,13 +388,13 @@ export function DeveloperAppDetail({
                       >
                         {scope.label}
                         {scope.required && (
-                          <span className="ml-1 text-xs text-muted-foreground">
+                          <span className="ml-1 text-13 text-muted-foreground">
                             (required)
                           </span>
                         )}
                       </label>
                       {"hint" in scope && scope.hint && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           {scope.hint}
                         </p>
                       )}
@@ -408,7 +408,7 @@ export function DeveloperAppDetail({
                 <label className="text-14 font-medium">
                   Default Services
                 </label>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Catalog services this app requests at consent time. Users
                   keep the final say.
                 </p>
@@ -434,14 +434,14 @@ export function DeveloperAppDetail({
                       className="cursor-pointer text-14 font-medium leading-none"
                     >
                       {entry.name}
-                      <span className="ml-1 text-xs font-normal text-muted-foreground">
+                      <span className="ml-1 text-13 font-normal text-muted-foreground">
                         {entry.slug}
                       </span>
                     </label>
                   </div>
                 ))}
                 {(catalog ?? []).length === 0 && (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     No catalog services available.
                   </p>
                 )}

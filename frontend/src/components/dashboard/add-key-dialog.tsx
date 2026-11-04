@@ -344,7 +344,7 @@ function CopyableCode({ children }: { readonly children: string }) {
 
   return (
     <div className="relative">
-      <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+      <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
         {children}
       </pre>
       <Button
@@ -403,7 +403,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={() => setChoosingPostHogRegion(false)}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back to catalog
@@ -458,7 +458,7 @@ function CatalogGrid({
           className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
-          <span className="text-xs font-medium">Custom Endpoint</span>
+          <span className="text-13 font-medium">Custom Endpoint</span>
         </button>
 
         <button
@@ -467,7 +467,7 @@ function CatalogGrid({
           className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
-          <span className="text-xs font-medium">Custom SSH</span>
+          <span className="text-13 font-medium">Custom SSH</span>
         </button>
 
         {filtered?.map((entry) => (
@@ -570,7 +570,7 @@ function RoutingStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back to catalog
@@ -607,7 +607,7 @@ function RoutingStep({
               }`}
             >
               <Globe className="h-5 w-5" />
-              <span className="text-xs font-medium">Direct</span>
+              <span className="text-13 font-medium">Direct</span>
               <span className="text-12 text-muted-foreground">
                 NyxID proxies to endpoint
               </span>
@@ -623,7 +623,7 @@ function RoutingStep({
               }`}
             >
               <Server className="h-5 w-5" />
-              <span className="text-xs font-medium">Via Node</span>
+              <span className="text-13 font-medium">Via Node</span>
               <span className="text-12 text-muted-foreground">
                 {catalogEntry?.auth_method === "ifttt_mcp"
                   ? "IFTTT OAuth uses direct routing"
@@ -750,7 +750,7 @@ function KeyForm({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -773,7 +773,7 @@ function KeyForm({
           href={catalogEntry.api_key_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
         >
           Get API key
           <ExternalLink className="h-3 w-3" />
@@ -781,7 +781,7 @@ function KeyForm({
       )}
 
       {catalogEntry?.api_key_instructions && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {catalogEntry.api_key_instructions}
         </p>
       )}
@@ -1011,7 +1011,7 @@ function KeyForm({
             }
           />
           {endpointUrlError && (
-            <p className="text-xs text-destructive">{endpointUrlError}</p>
+            <p className="text-13 text-destructive">{endpointUrlError}</p>
           )}
         </div>
 
@@ -1029,7 +1029,7 @@ function KeyForm({
             aria-invalid={openapiSpecUrlError ? true : undefined}
           />
           {openapiSpecUrlError && (
-            <p className="text-xs text-destructive">{openapiSpecUrlError}</p>
+            <p className="text-13 text-destructive">{openapiSpecUrlError}</p>
           )}
           <p className="text-13 text-muted-foreground">
             When set, AI agents discover concrete operations from the spec
@@ -1162,7 +1162,7 @@ function NodeSetupStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -1215,7 +1215,7 @@ function NodeSetupStep({
                     aria-invalid={sshPortError ? true : undefined}
                   />
                   {sshPortError && (
-                    <p className="text-xs text-destructive">{sshPortError}</p>
+                    <p className="text-13 text-destructive">{sshPortError}</p>
                   )}
                 </div>
               </div>
@@ -1274,7 +1274,7 @@ function NodeSetupStep({
                       aria-invalid={sshTtlError ? true : undefined}
                     />
                     {sshTtlError && (
-                      <p className="text-xs text-destructive">{sshTtlError}</p>
+                      <p className="text-13 text-destructive">{sshTtlError}</p>
                     )}
                     <p className="text-13 text-muted-foreground">
                       15-60 minutes. Shorter is more secure.
@@ -1363,7 +1363,7 @@ function NodeSetupStep({
 
         {isSsh ? (
           <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               The SSH service will be created with certificate-based
               authentication. After creation, full setup instructions (CA key,
               sshd_config, node agent setup) will be available on the service
@@ -1372,7 +1372,7 @@ function NodeSetupStep({
           </div>
         ) : (
           <div className="space-y-3">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Run this on your node to auto-setup credentials. It detects the
               service type and guides you through the right flow:
             </p>
@@ -1383,7 +1383,7 @@ function NodeSetupStep({
               <p className="text-13 text-muted-foreground">
                 The exact service slug will be shown on the service detail page
                 after creation. Update the{" "}
-                <code className="text-12">--service</code> flag accordingly.
+                <code className="text-14">--service</code> flag accordingly.
               </p>
             )}
             {catalogEntry?.api_key_url && (
@@ -1391,7 +1391,7 @@ function NodeSetupStep({
                 href={catalogEntry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+                className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
               >
                 Get API key
                 <ExternalLink className="h-3 w-3" />
@@ -2018,7 +2018,7 @@ function OAuthStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2464,7 +2464,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2489,7 +2489,7 @@ function DeviceCodeStep({
             idPrefix="device-scope"
           />
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This provider does not accept additional scopes -- they are fixed by
             the upstream client registration.
           </p>
@@ -2512,7 +2512,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2564,7 +2564,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2599,7 +2599,7 @@ function DeviceCodeStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2613,11 +2613,11 @@ function DeviceCodeStep({
       />
 
       <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <p className="text-13 font-medium uppercase tracking-wider text-muted-foreground">
           Your code
         </p>
         <div className="flex items-center gap-3">
-          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
+          <code className="text-28 font-semibold tracking-[0.3em] font-mono text-primary-text">
             {userCode}
           </code>
           <Button
@@ -2651,7 +2651,7 @@ function DeviceCodeStep({
         </ol>
       </div>
 
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
+      <div className="flex items-center justify-between text-13 text-muted-foreground">
         <div className="flex items-center gap-2">
           <Loader2 className="h-3 w-3 animate-spin" />
           <span>Waiting for authentication...</span>
@@ -2725,7 +2725,7 @@ function OAuthCredentialsStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2743,7 +2743,7 @@ function OAuthCredentialsStep({
           href={catalogEntry.documentation_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
         >
           How to create an OAuth app
           <ExternalLink className="h-3 w-3" />
@@ -2832,7 +2832,7 @@ function OwnerPicker({
   return (
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <div className="flex items-center gap-2 text-13 font-medium text-muted-foreground">
           <Building2 className="h-3.5 w-3.5" />
           Owner
         </div>
@@ -2859,7 +2859,7 @@ function AccessPolicyPicker({
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <Label htmlFor="add-key-admin-only" className="text-xs font-medium">
+          <Label htmlFor="add-key-admin-only" className="text-14 font-medium">
             Admin-only execution
           </Label>
           <p className="text-13 text-muted-foreground">

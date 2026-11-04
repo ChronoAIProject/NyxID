@@ -297,7 +297,7 @@ export function DatePicker(props: DatePickerProps) {
             <Button
               type="button"
               variant="ghost"
-              className="h-7 text-13 unthemed:text-11"
+              className="h-7 text-14 unthemed:text-11"
               disabled={values.length === 0}
               onClick={() => {
                 if (multiple) {
@@ -314,7 +314,7 @@ export function DatePicker(props: DatePickerProps) {
               <Button
                 type="button"
                 variant="ghost"
-                className="h-7 text-13 unthemed:text-11"
+                className="h-7 text-14 unthemed:text-11"
                 onClick={() => {
                   const t = new Date();
                   const todayValue = toDateString(t);
@@ -339,7 +339,7 @@ export function DatePicker(props: DatePickerProps) {
                 <Button
                   type="button"
                   variant="ghost"
-                  className="h-7 text-13 unthemed:text-11"
+                  className="h-7 text-14 unthemed:text-11"
                   onClick={() => setOpen(false)}
                 >
                   Done

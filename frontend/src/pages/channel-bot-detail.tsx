@@ -125,7 +125,7 @@ function ConversationRow({
 
   return (
     <TableRow>
-      <TableCell className="text-xs">
+      <TableCell className="text-14">
         {conversation.platform_conversation_id ||
           conversation.platform_sender_id ||
           "-"}
@@ -135,12 +135,12 @@ function ConversationRow({
           {conversationTypeLabel(conversation.platform_conversation_type)}
         </Badge>
       </TableCell>
-      <TableCell className="font-medium">{agentName}</TableCell>
+      <TableCell className="font-normal">{agentName}</TableCell>
       <TableCell>
         {conversation.default_agent ? (
           <Badge variant="info">Default</Badge>
         ) : (
-          <span className="text-xs text-muted-foreground">-</span>
+          <span className="text-13 text-muted-foreground">-</span>
         )}
       </TableCell>
       <TableCell>
@@ -150,7 +150,7 @@ function ConversationRow({
           <Badge variant="secondary">Inactive</Badge>
         )}
       </TableCell>
-      <TableCell className="text-xs text-muted-foreground">
+      <TableCell className="text-14 text-muted-foreground">
         {activities.length ? <LatestActivity activity={latest} descriptors={activities} unavailable={activityError} loading={activityLoading} /> : conversation.last_message_at
           ? formatRelativeTime(conversation.last_message_at)
           : "Never"}
@@ -221,7 +221,7 @@ function ConversationsSection({
       {activities.length > 0 && <ChannelActivities scope="bot" id={botId} descriptors={activities} />}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <h3 className="text-lg font-medium">Conversation Routes</h3>
+          <h3 className="text-15 font-medium">Conversation Routes</h3>
           <p className="text-14 text-muted-foreground">
             Map conversations to AI agents for message relay.
           </p>
@@ -465,7 +465,7 @@ export function AddRouteDialog({
                   Use a public default route
                 </Label>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {watch("default_agent")
                   ? "Receives ordinary messages from anyone contacting this bot when no exact route matches. Choose a dedicated agent with restricted permissions for public use."
                   : "Enter an exact Telegram chat ID to route only that conversation. Turn on the public default route to handle unmatched chats."}
@@ -473,7 +473,7 @@ export function AddRouteDialog({
             </div>
           )}
 
-          {keysError ? <ErrorBanner message="Agent keys could not be loaded for this owner." onRetry={() => void refetchKeys()} /> : keysLoading ? <p className="text-xs text-muted-foreground">Loading agent keys…</p> : <RouteReadiness keys={apiKeys ?? []} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} />}
+          {keysError ? <ErrorBanner message="Agent keys could not be loaded for this owner." onRetry={() => void refetchKeys()} /> : keysLoading ? <p className="text-13 text-muted-foreground">Loading agent keys…</p> : <RouteReadiness keys={apiKeys ?? []} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} />}
 
           <div className="space-y-2">
             <Label htmlFor="agent_api_key_id">Agent (API Key)</Label>
@@ -502,7 +502,7 @@ export function AddRouteDialog({
               </Select>
             )}
             {errors.agent_api_key_id && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 {errors.agent_api_key_id.message}
               </p>
             )}
@@ -526,13 +526,13 @@ export function AddRouteDialog({
                   }
                   {...register("platform_conversation_id")}
                 />
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {isTelegramManager
                     ? "Only messages from this chat will use this route."
                     : "Platform-specific chat/channel ID. Leave empty to create a default route for all unmatched conversations."}
                 </p>
                 {errors.platform_conversation_id && (
-                  <p className="text-xs text-destructive">
+                  <p className="text-13 text-destructive">
                     {errors.platform_conversation_id.message}
                   </p>
                 )}
@@ -731,13 +731,13 @@ function LarkPermissionSetupSection({
         </p>
         {scopes.length > 0 && (
           <div className="mt-3">
-            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+            <p className="text-13 font-medium text-text-tertiary uppercase tracking-wide">
               Scopes pre-selected
             </p>
             <ul className="mt-2 flex flex-wrap gap-2">
               {scopes.map((scope) => (
                 <li key={scope}>
-                  <Badge variant="secondary" className="text-xs">
+                  <Badge variant="secondary" className="text-12">
                     {scope}
                   </Badge>
                 </li>
@@ -765,7 +765,7 @@ function LarkPermissionSetupSection({
 function TelegramNewSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
   return <DetailSection title="Telegram connection">
     <DetailRow label="Webhook" value={bot.webhook_registered ? "Connected" : "Setup pending"} />
-    <p className="p-4 text-xs text-muted-foreground">{bot.status === "suspended" ? "Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the Telegram bot token option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with the Telegram option." : "NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message."}</p>
+    <p className="p-4 text-13 text-muted-foreground">{bot.status === "suspended" ? "Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the Telegram bot token option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with the Telegram option." : "NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message."}</p>
     {bot.status === "pending" && <div className="p-4"><Button variant="outline" asChild><a href="/channel-bots?connect=telegram-new">Continue Telegram setup</a></Button></div>}
   </DetailSection>;
 }
@@ -829,7 +829,7 @@ function EditBotNameDialog({
               {...register("label")}
             />
             {errors.label && (
-              <p id="bot-name-error" role="alert" className="text-xs text-destructive">
+              <p id="bot-name-error" role="alert" className="text-13 text-destructive">
                 {errors.label.message}
               </p>
             )}
@@ -896,17 +896,17 @@ function EditVerificationSection({
             </div>
             <Input id={field.name} type={field.secret ? "password" : "text"} autoComplete={field.secret ? "new-password" : "off"}
               placeholder="Leave blank to keep current value" {...register(field.name)} />
-            {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
-            {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
+            {field.hint && <p className="text-13 text-muted-foreground">{field.hint}</p>}
+            {errors[field.name] && <p className="text-13 text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
         {bot.platform === "whatsapp" ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Saving stores these credentials immediately. Run Verify Bot to check
             the saved credentials, then confirm a new message exchange with your agent.
           </p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Saving stores these credentials immediately (watch the Configured badges above).
             The bot stays pending until the platform delivers its first verified webhook,
             which changes its status to Active.
@@ -1204,12 +1204,12 @@ export function ChannelBotDetailPage() {
       ) : bot.credential_source === "telegram_manager" && bot.error ? (
         <div role="alert"><ErrorBanner message={bot.error} /></div>
       ) : verifyMutation.variables === botId && verifyMutation.isSuccess && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           Verification complete. Status: {statusLabel(verifyMutation.data.status)}.
         </p>
       ))}
 
-      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-xs text-muted-foreground">Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.</p> : bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
+      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {/* Bot Information */}
       <DetailSection
@@ -1248,7 +1248,7 @@ export function ChannelBotDetailPage() {
         <DetailSection title={`${getPlatform(bot.platform).label} Setup`}>
           <div className="space-y-4 p-5">
             <CopyableUrlCallout label={bot.platform === "discord" ? "Interactions Endpoint URL" : "Callback URL"} url={bot.webhook_url ?? ""} docsHref={getPlatform(bot.platform).webhookDocs} />
-            <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
+            <ol className="list-decimal space-y-2 pl-4 text-13 text-muted-foreground">
               {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
             </ol>
           </div>
@@ -1258,7 +1258,7 @@ export function ChannelBotDetailPage() {
       {bot.platform === "telegram-new" && <TelegramNewSetupSection bot={bot} />}
       {bot.credential_source === "telegram_manager" && (
         <DetailSection title="Telegram manager routing">
-          <div className="space-y-3 p-5 text-xs text-muted-foreground">
+          <div className="space-y-3 p-5 text-13 text-muted-foreground">
             <p>
               This manager can also act as a public channel bot. Add a public default
               route for ordinary messages from anyone contacting it, using a dedicated

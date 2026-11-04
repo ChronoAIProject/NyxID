@@ -24,11 +24,11 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
   }
   return (
     <div className="min-h-0 space-y-4 overflow-auto p-5">
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Actions, agents and outcomes only. Commands, file paths, page contents
         and private conversations are not shown.
       </p>
-      <div className="space-y-1 text-xs">
+      <div className="space-y-1 text-13">
         <label htmlFor="machine-activity-agent">Agent</label>
         <Select value={agent || "all"} onValueChange={selectAgent}>
           <SelectTrigger
@@ -61,7 +61,7 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
           return (
             <li
               key={entry.id}
-              className="min-w-0 space-y-1 rounded-lg border border-hairline p-3 text-xs"
+              className="min-w-0 space-y-1 rounded-lg border border-hairline p-3 text-13"
             >
               <div className="flex flex-wrap justify-between gap-2">
                 <span className="font-medium">

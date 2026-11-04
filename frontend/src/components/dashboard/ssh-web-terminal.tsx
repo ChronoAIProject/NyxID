@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
+import { computedTextSize } from "@/lib/typography";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -65,11 +66,16 @@ export function SshWebTerminal({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
+  const fontObserverRef = useRef<MutationObserver | null>(null);
+  const fitFrameRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const cleanup = useCallback(() => {
+    fontObserverRef.current?.disconnect();
+    if (fitFrameRef.current !== null) cancelAnimationFrame(fitFrameRef.current);
+    fitFrameRef.current = null;
     if (resizeTimerRef.current !== null) {
       clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = null;
@@ -123,7 +129,7 @@ export function SshWebTerminal({
       cursorStyle: "block",
       fontFamily:
         "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace",
-      fontSize: 14,
+      fontSize: computedTextSize(14),
       lineHeight: 1.2,
       scrollback: 5000,
       theme: {
@@ -173,18 +179,19 @@ export function SshWebTerminal({
 
     // Re-fit on window resize and container resize
     const handleWindowResize = () => {
-      requestAnimationFrame(() => {
+      if (fitFrameRef.current !== null) cancelAnimationFrame(fitFrameRef.current);
+      fitFrameRef.current = requestAnimationFrame(() => {
+        fitFrameRef.current = null;
+        terminal.options.fontSize = computedTextSize(14);
         fitAddon.fit();
       });
     };
+    fontObserverRef.current = new MutationObserver(handleWindowResize);
+    fontObserverRef.current.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
     window.addEventListener("resize", handleWindowResize);
 
     if (containerRef.current) {
-      const resizeObserver = new ResizeObserver(() => {
-        requestAnimationFrame(() => {
-          fitAddon.fit();
-        });
-      });
+      const resizeObserver = new ResizeObserver(handleWindowResize);
       resizeObserver.observe(containerRef.current);
       // Store for cleanup
       (terminal as unknown as Record<string, unknown>)._nyxidResizeObserver =
@@ -378,7 +385,7 @@ export function SshWebTerminal({
                   : "bg-zinc-500"
           }`}
         />
-        <span className="text-xs text-slate-400">
+        <span className="text-13 text-slate-400">
           {status === "connecting" && "Connecting..."}
           {status === "connected" && "Connected"}
           {status === "disconnected" && "Disconnected"}
@@ -388,7 +395,7 @@ export function SshWebTerminal({
           <button
             type="button"
             onClick={connect}
-            className="ml-auto rounded px-2 py-0.5 text-xs text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
+            className="ml-auto rounded px-2 py-0.5 text-13 text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
           >
             Reconnect
           </button>

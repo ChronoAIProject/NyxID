@@ -114,27 +114,27 @@ function BotRow({
       <TableCell>
         <Badge variant="secondary">{getPlatform(bot.platform).label}</Badge>
       </TableCell>
-      <TableCell className="text-xs">
+      <TableCell className="text-14">
         {bot.platform_bot_username || "-"}
       </TableCell>
-      <TableCell className="font-medium">{bot.label}</TableCell>
-      {ownerLabel && <TableCell className="text-xs text-muted-foreground">{ownerLabel}</TableCell>}
+      <TableCell className="font-normal">{bot.label}</TableCell>
+      {ownerLabel && <TableCell className="text-14 text-muted-foreground">{ownerLabel}</TableCell>}
       <TableCell>
         <Badge variant={statusBadgeVariant(bot.status)}>
           {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
         </Badge>
       </TableCell>
       <TableCell>
-        {bot.platform === "discord" ? <span className="text-xs"><DiscordGatewayStatus state={bot.gateway_state} /></span> : getPlatform(bot.platform).webhookIngestion === false ? <span className="text-xs text-muted-foreground">Polling</span> : bot.webhook_registered ? (
-          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+        {bot.platform === "discord" ? <span className="text-13"><DiscordGatewayStatus state={bot.gateway_state} /></span> : getPlatform(bot.platform).webhookIngestion === false ? <span className="text-13 text-muted-foreground">Polling</span> : bot.webhook_registered ? (
+          <div className="flex items-center gap-1 text-13 text-muted-foreground">
             <Check className="h-3 w-3 text-success" />
             Registered
           </div>
         ) : (
-          <span className="text-xs text-muted-foreground">Not registered</span>
+          <span className="text-13 text-muted-foreground">Not registered</span>
         )}
       </TableCell>
-      <TableCell className="text-xs text-muted-foreground">
+      <TableCell className="text-14 text-muted-foreground">
         {formatDate(bot.created_at)}
       </TableCell>
       <TableCell className="w-[60px]">
@@ -275,7 +275,7 @@ function EmptyState() {
       <RobotIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
         <p className="text-14 font-medium text-muted-foreground">No channel bots yet</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Add a messaging platform bot to relay conversations to your AI agents.
         </p>
       </div>
@@ -447,7 +447,7 @@ function CreateDeviceChannelDialog({
           <DialogTitle>Add Device Channel</DialogTitle>
           <DialogDescription>
             Device channels receive events through{" "}
-            <code className="text-xs">
+            <code className="text-14">
               POST /api/v1/channel-events/&#123;conversation_id&#125;
             </code>
             . No bot token is required — authenticate with the agent API key
@@ -463,12 +463,12 @@ function CreateDeviceChannelDialog({
               placeholder="household-camera"
               {...register("platform_conversation_id")}
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               The logical name the device will POST to. Must be unique per
               owner.
             </p>
             {errors.platform_conversation_id && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 {errors.platform_conversation_id.message}
               </p>
             )}
@@ -477,7 +477,7 @@ function CreateDeviceChannelDialog({
           <div className="space-y-2">
             <Label>Agent API Key</Label>
             {activeApiKeys.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 No active agent API keys in this scope. Create one with a
                 callback URL first.
               </p>
@@ -504,7 +504,7 @@ function CreateDeviceChannelDialog({
               </Select>
             )}
             {errors.agent_api_key_id && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 {errors.agent_api_key_id.message}
               </p>
             )}
@@ -519,15 +519,15 @@ function CreateDeviceChannelDialog({
               placeholder="device"
               {...register("platform_conversation_type")}
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Freeform label surfaced to the agent as
-              <code className="mx-1 text-xs">conversation.conversation_type</code>
-              (e.g. <code className="text-xs">camera</code>,{" "}
-              <code className="text-xs">sensor</code>). Defaults to
-              <code className="mx-1 text-xs">device</code>.
+              <code className="mx-1 text-14">conversation.conversation_type</code>
+              (e.g. <code className="text-14">camera</code>,{" "}
+              <code className="text-14">sensor</code>). Defaults to
+              <code className="mx-1 text-14">device</code>.
             </p>
             {errors.platform_conversation_type && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 {errors.platform_conversation_type.message}
               </p>
             )}
@@ -583,7 +583,7 @@ function DeviceChannelCard({
         {conversation.platform_conversation_id}
       </p>
       <div className="mt-1 flex items-center gap-2">
-        <code className="font-mono text-12 text-muted-foreground" title={conversation.id}>
+        <code className="font-mono text-14 text-muted-foreground" title={conversation.id}>
           {conversation.id.slice(0, 8)}…
         </code>
         <Button
@@ -631,7 +631,7 @@ function DeviceChannelRow({
       <TableCell>
         <div className="flex items-center gap-2">
           <code
-            className="font-mono text-xs text-muted-foreground"
+            className="font-mono text-14 text-muted-foreground"
             title={conversation.id}
           >
             {conversation.id.slice(0, 8)}…
@@ -647,13 +647,13 @@ function DeviceChannelRow({
           </Button>
         </div>
       </TableCell>
-      <TableCell className="text-xs">
+      <TableCell className="text-14">
         {conversation.platform_conversation_id}
       </TableCell>
       <TableCell>
         <Badge variant="secondary">{conversation.platform_conversation_type}</Badge>
       </TableCell>
-      <TableCell className="text-xs text-muted-foreground">
+      <TableCell className="text-14 text-muted-foreground">
         {conversation.agent_api_key_id.slice(0, 8)}…
       </TableCell>
       <TableCell>
@@ -661,7 +661,7 @@ function DeviceChannelRow({
           {conversation.is_active ? "Active" : "Inactive"}
         </Badge>
       </TableCell>
-      <TableCell className="text-xs text-muted-foreground">
+      <TableCell className="text-14 text-muted-foreground">
         {formatDate(conversation.created_at)}
       </TableCell>
       <TableCell className="w-[60px]">
@@ -714,7 +714,7 @@ function DeviceChannelsSection({
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold">Device Channels</h2>
+          <h2 className="text-15 font-semibold">Device Channels</h2>
           <p className="text-14 text-muted-foreground">
             HTTP Event Gateway channels for analyzers, sensors, and other
             non-bot event sources.
@@ -735,7 +735,7 @@ function DeviceChannelsSection({
           <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">No device channels yet</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Create one to let devices push events into the channel relay
               pipeline.
             </p>
@@ -839,7 +839,7 @@ function ChannelBotsList() {
         description="Manage messaging platform bots for agent relay."
         actions={
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <span className="text-xs text-muted-foreground">Scope</span>
+            <span className="text-13 text-muted-foreground">Scope</span>
             <div className="w-36 sm:w-48">
               <OrgScopeSelect value={scope} onChange={setScope} allowAll personalLabel="User" />
             </div>
@@ -855,8 +855,8 @@ function ChannelBotsList() {
       {telegram.data?.request && (
         <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-1">
-            <p className="text-sm font-medium">Telegram setup in progress</p>
-            <p className="break-words text-xs text-muted-foreground">
+            <p className="text-14 font-medium">Telegram setup in progress</p>
+            <p className="break-words text-13 text-muted-foreground">
               Continue setting up {telegram.data.request.label} from your saved step.
             </p>
           </div>

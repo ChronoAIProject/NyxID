@@ -62,7 +62,7 @@ export function RedirectUriEditor({
       <div className="space-y-2">
         {uris.map((uri, index) => (
           <div key={uri} className="flex items-center gap-2">
-            <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-xs">
+            <code className="flex-1 truncate rounded bg-muted px-2 py-1 text-14">
               {uri}
             </code>
             <Button
@@ -77,7 +77,7 @@ export function RedirectUriEditor({
           </div>
         ))}
         {uris.length === 0 && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             No redirect URIs configured.
           </p>
         )}
@@ -101,7 +101,7 @@ export function RedirectUriEditor({
             className="h-8 text-14"
           />
           {validationError && (
-            <p className="text-xs text-destructive">{validationError}</p>
+            <p className="text-13 text-destructive">{validationError}</p>
           )}
         </div>
         <Button

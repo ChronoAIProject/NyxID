@@ -85,7 +85,7 @@ const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
     field: "created_at",
     label: "Created",
     defaultWidth: 190,
-    cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
+    cellClassName: "whitespace-nowrap text-14 text-muted-foreground",
   },
   {
     field: "event_type",
@@ -577,10 +577,10 @@ export function AdminAuditLogPage() {
       case "event_type":
         return (
           <div className="min-w-0">
-            <span className="line-clamp-2 break-words text-sm font-medium text-foreground" title={entry.event_type}>{entry.event_type}</span>
+            <span className="line-clamp-2 break-words text-14 font-medium text-foreground" title={entry.event_type}>{entry.event_type}</span>
             {entry.event_type === "service_change_recorded" && typeof entry.event_data?.service_id === "string"
               && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(entry.event_data.service_id)
-              && <button type="button" className="mt-1 text-xs text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>View service history</button>}
+              && <button type="button" className="mt-1 text-13 text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>View service history</button>}
           </div>
         );
       case "service": {
@@ -589,7 +589,7 @@ export function AdminAuditLogPage() {
           <div className="min-w-0">
             {service.name && (
               <p
-                className="truncate text-sm font-medium text-foreground"
+                className="truncate text-14 font-medium text-foreground"
                 title={service.name}
               >
                 {service.name}
@@ -641,7 +641,7 @@ export function AdminAuditLogPage() {
           <div className="min-w-0">
             {name && (
               <p
-                className="truncate text-sm font-medium text-foreground"
+                className="truncate text-14 font-medium text-foreground"
                 title={name}
               >
                 {name}
@@ -732,7 +732,7 @@ export function AdminAuditLogPage() {
               <div
                 role="status"
                 aria-live="polite"
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                className="flex items-center gap-1.5 text-13 text-muted-foreground"
               >
                 <Loader2
                   className="h-3.5 w-3.5 animate-spin"
@@ -764,7 +764,7 @@ export function AdminAuditLogPage() {
         {error && data && (
           <div
             role="alert"
-            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between"
+            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-14 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -809,7 +809,7 @@ export function AdminAuditLogPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="text-sm font-medium text-destructive">
+            <p className="text-14 font-medium text-destructive">
               Failed to load audit log
             </p>
             <Button
@@ -825,12 +825,12 @@ export function AdminAuditLogPage() {
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
             <ClipboardList className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="text-sm font-medium text-foreground">
+              <p className="text-14 font-medium text-foreground">
                 {hasActiveFilters
                   ? "No events match these filters"
                   : "No audit events"}
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {hasActiveFilters
                   ? "Adjust or clear the current filters."
                   : "Audit activity will appear here."}

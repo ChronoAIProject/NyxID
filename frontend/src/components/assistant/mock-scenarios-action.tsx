@@ -201,7 +201,7 @@ export function MockScenariosAction() {
               size="sm"
               onClick={resetWorld}
               disabled={world.connected.length === 0}
-              className="h-6 px-1.5 text-12"
+              className="h-6 px-1.5 text-14"
             >
               <RotateCcw />
               Reset world

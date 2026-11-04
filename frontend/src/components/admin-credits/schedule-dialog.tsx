@@ -210,7 +210,7 @@ export function ScheduleDialog({
                   render={({ field }) => (
                     <FormItem>
                       <fieldset className="space-y-2">
-                        <legend className="text-xs font-medium text-muted-foreground">
+                        <legend className="text-13 font-medium text-muted-foreground">
                           Expiry policy
                         </legend>
                         <div className="grid gap-2 sm:grid-cols-3">

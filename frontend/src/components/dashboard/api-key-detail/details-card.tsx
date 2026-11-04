@@ -149,7 +149,7 @@ export function DetailsCard({
             <div>
               <p className="text-14 font-medium">{name}</p>
               {description && (
-                <p className="text-xs text-muted-foreground">{description}</p>
+                <p className="text-13 text-muted-foreground">{description}</p>
               )}
             </div>
             <Button
@@ -163,7 +163,7 @@ export function DetailsCard({
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-xs">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-13">
           <div className="min-w-0 space-y-1">
             <p className="text-muted-foreground">Prefix</p>
             <code className="block truncate rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">
@@ -196,7 +196,7 @@ export function DetailsCard({
 
         <div>
           <div className="flex items-center justify-between">
-            <span className="text-xs text-muted-foreground">Scopes: </span>
+            <span className="text-13 text-muted-foreground">Scopes: </span>
             {!editingScopes && (
               <Button
                 size="icon"
@@ -225,7 +225,7 @@ export function DetailsCard({
                         )
                       }
                     />
-                    <Label htmlFor={`scope-${s}`} className="text-xs">
+                    <Label htmlFor={`scope-${s}`} className="text-14">
                       {s}
                     </Label>
                   </div>
@@ -274,7 +274,7 @@ export function DetailsCard({
           ) : (
             <div className="mt-1 flex flex-wrap gap-1">
               {scopesList.map((s) => (
-                <Badge key={s} variant="secondary" className="text-xs">
+                <Badge key={s} variant="secondary" className="text-12">
                   {s}
                 </Badge>
               ))}

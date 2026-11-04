@@ -704,13 +704,13 @@ export function MachineOutput({
                 : ""}
             </p>
             <h4 className="font-medium text-foreground">Standard output</h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-13">
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-14">
               {output.stdout === undefined
                 ? "(not reported)"
                 : output.stdout || "(empty)"}
             </pre>
             <h4 className="font-medium text-foreground">Standard error</h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-13">
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-14">
               {output.stderr === undefined
                 ? "(not reported)"
                 : output.stderr || "(empty)"}

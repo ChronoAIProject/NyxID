@@ -138,7 +138,7 @@ export function AssistantNodeRotateTokenDialog({
                   id="assistant-node-auth-token"
                   readOnly
                   value={result.authToken}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
@@ -151,7 +151,7 @@ export function AssistantNodeRotateTokenDialog({
                   id="assistant-node-signing-secret"
                   readOnly
                   value={result.signingSecret}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}

@@ -44,7 +44,7 @@ export function PlatformServiceScope({
       <p className="text-14 unthemed:text-12 font-medium">
         Auto-connected platform services
       </p>
-      <Label className="flex items-start gap-2 text-14 unthemed:text-12">
+      <Label className="flex items-start gap-2 text-14 unthemed:text-14">
         <Checkbox
           checked={allowAll}
           disabled={disabled}

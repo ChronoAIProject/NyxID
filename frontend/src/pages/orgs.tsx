@@ -38,7 +38,7 @@ function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
       <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
         <p className="text-14 font-medium text-muted-foreground">No organizations yet</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Create an organization to share services and credentials with
           teammates.
         </p>
@@ -102,22 +102,22 @@ export function OrgsPage() {
                           <p className="truncate text-14 font-medium text-foreground">
                             {org.display_name ?? "Untitled org"}
                           </p>
-                          <p className="truncate text-xs text-muted-foreground">
+                          <p className="truncate text-13 text-muted-foreground">
                             @{org.slug}
                           </p>
                           {org.contact_email && (
-                            <p className="truncate text-xs text-muted-foreground">
+                            <p className="truncate text-13 text-muted-foreground">
                               {org.contact_email}
                             </p>
                           )}
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Created {formatRelativeTime(org.created_at) ?? "—"}
                           </p>
                         </div>
                       </div>
                       <RoleBadge role={org.your_role} />
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-2 text-13 text-muted-foreground">
                       <Users className="h-3.5 w-3.5" />
                       <span>View members and invites</span>
                     </div>

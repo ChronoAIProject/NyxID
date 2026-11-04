@@ -134,7 +134,7 @@ export function ServiceAccessTable({
         >
           Service access
         </h2>
-        <code className="text-13 text-muted-foreground">proxy</code>
+        <code className="text-14 text-muted-foreground">proxy</code>
       </div>
       <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
         Allow lets {clientName} read data and take actions, including creating,

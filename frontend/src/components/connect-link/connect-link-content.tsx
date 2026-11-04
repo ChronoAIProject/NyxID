@@ -530,7 +530,7 @@ export function ConnectLinkContent({
                 ) : null}
                 {oauthPopupOpen ? (
                   <p
-                    className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+                    className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-13 text-muted-foreground"
                     role="status"
                   >
                     Finish authorization in the provider window, then return
@@ -612,7 +612,7 @@ export function ConnectLinkContent({
             )}
           </CardContent>
           {user?.email ? (
-            <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground">
+            <div className="border-t border-border px-5 py-3 text-center text-13 text-muted-foreground">
               Signed in as <span className="text-foreground">{user.email}</span>
             </div>
           ) : null}
@@ -911,7 +911,7 @@ function CredentialForm({
           />
         ) : null}
         {preview.api_key_instructions ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {preview.api_key_instructions}
           </p>
         ) : null}
@@ -1064,7 +1064,7 @@ export function RequestDetails({
       </div>
       {preview.api_key_url ? (
         <a
-          className="inline-flex items-center gap-1.5 px-4 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1.5 px-4 text-13 text-muted-foreground hover:text-foreground"
           href={preview.api_key_url}
           target="_blank"
           rel="noreferrer"
@@ -1076,7 +1076,7 @@ export function RequestDetails({
       {preview.scopes.length > 0 &&
       (preview.connect_method === "oauth" ||
         preview.connect_method === "device_code") ? (
-        <p className="px-4 text-xs text-muted-foreground">
+        <p className="px-4 text-13 text-muted-foreground">
           These additional permissions will be requested on top of the provider
           defaults.
         </p>
@@ -1145,7 +1145,7 @@ export function TerminalPanel({
         )}
       </div>
       {completed ? (
-        <p className="mb-3 flex items-center gap-2 text-sm font-medium text-success">
+        <p className="mb-3 flex items-center gap-2 text-14 font-medium text-success">
           <CheckCircle2 className="size-4" />
           Connection completed
         </p>
@@ -1157,7 +1157,7 @@ export function TerminalPanel({
             ? "Connection cancelled"
             : "Connection request expired"}
       </h1>
-      <p className="mt-8 text-sm text-muted-foreground sm:mt-12 sm:text-base">
+      <p className="mt-8 text-14 text-muted-foreground sm:mt-12 sm:text-14">
         {callbackUrl
           ? "Returning to the requesting application..."
           : completed
@@ -1165,7 +1165,7 @@ export function TerminalPanel({
             : "You may now close this page or return to the requesting application."}
       </p>
       {completed && !callbackUrl ? (
-        <p className="mt-2 text-xs text-muted-foreground">
+        <p className="mt-2 text-13 text-muted-foreground">
           Your agent can now retry the original request.
         </p>
       ) : null}
@@ -1198,7 +1198,7 @@ function StandaloneConnectShell({ children }: { children: React.ReactNode }) {
     <main className="connect-link-shell flex min-h-dvh items-center justify-center px-4 py-8 text-foreground">
       <div className="relative z-10 flex w-full max-w-lg flex-col gap-5">
         {children}
-        <p className="text-center text-xs text-muted-foreground">
+        <p className="text-center text-13 text-muted-foreground">
           Service connection via NyxID
         </p>
       </div>

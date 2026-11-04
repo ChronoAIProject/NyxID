@@ -78,7 +78,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
             checked={accepted}
             onCheckedChange={(checked) => onAccepted(checked === true)}
           />
-          <Label htmlFor={id} className="text-13 leading-normal">
+          <Label htmlFor={id} className="text-14 leading-normal">
             I accept this reduced scope ({omissions.length} declared omission
             {omissions.length === 1 ? "" : "s"}).
           </Label>
@@ -250,7 +250,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     {data?.base_scripts_not_copied ? <p className="text-14 text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
     {data?.files.map((file) => <div key={file.path}>
       <p className="text-14 font-medium">{file.path}</p>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-13">{file.content}</pre>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-14">{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">
       <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>

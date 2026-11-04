@@ -307,7 +307,7 @@ export function ApiKeyCreateDialog({
                             </Badge>
                           ))}
                         </div>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Stored on the key for audit attribution. You can
                           change it later on the Agent Key detail page.
                         </p>
@@ -346,7 +346,7 @@ export function ApiKeyCreateDialog({
                             label="Owner"
                           />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Org-owned keys are shared with every admin of that
                           organization and can only scope to services owned by
                           the same org.
@@ -383,7 +383,7 @@ export function ApiKeyCreateDialog({
                           }
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Where NyxID sends channel relay messages. Required for
                         Channel Bot routing.
                       </p>

@@ -207,7 +207,7 @@ export function OrgServiceAccountsTab({
             <p className="text-14 font-medium text-muted-foreground">
               {search ? "No Results" : "No Service Accounts"}
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {search
                 ? `No service accounts owned by ${orgName} match your search.`
                 : `No service accounts owned by ${orgName}.`}
@@ -251,8 +251,8 @@ export function OrgServiceAccountsTab({
                       }
                     }}
                   >
-                    <TableCell className="font-medium">{sa.name}</TableCell>
-                    <TableCell className="text-xs">
+                    <TableCell className="font-normal">{sa.name}</TableCell>
+                    <TableCell className="text-14">
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
@@ -261,7 +261,7 @@ export function OrgServiceAccountsTab({
                       </Badge>
                     </TableCell>
                     <TableCell
-                      className="max-w-[200px] truncate text-xs"
+                      className="max-w-[200px] truncate text-14"
                       title={sa.allowed_scopes}
                     >
                       {sa.allowed_scopes}
@@ -463,7 +463,7 @@ function CredentialRow({
 }) {
   return (
     <div>
-      <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
+      <p className="mb-1 text-13 font-medium text-muted-foreground">{label}</p>
       <div className="flex items-center gap-2">
         <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono text-14">
           {value}

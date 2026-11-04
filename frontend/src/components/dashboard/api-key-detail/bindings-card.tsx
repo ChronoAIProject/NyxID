@@ -181,7 +181,7 @@ export function BindingsCard({
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">
-              <Label className="text-xs">AI Service</Label>
+              <Label className="text-14">AI Service</Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
@@ -267,7 +267,7 @@ export function BindingsCard({
                     </span>
                   </p>
                   {b.is_invalid && (
-                    <p className="text-xs text-destructive">
+                    <p className="text-13 text-destructive">
                       {invalidReasonLabel(b.invalid_reason)} Remove this
                       orphan binding to clean up.
                     </p>
@@ -289,7 +289,7 @@ export function BindingsCard({
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <CrystalLatticeIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               No credential overrides. This agent uses default credentials for
               all services.
             </p>

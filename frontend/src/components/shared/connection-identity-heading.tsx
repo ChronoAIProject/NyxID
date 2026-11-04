@@ -33,7 +33,7 @@ export function ConnectionIdentityHeading({
           <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
             <NyxidIcon className="size-9" alt="" />
           </div>
-          <span className="text-xs font-medium">NyxID</span>
+          <span className="text-13 font-medium">NyxID</span>
         </div>
         <ConnectionArc />
         <div className="flex w-20 flex-col items-center gap-2.5">
@@ -45,14 +45,14 @@ export function ConnectionIdentityHeading({
               className="text-foreground"
             />
           </div>
-          <span className="text-xs font-medium">{serviceName}</span>
+          <span className="text-13 font-medium">{serviceName}</span>
         </div>
       </div>
       <div className="space-y-2">
-        <h1 className="text-xl font-semibold leading-tight text-foreground sm:text-2xl">
+        <h1 className="text-22 font-bold leading-tight text-foreground sm:text-28">
           {title}
         </h1>
-        <p className="text-sm text-muted-foreground">{subtitle}</p>
+        <p className="text-14 text-muted-foreground">{subtitle}</p>
       </div>
     </div>
   );

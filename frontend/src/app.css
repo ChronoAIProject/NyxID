@@ -29,11 +29,15 @@
 @custom-variant very-short (@media (max-height: 679.98px));
 
 @utility min-h-control {
-  min-height: calc(1lh + var(--spacing) * 2);
+  min-height: max(24px, calc(1lh + var(--spacing) * 2));
+}
+
+@utility min-w-control {
+  min-width: max(24px, 1.5rem);
 }
 
 @utility min-h-input {
-  min-height: calc(1lh + var(--spacing) * 3 + 2px);
+  min-height: max(24px, calc(1lh + var(--spacing) * 3 + 2px));
 }
 
 @theme {
@@ -271,6 +275,7 @@ html.theme-dark {
 }
 
 html:is(.theme-light, .theme-dark) body {
+  font-size: var(--text-14);
   line-height: 1.5;
 }
 
@@ -326,6 +331,7 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
 
 .shell-user-email {
   font-size: var(--text-12);
+  font-weight: 400;
   color: var(--color-text-tertiary);
 }
 
@@ -376,7 +382,8 @@ html.assistant-display [data-grouped-list] [data-slot="grouped-select"] {
 [data-grouped-row].grouped-field > span:first-child,
 [data-grouped-row].grouped-field > label,
 [data-grouped-row].grouped-field > label > span:first-child {
-  font-size: var(--text-13);
+  font-size: var(--text-14);
+  font-weight: 500;
   color: var(--color-text-tertiary);
 }
 
@@ -656,11 +663,12 @@ input[type="number"] {
   input,
   select,
   textarea,
+  [role="combobox"][contenteditable="true"] {
+    font-size: max(16px, var(--text-14)) !important;
+  }
   [data-composer-textbox],
-  [data-composer-text-measure],
-  [role="combobox"],
-  [role="option"] {
-    font-size: max(16px, 1rem) !important;
+  [data-composer-text-measure] {
+    font-size: max(16px, var(--text-16)) !important;
   }
 }
 
@@ -1307,7 +1315,7 @@ html.theme-dark .assistant-halo--visible {
   color: var(--color-foreground);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 24%, transparent);
   font-weight: 500;
-  font-size: 0.92em;
+  font-size: var(--text-16);
   line-height: inherit;
 }
 .composer-mention[data-composer-mention="agent"] {
@@ -1546,4 +1554,16 @@ html.assistant-display [data-chat-index-target] {
   .agent-header-name, .agent-header-avatar, .agent-header-subtitle { transition: transform 240ms ease-out, opacity 240ms ease-out, visibility 240ms; }
   .agent-header-search[data-open="true"] .agent-header-search-field { animation: agent-search-open 200ms ease-out; }
   @keyframes agent-search-open { from { clip-path: inset(0 0 0 100%); opacity: 0; } to { clip-path: inset(0); opacity: 1; } }
+}
+
+/* Shared hit areas include portaled Studio controls at the smallest Display size. */
+html:is(.theme-light, .theme-dark) [data-icon-button] {
+  min-width: max(24px, 1.5rem);
+  min-height: max(24px, 1.5rem);
+}
+
+/* Field-label role is identical for shared and manually authored forms. */
+html:is(.theme-light, .theme-dark) label {
+  font-size: var(--text-14);
+  font-weight: 500;
 }

@@ -190,7 +190,7 @@ function ServiceScopeEditor({
 
             {!allowAll && (
               <div className="space-y-2 rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Select allowed services:
                 </p>
                 {personalKeys.length > 0 ? (
@@ -204,7 +204,7 @@ function ServiceScopeEditor({
                           onCheckedChange={() => toggleService(k.id)}
                         />
                         <ServiceIcon slug={k.catalog_service_slug} iconUrl={connectionIconUrl(k)} size="2xs" />
-                        <Label htmlFor={`svc-${k.id}`} className="text-xs">
+                        <Label htmlFor={`svc-${k.id}`} className="text-14">
                           {k.label}
                           <span className="text-muted-foreground">
                             {" "}
@@ -214,7 +214,7 @@ function ServiceScopeEditor({
                       </div>
                     ))
                 ) : (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     No external services configured yet.
                   </p>
                 )}
@@ -270,7 +270,7 @@ function ServiceScopeEditor({
               ) : allowedServices.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {allowedServices.map((s) => (
-                    <Badge key={s.id} variant="secondary" className="text-xs">
+                    <Badge key={s.id} variant="secondary" className="text-12">
                       {s.label} ({s.slug}) {s.auto_connected && "· Platform"}
                     </Badge>
                   ))}

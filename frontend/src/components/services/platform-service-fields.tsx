@@ -100,7 +100,7 @@ export function PlatformServiceFields({
           (["model_list", "realtime"] as const).map((field) => (
             <div
               key={field}
-              className="flex items-center justify-between text-xs"
+              className="flex items-center justify-between text-13"
             >
               <Label htmlFor={`inference-${field}`}>
                 {field === "model_list"
@@ -146,15 +146,15 @@ export function PlatformServiceFields({
         <section className="space-y-3">
           <h3 className="text-15 font-semibold">Platform key</h3>
           {!form.watch("platform_key") && service?.legacy_public_master && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Enabled, public (implicit)
             </p>
           )}
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Offer a server-held credential to authorized users. Organization
             grants include members who can proxy services.
           </p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Shared credential: {serviceCredentialStatus(service)}
           </p>
           <FormField
@@ -223,7 +223,7 @@ export function PlatformServiceFields({
       )}
       <section className="space-y-3">
         <h3 className="text-15 font-semibold">Endpoint policy</h3>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           These HTTP method and path rules apply to every binding of this
           service, including own keys, platform keys, and agents. An empty
           restricted list denies every operation.

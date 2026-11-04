@@ -1,3 +1,4 @@
+import { useTextSize } from "@/hooks/use-text-size";
 import { useState } from "react";
 import { Area, AreaChart, XAxis, YAxis } from "recharts";
 import { useApiKeyUsage } from "@/hooks/use-api-keys";
@@ -41,9 +42,10 @@ function ActivityChart({
     readonly error_count: number;
   }[];
 }) {
+  const tokenSize = useTextSize(13);
   if (buckets.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         No usage in the selected window.
       </p>
     );
@@ -69,6 +71,7 @@ function ActivityChart({
           </linearGradient>
         </defs>
         <XAxis
+          height={Math.max(30, tokenSize * 2.5)}
           dataKey="date"
           tickLine={false}
           axisLine={false}
@@ -78,7 +81,7 @@ function ActivityChart({
               day: "numeric",
             })
           }
-          tick={{ fontSize: 10 }}
+          tick={{ fontSize: tokenSize }}
           interval="preserveStartEnd"
         />
         <YAxis hide />
@@ -132,7 +135,7 @@ export function UsageStatsCard({
             <CardTitle className="text-15">Usage</CardTitle>
           </div>
           <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
-            <SelectTrigger className="h-8 w-[160px] text-xs">
+            <SelectTrigger className="h-8 w-[160px] text-14">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -161,25 +164,25 @@ export function UsageStatsCard({
                 <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Requests
                 </p>
-                <p className="mt-1 text-lg font-semibold">{data.request_count}</p>
+                <p className="mt-1 text-15 font-semibold">{data.request_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
                 <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Successes
                 </p>
-                <p className="mt-1 text-lg font-semibold">{data.success_count}</p>
+                <p className="mt-1 text-15 font-semibold">{data.success_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
                 <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Errors
                 </p>
-                <p className="mt-1 text-lg font-semibold">{data.error_count}</p>
+                <p className="mt-1 text-15 font-semibold">{data.error_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
                 <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
                   Error Rate
                 </p>
-                <p className="mt-1 text-lg font-semibold">
+                <p className="mt-1 text-15 font-semibold">
                   {(data.error_rate * 100).toFixed(1)}%
                 </p>
               </div>
@@ -187,8 +190,8 @@ export function UsageStatsCard({
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-medium text-foreground">Daily Activity</p>
-                <span className="text-xs text-muted-foreground">
+                <p className="text-13 font-medium text-foreground">Daily Activity</p>
+                <span className="text-13 text-muted-foreground">
                   Last used{" "}
                   {data.last_used_at ? formatRelativeTime(data.last_used_at) : "never"}
                 </span>
@@ -197,7 +200,7 @@ export function UsageStatsCard({
             </div>
 
             <div className="space-y-2">
-              <p className="text-xs font-medium text-foreground">Top Services</p>
+              <p className="text-13 font-medium text-foreground">Top Services</p>
               {data.top_services.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {data.top_services.map((service) => (
@@ -207,7 +210,7 @@ export function UsageStatsCard({
                   ))}
                 </div>
               ) : (
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   No attributed service traffic yet.
                 </p>
               )}

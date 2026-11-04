@@ -188,7 +188,7 @@ function EndpointListEditor({
                 <tr key={ep.id} className="border-b last:border-0">
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
-                      <span className="text-xs">{ep.name}</span>
+                      <span className="text-13">{ep.name}</span>
                       <Badge
                         variant={
                           (ep.publication ?? "published") === "published"
@@ -214,7 +214,7 @@ function EndpointListEditor({
                     </Badge>
                   </td>
                   <td className="px-3 py-2">
-                    <code className="text-xs text-muted-foreground">
+                    <code className="text-14 text-muted-foreground">
                       {ep.path}
                     </code>
                   </td>

@@ -324,7 +324,7 @@ export function ServiceDetailPage() {
                 );
               })}
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Users who consent to these apps will have this service
               auto-provisioned.
             </p>
@@ -658,7 +658,7 @@ export function ServiceDetailPage() {
                       {Object.entries(service.capabilities).every(
                         ([, v]) => v !== true,
                       ) && (
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-13 text-muted-foreground">
                           None configured
                         </span>
                       )}
@@ -674,7 +674,7 @@ export function ServiceDetailPage() {
             {service.default_request_headers &&
             service.default_request_headers.length > 0 ? (
               <div className="space-y-2 p-4">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Injected on every proxied request. Non-overridable entries
                   replace caller-supplied values; overridable ones yield to
                   them.
@@ -1403,12 +1403,12 @@ function YourRoutingSection({
       </CardHeader>
       <CardContent className="space-y-3">
         {count === 0 ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             You haven't bound this service to your account yet, so there's no
             routing to configure here.
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             You have {String(count)} personal bindings for this service. Manage
             each one's routing in AI Services.
           </p>

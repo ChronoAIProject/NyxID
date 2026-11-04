@@ -71,7 +71,7 @@ export function ThreadTitle({
         <Input
           autoFocus
           aria-label="Chat title"
-          className={heading ? "h-8 min-w-0 flex-1 text-15 font-semibold" : undefined}
+          className={heading ? "h-8 min-w-0 flex-1 text-14 font-normal" : undefined}
           maxLength={200}
           {...form.register("title")}
         />

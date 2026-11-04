@@ -272,7 +272,7 @@ export function ManagedWhatsApp({
         </Button>
       )}
       <fieldset className="space-y-3" disabled={stage !== null}>
-        <legend className="mb-3 text-xs font-medium">WhatsApp number</legend>
+        <legend className="mb-3 text-13 font-medium">WhatsApp number</legend>
         {[
           { value: "", label: "New or existing Cloud API number" },
           {
@@ -284,7 +284,7 @@ export function ManagedWhatsApp({
           .map((choice) => (
             <label
               key={choice.value}
-              className="flex items-start gap-2 text-xs"
+              className="flex items-start gap-2 text-14"
             >
               <input
                 type="radio"
@@ -301,14 +301,14 @@ export function ManagedWhatsApp({
       {stage && (
         <div
           role="status"
-          className="flex items-center gap-2 text-xs text-muted-foreground"
+          className="flex items-center gap-2 text-13 text-muted-foreground"
         >
           <Loader2 className="size-3 animate-spin" />
           {stageLabels[stage] ?? "Waiting for Meta..."}
         </div>
       )}
       {popupHint && stage === "popup" && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Complete signup in the Meta window. If no window opened, allow popups
           for this site.
         </p>

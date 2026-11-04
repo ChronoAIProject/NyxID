@@ -90,7 +90,7 @@ export function RateLimitCard({
         {editing ? (
           <div className="space-y-3">
             <div className="space-y-1.5">
-              <Label className="text-xs">Requests per second</Label>
+              <Label className="text-14">Requests per second</Label>
               <Input
                 type="number"
                 min={1}
@@ -100,7 +100,7 @@ export function RateLimitCard({
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-xs">Burst limit</Label>
+              <Label className="text-14">Burst limit</Label>
               <Input
                 type="number"
                 min={1}
@@ -124,7 +124,7 @@ export function RateLimitCard({
           </div>
         ) : (
           <div className="flex items-center justify-between">
-            <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="grid grid-cols-2 gap-2 text-13">
               <div>
                 <span className="text-muted-foreground">Per second: </span>
                 {rateLimitPerSecond != null

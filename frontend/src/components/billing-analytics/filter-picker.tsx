@@ -251,7 +251,7 @@ export function AnalyticsSelect({
     >
       <label
         htmlFor={id}
-        className="whitespace-nowrap text-12 font-medium text-muted-foreground"
+        className="whitespace-nowrap text-14 font-medium text-muted-foreground"
       >
         {label}
       </label>

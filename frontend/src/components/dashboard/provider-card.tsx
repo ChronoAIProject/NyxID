@@ -122,11 +122,11 @@ export function ProviderCard({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <CardTitle className="truncate text-base">
+            <CardTitle className="truncate text-15">
               {provider.name}
             </CardTitle>
             {provider.description && (
-              <CardDescription className="truncate text-xs">
+              <CardDescription className="truncate text-13">
                 {provider.description}
               </CardDescription>
             )}
@@ -165,28 +165,28 @@ export function ProviderCard({
                       className="h-5 w-5 rounded-full"
                     />
                   )}
-                  <span className="text-xs font-medium">
+                  <span className="text-13 font-medium">
                     {token.metadata.username
                       ? `@${token.metadata.username}`
                       : token.metadata.first_name ?? "Telegram User"}
                   </span>
                 </div>
               )}
-              <span className="text-xs text-muted-foreground">
+              <span className="text-13 text-muted-foreground">
                 Connected {formatDate(token.connected_at)}
               </span>
               {token.label && (
-                <span className="text-xs text-text-tertiary">
+                <span className="text-13 text-text-tertiary">
                   {token.label}
                 </span>
               )}
               {token.gateway_url && (
-                <span className="truncate text-xs text-text-tertiary">
+                <span className="truncate text-13 text-text-tertiary">
                   {token.gateway_url}
                 </span>
               )}
               {token.expires_at && (
-                <span className="text-xs text-text-tertiary">
+                <span className="text-13 text-text-tertiary">
                   Expires {formatDate(token.expires_at)}
                 </span>
               )}
@@ -220,7 +220,7 @@ export function ProviderCard({
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">
+                <span className="text-13 text-muted-foreground">
                   Not connected
                 </span>
                 {provider.documentation_url && (
@@ -228,7 +228,7 @@ export function ProviderCard({
                     href={provider.documentation_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-0.5 text-xs text-primary-text hover:underline"
+                    className="inline-flex items-center gap-0.5 text-13 text-primary-text hover:underline"
                   >
                     Docs
                     <ExternalLink className="h-2.5 w-2.5" />
@@ -236,7 +236,7 @@ export function ProviderCard({
                 )}
               </div>
               {connectHint && (
-                <span className="text-xs text-text-tertiary">
+                <span className="text-13 text-text-tertiary">
                   {connectHint}
                 </span>
               )}

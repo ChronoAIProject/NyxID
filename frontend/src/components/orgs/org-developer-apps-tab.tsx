@@ -91,8 +91,8 @@ function StatCard({
       <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
           <p className="text-14 text-muted-foreground">{title}</p>
-          <p className="text-2xl font-semibold text-foreground">{value}</p>
-          <p className="text-xs text-text-tertiary">{description}</p>
+          <p className="text-28 font-semibold text-foreground">{value}</p>
+          <p className="text-13 text-text-tertiary">{description}</p>
         </div>
         <Icon className="h-5 w-5 text-primary-text" />
       </CardContent>
@@ -246,7 +246,7 @@ export function OrgDeveloperAppsTab({
               </div>
               <div className="space-y-3">
                 <label className="text-14 font-medium">Allowed Scopes</label>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   OIDC scopes this app can request. Determines what user data
                   and NyxID capabilities are included in tokens.
                 </p>
@@ -272,13 +272,13 @@ export function OrgDeveloperAppsTab({
                         >
                           {scope.label}
                           {scope.required && (
-                            <span className="ml-1 text-xs text-muted-foreground">
+                            <span className="ml-1 text-13 text-muted-foreground">
                               (required)
                             </span>
                           )}
                         </label>
                         {"hint" in scope && scope.hint && (
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {scope.hint}
                           </p>
                         )}
@@ -385,14 +385,14 @@ export function OrgDeveloperAppsTab({
             >
               <CardHeader className="space-y-2">
                 <div className="flex items-center justify-between gap-3">
-                  <CardTitle className="text-base">{app.client_name}</CardTitle>
+                  <CardTitle className="text-15">{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
                     {app.is_active ? "Active" : "Inactive"}
                   </Badge>
                 </div>
                 <CardDescription className="break-all">
                   Client ID:{" "}
-                  <span className="text-xs text-foreground">
+                  <span className="text-13 text-foreground">
                     {app.id}
                   </span>
                 </CardDescription>
@@ -412,7 +412,7 @@ export function OrgDeveloperAppsTab({
                       <Badge
                         key={scope}
                         variant="secondary"
-                        className="text-xs"
+                        className="text-12"
                       >
                         {scope}
                       </Badge>

@@ -87,7 +87,7 @@ export function Header({
         >
           <Menu className="h-5 w-5 text-muted-foreground" />
         </button>
-        <h1 className="text-lg font-semibold md:text-xl">
+        <h1 className="text-15 font-semibold md:text-20">
           {title}
         </h1>
       </div>
@@ -115,7 +115,7 @@ export function Header({
               </div>
               <Avatar className="h-9 w-9">
                 {safeAvatarUrl && <AvatarImage src={safeAvatarUrl} alt="" />}
-                <AvatarFallback className="bg-nyx-500/10 text-xs text-nyx-300">
+                <AvatarFallback className="bg-nyx-500/10 text-13 text-nyx-300">
                   {getInitials(user?.display_name ?? null, user?.email ?? "")}
                 </AvatarFallback>
               </Avatar>

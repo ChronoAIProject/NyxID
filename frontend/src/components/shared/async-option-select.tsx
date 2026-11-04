@@ -495,19 +495,19 @@ function OptionSelection({
         }}
       >
         {original !== undefined && (
-          <p className="border-b px-2 py-2 text-xs text-muted-foreground">
+          <p className="border-b px-2 py-2 text-13 text-muted-foreground">
             Editing value. Enter saves; Escape cancels.
           </p>
         )}
         {query.isFetching && (
-          <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+          <p role="status" className="px-3 py-2 text-13 text-muted-foreground">
             {pages.length
               ? "Loading remaining suggestions…"
               : "Loading suggestions…"}
           </p>
         )}
         {query.isError && !query.versionChanged && (
-          <div role="alert" className="px-3 py-2 text-xs">
+          <div role="alert" className="px-3 py-2 text-13">
             <p className="text-destructive">
               {pages.length
                 ? "Some suggestions could not load."
@@ -563,7 +563,7 @@ function OptionSelection({
               <span className="min-w-0 flex-1">
                 <span
                   className={cn(
-                    "block break-words text-xs",
+                    "block break-words text-13",
                     optionSet === "service-scope" && "font-mono",
                   )}
                 >
@@ -574,7 +574,7 @@ function OptionSelection({
                 {optionSet === "service-scope" &&
                   choice.label &&
                   choice.label !== choice.value && (
-                    <span className="block break-words text-xs text-muted-foreground">
+                    <span className="block break-words text-13 text-muted-foreground">
                       {choice.label}
                     </span>
                   )}
@@ -586,12 +586,12 @@ function OptionSelection({
           ))}
         </div>
         {!choices.length && !query.isFetching && query.isSuccess && (
-          <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+          <p role="status" className="px-3 py-2 text-13 text-muted-foreground">
             No matching suggestions.
           </p>
         )}
         {allowCustom && draft.trim() && !editing?.branch && (
-          <p className="border-t px-2 py-2 text-xs text-muted-foreground">
+          <p className="border-t px-2 py-2 text-13 text-muted-foreground">
             Press Enter to finish this scope.
           </p>
         )}

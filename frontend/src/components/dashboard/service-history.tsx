@@ -318,7 +318,7 @@ function ArchiveList() {
     : (query.data?.pages.flatMap((page) => page.services) ?? []);
   return (
     <div className="space-y-3 rounded-xl border border-border/50 p-4">
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Recorded history of deleted services you currently have permission to
         manage.
       </p>
@@ -332,7 +332,7 @@ function ArchiveList() {
         </div>
       )}
       {query.isSuccess && !rows.length && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No deleted service history is available.
         </p>
       )}
@@ -340,7 +340,7 @@ function ArchiveList() {
         {rows.map((row) => (
           <li
             key={row.service_id}
-            className="flex flex-wrap justify-between gap-2 text-xs"
+            className="flex flex-wrap justify-between gap-2 text-13"
           >
             <Link
               to="/keys/$keyId"

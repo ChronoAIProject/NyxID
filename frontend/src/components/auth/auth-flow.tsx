@@ -365,7 +365,7 @@ export function AuthFlow({
                         <FormLabel>Password</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
-                          className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
+                          className="text-13 font-medium text-nyx-secondary-400 hover:text-nyx-300"
                         >
                           Forgot password?
                         </Link>
@@ -386,7 +386,7 @@ export function AuthFlow({
                 <Button
                   type="submit"
                   variant="primary"
-                  className="mt-1 h-[44px] w-full text-15 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                  className="mt-1 h-[44px] w-full text-14 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                   isLoading={loginMutation.isPending}
                 >
                   Sign in
@@ -461,7 +461,7 @@ export function AuthFlow({
                         placeholder="NYX-XXXXXXXX"
                         autoComplete="off"
                         spellCheck={false}
-                        className={`h-12 font-mono text-base tracking-wider ${
+                        className={`h-12 font-mono text-14 tracking-wider ${
                           isInviteValid
                             ? "border-success/40 shadow-[0_0_0_3px_rgba(52,211,153,0.08)]"
                             : ""
@@ -578,10 +578,10 @@ export function AuthFlow({
               </svg>
             </button>
             <div>
-              <h2 className="text-lg font-semibold tracking-tight">
+              <h2 className="text-15 font-semibold tracking-tight">
                 Email registration
               </h2>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Create your account with email and password
               </p>
             </div>
@@ -638,12 +638,12 @@ export function AuthFlow({
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Full Name</FormLabel>
+                    <FormLabel className="text-14">Full Name</FormLabel>
                     <FormControl>
                       <Input
                         placeholder="John Doe"
                         autoComplete="name"
-                        className="h-[42px] text-[0.84375rem]"
+                        className="h-[42px] text-14"
                         {...field}
                         ref={(el) => {
                           field.ref(el);
@@ -663,13 +663,13 @@ export function AuthFlow({
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Email</FormLabel>
+                    <FormLabel className="text-14">Email</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
                         placeholder="you@example.com"
                         autoComplete="email"
-                        className="h-[42px] text-[0.84375rem]"
+                        className="h-[42px] text-14"
                         {...field}
                       />
                     </FormControl>
@@ -683,13 +683,13 @@ export function AuthFlow({
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Password</FormLabel>
+                    <FormLabel className="text-14">Password</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
                         placeholder="Min 8 characters"
                         autoComplete="new-password"
-                        className="h-[42px] text-[0.84375rem]"
+                        className="h-[42px] text-14"
                         {...field}
                       />
                     </FormControl>
@@ -729,7 +729,7 @@ export function AuthFlow({
                 name="confirmPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">
+                    <FormLabel className="text-14">
                       Confirm Password
                     </FormLabel>
                     <FormControl>
@@ -737,7 +737,7 @@ export function AuthFlow({
                         type="password"
                         placeholder="Re-enter your password"
                         autoComplete="new-password"
-                        className="h-[42px] text-[0.84375rem]"
+                        className="h-[42px] text-14"
                         {...field}
                       />
                     </FormControl>
@@ -749,7 +749,7 @@ export function AuthFlow({
               <Button
                 type="submit"
                 variant="primary"
-                className="mt-1 h-[44px] w-full text-15 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
+                className="mt-1 h-[44px] w-full text-14 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
               >
                 Create Account

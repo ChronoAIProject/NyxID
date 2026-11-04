@@ -187,7 +187,7 @@ export function AdminNodesPage() {
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">Failed to load nodes</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : nodes.length === 0 ? (
@@ -195,7 +195,7 @@ export function AdminNodesPage() {
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
             <p className="text-14 font-medium text-muted-foreground">No nodes found</p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {search || statusFilter
                 ? "No nodes match your filters."
                 : "No credential nodes registered."}
@@ -309,7 +309,7 @@ export function AdminNodesPage() {
                           {node.name}
                         </span>
                         {node.metadata?.agent_version && (
-                          <span className="ml-2 text-xs text-muted-foreground">
+                          <span className="ml-2 text-13 text-muted-foreground">
                             v{node.metadata.agent_version}
                           </span>
                         )}
@@ -327,19 +327,19 @@ export function AdminNodesPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-14 tabular-nums text-muted-foreground">
                         {node.metrics
                           ? String(node.metrics.total_requests)
                           : "0"}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-14 tabular-nums text-muted-foreground">
                         {formatSuccessRate(node.metrics)}
                       </span>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm tabular-nums text-muted-foreground">
+                      <span className="text-14 tabular-nums text-muted-foreground">
                         {formatLatency(node.metrics)}
                       </span>
                     </TableCell>
