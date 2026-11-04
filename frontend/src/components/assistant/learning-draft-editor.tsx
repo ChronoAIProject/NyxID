@@ -46,7 +46,7 @@ type Review = ReturnType<typeof useAgentLearningReview>;
 type Proposal = z.infer<typeof learningProposalSchema>;
 type Draft = NonNullable<Proposal["draft"]>;
 
-const LABEL = "text-13 font-medium text-muted-foreground";
+const LABEL = "text-muted-foreground";
 
 function requestFailure(cause: unknown): string {
   return cause instanceof Error && cause.message
@@ -575,7 +575,7 @@ export function ProposalDraftEditor({
         <Link
           to="/assistant"
           search={{ c: proposal.card_conversation_id }}
-          className="text-14 font-medium text-primary hover:underline"
+          className="type-row-title text-primary hover:underline"
         >
           Open the confirmation card
         </Link>

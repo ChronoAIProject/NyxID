@@ -1,3 +1,5 @@
+@reference "../../typography.css";
+
 /* Figma 17:117-17:940: web content only, without the presentation's phone shell. */
 @font-face {
   font-family: "Nyxbot Inter";
@@ -18,8 +20,7 @@
   color: var(--nb-text);
   min-height: 100dvh;
   font-family: "Nyxbot Inter", Arial, sans-serif;
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
   letter-spacing: 0;
   color-scheme: light;
 }
@@ -82,27 +83,22 @@
   border-radius: 7px;
   background: var(--nb-accent);
   color: #fff;
-  font-size: var(--text-14);
-  font-weight: 700;
-  flex-shrink: 0;
+    @apply type-brand-monogram;  flex-shrink: 0;
 }
 .nb-setup-brand strong {
-  font-size: var(--text-20);
-  line-height: 1.5;
-  font-weight: 700;
+  @apply type-section-heading;
 }
 .nb-setup-brand > span:last-child {
   color: var(--nb-muted);
-  font-size: var(--text-14);
+  @apply type-body;
 }
 .nb-setup-return {
   display: flex;
   align-items: center;
   gap: 8px;
   color: #4589ad;
-  font-size: var(--text-14);
+  @apply type-button;
   flex-shrink: 0;
-  font-weight: 500;
 }
 .nb-setup-return .nb-brand-icon {
   width: 20px;
@@ -140,8 +136,7 @@
   padding-bottom: 18px;
   border-bottom: 2px solid var(--nb-line);
   color: var(--nb-muted);
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
   overflow-wrap: anywhere;
 }
 .nb-bot-result {
@@ -163,8 +158,7 @@
 .nb-setup-steps li[data-state="current"] {
   border-color: var(--nb-accent);
   color: var(--nb-text);
-  font-weight: 600;
-}
+  @apply type-body-strong;}
 .nb-setup-step-number {
   width: 18px;
   height: 18px;
@@ -173,7 +167,7 @@
   border-radius: 50%;
   flex-shrink: 0;
   background: var(--nb-note-bg);
-  font-size: var(--text-13);
+  @apply type-secondary;
 }
 [data-state="complete"] > .nb-setup-step-number {
   background: var(--nb-success);
@@ -191,30 +185,25 @@
 .nb-setup-content h1 {
   margin: 0;
   font-family: inherit;
-  font-size: var(--text-22);
-  font-weight: 700;
-  line-height: 1.3;
+  @apply type-compact-page-title;
   letter-spacing: 0;
   overflow-wrap: anywhere;
   outline: none;
 }
 .nyxbot-onboarding.nb-setup .nb-setup-content h1:focus {
   outline: none;
-  font-weight: 700;
-}
+  }
 .nb-setup-subtitle {
   margin: 10px 0 24px;
   color: var(--nb-muted);
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
 }
 .nb-source-account {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
 }
 .nb-source-account > span:first-child {
   display: flex;
@@ -257,12 +246,11 @@
   height: 32px;
 }
 .nb-source-option strong {
-  font-size: var(--text-14);
-  font-weight: 500;
+  @apply type-row-title;
   overflow-wrap: anywhere;
 }
 .nb-source-option > span:last-child {
-  font-size: var(--text-13);
+  @apply type-secondary;
   color: var(--nb-muted);
 }
 .nb-source-option[aria-disabled="true"] {
@@ -276,9 +264,9 @@
   height: 28px;
   margin: 2px;
   border: 1.5px solid currentColor;
-  font-size: var(--text-28);
-  line-height: 1;
+  @apply type-brand-letter;
 }
+
 .nb-source-services {
   display: grid;
   gap: 20px;
@@ -297,12 +285,11 @@
   margin-top: 2px;
 }
 .nb-source-services strong {
-  font-size: var(--text-14);
-  font-weight: 500;
+  @apply type-row-title;
 }
 .nb-source-services p {
   color: var(--nb-muted);
-  font-size: var(--text-14);
+  @apply type-body;
   margin: 2px 0 0;
 }
 .nb-source-permissions {
@@ -313,8 +300,7 @@
   border-radius: 6px;
   background: var(--nb-note-bg);
   color: var(--nb-muted);
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
 }
 .nb-source-permissions svg {
   flex-shrink: 0;
@@ -339,10 +325,9 @@
   min-height: 48px;
   padding: 10px 12px;
   border-radius: 6px;
-  font-size: var(--text-14);
+  @apply type-button;
   box-shadow: none;
   gap: 8px;
-  font-weight: 500;
 }
 .nyxbot-onboarding.nb-setup .nb-primary {
   flex: 1;
@@ -379,8 +364,7 @@
     margin-top: 48px;
   }
   .nb-setup-content h1 {
-    font-size: var(--text-28);
-    font-weight: 700;
+    @apply type-page-title;
   }
   .nb-setup-footer {
     margin: 0 24px;
@@ -408,9 +392,7 @@
   gap: 10px;
 }
 .nb-auth-brand strong {
-  font-size: var(--text-20);
-  font-weight: 700;
-  line-height: 1.5;
+  @apply type-section-heading;
 }
 .nb-auth-logo {
   display: grid;
@@ -435,20 +417,17 @@
 .nb-auth-content h1 {
   margin: 0;
   font-family: inherit;
-  font-size: var(--text-22);
-  font-weight: 700;
-  line-height: 1.33;
+  @apply type-compact-page-title;
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
 .nyxbot-onboarding.nb-auth .nb-auth-content h1:focus {
   outline: none;
-  font-weight: 700;
-}
+  }
 .nb-auth-subtitle {
   margin: 20px 0;
   color: var(--nb-muted);
-  font-size: var(--text-14);
+  @apply type-body;
 }
 .nb-auth-footer {
   width: 100%;
@@ -459,9 +438,8 @@
 .nyxbot-onboarding .nb-auth-footer .nb-secondary {
   min-height: 48px;
   border-radius: 6px;
-  font-size: var(--text-14);
+  @apply type-button;
   gap: 10px;
-  font-weight: 500;
 }
 .nyxbot-onboarding .nb-auth-footer .nb-secondary:disabled {
   opacity: 0.65;
@@ -492,9 +470,8 @@
   border: 1px solid var(--nb-line);
   border-radius: 6px;
   padding: 4px;
-  font-size: var(--text-14);
+  @apply type-body;
   min-height: 28px;
-  font-weight: 400;
 }
 .nb-tools button {
   display: grid;
@@ -524,19 +501,16 @@
 .nb-header h1 {
   margin: 0;
   font-family: inherit;
-  font-size: var(--text-22);
-  font-weight: 700;
-  line-height: 1.3;
+  @apply type-compact-page-title;
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
 .nb-header h1:focus {
   outline: none;
-  font-weight: 700;
-}
+  }
 .nb-header p {
   margin: 6px 0 0;
-  font-size: var(--text-14);
+  @apply type-body;
   color: var(--nb-muted);
 }
 .nb-progress {
@@ -558,8 +532,7 @@
 }
 .nb-intro {
   margin: 14px 0;
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
   text-align: center;
   color: var(--nb-muted);
 }
@@ -583,8 +556,7 @@
   color: #fff;
   font-family: "Nyxbot Inter", Arial, sans-serif;
   padding: 10px 12px;
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
 }
 .nb-footer {
   position: sticky;
@@ -606,9 +578,7 @@
   min-height: 44px;
   padding: 10px 12px;
   border-radius: 9px;
-  font-size: var(--text-14);
-  font-weight: 500;
-  line-height: 1.4;
+  @apply type-button;
   white-space: normal;
   text-align: center;
   letter-spacing: 0;
@@ -648,9 +618,7 @@
   border-radius: 6px;
   background: var(--nb-bg);
   color: var(--nb-text);
-  font-size: var(--text-14);
-  font-weight: 500;
-  line-height: 1.5;
+  @apply type-button;
   white-space: normal;
   text-align: left;
 }
@@ -702,10 +670,9 @@
 }
 .nb-notion {
   color: var(--nb-text);
-  font:
-    bold var(--text-28) Georgia,
-    serif;
-  border: 1px solid var(--nb-muted);
+  @apply type-brand-letter;
+  font-family: Georgia, serif;
+    border: 1px solid var(--nb-muted);
   border-radius: 5px;
   width: 1.25em;
   height: 1.25em;
@@ -722,22 +689,19 @@
   background: var(--nb-bg);
   color: var(--nb-text);
   border-radius: 6px;
-  font-size: var(--text-14);
-  font-weight: 500;
-  line-height: 1.5;
+  @apply type-button;
   gap: 14px;
   white-space: normal;
   text-align: left;
 }
 .nb-signup {
   margin: 22px 0 0;
-  font-size: var(--text-14);
+  @apply type-body;
   color: var(--nb-muted);
 }
 .nb-signup a {
   color: inherit;
-  font-weight: 500;
-}
+  @apply type-button;}
 .nb-signup a:hover {
   text-decoration: underline;
 }
@@ -764,12 +728,11 @@
   position: relative;
 }
 .nb-tile strong {
-  font-size: var(--text-14);
-  font-weight: 500;
+  @apply type-row-title;
   overflow-wrap: anywhere;
 }
 .nb-tile > span:last-child {
-  font-size: var(--text-13);
+  @apply type-secondary;
   color: var(--nb-muted);
 }
 .nb-tile[data-selected="true"] {
@@ -816,13 +779,12 @@
   margin: 16px 0;
   display: grid;
   gap: 9px;
-  font-size: var(--text-14);
+  @apply type-body;
   color: var(--nb-muted);
 }
 .nb-instructions a {
   color: var(--nb-text);
-  font-weight: 500;
-}
+  @apply type-button;}
 .nb-instructions svg {
   display: inline;
   vertical-align: middle;
@@ -835,9 +797,8 @@
   background: var(--nb-bg);
   color: var(--nb-text);
   border-color: var(--nb-line);
-  font-size: var(--text-14);
+  @apply type-body;
   border-radius: 9px;
-  font-weight: 400;
 }
 .nb-token-field input {
   padding-right: 46px;
@@ -855,8 +816,7 @@
 }
 .nb-small {
   color: var(--nb-muted);
-  font-size: var(--text-13);
-  line-height: 1.5;
+  @apply type-secondary;
   margin-top: 10px;
 }
 .nb-setup-loading {
@@ -898,11 +858,10 @@
   flex-shrink: 0;
 }
 .nb-setup .nb-channel-tiles strong {
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
 }
 .nb-setup .nb-channel-tiles .nb-tile > span:last-child {
-  line-height: 1.5;
+  line-height: var(--line-body);
 }
 .nb-setup .nb-channel-tiles > div.nb-tile {
   flex-direction: row;
@@ -926,15 +885,14 @@
 }
 .nb-channel-unavailable-copy span {
   color: var(--nb-muted);
-  font-size: var(--text-13);
-  line-height: 1.5;
+  @apply type-secondary;
 }
 .nb-setup .nb-instructions {
   margin: 16px 0 20px;
   padding-left: 18px;
   gap: 8px;
   color: var(--nb-text);
-  line-height: 1.5;
+  line-height: var(--line-body);
 }
 .nb-setup .nb-instructions li {
   padding-left: 8px;
@@ -943,16 +901,13 @@
   color: var(--nb-muted);
 }
 .nb-setup .nb-instructions a {
-  font-weight: 500;
-}
+  @apply type-button;}
 .nb-setup .nb-instructions a:hover {
   text-decoration: underline;
 }
 .nb-channel-form label {
   color: var(--nb-muted);
-  font-size: var(--text-14);
-  line-height: 1.5;
-  font-weight: 500;
+  @apply type-field-label;
 }
 .nyxbot-onboarding.nb-setup .nb-token-field input {
   border-radius: 6px;
@@ -964,15 +919,13 @@
   gap: 10px;
   margin: 20px 0 0;
   color: var(--nb-muted);
-  font-size: var(--text-13);
-  line-height: 1.5;
+  @apply type-secondary;
 }
 .nb-channel-token-note svg {
   flex-shrink: 0;
 }
 .nb-notice {
-  font-size: var(--text-14);
-  line-height: 1.6;
+  @apply type-body;
   border-left: 3px solid var(--nb-accent);
   background: var(--nb-selected);
   color: var(--nb-text);
@@ -994,7 +947,7 @@
   justify-content: center;
   gap: 6px;
   color: #12805c;
-  font-size: var(--text-14);
+  @apply type-body;
 }
 .nb-cap-options {
   display: grid;
@@ -1022,7 +975,7 @@
 }
 .nb-cap-option small {
   margin-left: auto;
-  font-size: var(--text-13);
+  @apply type-secondary;
   color: var(--nb-accent);
 }
 .nb-next {
@@ -1032,7 +985,7 @@
   border-radius: 16px;
   padding: 6px 12px;
   text-align: center;
-  font-size: var(--text-13);
+  @apply type-secondary;
   margin-top: 16px;
 }
 .nb-link-reasons {
@@ -1043,7 +996,7 @@
   display: grid;
   gap: 10px;
   color: var(--nb-muted);
-  font-size: var(--text-14);
+  @apply type-body;
 }
 .nb-link-reasons li {
   display: flex;
@@ -1055,10 +1008,9 @@
 }
 .nb-code-label {
   display: block;
-  font-size: var(--text-14);
+  @apply type-field-label;
   color: var(--nb-muted);
   margin-bottom: 6px;
-  font-weight: 500;
 }
 .nb-inline-actions {
   display: flex;

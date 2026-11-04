@@ -135,7 +135,7 @@ export function ChartView({
   };
   const chart = noUsage ? (
     <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
-      <span className="text-15 font-medium text-foreground">
+      <span className="type-card-title text-foreground">
         No usage in this view
       </span>
       <span className="text-14">
@@ -458,7 +458,7 @@ export function ChartView({
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <span
-            className="font-display text-28 font-semibold tracking-tight tabular-nums"
+            className="font-display type-metric tracking-tight tabular-nums"
           >
             {format(
               data.exact_total === undefined ? data.total : data.exact_total,
@@ -581,7 +581,7 @@ export function ChartView({
           >
             <summary
               className={cn(
-                "flex cursor-pointer list-none items-center justify-between text-13 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden",
+                "flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden",
                 panel.table_display !== "accordion" && "hidden",
               )}
             >
@@ -589,7 +589,7 @@ export function ChartView({
               <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
             </summary>
             {panel.table_display !== "accordion" && (
-              <h4 className="text-13 font-medium text-muted-foreground">
+              <h4 className="type-secondary-emphasis text-muted-foreground">
                 Data table
               </h4>
             )}

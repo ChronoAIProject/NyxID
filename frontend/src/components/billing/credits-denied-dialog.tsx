@@ -87,7 +87,7 @@ export default function CreditsDeniedDialog({
         />
         <DialogHeader className="items-center space-y-2 text-center">
           <DialogTitle>Not enough credits to continue</DialogTitle>
-          <DialogDescription className="max-w-[330px] text-14 leading-relaxed">
+          <DialogDescription className="max-w-[330px] text-14">
             {org
               ? `This request is billed to ${orgName ?? "your organization"}'s credits, which have been used up or have expired, so it couldn't run.`
               : "Your free platform credits have been used up or have expired, so this request couldn't run."}
@@ -112,7 +112,7 @@ export default function CreditsDeniedDialog({
           )}
         </ul>
         {payer === "unknown" && (
-          <p className="text-13 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             If this is billed to an organization, ask one of its admins instead.
           </p>
         )}
@@ -155,10 +155,10 @@ function OptionRow({
         {icon}
       </span>
       <span className="min-w-0 space-y-0.5">
-        <span className="block text-14 font-medium text-foreground">
+        <span className="block type-row-title text-foreground">
           {title}
         </span>
-        <span className="block text-13 leading-relaxed text-muted-foreground">
+        <span className="block text-13 text-muted-foreground">
           {children}
         </span>
       </span>

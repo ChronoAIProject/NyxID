@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { localTime } from "@/lib/automation-time";
 import { DatePicker } from "@/components/ui/date-picker";
 import { Input } from "@/components/ui/input";
@@ -69,10 +70,10 @@ export function AutomationDateTime({
     );
   return (
     <fieldset className="space-y-1 text-14">
-      <legend>
+      <Label asChild><legend>
         {label}
         {optional ? " (optional)" : ""}
-      </legend>
+      </legend></Label>
       <div className="flex gap-2">
         <DatePicker
           ariaLabel={`${label} date`}

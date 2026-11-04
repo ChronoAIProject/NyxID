@@ -242,11 +242,11 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-5">
             {/* User code display */}
             <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-              <p className="text-13 font-medium uppercase tracking-wider text-muted-foreground">
+              <p className="type-secondary-emphasis uppercase tracking-wider text-muted-foreground">
                 Your code
               </p>
               <div className="flex items-center gap-3">
-                <code className="text-28 font-semibold tracking-[0.3em] font-mono text-primary-text">
+                <code className="type-metric tracking-[0.3em] font-mono text-primary-text">
                   {userCode}
                 </code>
                 <Button

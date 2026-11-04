@@ -640,7 +640,7 @@ export function AdminOAuthClientsPage() {
         return (
           <div className="min-w-0 space-y-1">
             <p
-              className="line-clamp-2 break-words text-14 font-medium text-foreground"
+              className="line-clamp-2 break-words type-row-title text-foreground"
               title={client.client_name}
             >
               {client.client_name}
@@ -683,7 +683,7 @@ export function AdminOAuthClientsPage() {
                 stageBrokerCapability(client, checked)
               }
             />
-            <span className="whitespace-nowrap text-13 font-medium text-foreground">
+            <span className="whitespace-nowrap type-secondary-emphasis text-foreground">
               {client.broker_capability_effective
                 ? "Broker enabled"
                 : "No broker"}
@@ -713,7 +713,7 @@ export function AdminOAuthClientsPage() {
               }
               onCheckedChange={(checked) => stageActive(client, checked)}
             />
-            <span className="whitespace-nowrap text-13 font-medium text-foreground">
+            <span className="whitespace-nowrap type-secondary-emphasis text-foreground">
               {client.is_active ? "Active" : "Inactive"}
             </span>
           </div>
@@ -869,7 +869,7 @@ export function AdminOAuthClientsPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="text-14 font-medium text-destructive">
+            <p className="type-row-title text-destructive">
               Failed to load OAuth clients
             </p>
             <Button
@@ -885,7 +885,7 @@ export function AdminOAuthClientsPage() {
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
             <KeyRound className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="text-14 font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 {hasActiveFilters
                   ? "No clients match these filters"
                   : "No OAuth clients"}
@@ -1080,7 +1080,7 @@ export function AdminOAuthClientsPage() {
           </DialogHeader>
           {pendingClientAction && (
             <div className="rounded-lg bg-muted/50 p-3">
-              <p className="text-14 font-medium">
+              <p className="type-row-title">
                 {pendingClientAction.client.client_name}
               </p>
               <p className="mt-1 font-mono text-13 text-muted-foreground">
@@ -1220,7 +1220,7 @@ function BrokerPolicyRow({
     <div className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="text-14 font-medium text-foreground">{label}</p>
+          <p className="type-row-title text-foreground">{label}</p>
           <Badge variant={overridden ? "default" : "secondary"}>
             {overridden ? "Overridden" : "Env default"}
           </Badge>
@@ -1314,20 +1314,20 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
           {visibleItems.map((scope) => (
             <span
               key={scope}
-              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono text-12 font-medium text-muted-foreground"
+              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono type-group-label text-muted-foreground"
             >
               {scope}
             </span>
           ))}
           {hiddenItems.length > 0 && (
-            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 text-12 font-medium text-muted-foreground">
+            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 type-group-label text-muted-foreground">
               +{String(hiddenItems.length)} more
             </span>
           )}
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 rounded-lg p-3">
-        <p className="mb-2 text-13 font-semibold text-foreground">
+        <p className="mb-2 type-secondary-strong text-foreground">
           Allowed scopes
         </p>
         <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">

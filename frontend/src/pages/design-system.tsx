@@ -83,7 +83,7 @@ function Section({
 }) {
   return (
     <section id={id} className="scroll-mt-8">
-      <h2 className="text-24 font-bold tracking-tight mb-6" style={{ letterSpacing: "-0.02em" }}>
+      <h2 className="type-page-title tracking-tight mb-6" style={{ letterSpacing: "-0.02em" }}>
         {title}
       </h2>
       {children}
@@ -115,7 +115,7 @@ function TokenRow({ token, value, preview }: { readonly token: string; readonly 
 function ComponentShowcase({ title, children }: { readonly title: string; readonly children: React.ReactNode }) {
   return (
     <div className="space-y-3">
-      <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{title}</p>
+      <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{title}</p>
       <div className="rounded-xl border border-border/50 bg-card p-6">
         {children}
       </div>
@@ -182,7 +182,7 @@ export function DesignSystemPage() {
     <div className="mx-auto max-w-[1200px] flex gap-10 px-8 py-10">
       {/* Sticky nav */}
       <nav className="hidden xl:flex shrink-0 w-[180px] flex-col gap-1 sticky top-10 self-start">
-        <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary mb-2">Components</p>
+        <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary mb-2">Components</p>
         {DS_NAV.map((item) => (
           <a
             key={item.id}
@@ -198,8 +198,8 @@ export function DesignSystemPage() {
       <div className="flex-1 min-w-0 space-y-16">
         {/* Header */}
         <div>
-          <p className="text-13 font-semibold uppercase tracking-[1.5px] text-nyx-secondary-400 mb-2">Design System</p>
-          <h1 className="text-28 font-bold leading-[1.1]" style={{ letterSpacing: "-0.03em" }}>
+          <p className="type-secondary-strong uppercase tracking-[1.5px] text-nyx-secondary-400 mb-2">Design System</p>
+          <h1 className="type-page-title" style={{ letterSpacing: "-0.03em" }}>
             NyxID Components
           </h1>
           <p className="text-14 text-muted-foreground mt-2">
@@ -271,17 +271,17 @@ export function DesignSystemPage() {
             <div className="space-y-6">
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Page Title — 48px / bold / -0.035em</p>
-                <h1 className="text-28 font-bold leading-[1.1]" style={{ letterSpacing: "-0.03em" }}>Page Title</h1>
+                <h1 className="type-page-title" style={{ letterSpacing: "-0.03em" }}>Page Title</h1>
               </div>
               <Separator />
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Section Title — 24px / bold / -0.02em</p>
-                <h2 className="text-24 font-bold" style={{ letterSpacing: "-0.02em" }}>Section Title</h2>
+                <h2 className="type-page-title" style={{ letterSpacing: "-0.02em" }}>Section Title</h2>
               </div>
               <Separator />
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Card Title — 16px (base) / semibold</p>
-                <h3 className="text-14 font-semibold">Card Title</h3>
+                <h3 className="type-body-strong">Card Title</h3>
               </div>
               <Separator />
               <div>
@@ -301,12 +301,12 @@ export function DesignSystemPage() {
               <Separator />
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Overline — 11px / semibold / uppercase / tracking-[1.5px] / text-text-tertiary</p>
-                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Section Overline</p>
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Section Overline</p>
               </div>
               <Separator />
               <div>
                 <p className="text-13 text-text-tertiary mb-1">Caption — 10px / medium — badges only</p>
-                <p className="text-12 font-medium">Badge caption text</p>
+                <p className="type-group-label">Badge caption text</p>
               </div>
             </div>
           </ComponentShowcase>
@@ -517,31 +517,31 @@ export function DesignSystemPage() {
               <div className="grid gap-4 sm:grid-cols-2">
                 {/* Security Posture style */}
                 <div className="rounded-xl border border-border/50 bg-card p-5 flex flex-col gap-4">
-                  <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Security Posture</p>
+                  <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Security Posture</p>
                   <div className="flex items-center gap-4">
                     <div className="shrink-0 flex h-12 w-12 items-center justify-center rounded-full border-2 border-nyx-500/40">
-                      <span className="text-14 font-bold nyx-gradient-text">80%</span>
+                      <span className="type-body-strong nyx-gradient-text">80%</span>
                     </div>
                     <div className="flex flex-col gap-0.5">
-                      <span className="text-20 font-bold nyx-gradient-text leading-none" style={{ letterSpacing: "-0.02em" }}>80%</span>
+                      <span className="type-section-heading nyx-gradient-text" style={{ letterSpacing: "-0.02em" }}>80%</span>
                       <span className="text-13 text-text-tertiary">security score</span>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-13 font-medium bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
+                    <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
                       <CheckCircle2 className="h-3 w-3 shrink-0" /> Email
                     </div>
-                    <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-13 font-medium bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
+                    <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
                       <CheckCircle2 className="h-3 w-3 shrink-0" /> MFA
                     </div>
-                    <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-13 font-medium text-text-tertiary border border-dashed border-border/40">
+                    <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis text-text-tertiary border border-dashed border-border/40">
                       <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-border/60" /> Keys
                     </div>
                   </div>
                 </div>
                 {/* Quick Links style */}
                 <div className="rounded-xl border border-border/50 bg-card p-5 flex flex-col gap-3">
-                  <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Quick Links</p>
+                  <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Quick Links</p>
                   <div className="flex flex-col gap-1.5">
                     {["Documentation", "AI Setup Guide", "Integration Guide"].map((label) => (
                       <div key={label} className="flex items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-14 text-muted-foreground transition-colors duration-300 hover:bg-overlay hover:text-foreground cursor-pointer">
@@ -564,9 +564,9 @@ export function DesignSystemPage() {
                   <div key={s.label} className="group flex flex-col gap-3 rounded-xl border border-border/50 bg-card p-4 transition-all duration-300 hover:border-hairline-strong cursor-pointer">
                     <div className="flex flex-col gap-1.5">
                       <span className="text-text-tertiary transition-transform duration-300 group-hover:-translate-y-0.5">{s.icon}</span>
-                      <span className="text-13 font-semibold uppercase tracking-wider text-text-tertiary">{s.label}</span>
+                      <span className="type-secondary-strong uppercase tracking-wider text-text-tertiary">{s.label}</span>
                     </div>
-                    <span className={cn("text-24 font-bold leading-none", s.success ? "text-success" : "text-foreground")} style={{ letterSpacing: "-0.02em" }}>
+                    <span className={cn("type-page-title ", s.success ? "text-success" : "text-foreground")} style={{ letterSpacing: "-0.02em" }}>
                       {s.value}
                     </span>
                     <span className="text-13 text-text-tertiary">{s.footer}</span>
@@ -587,7 +587,7 @@ export function DesignSystemPage() {
                       {c.icon}
                     </div>
                     <div>
-                      <p className="text-14 font-semibold text-foreground">{c.title}</p>
+                      <p className="type-body-strong text-foreground">{c.title}</p>
                       <p className="text-14 text-muted-foreground mt-0.5">{c.desc}</p>
                     </div>
                   </div>
@@ -862,7 +862,7 @@ export function DesignSystemPage() {
                       className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/20 py-3 last:border-0"
                     >
                       <div className="min-w-0">
-                        <p className="truncate text-15 font-medium text-foreground">{label}</p>
+                        <p className="truncate type-card-title text-foreground">{label}</p>
                         <code className="text-14 text-text-tertiary">{platform}</code>
                       </div>
                       {ICON_SIZE_OPTIONS.map(({ value, label: sizeLabel }) => (
@@ -907,7 +907,7 @@ export function DesignSystemPage() {
                         className="grid grid-cols-[minmax(180px,1fr)_repeat(6,56px)] items-center gap-2 border-b border-border/20 px-3 last:border-0"
                       >
                         <div className="min-w-0 py-2">
-                          <p className="truncate text-14 font-medium text-foreground">{iconAuditLabel(slug)}</p>
+                          <p className="truncate type-row-title text-foreground">{iconAuditLabel(slug)}</p>
                           <code className="truncate text-14 text-text-tertiary">{slug}</code>
                         </div>
                         {ICON_SIZE_OPTIONS.map(({ value, label }) => (
@@ -966,7 +966,7 @@ export function DesignSystemPage() {
           <div className="space-y-6">
             <ComponentShowcase title="Section Overline + Content">
               <div className="flex flex-col gap-3">
-                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Section Label</p>
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Section Label</p>
                 <p className="text-14 text-muted-foreground">Content below the overline label.</p>
               </div>
             </ComponentShowcase>
@@ -977,7 +977,7 @@ export function DesignSystemPage() {
                   <ShieldCheck className="h-4.5 w-4.5 text-success" />
                 </div>
                 <div>
-                  <p className="text-15 font-semibold text-foreground">All systems clear</p>
+                  <p className="type-card-title text-foreground">All systems clear</p>
                   <p className="text-13 text-muted-foreground">Nothing needs your attention right now.</p>
                 </div>
               </div>
@@ -1006,10 +1006,10 @@ export function DesignSystemPage() {
 
             <ComponentShowcase title="Status Chips">
               <div className="flex flex-wrap gap-2">
-                <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-13 font-medium bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
+                <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis bg-nyx-500/10 text-nyx-secondary-400 border border-nyx-500/20">
                   <CheckCircle2 className="h-3 w-3 shrink-0" /> Complete
                 </div>
-                <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-13 font-medium text-text-tertiary border border-dashed border-border/40">
+                <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 type-secondary-emphasis text-text-tertiary border border-dashed border-border/40">
                   <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-border/60" /> Incomplete
                 </div>
               </div>
@@ -1021,7 +1021,7 @@ export function DesignSystemPage() {
                   <Cable className="h-6 w-6 text-muted-foreground" />
                 </div>
                 <div className="text-center max-w-md space-y-1">
-                  <p className="text-14 font-medium text-muted-foreground">No items yet</p>
+                  <p className="type-row-title text-muted-foreground">No items yet</p>
                   <p className="text-15 text-muted-foreground">Get started by adding your first item.</p>
                 </div>
                 <AddCtaButton label="Add Item" onClick={() => {}} />
@@ -1052,7 +1052,7 @@ export function DesignSystemPage() {
                 },
                 {
                   rule: "Section titles use consistent typography",
-                  detail: "All section titles above card grids must use the same pattern: an icon (h-4 w-4, text-muted-foreground) followed by text-15 font-semibold text-foreground. Never mix uppercase tertiary text with this pattern on the same page.",
+                  detail: "All section titles above card grids must use the same pattern: an icon (h-4 w-4, text-muted-foreground) followed by type-card-title text-foreground. Never mix uppercase tertiary text with this pattern on the same page.",
                   code: '<Icon className="h-4 w-4 text-muted-foreground" />\n<h3 className="text-15 font-semibold text-foreground">Title</h3>',
                 },
                 {
@@ -1132,7 +1132,7 @@ export function DesignSystemPage() {
                 },
               ].map((item) => (
                 <div key={item.rule} className="rounded-xl border border-border/50 bg-card p-5 space-y-2">
-                  <p className="text-15 font-semibold text-foreground">{item.rule}</p>
+                  <p className="type-card-title text-foreground">{item.rule}</p>
                   <p className="text-14 text-muted-foreground">{item.detail}</p>
                   <code className="block text-14 font-mono text-nyx-secondary-400 bg-muted rounded-lg px-3 py-2">
                     {item.code}

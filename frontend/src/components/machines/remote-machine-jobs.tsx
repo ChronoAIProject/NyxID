@@ -262,7 +262,7 @@ export function RemoteMachineJobs({
             key={job.id}
             className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
           >
-            <p className="break-all font-mono text-15 font-semibold">
+            <p className="break-all font-mono type-card-title">
               {job.id}
             </p>
             <div className="flex flex-wrap gap-2">

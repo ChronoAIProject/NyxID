@@ -1,3 +1,5 @@
+@reference "../../typography.css";
+
 /* Equal rows follow the largest card's content, including independent spacing. */
 .assistant-plugin-grid {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
@@ -5,9 +7,6 @@
 }
 .assistant-plugin-card {
   min-height: calc(5rem + var(--spacing) * 18);
-}
-.assistant-plugin-card > p {
-  min-height: 3.25em;
 }
 .workspace-status-success {
   color: color-mix(in srgb, var(--color-success) 55%, var(--color-foreground));
@@ -46,16 +45,13 @@
   display: none;
 }
 .assistant-workspace-approval h3 {
-  font-size: var(--text-14);
-  font-weight: 500;
+  @apply type-row-title;
 }
 .assistant-workspace-approval > section > div:nth-child(2) {
   padding-top: 0;
 }
 .assistant-workspace-approval > section > div:nth-child(2) > p:first-child {
-  font-size: var(--text-14);
-  font-weight: 400;
-  line-height: 1.5;
+  @apply type-body;
 }
 .assistant-workspace-approval > section > div:nth-child(2) > div > span {
   border: 0;
@@ -63,7 +59,7 @@
   background: transparent;
   padding: 0;
   font-family: inherit;
-  font-size: var(--text-13);
+  @apply type-secondary;
   text-transform: none;
   letter-spacing: normal;
 }

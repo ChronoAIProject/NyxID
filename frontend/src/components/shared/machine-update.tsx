@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import {
   GroupedList,
   GroupedRow,
@@ -166,15 +167,15 @@ export function MachineUpdate({
         {manual && status.installation === "container" && (
           <>
             <GroupedRow asChild className="block space-y-0.5">
-              <label>
-                <span className="text-13 font-normal text-text-tertiary">
+              <Label>
+                <span className="text-text-tertiary">
                   Docker container name
                 </span>
                 <GroupedInput
                   value={container}
                   onChange={(event) => setContainer(event.target.value)}
                 />
-              </label>
+              </Label>
             </GroupedRow>
             {command && (
               <GroupedRow>
@@ -280,13 +281,13 @@ export function MachineUpdate({
                   ? "Replace only the updater on the computer running Docker. Keep the machine container and update volume."
                   : "Run once on the computer running Docker. No pairing token needed."}
               </p>
-              <label className="block space-y-1">
+              <Label className="block space-y-1">
                 Docker container name
                 <Input
                   value={container}
                   onChange={(event) => setContainer(event.target.value)}
                 />
-              </label>
+              </Label>
               {command ? (
                 <CopyableField
                   label={legacy ? "Replace updater on the Docker host" : "Run on the Docker host"}

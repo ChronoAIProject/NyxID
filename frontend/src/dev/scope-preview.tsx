@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -36,9 +37,9 @@ export function ScopePreview() {
   return <main className="theme-dark min-h-screen bg-background px-4 py-8 text-foreground sm:px-8 sm:py-12">
     <div className="mx-auto max-w-5xl space-y-8">
       <header className="space-y-3">
-        <p className="text-13 font-medium uppercase tracking-widest text-muted-foreground">NyxID · Local preview · Mock data</p>
-        <h1 className="text-28 font-semibold tracking-tight">Service account scopes</h1>
-        <p className="max-w-2xl text-14 leading-6 text-muted-foreground">Build a scope from suggestions or type your own in the same field. Saving only updates this preview.</p>
+        <p className="type-secondary-emphasis uppercase tracking-widest text-muted-foreground">NyxID · Local preview · Mock data</p>
+        <h1 className="type-metric tracking-tight">Service account scopes</h1>
+        <p className="max-w-2xl text-14 text-muted-foreground">Build a scope from suggestions or type your own in the same field. Saving only updates this preview.</p>
       </header>
       <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
         <section className="min-w-0 rounded-xl border bg-card p-5 sm:p-7" aria-label="Service account form">
@@ -68,19 +69,19 @@ export function ScopePreview() {
         </section>
         <aside className="space-y-5 rounded-xl border bg-card p-5">
           <div className="space-y-2">
-            <label htmlFor="suggestion-scenario" className="text-14 font-medium">Suggestion source</label>
+            <Label htmlFor="suggestion-scenario">Suggestion source</Label>
             <select id="suggestion-scenario" className="h-10 w-full rounded-md border bg-background px-3 text-14" value={scenario} disabled={changingScenario} onChange={(event) => void changeScenario(event.target.value)}>
               <option value="available">Available suggestions</option><option value="empty">Empty suggestion list</option><option value="unavailable">Suggestions unavailable</option>
             </select>
             {previewError && <p role="alert" className="text-14 text-destructive">{previewError}</p>}
           </div>
-          <div className="space-y-3 text-14 leading-6 text-muted-foreground">
+          <div className="space-y-3 text-14 text-muted-foreground">
             <p>Type <code className="text-foreground">reports</code>, choose <code className="text-foreground">reports:</code>, then choose a suggested next segment. Try <code className="text-foreground">reports:finance:read</code>.</p>
             <p>Or type a complete scope, such as <code className="text-foreground">inventory:read</code>, and press Enter. You can also paste several scopes separated by spaces.</p>
             <p>Click a scope pill to edit its value. Press Enter to apply the change or Escape to cancel. All selected scopes stay visible.</p>
             <p>Switch to an empty or unavailable source and continue entering custom scopes.</p>
           </div>
-          <p className="border-t pt-4 text-13 leading-5 text-muted-foreground">Mock suggestions are examples. Custom scopes are saved as entered; supported permissions depend on the service handling them.</p>
+          <p className="border-t pt-4 text-13 text-muted-foreground">Mock suggestions are examples. Custom scopes are saved as entered; supported permissions depend on the service handling them.</p>
         </aside>
       </div>
     </div>

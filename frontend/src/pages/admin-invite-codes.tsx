@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -314,7 +315,7 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-14 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   Failed to load invite codes
                 </p>
                 <p className="text-13 text-muted-foreground">
@@ -326,7 +327,7 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-14 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   No invite codes found
                 </p>
                 <p className="text-13 text-muted-foreground">
@@ -352,7 +353,7 @@ export function AdminInviteCodesPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
-                        <p className="text-14 font-medium font-mono text-foreground truncate">
+                        <p className="type-row-title font-mono text-foreground truncate">
                           {ic.code}
                         </p>
                       </div>
@@ -449,7 +450,7 @@ export function AdminInviteCodesPage() {
                         )}
                       >
                         <TableCell>
-                          <span className="font-mono text-14 font-medium text-foreground">
+                          <span className="font-mono type-row-title text-foreground">
                             {ic.code}
                           </span>
                         </TableCell>
@@ -540,7 +541,7 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-14 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   Failed to load invite codes
                 </p>
                 <p className="text-13 text-muted-foreground">
@@ -587,7 +588,7 @@ export function AdminInviteCodesPage() {
                   Invite code
                 </p>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-15 font-medium text-foreground">
+                  <span className="font-mono type-card-title text-foreground">
                     {createdCode.code}
                   </span>
                   <Button
@@ -871,12 +872,11 @@ export function AdminInviteCodesPage() {
               </div>
 
               <div className="space-y-2">
-                <label
+                <Label
                   htmlFor="invite-code-note"
-                  className="text-14 font-medium"
                 >
                   Note
-                </label>
+                </Label>
                 <Input
                   id="invite-code-note"
                   value={noteDraft}
@@ -906,7 +906,7 @@ export function AdminInviteCodesPage() {
 
               <div className="space-y-3">
                 <div className="flex items-baseline justify-between">
-                  <h3 className="text-14 font-medium">Redemptions</h3>
+                  <h3 className="type-row-title">Redemptions</h3>
                   <span className="text-13 text-muted-foreground">
                     {selectedCode.usages.length} total
                   </span>
@@ -983,7 +983,7 @@ function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
     <Link
       to="/admin/users/$userId"
       params={{ userId }}
-      className="inline-flex items-center gap-1 text-14 font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer"
+      className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer"
     >
       <span className="truncate max-w-[200px]">{displayName || email}</span>
       <ArrowUpRight className="h-3 w-3 shrink-0" />
@@ -1012,7 +1012,7 @@ function InviteCodesByUserView({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-14 font-medium text-muted-foreground">
+          <p className="type-row-title text-muted-foreground">
             No redemptions found
           </p>
           <p className="text-13 text-muted-foreground">
@@ -1051,7 +1051,7 @@ function InviteCodesByUserView({
               <button
                 type="button"
                 onClick={() => onOpenCode(r.codeId)}
-                className="font-mono text-14 font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
+                className="font-mono type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
                 disabled={isSaving}
               >
                 {r.code}
@@ -1107,7 +1107,7 @@ function InviteCodesByUserView({
                   <button
                     type="button"
                     onClick={() => onOpenCode(r.codeId)}
-                    className="font-mono text-14 font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
+                    className="font-mono type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
                     disabled={isSaving}
                   >
                     {r.code}

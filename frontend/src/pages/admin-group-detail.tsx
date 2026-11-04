@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import {
   changedFields,
   describeChanges,
@@ -211,7 +212,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-15 font-semibold">
+        <h3 className="mb-2 font-display type-card-title">
           Group not found
         </h3>
         <p className="mb-4 text-14 text-muted-foreground">
@@ -504,9 +505,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-14 font-medium" htmlFor="add-member-id">
+              <Label htmlFor="add-member-id">
                 User ID
-              </label>
+              </Label>
               <Input
                 id="add-member-id"
                 placeholder="Enter user ID"

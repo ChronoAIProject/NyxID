@@ -14,6 +14,6 @@ test("iOS inputs keep the zoom-prevention minimum and grow with larger text", as
     await slider.press(key);
     await expect(slider).toHaveValue(String(scale));
     await page.keyboard.press("Escape");
-    await expect.poll(() => composerInput(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBe(Math.max(16, 16 * scale));
+    await expect.poll(() => composerInput(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(Math.max(16, 13.6 * scale), 2);
   }
 });

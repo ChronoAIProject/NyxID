@@ -80,7 +80,7 @@ export function OrgJoinPage() {
             <>
               <XCircle className="h-8 w-8 text-destructive" />
               <div className="space-y-1">
-                <p className="text-14 font-medium text-foreground">
+                <p className="type-row-title text-foreground">
                   Could not join organization
                 </p>
                 <p className="text-13 text-muted-foreground">{state.message}</p>

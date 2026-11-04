@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { scheduleFormSchema } from "@/schemas/billing-credits";
 import { ServiceLimitsEditor } from "./service-limits-editor";
@@ -210,9 +211,9 @@ export function ScheduleDialog({
                   render={({ field }) => (
                     <FormItem>
                       <fieldset className="space-y-2">
-                        <legend className="text-13 font-medium text-muted-foreground">
+                        <Label asChild><legend className="text-muted-foreground">
                           Expiry policy
-                        </legend>
+                        </legend></Label>
                         <div className="grid gap-2 sm:grid-cols-3">
                           <ExpiryOption
                             label="End of each period"
@@ -411,7 +412,7 @@ function ExpiryOption({
   readonly onChange: () => void;
 }) {
   return (
-    <label className="flex cursor-pointer gap-2 rounded-lg border border-border px-3 py-2">
+    <Label className="flex cursor-pointer gap-2 rounded-lg border border-border px-3 py-2">
       <input
         type="radio"
         name="schedule-expiry-policy"
@@ -421,11 +422,11 @@ function ExpiryOption({
         onChange={onChange}
       />
       <span>
-        <span className="block text-14 font-medium">{label}</span>
+        <span className="block type-row-title">{label}</span>
         <span className="block text-13 text-muted-foreground">
           {description}
         </span>
       </span>
-    </label>
+    </Label>
   );
 }

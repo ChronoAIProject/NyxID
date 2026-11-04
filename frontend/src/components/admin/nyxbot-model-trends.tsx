@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import {
   CartesianGrid,
@@ -39,7 +40,7 @@ function Trend({
   const points = modelDailyPoints(data, measure);
   return (
     <div className="min-w-0 space-y-2">
-      <h3 className="text-14 font-semibold">{title} · Daily UTC</h3>
+      <h3 className="type-body-strong">{title} · Daily UTC</h3>
       <div
         className="analytics-plot h-56"
         role="img"
@@ -185,7 +186,7 @@ export function ModelTrends({
           gaps mean cost is unavailable
         </p>
         <div className="flex items-center gap-2 text-13">
-          <span>{kind === "cost" ? "Cost measure" : "Token measure"}</span>
+          <Label asChild><span>{kind === "cost" ? "Cost measure" : "Token measure"}</span></Label>
           <Select
             value={kind === "cost" ? cost : effectiveTokens}
             onValueChange={(value) =>

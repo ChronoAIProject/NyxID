@@ -151,7 +151,7 @@ function MemberScopeForm({
 
       <div className="space-y-4">
         <div className="grid gap-2">
-          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+          <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
             <input
               type="radio"
               name="member-scope-mode"
@@ -161,7 +161,7 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-14 font-medium text-foreground">
+              <span className="block type-row-title text-foreground">
                 Inherit from role default
               </span>
               <span className="block text-13 text-muted-foreground">
@@ -170,9 +170,9 @@ function MemberScopeForm({
                   : `This member can access: ${inheritedSummary}`}
               </span>
             </span>
-          </label>
+          </Label>
 
-          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
+          <Label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-muted/30 p-3">
             <input
               type="radio"
               name="member-scope-mode"
@@ -182,21 +182,21 @@ function MemberScopeForm({
               className="mt-1"
             />
             <span className="space-y-1">
-              <span className="block text-14 font-medium text-foreground">
+              <span className="block type-row-title text-foreground">
                 Customize for this member
               </span>
               <span className="block text-13 text-muted-foreground">
                 Custom scopes override role defaults until reset.
               </span>
               {scopeMode === "override" && member.scope_source === "inherit" && (
-                <span className="block text-13 font-medium text-amber-600 dark:text-amber-400">
+                <span className="block type-secondary-emphasis text-amber-600 dark:text-amber-400">
                   Snapshot warning: saving will freeze this member at the
                   current role scope ({inheritedSummary}). Future changes to
                   the role default won't apply until you reset to inherit.
                 </span>
               )}
             </span>
-          </label>
+          </Label>
         </div>
 
         {scopeMode === "override" && (
@@ -210,7 +210,7 @@ function MemberScopeForm({
             <div className="space-y-1">
               <Label
                 htmlFor="member-scope-allow-all"
-                className="cursor-pointer text-14 font-medium"
+                className="cursor-pointer"
               >
                 Allow all org services
               </Label>
@@ -224,7 +224,7 @@ function MemberScopeForm({
 
         {scopeMode === "override" && !allowAll && (
           <div className="space-y-2">
-            <Label className="text-14 font-medium text-muted-foreground">
+            <Label className="text-muted-foreground">
               Services
             </Label>
             {keysLoading ? (
@@ -261,7 +261,7 @@ function MemberScopeForm({
                         htmlFor={id}
                         className="flex-1 cursor-pointer space-y-0.5"
                       >
-                        <span className="block text-14 font-medium text-foreground">
+                        <span className="block text-foreground">
                           {service.label}
                         </span>
                         <span className="block text-13 text-muted-foreground">

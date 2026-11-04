@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import { flushSync } from "react-dom";
 import { useState } from "react";
@@ -801,7 +802,7 @@ export function GroupInviteDialog({
                   .join(", ")}
               />
               <GroupedRow asChild interactive>
-                <label>
+                <Label>
                   <Switch
                     className="order-last shrink-0"
                     checked={disclosed}
@@ -809,7 +810,7 @@ export function GroupInviteDialog({
                   />
                   <span className="min-w-0 flex-1">I understand everyone can read the full retained group
                   history.</span>
-                </label>
+                </Label>
               </GroupedRow>
             </GroupedList>
           ) : null}

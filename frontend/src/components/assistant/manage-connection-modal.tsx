@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Copy, ExternalLink, Loader2 } from "lucide-react";
@@ -153,7 +154,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
     <div>
       <GroupedList title="Replace credential">
         <GroupedRow>
-          <label className="w-full text-14 font-medium text-text-tertiary">
+          <Label className="w-full text-text-tertiary">
             New credential
             <GroupedInput
               type="password"
@@ -168,7 +169,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
               }}
               placeholder="New credential"
             />
-          </label>
+          </Label>
         </GroupedRow>
         {!credential && (
           <GroupedRow asChild interactive>
@@ -506,7 +507,7 @@ export function ManageConnectionModal({
       <DialogContent className="bg-background md:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-14 font-semibold text-muted-foreground">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted type-body-strong text-muted-foreground">
               {iconSlug || iconUrl ? (
                 <ServiceIcon slug={iconSlug} iconUrl={iconUrl} size="md" />
               ) : (
@@ -515,7 +516,7 @@ export function ManageConnectionModal({
             </span>
             <span className="min-w-0 truncate">{serviceName}</span>
             {multiple && (
-              <span className="text-13 font-normal text-text-tertiary">
+              <span className="type-secondary text-text-tertiary">
                 {keyIds.length} connections
               </span>
             )}

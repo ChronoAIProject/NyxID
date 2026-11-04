@@ -60,6 +60,14 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+const SETTINGS_LABELS = {
+  max_auto_continuations: "Automatic task continuations",
+  max_live_subagents: "Live specialists",
+  max_concurrent_subagent_turns: "Specialists working at once",
+  max_group_handoffs: "Group hand-offs per message",
+  max_group_handoffs_per_hour: "Group hand-offs per hour",
+} as const;
+
 export function NyxBotSettingsContent() {
   const settings = useNyxBotSettings();
   const adaptersEnabled = useAuthStore(s=>userHasFeature(s.user,FEATURE_FLAG.NYXBOT_ADAPTERS));
@@ -167,7 +175,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             name="access_mode"
             render={({ field }) => (
               <FormItem inline>
-                <FormLabel className="flex-1 text-14 font-medium">
+                <FormLabel className="flex-1">
                   Access mode
                 </FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
@@ -214,7 +222,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             [
               {
                 name: "max_auto_continuations",
-                label: "Automatic task continuations",
+                label: SETTINGS_LABELS.max_auto_continuations,
                 min: 0,
                 max: 32,
                 description:
@@ -222,28 +230,28 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
               },
               {
                 name: "max_live_subagents",
-                label: "Live specialists",
+                label: SETTINGS_LABELS.max_live_subagents,
                 min: 0,
                 max: settings.max_live_subagents_limit,
                 description: `0–${settings.max_live_subagents_limit} · 0 stops new specialists`,
               },
               {
                 name: "max_concurrent_subagent_turns",
-                label: "Specialists working at once",
+                label: SETTINGS_LABELS.max_concurrent_subagent_turns,
                 min: 1,
                 max: settings.max_concurrent_subagent_turns_limit,
                 description: `1–${settings.max_concurrent_subagent_turns_limit} · Maximum specialists working simultaneously`,
               },
               {
                 name: "max_group_handoffs",
-                label: "Group hand-offs per message",
+                label: SETTINGS_LABELS.max_group_handoffs,
                 min: 0,
                 max: settings.max_group_handoffs_limit,
                 description: `0–${settings.max_group_handoffs_limit} · 0 turns off hand-offs after a message`,
               },
               {
                 name: "max_group_handoffs_per_hour",
-                label: "Group hand-offs per hour",
+                label: SETTINGS_LABELS.max_group_handoffs_per_hour,
                 min: 0,
                 max: settings.max_group_handoffs_per_hour_limit,
                 description: `0–${settings.max_group_handoffs_per_hour_limit} · Across all your groups`,
@@ -257,10 +265,10 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
               render={({ field }) => (
                 <FormItem inline>
                   <div className="min-w-0 flex-1">
-                    <FormLabel className="text-14 font-medium">
+                    <FormLabel>
                       {label}
                     </FormLabel>
-                    <RowDescription className="text-13 font-normal text-text-tertiary">
+                    <RowDescription className="type-secondary text-text-tertiary">
                       {description}
                     </RowDescription>
                   </div>
@@ -300,7 +308,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             name="specialist_access_requests"
             render={({ field }) => (
               <FormItem inline>
-                <FormLabel className="flex-1 text-14 font-medium">
+                <FormLabel className="flex-1">
                   Specialist access requests
                 </FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
@@ -325,7 +333,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           />
         </GroupedList>
         <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "max_auto_continuations", label: "Automatic continuations" }, { key: "max_live_subagents", label: "Live subagents" }, { key: "max_concurrent_subagent_turns", label: "Concurrent subagent turns" }, { key: "max_group_handoffs", label: "Handoffs per turn" }, { key: "max_group_handoffs_per_hour", label: "Handoffs per hour" }, { key: "access_mode", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL) }, { key: "specialist_access_requests", label: "Specialist access requests", format: labelValue({ denied: "Deny requests", routed_to_nyxbot: "Route to NyxBot" }) }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [...(Object.keys(SETTINGS_LABELS) as (keyof typeof SETTINGS_LABELS)[]).map(key => ({ key, label: SETTINGS_LABELS[key] })), { key: "access_mode", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL) }, { key: "specialist_access_requests", label: "Specialist access requests", format: labelValue({ denied: "Deny requests", routed_to_nyxbot: "Route to NyxBot" }) }])}
           label="NyxBot preferences"
           dirty={form.formState.isDirty}
           pending={update.isPending}

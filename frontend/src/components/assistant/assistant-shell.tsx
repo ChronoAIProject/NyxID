@@ -72,7 +72,7 @@ function AssistantShellLayout({
   const hasPreview = Boolean(aside || (wideScreen && cmaCards));
   const shellTitle = contentTitle ? null : onRenameTitle ? (
     <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
-  ) : <h1 className="truncate text-15 font-semibold text-foreground" title={title}>{title}</h1>;
+  ) : <h1 className="truncate type-card-title text-foreground" title={title}>{title}</h1>;
   const viewportRef = useAssistantViewport();
   useScrollFades(viewportRef);
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);

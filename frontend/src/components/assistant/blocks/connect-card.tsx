@@ -268,7 +268,7 @@ export function ConnectCard({
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <p className="truncate text-15 font-semibold text-foreground">
+            <p className="truncate type-card-title text-foreground">
               {serviceName}
             </p>
             <Badge

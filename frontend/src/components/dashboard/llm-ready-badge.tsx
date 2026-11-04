@@ -43,7 +43,7 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
       </PopoverTrigger>
       <PopoverContent className="w-80" align="end">
         <div className="space-y-3">
-          <p className="text-13 font-medium">LLM Proxy URLs</p>
+          <p className="type-secondary-emphasis">LLM Proxy URLs</p>
 
           <CopyableField
             label="Direct Proxy URL"
@@ -53,14 +53,14 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
           <CopyableField label="Gateway URL" value={gatewayUrl} size="sm" />
 
           <div>
-            <p className="mb-1 text-12 font-medium text-muted-foreground">
+            <p className="mb-1 type-group-label text-muted-foreground">
               Agent Key
             </p>
             <AgentKeyPicker onSelect={setPickedKey} />
           </div>
 
           <div>
-            <p className="mb-1 text-12 font-medium text-muted-foreground">
+            <p className="mb-1 type-group-label text-muted-foreground">
               Example
             </p>
             <pre className="rounded bg-muted px-2 py-1.5 text-14 overflow-x-auto whitespace-pre-wrap break-all">

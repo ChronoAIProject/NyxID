@@ -144,7 +144,7 @@ export function AdminGroupsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">Failed to load groups</p>
+            <p className="type-row-title text-muted-foreground">Failed to load groups</p>
             <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -152,7 +152,7 @@ export function AdminGroupsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No groups found</p>
+            <p className="type-row-title text-muted-foreground">No groups found</p>
             <p className="text-13 text-muted-foreground">There are no groups to display.</p>
           </div>
         </div>
@@ -184,7 +184,7 @@ export function AdminGroupsPage() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-14 font-medium truncate">{group.name}</p>
+                  <p className="type-row-title truncate">{group.name}</p>
                   <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                     {group.slug}
                   </p>

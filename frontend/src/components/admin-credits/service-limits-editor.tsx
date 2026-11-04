@@ -26,7 +26,7 @@ export function ServiceLimitsEditor({
   });
   return (
     <details className="rounded-lg border border-border p-3" open>
-      <summary className="cursor-pointer text-15 font-medium">
+      <summary className="cursor-pointer type-card-title">
         Service limits (optional)
       </summary>
       <p className="my-3 text-14 text-muted-foreground">

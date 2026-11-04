@@ -268,7 +268,7 @@ export function OrgDetailPage() {
                 </button>
               </PopoverTrigger>
               <PopoverContent side="bottom" align="start" className="w-[280px] p-3 space-y-3">
-                <p className="text-14 font-medium text-foreground">Change avatar</p>
+                <p className="type-row-title text-foreground">Change avatar</p>
                 <div className="flex gap-2">
                   <Input
                     value={avatarUrlInput}
@@ -316,7 +316,7 @@ export function OrgDetailPage() {
                 {org.avatar_url && (
                   <button
                     type="button"
-                    className="flex items-center gap-1 text-14 font-medium text-destructive hover:underline"
+                    className="flex items-center gap-1 type-row-title text-destructive hover:underline"
                     onClick={async () => {
                       try {
                         await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: "" } });
@@ -368,7 +368,7 @@ export function OrgDetailPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <BenchesIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-14 font-medium text-muted-foreground">No Members</p>
+                <p className="type-row-title text-muted-foreground">No Members</p>
                 <p className="text-13 text-muted-foreground">No members yet.</p>
               </div>
             </div>
@@ -396,9 +396,9 @@ export function OrgDetailPage() {
                           </Button>
                         </div>
                       )}
-                      <p className="pr-10 text-15 font-semibold text-foreground truncate">
+                      <p className="pr-10 type-card-title text-foreground truncate">
                         {displayName}
-                        {isSelf && <span className="ml-1 text-13 font-normal text-muted-foreground">(you)</span>}
+                        {isSelf && <span className="ml-1 type-secondary text-muted-foreground">(you)</span>}
                       </p>
                       {member.email && member.display_name && (
                         <p className="text-13 text-muted-foreground truncate">{member.email}</p>
@@ -910,7 +910,7 @@ function RolePermissionCard({
       <CardContent className="space-y-4 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <p className="text-15 font-semibold text-foreground">
+            <p className="type-card-title text-foreground">
               {roleLabel(role)}
             </p>
             <p className="text-13 text-muted-foreground">
@@ -927,7 +927,6 @@ function RolePermissionCard({
         <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
           <Label
             htmlFor={`role-scope-full-${role}`}
-            className="text-14 font-medium"
           >
             Full access
           </Label>
@@ -941,7 +940,7 @@ function RolePermissionCard({
         </div>
 
         <div className="space-y-2">
-          <Label className="text-14 font-medium text-muted-foreground">
+          <Label className="text-muted-foreground">
             Services
           </Label>
           {services.length === 0 ? (
@@ -974,7 +973,7 @@ function RolePermissionCard({
                       htmlFor={id}
                       className="flex-1 cursor-pointer space-y-0.5"
                     >
-                      <span className="block text-14 font-medium text-foreground">
+                      <span className="block text-foreground">
                         {service.label}
                       </span>
                       <span className="block text-13 text-muted-foreground">
@@ -1178,7 +1177,7 @@ function SettingsPanel({
                 name="remote_credential_integrity_verification_opt_out"
                 render={({ field }) => (
                   <FormItem>
-                    <label className="flex items-start gap-3 rounded-md border border-border p-3">
+                    <Label className="flex items-start gap-3 rounded-md border border-border p-3">
                       <Checkbox
                         checked={Boolean(field.value)}
                         onCheckedChange={(checked) =>
@@ -1186,7 +1185,7 @@ function SettingsPanel({
                         }
                       />
                       <span className="space-y-1">
-                        <span className="block text-15 font-medium text-foreground">
+                        <span className="block type-card-title text-foreground">
                           Opt out of credential accept fingerprint verification
                         </span>
                         <span className="block text-13 text-muted-foreground">
@@ -1194,7 +1193,7 @@ function SettingsPanel({
                           does not change the encrypted credential flow.
                         </span>
                       </span>
-                    </label>
+                    </Label>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -1219,7 +1218,7 @@ function SettingsPanel({
       <Card>
         <CardContent className="flex flex-col gap-4 p-4">
           <div>
-            <p className="text-14 font-medium text-foreground">Danger zone</p>
+            <p className="type-row-title text-foreground">Danger zone</p>
             <p className="text-13 text-muted-foreground">
               Deleting the organization removes memberships and invites. Shared
               services stay in place so admins can rescue credentials.

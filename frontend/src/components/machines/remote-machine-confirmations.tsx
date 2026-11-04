@@ -528,7 +528,7 @@ export function ConfirmationDecision({
                         }
                       />
                     </FormControl>
-                    <FormLabel className="min-w-0 flex-1 text-14">
+                    <FormLabel className="min-w-0 flex-1">
                       I reviewed this identity and safe request summary.
                     </FormLabel>
                   </div>

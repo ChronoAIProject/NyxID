@@ -14,7 +14,7 @@ const Input = React.forwardRef<
         // aria-invalid keeps the error border while errored — even when
         // focused — for every consumer that sets it (FormControl does so
         // automatically for FormField-driven inputs).
-        `min-h-input flex h-8 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 ${TEXT_STYLES.input} unthemed:text-12 text-foreground transition-colors duration-200 file:border-0 file:bg-transparent file:text-14 file:font-medium placeholder:text-text-tertiary focus-visible:outline-none focus-visible:border-input-focus aria-invalid:border-destructive aria-invalid:focus-visible:border-destructive disabled:cursor-not-allowed disabled:opacity-50`,
+        `min-h-input flex h-8 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 ${TEXT_STYLES.input} unthemed:text-12 text-foreground transition-colors duration-200 file:border-0 file:bg-transparent file:type-button placeholder:text-text-tertiary focus-visible:outline-none focus-visible:border-input-focus aria-invalid:border-destructive aria-invalid:focus-visible:border-destructive disabled:cursor-not-allowed disabled:opacity-50`,
         className,
       )}
       ref={ref}

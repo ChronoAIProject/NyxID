@@ -181,7 +181,7 @@ export function BindingsCard({
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">
-              <Label className="text-14">AI Service</Label>
+              <Label>AI Service</Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
@@ -250,7 +250,7 @@ export function BindingsCard({
                     size="sm"
                   />
                   <div className="space-y-0.5">
-                  <p className="text-14 font-medium flex items-center gap-1.5">
+                  <p className="type-row-title flex items-center gap-1.5">
                     {b.is_invalid && (
                       <AlertTriangle
                         className="h-3.5 w-3.5 text-destructive shrink-0"

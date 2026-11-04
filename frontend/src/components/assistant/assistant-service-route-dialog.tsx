@@ -254,7 +254,7 @@ export function AssistantServiceRouteDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="text-15 font-medium">
+              <p className="type-card-title">
                 {observedNodeId ? "Routed through node" : "Direct routing"}
               </p>
               <p className="break-all font-mono text-14 text-muted-foreground">

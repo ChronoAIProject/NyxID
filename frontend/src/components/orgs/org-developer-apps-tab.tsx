@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -91,7 +92,7 @@ function StatCard({
       <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
           <p className="text-14 text-muted-foreground">{title}</p>
-          <p className="text-28 font-semibold text-foreground">{value}</p>
+          <p className="type-metric text-foreground">{value}</p>
           <p className="text-13 text-text-tertiary">{description}</p>
         </div>
         <Icon className="h-5 w-5 text-primary-text" />
@@ -200,9 +201,9 @@ export function OrgDeveloperAppsTab({
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
               <div className="space-y-2">
-                <label className="text-14 font-medium" htmlFor="org-app-name">
+                <Label htmlFor="org-app-name">
                   Application Name
-                </label>
+                </Label>
                 <Input
                   id="org-app-name"
                   value={name}
@@ -211,12 +212,12 @@ export function OrgDeveloperAppsTab({
                 />
               </div>
               <div className="space-y-2">
-                <label
-                  className="text-14 font-medium"
+                <Label
+
                   htmlFor="org-redirect-uris"
                 >
                   Redirect URIs (one per line)
-                </label>
+                </Label>
                 <textarea
                   id="org-redirect-uris"
                   value={redirectUrisText}
@@ -228,7 +229,7 @@ export function OrgDeveloperAppsTab({
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-14 font-medium">Client Type</label>
+                <Label>Client Type</Label>
                 <Select
                   value={clientType}
                   onValueChange={(value: "public" | "confidential") =>
@@ -245,7 +246,7 @@ export function OrgDeveloperAppsTab({
                 </Select>
               </div>
               <div className="space-y-3">
-                <label className="text-14 font-medium">Allowed Scopes</label>
+                <Label>Allowed Scopes</Label>
                 <p className="text-13 text-muted-foreground">
                   OIDC scopes this app can request. Determines what user data
                   and NyxID capabilities are included in tokens.
@@ -265,10 +266,10 @@ export function OrgDeveloperAppsTab({
                           );
                         }}
                       />
-                      <div className="grid gap-0.5 leading-none">
-                        <label
+                      <div className="grid gap-0.5">
+                        <Label
                           htmlFor={`scope-org-create-${scope.id}`}
-                          className="text-14 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          className="peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                         >
                           {scope.label}
                           {scope.required && (
@@ -276,7 +277,7 @@ export function OrgDeveloperAppsTab({
                               (required)
                             </span>
                           )}
-                        </label>
+                        </Label>
                         {"hint" in scope && scope.hint && (
                           <p className="text-13 text-muted-foreground">
                             {scope.hint}

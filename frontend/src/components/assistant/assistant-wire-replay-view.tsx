@@ -146,7 +146,7 @@ export function AssistantWireReplayView({
           clean terminal frame.
         </p>
       ) : null}
-      <p className="text-13 leading-normal text-text-tertiary">
+      <p className="text-13 text-text-tertiary">
         Message content uses the production chat renderer. Actor facts are
         diagnostic only and cannot be acted on here.
       </p>
@@ -164,14 +164,14 @@ export function AssistantWireReplayView({
         >
           <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2">
             <FileJson2 className="h-3.5 w-3.5 text-text-tertiary" />
-            <span className="text-13 font-medium text-foreground">
+            <span className="type-secondary-emphasis text-foreground">
               Actor facts
             </span>
             <span className="ml-auto text-12 text-text-tertiary">
               Diagnostic only
             </span>
           </div>
-          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-14 leading-normal text-muted-foreground">
+          <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-14 text-muted-foreground">
             {JSON.stringify(replay.actorFacts, null, 2)}
           </pre>
         </section>

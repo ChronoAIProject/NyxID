@@ -86,7 +86,7 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
 
         {readyProviders.length > 0 && (
           <div>
-            <p className="mb-2 text-13 font-medium text-muted-foreground">
+            <p className="mb-2 type-secondary-emphasis text-muted-foreground">
               Ready Providers
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -104,14 +104,14 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
         )}
 
         <div>
-          <p className="mb-2 text-13 font-medium text-muted-foreground">
+          <p className="mb-2 type-secondary-emphasis text-muted-foreground">
             Agent Key
           </p>
           <AgentKeyPicker onSelect={setPickedKey} />
         </div>
 
         <div>
-          <p className="mb-1 text-13 font-medium text-muted-foreground">
+          <p className="mb-1 type-secondary-emphasis text-muted-foreground">
             Example Request
           </p>
           <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-14 overflow-x-auto whitespace-pre-wrap break-all">

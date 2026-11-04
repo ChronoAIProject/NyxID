@@ -193,7 +193,7 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">Failed to load service accounts</p>
+            <p className="type-row-title text-muted-foreground">Failed to load service accounts</p>
             <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -201,7 +201,7 @@ export function AdminServiceAccountsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No service accounts found</p>
+            <p className="type-row-title text-muted-foreground">No service accounts found</p>
             <p className="text-13 text-muted-foreground">
               {search
                 ? "No service accounts match your search."
@@ -237,7 +237,7 @@ export function AdminServiceAccountsPage() {
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
-                    <p className="text-14 font-medium truncate">{sa.name}</p>
+                    <p className="type-row-title truncate">{sa.name}</p>
                     <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                       {sa.client_id}
                     </p>
@@ -374,7 +374,7 @@ export function AdminServiceAccountsPage() {
 
               <div className="space-y-3">
                 <div>
-                  <p className="mb-1 text-13 font-medium text-muted-foreground">
+                  <p className="mb-1 type-secondary-emphasis text-muted-foreground">
                     Client ID
                   </p>
                   <div className="flex items-center gap-2">
@@ -398,7 +398,7 @@ export function AdminServiceAccountsPage() {
                 </div>
 
                 <div>
-                  <p className="mb-1 text-13 font-medium text-muted-foreground">
+                  <p className="mb-1 type-secondary-emphasis text-muted-foreground">
                     Client Secret
                   </p>
                   <div className="flex items-center gap-2">

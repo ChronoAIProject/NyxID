@@ -72,9 +72,9 @@ function LevelControl({
             disabled={disabled}
             onClick={() => onChange(option.value)}
             className={cn(
-              "h-6 whitespace-nowrap rounded-md px-2 text-13 transition-colors focus-visible:outline-2 focus-visible:outline-ring",
+              "h-6 whitespace-nowrap rounded-md px-2 type-button transition-colors focus-visible:outline-2 focus-visible:outline-ring",
               value === option.value
-                ? "bg-overlay-strong font-medium text-foreground"
+                ? "bg-overlay-strong text-foreground"
                 : "text-muted-foreground hover:text-foreground",
               disabled &&
                 "cursor-not-allowed opacity-40 hover:text-muted-foreground",
@@ -130,13 +130,13 @@ export function ServiceAccessTable({
       <div className="flex items-baseline justify-between gap-3">
         <h2
           id="oauth-service-access"
-          className="text-15 font-semibold text-foreground"
+          className="type-card-title text-foreground"
         >
           Service access
         </h2>
         <code className="text-14 text-muted-foreground">proxy</code>
       </div>
-      <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
+      <p className="mt-1 text-14 text-muted-foreground">
         Allow lets {clientName} read data and take actions, including creating,
         updating or deleting data, using that service. Approval prompts depend
         on your configured policies.
@@ -162,7 +162,7 @@ export function ServiceAccessTable({
       <div className="mt-2 overflow-hidden rounded-lg border border-border/60">
         <div className="flex flex-wrap items-center justify-between gap-3 bg-overlay px-3 py-2">
           <div className="min-w-0">
-            <p className="text-15 font-medium text-foreground">All services</p>
+            <p className="type-card-title text-foreground">All services</p>
             <p className="text-13 text-text-tertiary">
               {allowsFutureServices
                 ? "Also applies to services you connect later"
@@ -229,7 +229,7 @@ export function ServiceAccessTable({
         </div>
       </div>
 
-      <p className="mt-2 text-13 leading-relaxed text-text-tertiary">
+      <p className="mt-2 text-13 text-text-tertiary">
         {clientName} can discover the services you allow. NyxID supplies
         credentials to those services without sharing them with {clientName}.
       </p>

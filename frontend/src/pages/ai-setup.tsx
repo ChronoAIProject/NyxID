@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState, useMemo, useCallback } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -54,7 +55,7 @@ function CodeBlock({
         {label}
       </Badge>
       <div className="relative">
-        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-14 leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-14 text-foreground">
           {code}
         </pre>
         <Button
@@ -154,7 +155,7 @@ function AiSkillSetupCard({
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
-                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                     {setupPrompt}
                   </pre>
                   <Button
@@ -289,7 +290,7 @@ export function AiSetupPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+        <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           AI Setup Guide
         </h2>
         <p className="text-14 text-muted-foreground">
@@ -305,7 +306,7 @@ export function AiSetupPage() {
               <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-15 font-semibold text-foreground">
+              <h3 className="type-card-title text-foreground">
                 Isolate this AI agent before handing it credentials
               </h3>
               <p className="max-w-2xl text-13 text-muted-foreground">
@@ -353,7 +354,7 @@ export function AiSetupPage() {
             <CardContent className="space-y-6">
               {/* App selector */}
               <div className="space-y-2">
-                <label className="text-14 font-medium">OAuth Client</label>
+                <Label>OAuth Client</Label>
                 <Select
                   value={selectedClient?.id ?? ""}
                   onValueChange={setSelectedClientId}

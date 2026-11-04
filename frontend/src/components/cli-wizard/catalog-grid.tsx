@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 /**
  * Step 1 of the `nyxid service add` (ai-key) wizard: pick a service.
  *
@@ -170,12 +171,12 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1.5">
-        <label
+        <Label
           htmlFor="catalog-search"
-          className="text-14 font-medium uppercase tracking-wide text-muted-foreground"
+          className="uppercase tracking-wide text-muted-foreground"
         >
           Search
-        </label>
+        </Label>
         <Input
           id="catalog-search"
           type="search"
@@ -241,7 +242,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
 
 function SectionLabel({ children }: { readonly children: React.ReactNode }) {
   return (
-    <div className="text-13 font-medium uppercase tracking-wide text-muted-foreground">
+    <div className="type-secondary-emphasis uppercase tracking-wide text-muted-foreground">
       {children}
     </div>
   )
@@ -270,7 +271,7 @@ function CatalogCard({
       ) : null}
       <div className="flex w-full items-center gap-2">
         <ServiceIcon slug={entry.slug} size="sm" />
-        <span className="text-15 font-semibold text-foreground">
+        <span className="type-card-title text-foreground">
           {entry.name || entry.slug}
         </span>
       </div>
@@ -293,7 +294,7 @@ function CustomCard({ onClick }: { readonly onClick: () => void }) {
       onClick={onClick}
       className="flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-dashed border-border/50 bg-transparent p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-card/40 focus-visible:outline-none"
     >
-      <span className="text-15 font-semibold text-foreground">
+      <span className="type-card-title text-foreground">
         Custom / self-hosted…
       </span>
       <span className="text-13 text-muted-foreground">

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Settings2 } from "lucide-react";
 import { ServiceIcon } from "@/components/service-icon";
@@ -72,7 +73,7 @@ export function ServicePoolRoutingPanel({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
-          <div className="flex flex-wrap items-center gap-2 text-14 font-medium">
+          <div className="flex flex-wrap items-center gap-2 type-row-title">
             <ServicePoolIcon className="size-4 shrink-0" />
             <span>{pool.name}</span>
             <Badge variant="secondary" className="gap-1.5">
@@ -136,7 +137,7 @@ export function ServicePoolRoutingPanel({
             setOperation({ method, path: path.trim() || "/" });
           }}
         >
-          <label className="space-y-1 text-14 text-muted-foreground">
+          <Label className="space-y-1 text-muted-foreground">
             <span>Method</span>
             <select
               aria-label={`Method for ${pool.name}`}
@@ -150,8 +151,8 @@ export function ServicePoolRoutingPanel({
                 ),
               )}
             </select>
-          </label>
-          <label className="min-w-36 flex-1 space-y-1 text-14 text-muted-foreground">
+          </Label>
+          <Label className="min-w-36 flex-1 space-y-1 text-muted-foreground">
             <span>Operation path</span>
             <Input
               aria-label={`Operation path for ${pool.name}`}
@@ -159,7 +160,7 @@ export function ServicePoolRoutingPanel({
               onChange={(event) => setPath(event.target.value)}
               className="h-8"
             />
-          </label>
+          </Label>
           <Button type="submit" variant="outline" size="sm">
             Inspect
           </Button>

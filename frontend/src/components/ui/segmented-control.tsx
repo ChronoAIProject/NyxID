@@ -28,7 +28,7 @@ export function SegmentedControlTrigger({
   return (
     <Tabs.Trigger
       className={cn(
-        "min-h-8 flex-auto shrink-0 rounded-md px-1.5 py-1.5 text-14 font-medium text-text-tertiary transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
+        "min-h-8 flex-auto shrink-0 rounded-md px-1.5 py-1.5 type-row-title text-text-tertiary transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm",
         className,
       )}
       {...props}

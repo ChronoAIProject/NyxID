@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +18,7 @@ export function VoiceInferenceFields({
   const validation = value ? voiceMetadataSchema.safeParse(value) : null;
   return (
     <div className="space-y-3 rounded-lg border p-3">
-      <label className="block text-14">
+      <Label className="block">
         Voice protocol
         <select
           aria-label="Voice protocol"
@@ -49,14 +50,14 @@ export function VoiceInferenceFields({
           <option value="openai_live">OpenAI Live</option>
           <option value="xai_realtime">xAI Realtime</option>
         </select>
-      </label>
+      </Label>
       {value && (
         <>
           {(["models", "voices"] as const).map((field) => (
             <fieldset key={field} className="space-y-2">
-              <legend className="text-13 font-medium">
+              <Label asChild><legend className="">
                 {field === "models" ? "Voice models" : "Provider voices"}
-              </legend>
+              </legend></Label>
               {value[field].map((item, index) => (
                 <div key={index} className="flex flex-wrap items-center gap-2">
                   <Input
@@ -90,7 +91,7 @@ export function VoiceInferenceFields({
                     }
                   />
                   {field === "models" && (
-                    <label className="text-14">
+                    <Label>
                       <input
                         type="radio"
                         name="default-voice-model"
@@ -107,7 +108,7 @@ export function VoiceInferenceFields({
                         }
                       />{" "}
                       Default
-                    </label>
+                    </Label>
                   )}
                   <Button
                     type="button"
@@ -147,7 +148,7 @@ export function VoiceInferenceFields({
               </Button>
             </fieldset>
           ))}
-          <label className="block text-14">
+          <Label className="block">
             Usage source
             <select
               aria-label="Voice usage source"
@@ -165,11 +166,11 @@ export function VoiceInferenceFields({
               </option>
               <option value="server_measured">Server measured (xAI)</option>
             </select>
-          </label>
+          </Label>
           <fieldset className="flex flex-wrap gap-3 text-13">
-            <legend>Reported billing units</legend>
+            <Label asChild><legend>Reported billing units</legend></Label>
             {VOICE_BILLING_METRICS.map((metric) => (
-              <label key={metric}>
+              <Label key={metric}>
                 <input
                   type="checkbox"
                   checked={value.billing_metrics.includes(metric)}
@@ -184,7 +185,7 @@ export function VoiceInferenceFields({
                   }
                 />{" "}
                 {metricLabel(metric)}
-              </label>
+              </Label>
             ))}
           </fieldset>
           <p className="text-13 text-muted-foreground">

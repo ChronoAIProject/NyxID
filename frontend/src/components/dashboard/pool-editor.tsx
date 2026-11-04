@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useWatch } from "react-hook-form";
@@ -247,9 +248,9 @@ export function PoolEditor({
               </div>
               {priority && (
                 <fieldset className="space-y-2">
-                  <legend className="mb-2 text-14 font-medium">
+                  <Label asChild><legend className="mb-2">
                     What will this pool handle?
-                  </legend>
+                  </legend></Label>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {(
                       [
@@ -272,13 +273,13 @@ export function PoolEditor({
                         onClick={() => setContract(value)}
                         className={`rounded-xl border p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-surface ${values.member_contract === value ? "border-nyx-500/50 bg-overlay" : "border-border/50 hover:bg-overlay"}`}
                       >
-                        <span className="flex items-center gap-2 text-14 font-medium">
+                        <span className="flex items-center gap-2 type-row-title">
                           {values.member_contract === value && (
                             <Check className="size-3 text-nyx-secondary-400" />
                           )}
                           {label}
                         </span>
-                        <span className="mt-1 block text-13 leading-relaxed text-muted-foreground">
+                        <span className="mt-1 block text-13 text-muted-foreground">
                           {description}
                         </span>
                       </button>
@@ -294,7 +295,7 @@ export function PoolEditor({
                 setOperation={setOperation}
               />
               <details className="rounded-xl border border-border/50 p-3">
-                <summary className="cursor-pointer text-14 font-medium">
+                <summary className="cursor-pointer type-row-title">
                   Advanced settings{values.failover ? " · Custom retries" : ""}
                 </summary>
                 <div className="space-y-4 pt-4">

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState, type ReactNode } from "react";
 import {
   useNyxbotModelUsage,
@@ -62,7 +63,7 @@ function Table({
               <th
                 key={column}
                 scope="col"
-                className="h-8 whitespace-nowrap border-b border-border px-3 text-left text-12 font-semibold uppercase tracking-wide text-text-tertiary"
+                className="h-8 whitespace-nowrap border-b border-border px-3 text-left type-table-header uppercase tracking-wide text-text-tertiary"
               >
                 {column}
               </th>
@@ -85,7 +86,7 @@ function Cell({
   return (
     <Tag
       scope={heading ? "row" : undefined}
-      className={`border-b border-border/50 px-3 py-2.5 text-left tabular-nums ${heading ? "min-w-44 font-semibold" : "whitespace-nowrap font-mono text-13"}`}
+      className={`border-b border-border/50 px-3 py-2.5 text-left tabular-nums ${heading ? "min-w-44 type-table-header" : "whitespace-nowrap font-mono type-secondary"}`}
     >
       {children}
     </Tag>
@@ -151,7 +152,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
     <section className="space-y-4" aria-label="NyxBot model usage">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="font-display text-15 font-semibold">
+          <h2 className="font-display type-card-title">
             Cost and billing by model
           </h2>
           <p className="mt-1 max-w-3xl text-14 text-muted-foreground">
@@ -175,7 +176,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
           if (draft.trim()) changeFilter({ model: draft.trim() });
         }}
       >
-        <label className="min-w-0 space-y-1 text-14 text-muted-foreground">
+        <Label className="min-w-0 space-y-1 text-muted-foreground">
           Billing model
           <Input
             value={draft}
@@ -183,7 +184,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             placeholder="Exact model name"
             onChange={(e) => setDraft(e.target.value)}
           />
-        </label>
+        </Label>
         <Button type="submit" variant="outline" disabled={!draft.trim()}>
           Apply model
         </Button>
@@ -276,7 +277,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                     <p className="text-12 uppercase tracking-wide text-muted-foreground">
                       {label}
                     </p>
-                    <p className="mt-2 break-words font-display text-28 font-semibold tabular-nums">
+                    <p className="mt-2 break-words font-display type-metric tabular-nums">
                       {modelCost(data.totals, field)}
                     </p>
                     <p className="mt-1 text-12 text-text-tertiary">credits</p>
@@ -315,7 +316,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 ))}
               </Table>
               <div>
-                <h2 className="font-display text-15 font-semibold">
+                <h2 className="font-display type-card-title">
                   Traffic by model
                 </h2>
                 <p className="mt-1 text-14 text-muted-foreground">
@@ -367,7 +368,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 className="min-w-0 p-4"
               >
                 <div className="mb-4">
-                  <h2 className="font-display text-15 font-semibold leading-none tracking-tight">
+                  <h2 className="font-display type-card-title tracking-tight">
                     Model services
                   </h2>
                   <p className="mt-1 text-14 text-muted-foreground">
@@ -379,7 +380,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   panel={SERVICES_PANEL}
                 />
                 <details className="group mt-4 border-t border-border/50 pt-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-13 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">
                     Cost and tokens by service
                     <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
                   </summary>
@@ -415,7 +416,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 className="min-w-0 p-4"
               >
                 <div className="mb-4">
-                  <h2 className="font-display text-15 font-semibold leading-none tracking-tight">
+                  <h2 className="font-display type-card-title tracking-tight">
                     Top billing accounts
                   </h2>
                   <p className="mt-1 text-14 text-muted-foreground">
@@ -427,7 +428,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   panel={ACCOUNTS_PANEL}
                 />
                 <details className="group mt-4 border-t border-border/50 pt-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-13 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">
                     Models by billing account
                     <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
                   </summary>
@@ -441,7 +442,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                       <div key={account.id} className="min-w-0 space-y-2">
                         <div className="flex flex-wrap justify-between gap-2">
                           <div>
-                            <h3 className="text-15 font-semibold">
+                            <h3 className="type-card-title">
                               {account.display_name}
                             </h3>
                             <p className="text-13 text-text-tertiary">

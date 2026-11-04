@@ -102,7 +102,7 @@ export function McpConnectionInfo() {
       </div>
 
       <div>
-        <p className="mb-1 text-13 font-medium text-muted-foreground">
+        <p className="mb-1 type-secondary-emphasis text-muted-foreground">
           MCP Proxy URL
         </p>
         <div className="relative">
@@ -115,7 +115,7 @@ export function McpConnectionInfo() {
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-13 font-medium text-muted-foreground">
+          <p className="type-secondary-emphasis text-muted-foreground">
             Cursor Configuration
           </p>
           <Badge variant="secondary" className="text-12">
@@ -132,7 +132,7 @@ export function McpConnectionInfo() {
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-13 font-medium text-muted-foreground">
+          <p className="type-secondary-emphasis text-muted-foreground">
             Claude Code Configuration
           </p>
           <Badge variant="secondary" className="text-12">
@@ -149,7 +149,7 @@ export function McpConnectionInfo() {
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-13 font-medium text-muted-foreground">
+          <p className="type-secondary-emphasis text-muted-foreground">
             Codex Configuration
           </p>
           <Badge variant="secondary" className="text-12">
@@ -165,7 +165,7 @@ export function McpConnectionInfo() {
       </div>
 
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-13 font-medium mb-1">How it works</p>
+        <p className="type-secondary-emphasis mb-1">How it works</p>
         <p className="text-13 text-muted-foreground">
           When an MCP client connects, NyxID authenticates via OAuth in your
           browser. Once authenticated, the proxy exposes tools from all your

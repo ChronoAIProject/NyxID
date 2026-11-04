@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -91,10 +92,10 @@ export function ServiceFilterMultiselect({
           {visible.map((option) => {
             const checked = selected.includes(option.id);
             return (
-              <label
+              <Label
                 key={option.id}
                 className={cn(
-                  "grid cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left text-14 font-medium hover:bg-accent focus-within:bg-accent",
+                  "grid cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-accent focus-within:bg-accent",
                   hasIcons
                     ? "grid-cols-[1rem_1.25rem_minmax(0,1fr)]"
                     : "grid-cols-[1rem_minmax(0,1fr)]",
@@ -117,10 +118,10 @@ export function ServiceFilterMultiselect({
                     {option.icon}
                   </span>
                 )}
-                <span className="min-w-0 break-words leading-5">
+                <span className="min-w-0 break-words">
                   {option.label}
                 </span>
-              </label>
+              </Label>
             );
           })}
           {!visible.length && (

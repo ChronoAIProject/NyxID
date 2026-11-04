@@ -208,13 +208,13 @@ export function GuidedTour({
           left: placement?.card.left ?? -9999,
         }}
       >
-        <p className="text-12 font-medium uppercase tracking-[0.125em] text-text-tertiary">
+        <p className="type-group-label uppercase tracking-[0.125em] text-text-tertiary">
           {index + 1} of {available.length}
         </p>
-        <h2 id="guided-tour-title" className="text-15 font-semibold text-foreground">
+        <h2 id="guided-tour-title" className="type-card-title text-foreground">
           {step.title}
         </h2>
-        <p id="guided-tour-body" className="text-14 leading-relaxed text-muted-foreground">
+        <p id="guided-tour-body" className="text-14 text-muted-foreground">
           {step.body}
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-1">

@@ -161,28 +161,28 @@ export function UsageStatsCard({
           <>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-lg border border-border p-3">
-                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
                   Requests
                 </p>
-                <p className="mt-1 text-15 font-semibold">{data.request_count}</p>
+                <p className="mt-1 type-card-title">{data.request_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
                   Successes
                 </p>
-                <p className="mt-1 text-15 font-semibold">{data.success_count}</p>
+                <p className="mt-1 type-card-title">{data.success_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
                   Errors
                 </p>
-                <p className="mt-1 text-15 font-semibold">{data.error_count}</p>
+                <p className="mt-1 type-card-title">{data.error_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
                   Error Rate
                 </p>
-                <p className="mt-1 text-15 font-semibold">
+                <p className="mt-1 type-card-title">
                   {(data.error_rate * 100).toFixed(1)}%
                 </p>
               </div>
@@ -190,7 +190,7 @@ export function UsageStatsCard({
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-13 font-medium text-foreground">Daily Activity</p>
+                <p className="type-secondary-emphasis text-foreground">Daily Activity</p>
                 <span className="text-13 text-muted-foreground">
                   Last used{" "}
                   {data.last_used_at ? formatRelativeTime(data.last_used_at) : "never"}
@@ -200,7 +200,7 @@ export function UsageStatsCard({
             </div>
 
             <div className="space-y-2">
-              <p className="text-13 font-medium text-foreground">Top Services</p>
+              <p className="type-secondary-emphasis text-foreground">Top Services</p>
               {data.top_services.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {data.top_services.map((service) => (

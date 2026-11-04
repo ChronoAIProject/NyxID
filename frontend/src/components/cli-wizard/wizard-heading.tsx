@@ -18,7 +18,7 @@ export function WizardHeading({
   return (
     <div className="flex flex-col items-center gap-2 text-center">
       {eyebrow}
-      <h2 className="text-22 font-bold leading-tight text-foreground sm:text-28">
+      <h2 className="type-compact-page-title text-foreground sm:type-page-title">
         {title}
       </h2>
       {children ? (

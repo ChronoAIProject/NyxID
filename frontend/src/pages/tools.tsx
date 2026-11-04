@@ -80,7 +80,7 @@ export function ToolsPage() {
       ) : (
         Array.from(groups, ([supplier, rows]) => (
           <section key={supplier} className="space-y-3">
-            <h2 className="text-15 font-semibold">{supplier}</h2>
+            <h2 className="type-card-title">{supplier}</h2>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {rows.map((tool) => (
                 <ToolCard key={tool.id} tool={tool} />
@@ -102,7 +102,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
       <CardContent className="space-y-3 p-4">
         <div>
           {tool.icon_url && <ServiceIcon iconUrl={tool.icon_url} size="md" />}
-          <h3 className="text-15 font-semibold">{tool.name}</h3>
+          <h3 className="type-card-title">{tool.name}</h3>
           <p className="text-13 text-text-tertiary">
             {tool.supplier ?? tool.provider_label}
           </p>
@@ -116,7 +116,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
             </Badge>
           ))}
         </div>
-        <p className="text-15 font-semibold">{toolPrice(tool)}</p>
+        <p className="type-card-title">{toolPrice(tool)}</p>
         <p className="text-13 text-text-tertiary">
           {tool.limits
             ? `${tool.limits.rate_limit_per_second} requests / second · Burst ${tool.limits.burst}`
@@ -132,7 +132,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                 key={op.name}
                 className="space-y-1 border-t border-border/50 pt-2"
               >
-                <p className="text-14 font-medium">{op.name}</p>
+                <p className="type-row-title">{op.name}</p>
                 <p className="text-13 text-muted-foreground">
                   {op.description}
                 </p>

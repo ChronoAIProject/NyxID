@@ -235,7 +235,7 @@ export function PoolConnectionPicker({
                   aria-label={`${group.name}${group.slug ? ` (${group.slug})` : ""} (${group.rows.length} loaded)`}
                   className="border-b border-border/40 last:border-b-0"
                 >
-                  <div className="flex min-w-0 items-center gap-2 px-2 pb-1 pt-2 text-13 font-semibold text-muted-foreground">
+                  <div className="flex min-w-0 items-center gap-2 px-2 pb-1 pt-2 type-secondary-strong text-muted-foreground">
                     <ServiceIcon slug={group.slug} size="xs" />
                     <span className="min-w-0 flex-1 break-words">
                       {group.name}
@@ -274,7 +274,7 @@ export function PoolConnectionPicker({
                           {selected && <Check className="size-3" />}
                         </span>
                         <div className="min-w-0 flex-1">
-                          <p className="break-words text-14 font-medium">
+                          <p className="break-words type-row-title">
                             {row.name || row.slug}
                           </p>
                           <div

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { useWatch, type UseFormReturn } from "react-hook-form";
 import { ArrowDown, ArrowUp } from "lucide-react";
@@ -205,7 +206,7 @@ export function PoolConnectionsEditor({
   return (
     <section className="space-y-3" aria-label="Pool connections">
       <div>
-        <h3 className="text-15 font-semibold">
+        <h3 className="type-card-title">
           {priority ? "Connection order" : "Connections"}
         </h3>
         <p className="mt-1 text-14 text-muted-foreground">
@@ -256,7 +257,7 @@ export function PoolConnectionsEditor({
         </div>
       )}
       <div className="space-y-2 rounded-xl border border-border/50 p-3">
-        <h4 className="text-14 font-medium">Select connections</h4>
+        <h4 className="type-row-title">Select connections</h4>
         <PoolConnectionPicker
           rows={rows}
           selectedIds={members.map((member) => member.user_service_id!)}
@@ -338,7 +339,7 @@ export function PoolConnectionsEditor({
                 {position + 1}
               </span>
               <div className="min-w-0 flex-1">
-                <p className="break-words text-14 font-medium">
+                <p className="break-words type-row-title">
                   {labelRow?.name ||
                     labelRow?.slug ||
                     `Connection ${position + 1}`}
@@ -445,7 +446,7 @@ export function PoolConnectionsEditor({
                 />
               )}
               {aiChat && (
-                <label className="space-y-1 text-14">
+                <Label className="space-y-1">
                   <span>Model (required)</span>
                   <Input
                     aria-label={`Model for member ${position + 1}`}
@@ -455,7 +456,7 @@ export function PoolConnectionsEditor({
                       setMember(id, { model: e.target.value || null })
                     }
                   />
-                </label>
+                </Label>
               )}
               {weighted && (
                 <NumberInput
@@ -478,7 +479,7 @@ export function PoolConnectionsEditor({
               onChange={(v) => setMember(id, { enabled: v })}
             />
             {requiresDeclaration && (
-              <label className="flex items-start gap-2 text-14 leading-relaxed">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   className="mt-0.5"
                   aria-label={`Confirm API compatibility for member ${position + 1}`}
@@ -489,14 +490,14 @@ export function PoolConnectionsEditor({
                 />
                 I confirm this connection accepts the same paths and request
                 format as the other connections.
-              </label>
+              </Label>
             )}
           </div>
         );
       })}
       {!aiChat && (
         <details className="rounded-xl border border-border/50 p-3">
-          <summary className="cursor-pointer text-14 font-medium">
+          <summary className="cursor-pointer type-row-title">
             Check an operation (optional)
           </summary>
           <div className="pt-3">

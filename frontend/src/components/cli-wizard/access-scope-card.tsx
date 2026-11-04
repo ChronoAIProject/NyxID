@@ -64,7 +64,7 @@ export function AccessScopeCard({
       className="flex flex-col gap-4 rounded-lg border border-border bg-muted/30 p-4"
     >
       <div className="flex flex-col gap-1">
-        <h3 id="access-scope-title" className="text-15 font-semibold">
+        <h3 id="access-scope-title" className="type-card-title">
           Access Scope
         </h3>
         <p className="text-13 text-muted-foreground">
@@ -180,11 +180,11 @@ function AccessGroup({
 }: AccessGroupProps) {
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-1.5 text-14 font-medium">
+      <div className="flex items-center gap-1.5 type-row-title">
         <span className="text-muted-foreground">{icon}</span>
         <span>{label}</span>
       </div>
-      <Label className="flex cursor-pointer items-center gap-2 text-14">
+      <Label className="flex cursor-pointer items-center gap-2">
         <Checkbox
           checked={allowAll}
           onCheckedChange={(checked) => {
@@ -208,7 +208,7 @@ function AccessGroup({
               {items.map((item) => (
                 <Label
                   key={item.id}
-                  className="flex cursor-pointer items-center gap-2 text-14"
+                  className="flex cursor-pointer items-center gap-2"
                 >
                   <Checkbox
                     checked={selectedIds.has(item.id)}

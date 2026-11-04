@@ -106,7 +106,7 @@ export function ProviderCard({
                 size="sm"
               />
             ) : hasBrand ? (
-              <span className={`text-15 font-bold ${brand.textClass}`}>
+              <span className={`type-card-title ${brand.textClass}`}>
                 {brand.initial}
               </span>
             ) : (
@@ -165,7 +165,7 @@ export function ProviderCard({
                       className="h-5 w-5 rounded-full"
                     />
                   )}
-                  <span className="text-13 font-medium">
+                  <span className="type-secondary-emphasis">
                     {token.metadata.username
                       ? `@${token.metadata.username}`
                       : token.metadata.first_name ?? "Telegram User"}
@@ -228,7 +228,7 @@ export function ProviderCard({
                     href={provider.documentation_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="inline-flex items-center gap-0.5 text-14 font-medium text-primary-text hover:underline"
+                    className="inline-flex items-center gap-0.5 type-row-title text-primary-text hover:underline"
                   >
                     Docs
                     <ExternalLink className="h-2.5 w-2.5" />

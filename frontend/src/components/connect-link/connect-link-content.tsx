@@ -1064,7 +1064,7 @@ export function RequestDetails({
       </div>
       {preview.api_key_url ? (
         <a
-          className="inline-flex items-center gap-1.5 px-4 text-14 font-medium text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1.5 px-4 type-row-title text-muted-foreground hover:text-foreground"
           href={preview.api_key_url}
           target="_blank"
           rel="noreferrer"
@@ -1103,7 +1103,7 @@ function DeviceCodePanel({
         Enter this code at the provider. NyxID will finish the connection after
         authorization.
       </p>
-      <p className="font-mono text-15 font-semibold text-foreground">
+      <p className="font-mono type-card-title text-foreground">
         {code}
       </p>
       <p className="text-13 text-muted-foreground" role="status">
@@ -1145,12 +1145,12 @@ export function TerminalPanel({
         )}
       </div>
       {completed ? (
-        <p className="mb-3 flex items-center gap-2 text-14 font-medium text-success">
+        <p className="mb-3 flex items-center gap-2 type-row-title text-success">
           <CheckCircle2 className="size-4" />
           Connection completed
         </p>
       ) : null}
-      <h1 className="text-28 font-semibold leading-tight text-foreground sm:text-36">
+      <h1 className="type-metric text-foreground sm:type-metric">
         {completed
           ? `${serviceName ?? "Service"} connected`
           : status === "cancelled"

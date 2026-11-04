@@ -187,7 +187,7 @@ export function ServiceViewToolbar({
           align="end"
           sideOffset={8}
           collisionPadding={12}
-          className="max-w-[min(18rem,calc(100vw-2rem))] space-y-1 text-left leading-relaxed"
+          className="max-w-[min(18rem,calc(100vw-2rem))] space-y-1 text-left"
         >
           <p className="font-medium">
             {filters.source === "personal"
@@ -245,7 +245,7 @@ export function ServiceViewToolbar({
           align="end"
           sideOffset={8}
           collisionPadding={12}
-          className="max-w-[min(18rem,calc(100vw-2rem))] space-y-1 text-left leading-relaxed"
+          className="max-w-[min(18rem,calc(100vw-2rem))] space-y-1 text-left"
         >
           <p className="font-medium">
             {filters.show_auto_connected

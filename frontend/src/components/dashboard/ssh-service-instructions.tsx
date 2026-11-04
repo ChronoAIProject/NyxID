@@ -62,7 +62,7 @@ export function SshServiceInstructions({
       {/* Client Setup */}
       <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-15 font-semibold">Client Setup</h4>
+          <h4 className="type-card-title">Client Setup</h4>
           <p className="text-13 text-muted-foreground">
             Install the NyxID CLI on your local machine and authenticate.
           </p>
@@ -72,7 +72,7 @@ export function SshServiceInstructions({
           value={installCommand}
         />
         <div className="space-y-1">
-          <p className="text-13 font-medium text-muted-foreground">
+          <p className="type-secondary-emphasis text-muted-foreground">
             2. Authenticate (choose one)
           </p>
         </div>
@@ -113,7 +113,7 @@ export function SshServiceInstructions({
       {sshConfig.certificate_auth_enabled && (
         <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
           <div className="space-y-1">
-            <h4 className="text-15 font-semibold">
+            <h4 className="type-card-title">
               Target Machine Setup (Passwordless Login)
             </h4>
             <p className="text-13 text-muted-foreground">
@@ -181,7 +181,7 @@ export function SshServiceInstructions({
       {/* Node-Agent Setup (for unreachable targets) */}
       <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-15 font-semibold">Node Agent (Required)</h4>
+          <h4 className="type-card-title">Node Agent (Required)</h4>
           <p className="text-13 text-muted-foreground">
             A node agent is required for web terminal, command execution
             (API/MCP), and SSH tunneling. Deploy a node agent on a machine that

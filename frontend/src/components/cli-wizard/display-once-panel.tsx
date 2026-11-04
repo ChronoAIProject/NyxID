@@ -50,7 +50,7 @@ export function DisplayOncePanel({
         eyebrow={
           <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
             <Lock className="h-4 w-4" />
-            <span className="text-14 font-medium">Shown once — save it now</span>
+            <span className="type-row-title">Shown once — save it now</span>
           </div>
         }
       >
@@ -133,7 +133,7 @@ export function RecoveryCodesPanel({
         eyebrow={
           <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
             <Lock className="h-4 w-4" />
-            <span className="text-14 font-medium">Shown once — save them now</span>
+            <span className="type-row-title">Shown once — save them now</span>
           </div>
         }
       >
@@ -215,9 +215,9 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
 
   return (
     <div className="flex flex-col gap-2">
-      <label className="text-14 font-medium uppercase tracking-wide text-muted-foreground">
+      <Label className="uppercase tracking-wide text-muted-foreground">
         {label}
-      </label>
+      </Label>
       <div className="flex items-center gap-2">
         <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-14">
           {revealed ? value : masked}

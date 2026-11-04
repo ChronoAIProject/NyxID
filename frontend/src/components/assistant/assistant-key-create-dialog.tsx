@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
@@ -145,7 +146,7 @@ function KeyEffectResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-15 font-medium">Existing key</p>
+            <p className="type-card-title">Existing key</p>
             <p className="break-all font-mono text-14 text-muted-foreground">
               {result.resource.keyId}
             </p>
@@ -168,13 +169,13 @@ function KeyEffectResult({
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-14">
+          <Label className="flex cursor-pointer items-start gap-2">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
             />
             <span>I saved this key in a secure location.</span>
-          </label>
+          </Label>
         </div>
       )}
       {verified ? (
@@ -409,7 +410,7 @@ export function AssistantKeyCreateDialog({
                 ))}
               </div>
             </div>
-            <p className="text-13 leading-relaxed text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Proxy access follows these service selections. Node access is denied.
             </p>
           </div>

@@ -124,7 +124,7 @@ export function EffectiveClassBlock({
 }) {
   return (
     <div className="space-y-1" data-testid="effective-class">
-      <div className="flex flex-wrap items-center gap-1.5 text-14 font-medium">
+      <div className="flex flex-wrap items-center gap-1.5 type-row-title">
         <span>
           {group.credential_classes.map((c) => CLASS_LABELS[c]).join(", ")}
         </span>
@@ -203,7 +203,7 @@ export function EffectiveBillingSummary({
   const { data, isLoading, error } = useAdminBillingService(serviceId);
   return (
     <section className="space-y-2 rounded-lg border border-border/50 p-3">
-      <h3 className="text-15 font-semibold">Effective billing</h3>
+      <h3 className="type-card-title">Effective billing</h3>
       {isLoading && (
         <p className="text-14 text-muted-foreground">Resolving prices…</p>
       )}

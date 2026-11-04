@@ -17,7 +17,7 @@ export function DocsIndexPage() {
     <DocsLayout activeTab="ai" hideNav>
       <div className="py-6">
         <p className="font-mono text-13 tracking-widest text-nyx-700 dark:text-nyx-secondary-400 uppercase">NyxID Documentation</p>
-        <h1 className="mt-3 max-w-3xl font-display text-22 sm:text-28 font-bold leading-tight tracking-tight text-foreground">
+        <h1 className="mt-3 max-w-3xl font-display type-compact-page-title sm:type-page-title tracking-tight text-foreground">
           Broker credentials. Never expose keys.
         </h1>
         <p className="mt-4 max-w-2xl text-15 text-muted-foreground">
@@ -41,14 +41,14 @@ export function DocsIndexPage() {
                     <Icon className="h-5 w-5 text-nyx-700 dark:text-nyx-secondary-400" aria-hidden />
                   </div>
                   {i === 0 && (
-                    <span className="rounded-full bg-nyx-100 px-2 py-0.5 text-12 font-medium text-nyx-700 dark:bg-nyx-500/15 dark:text-nyx-secondary-400">
+                    <span className="rounded-full bg-nyx-100 px-2 py-0.5 type-group-label text-nyx-700 dark:bg-nyx-500/15 dark:text-nyx-secondary-400">
                       Start here
                     </span>
                   )}
                 </div>
-                <h2 className="mt-4 font-display text-20 font-semibold tracking-tight text-foreground">{tab.label}</h2>
-                <p className="mt-2 text-14 leading-relaxed text-muted-foreground">{tab.blurb}</p>
-                <span className="mt-4 inline-flex items-center gap-1 text-14 font-medium text-nyx-700 dark:text-nyx-secondary-400">
+                <h2 className="mt-4 font-display type-section-heading tracking-tight text-foreground">{tab.label}</h2>
+                <p className="mt-2 text-14 text-muted-foreground">{tab.blurb}</p>
+                <span className="mt-4 inline-flex items-center gap-1 type-row-title text-nyx-700 dark:text-nyx-secondary-400">
                   Get started
                   <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
                 </span>
@@ -65,7 +65,7 @@ export function DocsIndexPage() {
                 key={p.slug}
                 to="/docs/$"
                 params={{ _splat: p.slug }}
-                className="rounded-lg border border-border px-4 py-2.5 text-14 font-medium text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
+                className="rounded-lg border border-border px-4 py-2.5 type-row-title text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
               >
                 {p.title}
               </Link>

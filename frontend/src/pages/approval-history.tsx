@@ -161,7 +161,7 @@ export function ApprovalHistoryPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SeoKeywordIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No Approval Requests</p>
+            <p className="type-row-title text-muted-foreground">No Approval Requests</p>
             <p className="text-14 text-muted-foreground">
               No approval requests match the current filter.
             </p>

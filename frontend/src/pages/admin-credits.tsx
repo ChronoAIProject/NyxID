@@ -505,7 +505,7 @@ export function AdminCreditsPage() {
         </p>
         {overview.data ? (
           <>
-            <p className="min-w-0 break-all text-28 font-semibold tabular-nums">
+            <p className="min-w-0 break-all type-metric tabular-nums">
               {formatExactCredits(overview.data.summary.remaining, 12)} credits
             </p>
             {overview.isError ? (

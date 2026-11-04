@@ -85,7 +85,7 @@ export function MockScenariosAction() {
         <section className="space-y-3 p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="text-15 font-semibold text-foreground">
+              <h2 className="type-card-title text-foreground">
                 Mock scenarios
               </h2>
               {engineState === "loading" ? (
@@ -105,11 +105,11 @@ export function MockScenariosAction() {
               aria-label="Enable mock scenarios"
             />
           </div>
-          <p className="text-13 leading-normal text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Shapes matching assistant HTTP fixtures. Session-only; other
             messages use the default fixture stream.
           </p>
-          <div className="flex gap-2 text-13 leading-normal text-warning">
+          <div className="flex gap-2 text-13 text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
             <p>
               Action cards open real connection journeys and can create real
@@ -124,7 +124,7 @@ export function MockScenariosAction() {
         >
           <h3
             id="mock-scenario-list-heading"
-            className="mb-1 text-12 font-semibold uppercase text-text-tertiary"
+            className="mb-1 type-table-header uppercase text-text-tertiary"
           >
             Scenarios
           </h3>
@@ -142,7 +142,7 @@ export function MockScenariosAction() {
                 >
                   <div className="min-w-0 flex-1">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <p className="truncate text-14 font-medium text-foreground">
+                      <p className="truncate type-row-title text-foreground">
                         {scenarioName(entry.id)}
                       </p>
                       {matched && lastActivity ? (
@@ -191,7 +191,7 @@ export function MockScenariosAction() {
           <div className="flex items-center justify-between gap-3">
             <h3
               id="mock-scenario-world-heading"
-              className="text-12 font-semibold uppercase text-text-tertiary"
+              className="type-table-header uppercase text-text-tertiary"
             >
               Connected (mock)
             </h3>
@@ -208,7 +208,7 @@ export function MockScenariosAction() {
             </Button>
           </div>
           {world.connected.length === 0 ? (
-            <p className="mt-2 text-13 leading-normal text-text-tertiary">
+            <p className="mt-2 text-13 text-text-tertiary">
               Nothing connected - <code className="font-mono">need</code> flows
               will run their connect step.
             </p>
@@ -234,7 +234,7 @@ export function MockScenariosAction() {
           )}
         </section>
 
-        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-12 leading-normal text-text-tertiary">
+        <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-12 text-text-tertiary">
           <p>
             Edit flows in{" "}
             <code className="font-mono">

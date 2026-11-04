@@ -200,7 +200,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             />
 
             <div>
-              <p className="text-14 font-medium mb-1">Slug</p>
+              <p className="type-row-title mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
               <p className="text-13 text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
@@ -208,7 +208,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             </div>
 
             <div>
-              <p className="text-14 font-medium mb-1">Provider Type</p>
+              <p className="type-row-title mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
@@ -324,7 +324,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-15 font-semibold">
+                <h3 className="type-card-title">
                   OAuth 2.0 Configuration
                 </h3>
                 <p className="text-13 text-muted-foreground">
@@ -500,7 +500,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-15 font-semibold">
+                <h3 className="type-card-title">
                   Device Code Configuration (RFC 8628)
                 </h3>
                 <p className="text-13 text-muted-foreground">
@@ -634,7 +634,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-15 font-semibold">
+                <h3 className="type-card-title">
                   Telegram Widget Configuration
                 </h3>
                 <p className="text-13 text-muted-foreground">
@@ -690,7 +690,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-15 font-semibold">
+                <h3 className="type-card-title">
                   API Key Configuration
                 </h3>
 

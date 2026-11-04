@@ -33,7 +33,7 @@ export function WhatsappRollbackTokenSection({ botId, revision }: { readonly bot
         {issued && <div className="space-y-4">
           <p className="text-14">Point Meta’s callback back to the relay Callback URL below with this new Verify Token.</p>
           {([["Relay Callback URL", issued.relay_webhook_url], ["New Verify Token", issued.verify_token]] as const).map(([label, value]) => <div className="space-y-2" key={label}>
-            <p className="text-14 font-medium">{label}</p>
+            <p className="type-row-title">{label}</p>
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
               <code className="min-w-0 flex-1 break-all font-mono text-14">{value}</code>
               <Button type="button" variant="ghost" size="icon" className="h-7 w-7 shrink-0" aria-label={`Copy ${label}`} onClick={() => copy(value, label)}><Copy className="h-3.5 w-3.5" /></Button>

@@ -59,10 +59,10 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
         <p>External OAuth clients and API keys support shared legacy access only. They cannot use separated agent contexts.</p>
         <p>Browser, desktop and saved-login tools are excluded. Excluding these tools does not protect their underlying files from shell access.</p>
       </div>
-      <label className="flex items-start gap-2 text-14">
+      <Label className="flex items-start gap-2">
         <Checkbox checked={form.watch("legacy_warning_acknowledged") === true} disabled={busy} onCheckedChange={(checked) => { onSelectionChange?.(hasSelection); form.setValue("legacy_warning_acknowledged", checked === true); }} />
         I explicitly allow shared legacy access and acknowledge access to node tokens, signing secrets and stored credentials.
-      </label></>}
+      </Label></>}
       {nodes.isLoading && <p role="status">Loading owned Machines…</p>}
       {nodes.error && <ErrorBanner message="Could not load owned Machines." onRetry={() => void nodes.refetch()} />}
       {!nodes.isLoading && !nodes.error && inventory.length === 0 && <p className="text-14 text-muted-foreground">No eligible personal Machines are available. Add a Machine in Assistant → Machines first.</p>}
@@ -70,7 +70,7 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
       {inventory.map((node) => {
         const assignment = assignments[node.id];
         return <fieldset key={node.id} className="space-y-3 rounded-lg border border-border p-3" disabled={submitting || disabled}>
-          <legend className="px-1 text-15 font-medium">{node.name}</legend>
+          <Label asChild><legend className="px-1">{node.name}</legend></Label>
           <div className="flex items-center gap-2"><Checkbox id={`${id}-${node.id}`} checked={Boolean(assignment)} onCheckedChange={(checked) => {
             if (checked) setAssignments({ ...assignments, [node.id]: { capabilities: { shell: Boolean(node.machine?.shell), files: Boolean(node.machine?.files), browser: false, computer: false, developer_browser: false }, file_roots: node.machine?.roots ?? [], service_ids: [] } });
             else { const next = { ...assignments }; delete next[node.id]; setAssignments(next); }
@@ -79,7 +79,7 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
           {assignment && <>
             <div className="flex flex-wrap gap-4">{(["shell", "files"] as const).map((capability) => <div key={capability} className="flex items-center gap-2"><Checkbox id={`${id}-${node.id}-${capability}`} checked={assignment.capabilities[capability]} disabled={!node.machine?.[capability]} onCheckedChange={(checked) => update(node.id, { ...assignment, capabilities: { ...assignment.capabilities, [capability]: checked === true }, service_ids: capability === "shell" && !checked ? [] : assignment.service_ids })} /><Label htmlFor={`${id}-${node.id}-${capability}`}>{capability === "shell" ? "Commands" : "Files"}</Label></div>)}</div>
             <div className="space-y-1.5"><Label htmlFor={`${id}-${node.id}-roots`}>File roots (one per line)</Label><Textarea id={`${id}-${node.id}-roots`} value={assignment.file_roots.join("\n")} onChange={(event) => update(node.id, { ...assignment, file_roots: event.target.value.split("\n") })} /><p className="text-13 text-muted-foreground">Machine ceiling: {node.machine?.roots.join(", ") || "Not reported"}. The server and Node enforce the intersection.</p></div>
-            <details className="space-y-2"><summary className="cursor-pointer text-14 font-medium">Gateway services · {assignment.service_ids.length} selected</summary><p className="text-13 text-muted-foreground">Default none. Each job must also explicitly request its services, within the live OAuth/Key and service permissions. This does not restrict ordinary shell network access.</p>
+            <details className="space-y-2"><summary className="cursor-pointer type-row-title">Gateway services · {assignment.service_ids.length} selected</summary><p className="text-13 text-muted-foreground">Default none. Each job must also explicitly request its services, within the live OAuth/Key and service permissions. This does not restrict ordinary shell network access.</p>
               {services.isLoading && <p role="status">Loading services…</p>}
               {services.error && <ErrorBanner message="Service choices are unavailable. Existing selections are retained; retry before adding services." onRetry={() => void services.refetch()} />}
               {availableServices.map((service) => <div key={service.id} className="flex items-center gap-2"><Checkbox id={`${id}-${node.id}-svc-${service.id}`} disabled={!assignment.capabilities.shell} checked={assignment.service_ids.includes(service.id)} onCheckedChange={(checked) => update(node.id, { ...assignment, service_ids: checked ? [...assignment.service_ids, service.id] : assignment.service_ids.filter((value) => value !== service.id) })} /><Label htmlFor={`${id}-${node.id}-svc-${service.id}`}>{service.label || service.catalog_service_name || service.slug}</Label></div>)}

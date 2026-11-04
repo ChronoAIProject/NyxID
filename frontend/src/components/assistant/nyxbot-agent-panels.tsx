@@ -156,7 +156,7 @@ export function ThreadHeader({
           {onRenameTitle ? (
             <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
           ) : (
-            <h1 title={title} className="truncate text-15 font-semibold text-foreground">{title}</h1>
+            <h1 title={title} className="truncate type-card-title text-foreground">{title}</h1>
           )}
         </div>
       ) : null}
@@ -170,19 +170,19 @@ export function ThreadHeader({
         </HeaderItem>
         <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
           {compact ? (
-            <h2 className="truncate text-13 font-semibold text-foreground">{name}</h2>
+            <h2 className="truncate type-secondary-strong text-foreground">{name}</h2>
           ) : (
             // The name line is as tall as the controls so both share one top
             // line; the @handle sits under it.
             <div className="min-w-0">
               <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-2">
-                <h2 className="truncate text-15 font-semibold text-foreground">{name}</h2>
+                <h2 className="truncate type-card-title text-foreground">{name}</h2>
                 <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
                   {loading ? null : <AgentKindBadge kind={kind} />}
                   {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
                 </span>
               </div>
-              {handle ? <p className="max-w-full text-13 leading-normal text-text-tertiary [overflow-wrap:anywhere]">{handle}</p> : null}
+              {handle ? <p className="max-w-full text-13 text-text-tertiary [overflow-wrap:anywhere]">{handle}</p> : null}
             </div>
           )}
         </HeaderItem>

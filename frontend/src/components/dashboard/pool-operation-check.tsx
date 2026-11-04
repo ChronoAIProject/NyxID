@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -45,9 +46,9 @@ export function PoolOperationCheck({
       </p>
       <div className="flex flex-wrap items-end gap-2">
         <div className="w-24 space-y-1">
-          <label htmlFor={`${id}-method`} className="text-14">
+          <Label htmlFor={`${id}-method`}>
             Method
-          </label>
+          </Label>
           <Select
             value={method}
             onValueChange={(v) => {
@@ -70,9 +71,9 @@ export function PoolOperationCheck({
           </Select>
         </div>
         <div className="min-w-36 flex-1 space-y-1">
-          <label htmlFor={`${id}-path`} className="text-14">
+          <Label htmlFor={`${id}-path`}>
             Operation path
-          </label>
+          </Label>
           <Input
             id={`${id}-path`}
             value={path}

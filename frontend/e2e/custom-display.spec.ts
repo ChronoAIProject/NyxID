@@ -112,7 +112,7 @@ for (const theme of ["light", "dark"] as const)
           // layout measurement can move the lazy panel just below the viewport.
           await traffic.getByRole("heading", { name: "Request traffic" }).evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
           await expect(traffic).toBeInViewport({ ratio: 0.1 });
-          const metrics = analytics.locator(".font-display.text-28");
+          const metrics = analytics.locator(".font-display.type-metric");
           await expect(metrics).toHaveCount(5);
           for (const metric of await metrics.all())
             await role(metric, 28, "600", scale);

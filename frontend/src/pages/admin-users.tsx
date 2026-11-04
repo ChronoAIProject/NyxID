@@ -170,7 +170,7 @@ export function AdminUsersPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">Failed to load users</p>
+            <p className="type-row-title text-muted-foreground">Failed to load users</p>
             <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -178,7 +178,7 @@ export function AdminUsersPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BiometricIdentityIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No users found</p>
+            <p className="type-row-title text-muted-foreground">No users found</p>
             <p className="text-13 text-muted-foreground">
               {search ? "No users match your search." : "There are no users to display."}
             </p>
@@ -199,7 +199,7 @@ export function AdminUsersPage() {
                   onKeyDown={(e) => { if (e.key === "Enter") void navigate({ to: "/admin/users/$userId", params: { userId: user.id } }); }}
                   className="rounded-xl border border-border/50 bg-card p-4 transition-colors hover:bg-overlay cursor-pointer"
                 >
-                  <p className="text-15 font-semibold text-foreground truncate">{user.display_name ?? user.email}</p>
+                  <p className="type-card-title text-foreground truncate">{user.display_name ?? user.email}</p>
                   {user.display_name && (
                     <p className="text-13 text-muted-foreground truncate">{user.email}</p>
                   )}

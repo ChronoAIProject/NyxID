@@ -44,7 +44,7 @@ export function MfaStepUpForm({
       className="rounded-xl border border-border bg-card p-4 text-left"
       aria-label="Verify this session"
     >
-      <h2 className="text-15 font-semibold">Verify this session</h2>
+      <h2 className="type-card-title">Verify this session</h2>
       <p className="mt-2 text-14 unthemed:text-12 text-muted-foreground">{message}</p>
       <Form {...form}>
         <form className="mt-4 space-y-3" onSubmit={form.handleSubmit(submit)}>

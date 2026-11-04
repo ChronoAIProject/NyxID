@@ -221,7 +221,7 @@ function Body({
           className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground"
           aria-hidden
         />
-        <p className="text-14 leading-relaxed text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Your AI tools need an{" "}
           <span className="font-medium text-foreground">Agent Key</span> to
           call <span className="font-medium text-foreground">{createdKey.serviceName}</span>{" "}
@@ -344,7 +344,7 @@ function InlineStatus({
   return (
     <div className="flex items-start gap-2">
       <span className="mt-0.5 shrink-0">{icon}</span>
-      <p className={`text-14 leading-relaxed ${toneClass}`}>{children}</p>
+      <p className={`text-14 ${toneClass}`}>{children}</p>
     </div>
   );
 }
@@ -362,7 +362,7 @@ function AgentKeyPanel({
   return (
     <div className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
       <div className="space-y-1">
-        <p className="text-14 font-semibold text-foreground">
+        <p className="type-body-strong text-foreground">
           Your new Agent Key
         </p>
         <p className="text-13 text-muted-foreground">

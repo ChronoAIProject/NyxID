@@ -60,7 +60,7 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
         <Info className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
         <div className="space-y-0.5">
-          <p className="text-14 font-medium">{approvalSuspended ? "Server reports approval is suspended" : "Web-only approval support is unconfirmed"}</p>
+          <p className="type-row-title">{approvalSuspended ? "Server reports approval is suspended" : "Web-only approval support is unconfirmed"}</p>
           <p className="text-13 text-muted-foreground">
             Keep a configured notification channel enabled until the server confirms required approval and web decisions remain available without delivery.
           </p>
@@ -74,7 +74,7 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
         <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
         <div className="space-y-0.5">
-          <p className="text-14 font-medium">
+          <p className="type-row-title">
             Approval protection is active
           </p>
           <p className="text-13 text-muted-foreground">
@@ -126,11 +126,11 @@ export function ApprovalSetupWizard({
         <ol className="space-y-4">
           {steps.map((step, idx) => (
             <li key={step.label} className="flex items-start gap-3">
-              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-12 font-medium text-muted-foreground">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay type-group-label text-muted-foreground">
                 {String(idx + 1)}
               </span>
               <div className="space-y-0.5">
-                <p className="text-14 font-medium">
+                <p className="type-row-title">
                   Step {String(idx + 1)}: {step.label}
                 </p>
                 <p className="text-13 text-muted-foreground">

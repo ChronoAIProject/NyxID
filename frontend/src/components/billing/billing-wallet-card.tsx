@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
 import { useState, type ReactNode } from "react";
 import {
@@ -134,7 +135,7 @@ export function BillingWalletCard({
                   </TooltipTrigger>
                   <TooltipContent
                     side="top"
-                    className="max-w-[260px] leading-relaxed"
+                    className="max-w-[260px]"
                   >
                     Credits spendable now after in-flight requests, unsettled
                     usage, and purchased-credit expiry holds. 1 credit is 1 USD.
@@ -142,7 +143,7 @@ export function BillingWalletCard({
                 </Tooltip>
               )}
             </div>
-            <div className="mt-1 break-words text-28 font-semibold leading-tight">
+            <div className="mt-1 break-words type-metric">
               {formatCredits(wallet.available ?? wallet.available_credits)}
             </div>
             <div className="mt-1 text-13 text-muted-foreground">
@@ -152,7 +153,7 @@ export function BillingWalletCard({
               type="button"
               aria-expanded={showBreakdown}
               aria-controls="wallet-breakdown"
-              className="mt-2 flex items-center gap-1 text-14 font-medium text-muted-foreground transition-colors hover:text-foreground"
+              className="mt-2 flex items-center gap-1 type-row-title text-muted-foreground transition-colors hover:text-foreground"
               onClick={() => setShowBreakdown((current) => !current)}
             >
               {showBreakdown ? "Hide breakdown" : "View breakdown"}
@@ -173,7 +174,7 @@ export function BillingWalletCard({
         {showBreakdown && (
           <div id="wallet-breakdown">
             <hr className="my-4 border-border" />
-            <p className="text-13 leading-relaxed text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Not all of your balance is spendable at any moment — requests in
               flight hold credits until they finish.
             </p>
@@ -295,7 +296,7 @@ function AddCreditsDialog({
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-2">
-            <span className="text-14 font-medium">Amount</span>
+            <span className="type-row-title">Amount</span>
             <div className="flex flex-wrap gap-2">
               {TOP_UP_PRESETS.map((preset) => (
                 <Button
@@ -311,9 +312,9 @@ function AddCreditsDialog({
             </div>
           </div>
           <div className="space-y-2">
-            <label className="text-14 font-medium" htmlFor="topup-credits">
+            <Label htmlFor="topup-credits">
               Or enter an amount
-            </label>
+            </Label>
             <div className="flex items-center gap-3">
               <Input
                 id="topup-credits"
@@ -334,7 +335,7 @@ function AddCreditsDialog({
               </span>
             </div>
           </div>
-          <p className="text-13 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             We&apos;ll hand you to Stripe to pay, then bring you back here.
             Credits land once the payment clears.
           </p>

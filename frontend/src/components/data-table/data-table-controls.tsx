@@ -254,7 +254,7 @@ export function DataTableFilterPopover<FilterKey extends string>({
           <Filter className="h-3.5 w-3.5" aria-hidden="true" />
           <span>{triggerLabel}</span>
           {activeCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 text-12 font-semibold text-primary-text">
+            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-primary/15 px-1 type-table-header text-primary-text">
               {String(activeCount)}
             </span>
           )}
@@ -332,7 +332,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               key={field.key}
               type="button"
               className={cn(
-                "flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                "flex min-h-11 w-full items-center gap-2 rounded-md px-2.5 py-2 text-left type-secondary-emphasis outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
                 selected
                   ? "bg-accent text-accent-foreground"
                   : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
@@ -343,7 +343,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               <span className="min-w-0 flex-1 break-words">{field.label}</span>
               {active && (
                 <span
-                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-12 font-semibold text-primary-text"
+                  className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 type-table-header text-primary-text"
                   aria-label={`${String(selectedValueCount)} selected`}
                 >
                   {String(selectedValueCount)}
@@ -437,7 +437,7 @@ function DataTableFilterEditor<FilterKey extends string>({
     <div className="flex min-w-0 flex-col">
       <div className="border-b border-border/70 px-3 py-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-13 font-semibold text-foreground">
+          <p className="truncate type-secondary-strong text-foreground">
             {field.label}{" "}
             <span className="font-normal text-muted-foreground">
               {field.operator}
@@ -467,7 +467,7 @@ function DataTableFilterEditor<FilterKey extends string>({
               role="checkbox"
               aria-checked={partiallySelected ? "mixed" : allSelected}
               className={cn(
-                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
+                "mb-2 flex min-h-11 w-full items-center gap-2 rounded-md border border-dashed px-3 py-2 text-left type-secondary-emphasis outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring md:min-h-9",
                 allSelected || partiallySelected
                   ? "border-primary/45 bg-primary/[0.07] text-foreground"
                   : "border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/35 hover:bg-muted/35 hover:text-foreground",
@@ -496,7 +496,7 @@ function DataTableFilterEditor<FilterKey extends string>({
                 ) : null}
               </span>
               <span>Select all</span>
-              <span className="ml-auto text-12 font-normal text-muted-foreground">
+              <span className="ml-auto type-account-email text-muted-foreground">
                 {String(field.options.length)} values
               </span>
             </button>
@@ -691,7 +691,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
     <div className="flex min-w-0 flex-col">
       <div className="border-b border-border/70 px-3 py-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-13 font-semibold text-foreground">
+          <p className="truncate type-secondary-strong text-foreground">
             {field.label}{" "}
             <span className="font-normal text-muted-foreground">
               {mode === "dates" ? "on any selected date" : "between"}
@@ -719,7 +719,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                 type="button"
                 aria-pressed={mode === "dates"}
                 className={cn(
-                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 type-secondary-emphasis outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
                   mode === "dates"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
@@ -735,7 +735,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                 type="button"
                 aria-pressed={mode === "range"}
                 className={cn(
-                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 text-13 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  "flex min-h-9 items-center justify-center gap-1.5 rounded px-2 type-secondary-emphasis outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
                   mode === "range"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground",
@@ -751,7 +751,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
 
         {mode === "dates" ? (
           <div className="space-y-1.5">
-            <span className="text-13 font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               Dates
             </span>
             <DatePicker
@@ -772,7 +772,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                   <button
                     key={date}
                     type="button"
-                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-14 font-medium text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 type-row-title text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     aria-label={`Remove selected date ${date}`}
                     onClick={() =>
                       onValuesChange([
@@ -794,7 +794,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <span className="text-13 font-medium text-muted-foreground">
+              <span className="type-secondary-emphasis text-muted-foreground">
                 From
               </span>
               <DatePicker
@@ -807,7 +807,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
               />
             </div>
             <div className="space-y-1.5">
-              <span className="text-13 font-medium text-muted-foreground">
+              <span className="type-secondary-emphasis text-muted-foreground">
                 To
               </span>
               <DatePicker
@@ -1030,7 +1030,7 @@ export function DataTableFilterChips<
               return (
                 <Fragment key={value.toLocaleLowerCase()}>
                   {valueIndex > 0 && (
-                    <span className="flex items-center border-l border-border/70 px-2 text-12 font-semibold text-muted-foreground">
+                    <span className="flex items-center border-l border-border/70 px-2 type-table-header text-muted-foreground">
                       OR
                     </span>
                   )}

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges, changeList } from "@/lib/grouped-form-changes";
 import { flushSync } from "react-dom";
 import { useCollaborationAvailable } from "@/hooks/use-collaboration-groups";
@@ -177,7 +178,7 @@ function AgentPicker({
             return (
               <li key={row.id}>
                 <GroupedRow asChild interactive>
-                  <label
+                  <Label
                     htmlFor={id}
                     className={cn(
                       disabled && "cursor-not-allowed text-text-tertiary",
@@ -202,7 +203,7 @@ function AgentPicker({
                         {row.description}
                       </span>
                     </span>
-                  </label>
+                  </Label>
                 </GroupedRow>
               </li>
             );
@@ -230,9 +231,9 @@ function GroupOwnerPicker({
       }
     >
       <GroupedRow>
-        <label htmlFor="group-owner" className="flex-1 text-14 font-medium">
+        <Label htmlFor="group-owner" className="flex-1">
           Ownership
-        </label>
+        </Label>
         <Select value={value ?? "personal"} onValueChange={(id) => onChange(id === "personal" ? undefined : id)}>
           <SelectTrigger id="group-owner"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -298,11 +299,11 @@ export function GroupParticipantPicker({
           .map((member) => (
             <li key={member.user_id}>
               <GroupedRow asChild interactive>
-                <label>
+                <Label>
                   <Checkbox checked={value.includes(member.user_id)} disabled={value.length >= 16 && !value.includes(member.user_id)}
                     onCheckedChange={(checked) => onChange(checked ? [...value, member.user_id] : value.filter((id) => id !== member.user_id))} />
                   {member.display_name ?? "Member"}
-                </label>
+                </Label>
               </GroupedRow>
             </li>
           ))}
@@ -439,13 +440,13 @@ export function NewGroupDialog({
                   }
                 >
                   <GroupedRow asChild interactive>
-                    <label>
+                    <Label>
                       <Switch className="order-last shrink-0" checked={Boolean(collaboration)} onCheckedChange={(checked) => {
                         form.setValue("collaboration", checked === true);
                         form.setValue("member_agent_ids", []);
                       }} />
                       <span className="min-w-0 flex-1">Invite other people</span>
-                    </label>
+                    </Label>
                   </GroupedRow>
                 </GroupedList>
               ) : null}
@@ -622,12 +623,12 @@ export function GroupSettingsDialog({
                       <GroupParticipantPicker org={org} value={form.watch("participant_user_ids") ?? []} onChange={(ids) => form.setValue("participant_user_ids", ids)} />
                       <GroupedList title="Routing">
                         <GroupedRow>
-                          <label
+                          <Label
                             htmlFor="group-lead"
-                            className="flex-1 text-14 font-medium"
+                            className="flex-1"
                           >
                             Lead agent
-                          </label>
+                          </Label>
                           <Select value={form.watch("lead_agent_id")} onValueChange={(id) => form.setValue("lead_agent_id", id)}>
                             <SelectTrigger id="group-lead"><SelectValue /></SelectTrigger>
                             <SelectContent>{agents.filter((agent) => members.includes(agent.id)).map((agent) => <SelectItem key={agent.id} value={agent.id}>{agentTitle(agent)}</SelectItem>)}</SelectContent>

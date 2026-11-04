@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import {
   useCallback,
   useEffect,
@@ -616,9 +617,9 @@ export function useComposerDictation({
         )}
         <div className="mt-2 flex min-h-12 items-center gap-3 border-t border-hairline px-1 pt-2">
           <Hand className="size-4 text-text-secondary" />
-          <label htmlFor={`hold-${scope}`} className="flex-1">
+          <Label htmlFor={`hold-${scope}`} className="flex-1">
             Hold to record
-          </label>
+          </Label>
           <Switch
             id={`hold-${scope}`}
             aria-label="Hold to record"

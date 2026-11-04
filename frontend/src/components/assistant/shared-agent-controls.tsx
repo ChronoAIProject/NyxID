@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges, changeLines, labelValue, recordChanges } from "@/lib/grouped-form-changes";
 import { GroupedDialog as Dialog, GroupedDialogContent as DialogContent } from "@/components/ui/grouped-dialog";
 import {
@@ -145,13 +146,13 @@ function SharingEditor({
           }
         >
           <GroupedRow asChild>
-            <label className="flex items-center justify-between gap-3">
+            <Label className="flex items-center justify-between gap-3">
               Enable sharing
               <Switch
                 checked={form.watch("enabled")}
                 onCheckedChange={(value) => form.setValue("enabled", value)}
               />
-            </label>
+            </Label>
           </GroupedRow>
         </GroupedList>
         <GroupedList
@@ -211,7 +212,7 @@ function SharingEditor({
             </Select>
           </GroupedRow>
           <GroupedRow asChild className="grouped-field">
-            <label className="block space-y-1 text-14">
+            <Label className="block space-y-1">
               <span>{kind === "org" ? "Organization ID" : "Person email"}</span>
               <GroupedInput
                 value={subject}
@@ -221,7 +222,7 @@ function SharingEditor({
                 }
                 type={kind === "person" ? "email" : "text"}
               />
-            </label>
+            </Label>
           </GroupedRow>
           <GroupedRow>
             <Button
@@ -253,7 +254,7 @@ function SharingEditor({
           {policy.services.length ? (
             policy.services.map((service) => (
               <GroupedRow key={service.id}>
-                <label htmlFor={`share-${service.id}`}>{service.name}</label>
+                <Label htmlFor={`share-${service.id}`}>{service.name}</Label>
                 <Select
                   value={levels[service.id] ?? "withheld"}
                   onValueChange={(value) => {
@@ -445,7 +446,7 @@ function NotesEditor({
           }
         >
           <GroupedRow search={{ id: `shared-notes-${kind}`, title, breadcrumb: "Memory", keywords: form.watch("text") }} asChild className="grouped-field">
-            <label>
+            <Label>
               <span>One note per line</span>
               <GroupedTextarea
                 rows={4}
@@ -453,7 +454,7 @@ function NotesEditor({
                 aria-describedby={`notes-error-${kind}`}
                 {...form.register("text")}
               />
-            </label>
+            </Label>
           </GroupedRow>
         </GroupedList>
         <GroupedFormActions
@@ -629,7 +630,7 @@ export function SharedAgentProfile({
           {(["display_name", "description", "persona"] as const).map(
             (field) => (
               <GroupedRow search={{ id: `shared-profile-${field}`, title: field === "display_name" ? "Display name" : field === "description" ? "Description" : "Persona", keywords: form.watch(field) }} key={field} asChild className="grouped-field">
-                <label>
+                <Label>
                   <span>
                     {field === "display_name"
                       ? "Display name"
@@ -642,7 +643,7 @@ export function SharedAgentProfile({
                     aria-describedby={form.formState.errors[field] ? `shared-profile-error-${field}` : undefined}
                     {...form.register(field)}
                   />
-                </label>
+                </Label>
               </GroupedRow>
             ),
           )}

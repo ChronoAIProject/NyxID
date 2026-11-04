@@ -41,10 +41,10 @@ export function PlatformServiceScope({
       aria-label="Auto-connected platform services"
       className="space-y-2 border-t border-border/50 pt-3"
     >
-      <p className="text-14 unthemed:text-12 font-medium">
+      <p className="type-row-title unthemed:text-12">
         Auto-connected platform services
       </p>
-      <Label className="flex items-start gap-2 text-14 unthemed:text-14">
+      <Label className="flex items-start gap-2 unthemed:text-14">
         <Checkbox
           checked={allowAll}
           disabled={disabled}
@@ -60,7 +60,7 @@ export function PlatformServiceScope({
             <Label
               key={service.id}
               htmlFor={`${prefix}-${service.id}`}
-              className={`flex items-center gap-2 text-14 unthemed:text-12 ${implied ? "text-muted-foreground" : ""}`}
+              className={`flex items-center gap-2 unthemed:text-12 ${implied ? "text-muted-foreground" : ""}`}
             >
               <Checkbox
                 id={`${prefix}-${service.id}`}

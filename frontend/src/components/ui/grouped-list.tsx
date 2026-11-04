@@ -63,7 +63,7 @@ export function GroupedList({
           <h3
             aria-label={title}
             id={id}
-            className={`flex items-center gap-1 break-words px-4 ${TEXT_STYLES.groupHeading} font-medium text-text-tertiary`}
+            className={`flex items-center gap-1 break-words px-4 ${TEXT_STYLES.groupHeading} text-text-tertiary`}
           >
             <span>{title}</span>
             {help && <SectionInfo title={title} >{help}</SectionInfo>}
@@ -80,7 +80,7 @@ export function GroupedList({
         <div
           ref={setFooterContainer}
           data-grouped-footer=""
-          className="space-y-1 break-words px-4 text-13 font-normal leading-relaxed text-text-tertiary empty:hidden"
+          className="space-y-1 break-words px-4 type-secondary text-text-tertiary empty:hidden"
         >
           {typeof footer === "string" || typeof footer === "number" ? <p>{footer}</p> : footer}
         </div>
@@ -140,13 +140,13 @@ export function GroupedRow({
               <div className="min-w-0 flex-1 basis-32 break-words">
                 <div className="font-medium text-foreground">{title}</div>
                 {description && (
-                  <div className="mt-0.5 text-13 font-normal leading-relaxed text-text-tertiary">
+                  <div className="mt-0.5 type-secondary text-text-tertiary">
                     {description}
                   </div>
                 )}
               </div>
               {accessory && (
-                <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2 text-14 font-normal text-text-tertiary">
+                <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2 type-body text-text-tertiary">
                   {accessory}
                 </div>
               )}
@@ -199,7 +199,7 @@ export function GroupedTextarea({
   return (
     <Textarea
       className={cn(
-        "rounded-none border-0 bg-transparent px-0 py-1 text-14 font-normal shadow-none focus-visible:ring-0",
+        "rounded-none border-0 bg-transparent px-0 py-1 type-body shadow-none focus-visible:ring-0",
         className,
       )}
       {...props}

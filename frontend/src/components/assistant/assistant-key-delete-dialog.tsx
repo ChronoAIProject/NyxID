@@ -218,7 +218,7 @@ export function AssistantKeyDeleteDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-13 leading-relaxed text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Deletion cannot be remembered or pre-approved. Confirm this exact
               key every time.
             </p>

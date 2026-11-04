@@ -288,7 +288,7 @@ export function AuthFlow({
            ================================================================ */
         <div>
           <div className="mb-8">
-            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+            <h1 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Welcome back
             </h1>
             <p className="mt-1 text-15 text-muted-foreground">
@@ -365,7 +365,7 @@ export function AuthFlow({
                         <FormLabel>Password</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
-                          className="text-14 font-medium text-nyx-secondary-400 hover:text-nyx-300"
+                          className="type-row-title text-nyx-secondary-400 hover:text-nyx-300"
                         >
                           Forgot password?
                         </Link>
@@ -409,7 +409,7 @@ export function AuthFlow({
           className={`w-1/2 shrink-0 transition-[visibility] duration-300 ${showEmailForm ? "invisible" : "visible"}`}
         >
           <div className="mb-8">
-            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+            <h1 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
               Create your account
             </h1>
             <p className="mt-1 text-15 text-muted-foreground">
@@ -423,7 +423,7 @@ export function AuthFlow({
             <div className="relative mb-6 pl-9">
               <div className="absolute left-[11px] top-7 bottom-[-12px] w-px bg-gradient-to-b from-nyx-500/10 to-transparent" />
               <div
-                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border text-13 font-semibold transition-colors duration-300 ${
+                className={`absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border type-secondary-strong transition-colors duration-300 ${
                   isInviteValid
                     ? "border-transparent nyx-gradient-vivid text-white"
                     : "border-nyx-500/15 bg-nyx-500/10 text-nyx-secondary-400"
@@ -448,7 +448,7 @@ export function AuthFlow({
                   "1"
                 )}
               </div>
-              <p className="mb-3 text-15 font-medium leading-6 text-muted-foreground">
+              <p className="mb-3 type-card-title text-muted-foreground">
                 Enter your invite code
               </p>
               <FormField
@@ -484,11 +484,11 @@ export function AuthFlow({
                 )}
               />
               {inviteError && (
-                <p className="mt-2 text-14 font-medium text-destructive">
+                <p className="mt-2 type-row-title text-destructive">
                   An invite code is required to use NyxID at this time.
                 </p>
               )}
-              <p className="mt-2 text-13 leading-relaxed text-muted-foreground">
+              <p className="mt-2 text-13 text-muted-foreground">
                 NyxID is in closed beta.{" "}
                 <a
                   href="https://discord.gg/QMvcs8UQBW"
@@ -508,10 +508,10 @@ export function AuthFlow({
           <div className={`relative ${inviteRequired ? "pl-9" : ""}`}>
             {inviteRequired && (
             <>
-            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-13 font-semibold text-nyx-secondary-400">
+            <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 type-secondary-strong text-nyx-secondary-400">
               2
             </div>
-            <p className="mb-3 text-15 font-medium leading-6 text-muted-foreground">
+            <p className="mb-3 type-card-title text-muted-foreground">
               Choose how to sign up
             </p>
             </>
@@ -578,7 +578,7 @@ export function AuthFlow({
               </svg>
             </button>
             <div>
-              <h2 className="text-15 font-semibold tracking-tight">
+              <h2 className="type-card-title tracking-tight">
                 Email registration
               </h2>
               <p className="text-13 text-muted-foreground">
@@ -602,13 +602,13 @@ export function AuthFlow({
               <rect x="3" y="7" width="10" height="7" rx="1.5" />
               <path d="M5 7V5a3 3 0 016 0v2" />
             </svg>
-            <span className="font-mono text-15 font-medium tracking-wider text-nyx-secondary-400">
+            <span className="font-mono type-card-title tracking-wider text-nyx-secondary-400">
               {inviteCode.trim().toUpperCase() || "NYX-XXXXXXXX"}
             </span>
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="ml-auto border-0 bg-transparent text-13 font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
+              className="ml-auto border-0 bg-transparent type-secondary-emphasis text-muted-foreground transition-colors duration-300 hover:text-foreground"
             >
               Edit
             </button>
@@ -638,7 +638,7 @@ export function AuthFlow({
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-14">Full Name</FormLabel>
+                    <FormLabel>Full Name</FormLabel>
                     <FormControl>
                       <Input
                         placeholder="John Doe"
@@ -663,7 +663,7 @@ export function AuthFlow({
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-14">Email</FormLabel>
+                    <FormLabel>Email</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
@@ -683,7 +683,7 @@ export function AuthFlow({
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-14">Password</FormLabel>
+                    <FormLabel>Password</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
@@ -729,7 +729,7 @@ export function AuthFlow({
                 name="confirmPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-14">
+                    <FormLabel>
                       Confirm Password
                     </FormLabel>
                     <FormControl>

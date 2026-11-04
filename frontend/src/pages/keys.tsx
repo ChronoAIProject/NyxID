@@ -246,7 +246,7 @@ function NyxIdApiKeysTab({
               <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-15 font-semibold text-foreground">
+              <h3 className="type-card-title text-foreground">
                 Set up an isolated AI agent
               </h3>
               <p className="max-w-2xl text-14 text-muted-foreground">
@@ -267,7 +267,7 @@ function NyxIdApiKeysTab({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-15 font-semibold text-foreground">Agent Keys</h3>
+          <h3 className="type-card-title text-foreground">Agent Keys</h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>

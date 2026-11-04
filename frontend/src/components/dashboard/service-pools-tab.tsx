@@ -151,7 +151,7 @@ export function ServicePoolsTab({
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <p className="max-w-xl text-14 leading-relaxed text-muted-foreground">
+        <p className="max-w-xl text-14 text-muted-foreground">
           Keep one stable name for your apps. Prefer a platform connection, fall
           back to your own key, or share traffic across compatible services.
         </p>
@@ -190,10 +190,10 @@ export function ServicePoolsTab({
           <div className="mx-auto mb-4 flex size-10 items-center justify-center rounded-xl border border-border/50 bg-overlay">
             <ServicePoolIcon className="size-5 text-muted-foreground" />
           </div>
-          <h3 className="text-15 font-semibold">
+          <h3 className="type-card-title">
             Your connections, one reliable route
           </h3>
-          <p className="mx-auto mt-2 max-w-md text-14 leading-relaxed text-muted-foreground">
+          <p className="mx-auto mt-2 max-w-md text-14 text-muted-foreground">
             Create a pool from{" "}
             {orgId
               ? `${ownerLabel}’s connections`
@@ -299,7 +299,7 @@ export function ServicePoolsTab({
                 className="flex items-center justify-between gap-3 rounded-xl border border-border/50 bg-card p-4"
               >
                 <div className="min-w-0 flex-1">
-                  <p className="flex items-start gap-2 break-words text-15 font-medium">
+                  <p className="flex items-start gap-2 break-words type-card-title">
                     <ServicePoolIcon className="mt-0.5 size-4 shrink-0" />
                     <span>{pool.name}</span>
                   </p>

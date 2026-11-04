@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import {
   formToPayload,
   type CreateEndpointPayload,
@@ -395,7 +396,7 @@ function EndpointFormEditor({
                   },
                 ] as const
               ).map((field) => (
-                <label key={field.name} className="text-14">
+                <Label key={field.name}>
                   {field.label}
                   <Select
                     value={form.watch(field.name) ?? "unspecified"}
@@ -420,7 +421,7 @@ function EndpointFormEditor({
                       ))}
                     </SelectContent>
                   </Select>
-                </label>
+                </Label>
               ))}
             </div>
             <DialogFooter>

@@ -49,7 +49,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
       onSubmit={form.handleSubmit(save)}
       className="space-y-4 border-t border-border px-4 py-4"
     >
-      <h3 className="text-14 font-medium">Events to receive</h3>
+      <h3 className="type-row-title">Events to receive</h3>
       {choices.map(
         ({ subscription, subscription_label, label, description }) => {
           const value = subscription as XChannelEvent;

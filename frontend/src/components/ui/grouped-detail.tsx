@@ -124,7 +124,7 @@ export function GroupedDetail({
         <h2
           aria-label={title}
           tabIndex={-1}
-          className="mt-3 flex items-center gap-1 break-words px-4 text-15 font-semibold outline-none"
+          className="mt-3 flex items-center gap-1 break-words px-4 type-card-title outline-none"
         >
           <span>{title}</span>{help && <SectionInfo title={title}>{help}</SectionInfo>}
         </h2>

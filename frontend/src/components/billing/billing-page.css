@@ -1,3 +1,5 @@
+@reference "../../typography.css";
+
 .billing-page {
   --billing-chart-accent: color-mix(
     in srgb,
@@ -10,40 +12,37 @@
   .service-category > h4 {
     display: flex;
     gap: 12px;
-    font-size: var(--text-15);
-    font-weight: 600;
+    @apply type-card-title;
     margin-bottom: 12px;
   }
   .service-category > h4 > span {
-    font-size: var(--text-13);
-    font-weight: 400;
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .fine-print {
-    font-size: var(--text-13);
-    line-height: 1.7;
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .empty-inline {
     padding: 24px 0;
-    font-size: var(--text-14);
+    @apply type-body;
     color: var(--color-muted-foreground);
   }
   .usage-column-labels {
     display: flex;
     justify-content: space-between;
     padding: 10px 0;
-    font-size: var(--text-12);
+    @apply type-table-header;
     letter-spacing: 0.5px;
     text-transform: uppercase;
     color: var(--color-text-tertiary);
     border-bottom: 1px solid var(--color-border);
-    font-weight: 600;
   }
   .usage-status {
     display: block;
     margin-top: 5px;
-    font: 400 var(--text-13) var(--font-sans);
+    @apply type-secondary;
+    font-family: var(--font-sans);
     color: var(--color-muted-foreground);
   }
   .usage-status.text-warning {
@@ -58,29 +57,29 @@
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .usage-column-labels {
     padding-left: 8px;
     padding-right: 28px;
-    font-weight: 600;
+    @apply type-table-header;
   }
   .all-metrics > summary {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 12px 24px;
-    font-size: var(--text-13);
+    @apply type-secondary;
     border-top: 1px solid var(--color-border);
   }
   .all-metrics > summary strong {
-    font-weight: 500;
+    @apply type-secondary-emphasis;
   }
   .all-metrics > summary span {
     color: var(--color-muted-foreground);
     margin-left: auto;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .all-metrics > summary:hover,
   .expandable-service > summary:hover {
@@ -95,8 +94,7 @@
   }
   .expanded-metrics h3 {
     margin-bottom: 12px;
-    font-size: var(--text-15);
-    font-weight: 600;
+    @apply type-card-title;
   }
   .split-facts {
     margin: 0;
@@ -108,7 +106,7 @@
     gap: 16px;
     padding: 8px 0;
     border-bottom: 1px solid var(--color-border);
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .split-facts dt {
     color: var(--color-muted-foreground);
@@ -116,21 +114,21 @@
   }
   .split-facts dd {
     font-family: "JetBrains Mono", monospace;
-    font-size: var(--text-13);
+    @apply type-secondary;
     text-align: right;
     overflow-wrap: anywhere;
     min-width: 0;
   }
   .expanded-metrics .fine-print {
     margin-top: 14px;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .expandable-usage {
     border-top: 1px solid var(--color-border);
   }
   .expandable-usage > .usage-column-labels {
     padding: 12px 16px;
-    font-weight: 600;
+    @apply type-table-header;
   }
   .expandable-service {
     border-bottom: 1px solid var(--color-border);
@@ -149,25 +147,24 @@
     flex: 1;
   }
   .expandable-name strong {
-    font-size: var(--text-14);
-    font-weight: 500;
+    @apply type-row-title;
     display: block;
     overflow-wrap: anywhere;
   }
   .expandable-name small {
     display: block;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
     margin-top: 4px;
   }
   .row-credit {
     font-family: "JetBrains Mono", monospace;
-    font-size: var(--text-14);
+    @apply type-body;
     text-align: right;
   }
   .row-credit small {
     font-family: var(--font-sans);
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .detailed-usage {
@@ -198,7 +195,7 @@
     padding: 12px 0;
     border-top: 1px solid var(--color-border);
     color: var(--color-muted-foreground);
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .usage-group-disclosure[open] > summary > svg {
     transform: rotate(180deg);
@@ -214,7 +211,7 @@
     .all-metrics > summary span {
       width: 100%;
       margin-left: 22px;
-      line-height: 1.6;
+      line-height: var(--line-body);
     }
     .expanded-metrics {
       grid-template-columns: 1fr;
@@ -224,14 +221,14 @@
     .expandable-usage > .usage-column-labels {
       padding-left: 4px;
       padding-right: 4px;
-      font-weight: 600;
+      @apply type-table-header;
     }
     .expandable-service > summary {
       padding: 16px 4px;
       gap: 8px;
     }
     .row-credit {
-      font-size: var(--text-13);
+      @apply type-secondary;
     }
     .row-credit small {
       display: block;
@@ -247,16 +244,16 @@
       max-width: 56%;
     }
     .split-facts dd {
-      font-size: var(--text-13);
+      @apply type-secondary;
     }
   }
   .tabbed-billing {
     margin-top: 24px;
-    font-size: var(--text-14);
+    @apply type-body;
   }
   .tabbed-billing h3,
   .tabbed-billing h4 {
-    font-weight: 600;
+    @apply type-body-strong;
   }
   .benefit-section + .benefit-section {
     margin-top: 20px;
@@ -290,8 +287,7 @@
     flex-shrink: 0;
   }
   .benefit-meter-caption {
-    font-size: var(--text-13);
-    line-height: 1.5;
+    @apply type-secondary;
     text-align: right;
     white-space: nowrap;
     color: var(--color-muted-foreground);
@@ -320,9 +316,8 @@
     margin-top: 20px;
   }
   .benefit-expanded h4 {
-    font-size: var(--text-15);
+    @apply type-card-title;
     margin-bottom: 8px;
-    font-weight: 600;
   }
   .benefit-expanded .split-facts {
     max-width: 720px;
@@ -340,25 +335,22 @@
     border-left: 1px solid var(--color-border);
   }
   .summary-family h3 {
-    font-size: var(--text-15);
+    @apply type-card-title;
     margin-bottom: 16px;
-    font-weight: 600;
   }
   .summary-family > strong {
     display: block;
-    font-size: var(--text-28);
-    font-weight: 600;
+    @apply type-metric;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
   }
   .summary-family > strong small {
-    font-size: var(--text-13);
-    font-weight: 400;
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .summary-family > p {
     margin-top: 4px;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .summary-family dl {
@@ -369,7 +361,7 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 12px;
-    font-size: var(--text-13);
+    @apply type-secondary;
     margin-top: 8px;
   }
   .summary-family dt {
@@ -384,8 +376,7 @@
     margin-top: 20px;
   }
   .usage-results .service-category > h4 {
-    font-size: var(--text-15);
-    font-weight: 600;
+    @apply type-card-title;
   }
   .history-heading {
     flex-direction: row;
@@ -411,18 +402,17 @@
     gap: 4px 12px;
     padding: 10px 0;
     border-bottom: 1px solid var(--color-border);
-    font-size: var(--text-14);
+    @apply type-body;
   }
   .grants-mobile > li:last-child {
     border-bottom: 0;
   }
   .grants-mobile strong {
-    font-weight: 500;
+    @apply type-row-title;
   }
   .grants-mobile small {
     grid-column: 1 / -1;
-    font-size: var(--text-13);
-    line-height: 1.6;
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .grant-scope {
@@ -454,8 +444,7 @@
       padding: 16px;
     }
     .summary-family > strong {
-      font-size: var(--text-28);
-      font-weight: 600;
+      @apply type-metric;
     }
     .summary-family dl > div {
       flex-wrap: wrap;
@@ -478,12 +467,11 @@
     .summary-family h3 {
       margin: 0;
       align-self: center;
-      font-weight: 600;
+      @apply type-body-strong;
     }
     .summary-family > strong {
       text-align: right;
-      font-size: var(--text-28);
-      font-weight: 600;
+      @apply type-metric;
     }
     .summary-family > p {
       margin: 0;
@@ -546,14 +534,12 @@
   }
   .compact-benefit-label > strong {
     display: block;
-    font-size: var(--text-14);
-    line-height: 1.5;
-    font-weight: 500;
+    @apply type-row-title;
     overflow-wrap: anywhere;
   }
   .compact-benefit-label > span {
     display: block;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
     margin-top: 4px;
   }
@@ -564,7 +550,7 @@
     justify-content: end;
     gap: 6px;
     height: 18px;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .benefit-summary-metric {
@@ -591,12 +577,11 @@
   }
   .compact-coverage > span > span,
   .compact-coverage > small {
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .compact-coverage strong {
-    font-size: var(--text-13);
-    font-weight: 500;
+    @apply type-secondary-emphasis;
     font-variant-numeric: tabular-nums;
   }
   .compact-grant-balance {
@@ -706,14 +691,13 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .stack-legend > li > span {
     color: var(--color-muted-foreground);
   }
   .stack-legend > li > strong {
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
+    @apply type-secondary-emphasis;    font-variant-numeric: tabular-nums;
   }
   .stack-legend > li.is-warning > strong {
     color: var(--color-warning);
@@ -755,8 +739,7 @@
 }
 .billing-benefit-help-content {
   max-width: min(330px, calc(100vw - 32px));
-  font-size: var(--text-14);
-  line-height: 1.6;
+  @apply type-body;
   padding: 12px;
 }
 .billing-page {
@@ -772,14 +755,14 @@
   }
   .usage-explorer-heading p {
     margin-top: 6px;
-    line-height: 1.6;
+    line-height: var(--line-body);
   }
   .usage-group-count {
     flex-shrink: 0;
     border: 1px solid var(--color-border);
     border-radius: 6px;
     padding: 4px 8px;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
     font-variant-numeric: tabular-nums;
   }
@@ -807,8 +790,7 @@
   }
   .usage-search > input {
     padding-left: 32px;
-    font-size: var(--text-14);
-    font-weight: 400;
+    @apply type-body;
   }
   @container usage-explorer (max-width: 600px) {
     .usage-explorer-heading {
@@ -829,8 +811,7 @@
   }
 }
 .billing-benefit-help-content > strong {
-  font-weight: 600;
-}
+  @apply type-secondary-strong;}
 .billing-benefit-help-content > p {
   margin-top: 8px;
 }
@@ -945,7 +926,7 @@
     width: 100%;
     margin-top: 2px;
     color: var(--color-muted-foreground);
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .allowance-gauge-legend > span {
     display: inline-flex;
@@ -981,21 +962,21 @@
     gap: 8px 14px;
     padding: 14px 16px;
     background: color-mix(in srgb, var(--color-foreground) 2.5%, transparent);
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .allowance-period > strong {
-    font-weight: 500;
+    @apply type-secondary-emphasis;
   }
   .allowance-period > span {
     color: var(--color-muted-foreground);
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .allowance-period dl {
     flex-basis: 100%;
     display: flex;
     flex-wrap: wrap;
     gap: 8px 24px;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .allowance-period dl > div {
     display: flex;
@@ -1015,11 +996,10 @@
     align-items: center;
     gap: 16px;
     margin-bottom: 12px;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .allowance-balance > header > strong {
-    font-weight: 500;
-    margin-right: auto;
+    @apply type-secondary-emphasis;    margin-right: auto;
     white-space: nowrap;
   }
   .allowance-balance .benefit-meter {
@@ -1029,17 +1009,16 @@
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 12px;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .allowance-balance dd {
     margin-top: 5px;
-    font:
-      500 var(--text-13) "JetBrains Mono",
-      monospace;
+    @apply type-secondary-emphasis;
+    font-family: "JetBrains Mono", monospace;
     overflow-wrap: anywhere;
   }
   .allowance-balance .allowance-remaining dd {
-    font-size: var(--text-15);
+    @apply type-nav-item;
     color: var(--color-foreground);
   }
   .billing-detail-pagination,
@@ -1048,7 +1027,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 8px;
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
     padding-top: 12px;
   }
@@ -1086,19 +1065,18 @@
   }
   .funding-visual h4 {
     margin-bottom: 4px;
-    font-size: var(--text-15);
-    font-weight: 600;
+    @apply type-card-title;
   }
   .funding-visual-total {
     flex-shrink: 0;
-    font:
-      500 var(--text-15) "JetBrains Mono",
-      monospace;
+    @apply type-data-total;
+    font-family: "JetBrains Mono", monospace;
     text-align: right;
     overflow-wrap: anywhere;
   }
   .funding-visual-total small {
-    font: 400 var(--text-13) var(--font-sans);
+    @apply type-secondary;
+    font-family: var(--font-sans);
     color: var(--color-muted-foreground);
   }
   .funding-track {
@@ -1133,7 +1111,7 @@
     align-items: start;
     gap: 7px;
     min-width: 0;
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .funding-legend-swatch {
     width: 8px;
@@ -1151,9 +1129,8 @@
     color: var(--color-muted-foreground);
   }
   .funding-legend-item strong {
-    font:
-      500 var(--text-13) "JetBrains Mono",
-      monospace;
+    @apply type-secondary-emphasis;
+    font-family: "JetBrains Mono", monospace;
     color: var(--color-foreground);
     overflow-wrap: anywhere;
   }
@@ -1179,8 +1156,7 @@
     margin-bottom: 12px;
   }
   .usage-quantity-chart h4 {
-    font-size: var(--text-15);
-    font-weight: 600;
+    @apply type-card-title;
     margin-bottom: 4px;
   }
   .quantity-unit-panel {
@@ -1198,15 +1174,14 @@
     display: flex;
     align-items: center;
     gap: calc(var(--spacing) * 1.5);
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .quantity-chart-totals dd {
     margin-top: calc(var(--spacing) * 1.5);
     color: var(--color-foreground);
-    font:
-      500 var(--text-15) "JetBrains Mono",
-      monospace;
+    @apply type-data-total;
+    font-family: "JetBrains Mono", monospace;
     overflow-wrap: anywhere;
   }
   .quantity-series-swatch {
@@ -1215,7 +1190,7 @@
     flex-shrink: 0;
   }
   .quantity-axis-label {
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
     margin-bottom: 4px;
   }
@@ -1223,13 +1198,13 @@
     margin: 2px 0 12px;
     text-align: center;
     color: var(--color-muted-foreground);
-    font-size: var(--text-13);
+    @apply type-secondary;
   }
   .quantity-exact-values {
     margin-top: 12px;
     padding-top: 12px;
     border-top: 1px solid var(--color-border);
-    font-size: var(--text-13);
+    @apply type-secondary;
     color: var(--color-muted-foreground);
   }
   .quantity-exact-values dl {
@@ -1247,9 +1222,8 @@
     transform: rotate(180deg);
   }
   .quantity-exact-values dd {
-    font:
-      500 var(--text-13) "JetBrains Mono",
-      monospace;
+    @apply type-secondary-emphasis;
+    font-family: "JetBrains Mono", monospace;
     margin-top: 5px;
     color: var(--color-foreground);
     overflow-wrap: anywhere;
@@ -1317,12 +1291,11 @@
 .billing-stack-tooltip {
   --stack-bg: var(--color-popover);
   max-width: min(300px, calc(100vw - 32px));
-  font-size: var(--text-13);
+  @apply type-secondary;
 }
 .billing-stack-tooltip > p {
   margin-bottom: 6px;
-  font-weight: 500;
-}
+  @apply type-secondary-emphasis;}
 .billing-stack-tooltip li {
   display: flex;
   align-items: center;

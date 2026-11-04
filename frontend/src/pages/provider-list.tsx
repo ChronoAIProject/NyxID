@@ -32,7 +32,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  
+
 } from "@/components/ui/dialog";
 import {
   useAppForm,
@@ -129,7 +129,7 @@ export function ProviderListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             Manage Providers
           </h2>
           <p className="text-14 text-muted-foreground">
@@ -335,7 +335,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "oauth2" && (
                   <>
                     <Separator />
-                    <h4 className="text-15 font-semibold">
+                    <h4 className="type-card-title">
                       OAuth 2.0 Configuration
                     </h4>
 
@@ -504,7 +504,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "device_code" && (
                   <>
                     <Separator />
-                    <h4 className="text-15 font-semibold">
+                    <h4 className="type-card-title">
                       Device Code Configuration (RFC 8628)
                     </h4>
 
@@ -650,7 +650,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "telegram_widget" && (
                   <>
                     <Separator />
-                    <h4 className="text-15 font-semibold">
+                    <h4 className="type-card-title">
                       Telegram Widget Configuration
                     </h4>
 
@@ -699,7 +699,7 @@ export function ProviderListPage() {
                 {watchedProviderType === "api_key" && (
                   <>
                     <Separator />
-                    <h4 className="text-15 font-semibold">
+                    <h4 className="type-card-title">
                       API Key Configuration
                     </h4>
 
@@ -771,7 +771,7 @@ export function ProviderListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No Providers</p>
+            <p className="type-row-title text-muted-foreground">No Providers</p>
             <p className="text-13 text-muted-foreground">
               Add a provider to get started.
             </p>

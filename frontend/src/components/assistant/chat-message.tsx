@@ -112,7 +112,7 @@ function ThinkingBlock({
         {streaming ? <PulseDot /> : null}
       </button>
       {open ? (
-        <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-13 leading-relaxed text-text-tertiary whitespace-pre-wrap">
+        <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-13 text-text-tertiary whitespace-pre-wrap">
           {text}
         </div>
       ) : null}
@@ -245,7 +245,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
     <span
       title={decisionTitle(row)}
       className={cn(
-        "shrink-0 rounded border px-1 font-sans text-12 leading-normal",
+        "shrink-0 rounded border px-1 font-sans text-12 ",
         denied
           ? "border-warning/30 bg-warning/10 text-warning"
           : "border-hairline bg-overlay text-text-tertiary",
@@ -446,7 +446,7 @@ function BillingRemedyWithRouter() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const panel = useAccountPanel();
   if (!isAssistantShellRoute(pathname)) return null;
-  return <button type="button" className="mt-2 block text-14 font-medium underline"
+  return <button type="button" className="mt-2 block type-row-title underline"
     onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
 }
 
@@ -725,7 +725,7 @@ export function ChatMessageBubble({
           </div>
         ) : null}
         {capacityNote ? (
-          <p role="note" className="text-14 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
+          <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
@@ -765,7 +765,7 @@ export function ChatMessageBubble({
             ) : null}
             <button
               type="button"
-              className="inline-flex items-center gap-1 text-14 font-medium underline disabled:opacity-50"
+              className="inline-flex items-center gap-1 type-row-title underline disabled:opacity-50"
               disabled={retrying}
               onClick={() => void retry()}
             >
@@ -978,14 +978,14 @@ export function ChatMessageEntry({
         <MessageSquare className="h-3 w-3" />
       </div>
       <div className="min-w-0 max-w-[84%] flex-1">
-        <div className="text-13 font-medium text-foreground">{displayName}</div>
+        <div className="type-secondary-emphasis text-foreground">{displayName}</div>
         {message.thinking ? (
           <p className="mt-1 text-13 italic text-text-tertiary">
             {message.thinking}
           </p>
         ) : null}
         {message.content ? (
-          <div className="mt-1 text-14 leading-relaxed text-foreground whitespace-pre-wrap">
+          <div className="mt-1 text-14 text-foreground whitespace-pre-wrap">
             {message.content}
           </div>
         ) : null}

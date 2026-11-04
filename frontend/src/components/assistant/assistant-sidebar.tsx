@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
@@ -187,10 +188,10 @@ function ConversationRow({
         aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full overflow-hidden px-2 py-1 text-left text-15 transition-colors",
+          "w-full overflow-hidden px-2 py-1 text-left transition-colors",
           active
-            ? "font-medium text-foreground"
-            : "text-muted-foreground group-hover:text-foreground",
+            ? "type-active-nav-item text-foreground"
+            : "type-nav-item text-muted-foreground group-hover:text-foreground",
           "[@media(hover:none)]:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
           "group-hover:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
           menuOpen && TITLE_FADE,
@@ -207,7 +208,7 @@ function ConversationRow({
         {showDraft && (
           <span
             id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-13 leading-normal text-text-tertiary"
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-13 text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
             <span className="sr-only">Draft: </span>
@@ -351,7 +352,7 @@ function ChannelThreadsGroup({
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-12 font-medium leading-normal text-text-tertiary @min-[15rem]:inline">
+        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 type-group-label text-text-tertiary @min-[15rem]:inline">
           {platform}
         </span>
         {running ? (
@@ -479,10 +480,10 @@ function AgentRow({
             className={cn(
               // The whole row highlights (also while its options button is
               // hovered); only its content fades under that button.
-              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left text-15 transition-colors group-hover:bg-sidebar-hover",
+              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left transition-colors group-hover:bg-sidebar-hover",
               selected
-                ? "font-medium text-foreground"
-                : "text-muted-foreground group-hover:text-foreground",
+                ? "type-active-nav-item text-foreground"
+                : "type-nav-item text-muted-foreground group-hover:text-foreground",
               agent.status === "destroyed" && "opacity-50",
             )}
           >
@@ -518,14 +519,14 @@ function AgentRow({
               {platforms.slice(0, 1).map((platform) => (
                 <span
                   key={platform}
-                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-12 font-medium leading-normal text-text-tertiary @min-[15rem]:inline"
+                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 type-group-label text-text-tertiary @min-[15rem]:inline"
                 >
                   {channelPlatformName(platform)}
                   {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
                 </span>
               ))}
               {pending > 0 ? (
-                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-12 font-medium text-warning">
+                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning">
                   {pending}
                 </span>
               ) : null}
@@ -781,7 +782,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 type="button"
                 onClick={model.onNewGroup}
                 data-keep-drawer-open=""
-                className="w-full rounded-lg px-3 py-1.5 text-left text-14 font-medium text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+                className="w-full rounded-lg px-3 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
               >
                 Chat with several agents at once
               </button>
@@ -1037,7 +1038,7 @@ export function AssistantSidebar({
           />
           <span className="min-w-0 flex-1 truncate">Approvals</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
-            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-12 font-medium text-warning">
+            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning">
               {counts.data?.pendingApprovals}
             </span>
           )}
@@ -1050,7 +1051,7 @@ export function AssistantSidebar({
       {notice ? (
         <p
           role="status"
-          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-12 leading-relaxed text-muted-foreground"
+          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-12 text-muted-foreground"
         >
           {notice}
         </p>
@@ -1172,9 +1173,9 @@ function RenameChatInline({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-14">
+          <Label htmlFor="chat-title">
             Title
-          </label>
+          </Label>
           <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
           {error ? (
             <p role="alert" className="mt-2 text-14 text-destructive">
@@ -1362,7 +1363,7 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
         <button data-icon-button="" type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
       </PopoverTrigger>
       <PopoverContent side="right" align="start" className="w-72 p-2">
-        <p className="px-2 py-1 text-14 font-medium">Previous chats</p>
+        <p className="px-2 py-1 type-row-title">Previous chats</p>
         <ul aria-label="Previous chats" className="max-h-80 shell-nav-stack overflow-y-auto">
           {conversations.map((chat) => (
             <li key={chat.id}>
@@ -1475,7 +1476,7 @@ function RailAgentChats({
         <button
           type="button"
           onClick={onNewChat}
-          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-14 font-medium text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           <Plus aria-hidden="true" className="h-3 w-3" />
           New chat
@@ -1508,7 +1509,7 @@ function RailAgentChats({
         <button
           type="button"
           onClick={onAll}
-          className="w-full rounded-md px-2 py-1.5 text-left text-14 font-medium text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="w-full rounded-md px-2 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           All chats ({chats.length})
         </button>
@@ -1533,7 +1534,7 @@ function GroupUnread({ group, compact = false }: {
       {mentions > 0 ? (
         <span
           aria-label={`${mentions} mentions`}
-          className={cn("rounded-full bg-primary/10 px-1.5 text-12 font-medium text-primary", compact && "absolute -bottom-0.5 right-0 bg-primary px-1 text-primary-foreground")}
+          className={cn("rounded-full bg-primary/10 px-1.5 type-group-label text-primary", compact && "absolute -bottom-0.5 right-0 bg-primary px-1 text-primary-foreground")}
         >
           @{mentions > 99 ? "99+" : mentions}
         </span>

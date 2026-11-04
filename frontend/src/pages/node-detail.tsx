@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { MachineSummary } from "@/components/shared/machine-summary";
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
@@ -417,7 +418,7 @@ export function NodeDetailPage() {
             <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-3 p-4">
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="break-words text-28 font-semibold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {String(node.metrics.total_requests)}
@@ -428,7 +429,7 @@ export function NodeDetailPage() {
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="break-words text-28 font-semibold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {(node.metrics.success_rate * 100).toFixed(1)}%
@@ -439,7 +440,7 @@ export function NodeDetailPage() {
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="break-words text-28 font-semibold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {node.metrics.avg_latency_ms.toFixed(0)}ms
@@ -450,7 +451,7 @@ export function NodeDetailPage() {
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="break-words text-28 font-semibold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {String(node.metrics.error_count)}
@@ -460,7 +461,7 @@ export function NodeDetailPage() {
             </div>
             {node.metrics.last_error && (
               <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
-                <div className="flex items-center gap-2 text-13 font-medium text-destructive">
+                <div className="flex items-center gap-2 type-secondary-emphasis text-destructive">
                   <Activity className="h-3 w-3" />
                   Last Error
                   {node.metrics.last_error_at && (
@@ -759,7 +760,7 @@ export function NodeDetailPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <p className="text-14 font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 Destination owner
               </p>
               <OrgScopeSelect
@@ -785,7 +786,7 @@ export function NodeDetailPage() {
                 </p>
               )}
             </div>
-            <label className="flex items-start gap-2 text-14 text-muted-foreground">
+            <Label className="flex items-start gap-2 text-muted-foreground">
               <Checkbox
                 checked={transferConfirmed}
                 onCheckedChange={(checked) =>
@@ -796,7 +797,7 @@ export function NodeDetailPage() {
                 I understand that cross-owner AI Services will stop routing
                 through this node.
               </span>
-            </label>
+            </Label>
           </div>
           <DialogFooter>
             <Button
@@ -883,7 +884,7 @@ export function NodeDetailPage() {
                   value={rotatedCredentials.signing_secret}
                 />
                 <div className="rounded-lg bg-muted p-3">
-                  <p className="mb-1 text-13 font-medium text-text-tertiary">
+                  <p className="mb-1 type-secondary-emphasis text-text-tertiary">
                     Run on your node
                   </p>
                   <code className="text-14 text-foreground break-all">

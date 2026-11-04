@@ -23,7 +23,7 @@ export function PageHeader({
       <div data-page-heading="" className="flex min-w-0 flex-col gap-1">
         <div className="flex items-center gap-3">
           {leading && <div className="shrink-0">{leading}</div>}
-          <Title className="text-22 sm:text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+          <Title className="type-compact-page-title sm:type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             {title}
           </Title>
         </div>

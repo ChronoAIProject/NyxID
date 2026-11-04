@@ -16,7 +16,7 @@ export function RemoteMachineServiceUsage({ machineId }: { readonly machineId: s
   const rows = opened && !query.error ? query.data : undefined;
   return <section className="space-y-3" aria-label="Gateway service usage">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <h3 className="text-15 font-semibold">Gateway service usage</h3>
+      <h3 className="type-card-title">Gateway service usage</h3>
       <Button variant="outline" disabled={!owner || !machineId || (opened && query.isFetching)} onClick={() => { if (opened) void query.refetch(); else setOpenedFor(context); }}>
         {opened ? "Refresh service usage" : "Load service usage"}
       </Button>
@@ -32,7 +32,7 @@ export function RemoteMachineServiceUsage({ machineId }: { readonly machineId: s
       const exactCost = exactCredits(row.estimated_credits, row.estimated_credits_micros);
       return <article key={`${attribution.job_id}-${row.lago_metric_code}-${row.layer}-${index}`} className="space-y-3 rounded-lg border border-border/50 bg-card p-4">
         <div className="flex flex-wrap items-center gap-2">
-          <h4 className="break-all text-15 font-medium">{row.service_slug ?? row.service_id ?? "Unavailable service"}</h4>
+          <h4 className="break-all type-card-title">{row.service_slug ?? row.service_id ?? "Unavailable service"}</h4>
           <Badge variant="secondary">{row.layer}</Badge>
           <Badge variant="secondary">{row.billable ? "Billable" : "Metering only"}</Badge>
           {row.billable && (exactCost === null

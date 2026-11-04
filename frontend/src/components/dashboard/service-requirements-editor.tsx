@@ -54,7 +54,7 @@ export function ServiceRequirementsView({
             <div className="flex items-center gap-3">
               <KeyRound className="h-4 w-4 text-muted-foreground" />
               <div>
-                <p className="text-14 font-medium">
+                <p className="type-row-title">
                   {provider?.name ?? req.provider_name}
                 </p>
                 <p className="text-13 text-muted-foreground">

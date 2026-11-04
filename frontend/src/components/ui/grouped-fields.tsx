@@ -14,7 +14,7 @@ export function GroupedField({
       <FormItem
         className={cn(
           inline
-            ? "space-y-0 [&>label]:flex-1 [&>label]:text-14 [&>label]:font-medium [&>label]:text-foreground"
+            ? "space-y-0 [&>label]:flex-1 [&>label]:text-foreground"
             : "block space-y-0.5",
           className,
         )}
@@ -30,7 +30,7 @@ export function GroupedLabel({
 }: ComponentProps<typeof FormLabel>) {
   return (
     <FormLabel
-      className={cn("text-14 font-medium text-text-tertiary", className)}
+      className={cn("text-text-tertiary", className)}
       {...props}
     />
   );
@@ -42,7 +42,7 @@ export function GroupedDescription(
   return (
       <FormDescription
         {...props}
-        className={cn("basis-full text-13 font-normal text-text-tertiary", props.className)}
+        className={cn("basis-full type-secondary text-text-tertiary", props.className)}
       />
   );
 }

@@ -16,6 +16,6 @@ export function SectionInfo({ title, children }: { readonly title: string; reado
         <Info aria-hidden className="size-[1em]" />
       </button>
     </PopoverTrigger>
-    <PopoverContent id={id} role="tooltip" aria-label={`About ${title}`} className="w-70 max-w-[calc(100vw-2rem)] p-3 text-13 font-normal leading-relaxed" onMouseEnter={show} onMouseLeave={leave} onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()} onEscapeKeyDown={(event) => { event.stopPropagation(); setOpen(false); }}>{children}</PopoverContent>
+    <PopoverContent id={id} role="tooltip" aria-label={`About ${title}`} className="w-70 max-w-[calc(100vw-2rem)] p-3 type-secondary" onMouseEnter={show} onMouseLeave={leave} onOpenAutoFocus={(event) => event.preventDefault()} onCloseAutoFocus={(event) => event.preventDefault()} onEscapeKeyDown={(event) => { event.stopPropagation(); setOpen(false); }}>{children}</PopoverContent>
   </Popover>;
 }

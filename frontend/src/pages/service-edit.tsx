@@ -344,7 +344,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
               user?.is_admin &&
               (developerApps.length > 0 || unavailableAppIds.length > 0) && (
                 <div className="space-y-2">
-                  <p className="text-14 font-medium">
+                  <p className="type-row-title">
                     Developer App Scoping
                   </p>
                   <p className="text-13 text-muted-foreground">
@@ -403,7 +403,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                           />
                           <Label
                             htmlFor={`app-${app.id}`}
-                            className="text-14 font-medium"
                           >
                             {app.client_name}
                             {!app.is_active ? " (inactive)" : ""}
@@ -594,7 +593,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                 />
 
                 <div>
-                  <p className="mb-1 text-14 font-medium">Auth Type</p>
+                  <p className="mb-1 type-row-title">Auth Type</p>
                   <Badge variant="secondary">{getAuthTypeLabel(service)}</Badge>
                   <p className="mt-1 text-13 text-muted-foreground">
                     Auth type cannot be changed after creation.
@@ -605,7 +604,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                   <>
                     <Separator className="my-2" />
                     <div className="space-y-2">
-                      <h3 className="text-15 font-semibold">
+                      <h3 className="type-card-title">
                         Identity Propagation
                       </h3>
                       <p className="text-13 text-muted-foreground">
@@ -673,7 +672,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       )}
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-15 font-semibold">
+                        <h3 className="type-card-title">
                           Service Metadata
                         </h3>
                         <p className="text-13 text-muted-foreground">
@@ -859,7 +858,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <Separator className="my-2" />
                       <div className="space-y-2">
                         <div className="space-y-1">
-                          <p className="text-14 font-medium">
+                          <p className="type-row-title">
                             Default request headers
                           </p>
                           <p className="text-13 text-muted-foreground">
@@ -898,7 +897,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       </div>
 
                       <div className="space-y-2">
-                        <p className="text-14 font-medium">Capabilities</p>
+                        <p className="type-row-title">Capabilities</p>
                         <p className="text-13 text-muted-foreground">
                           Flags describing what this service supports through
                           NyxID proxy.
@@ -927,7 +926,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                             >
                               <Label
                                 htmlFor={`cap-${key}`}
-                                className="text-14 font-medium"
                               >
                                 {label}
                               </Label>
@@ -945,7 +943,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-15 font-semibold">
+                        <h3 className="type-card-title">
                           Forward Access Token
                         </h3>
                         <p className="text-13 text-muted-foreground">
@@ -957,7 +955,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="forward-access-token"
-                          className="text-14 font-medium"
                         >
                           Forward Access Token
                         </Label>
@@ -984,7 +981,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     )}
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-15 font-semibold">Billing</h3>
+                        <h3 className="type-card-title">Billing</h3>
                         <p className="text-13 text-muted-foreground">
                           Services are free by default: usage is metered for
                           observability but never charged. Enable platform
@@ -997,7 +994,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="platform-billable"
-                          className="text-14 font-medium"
                         >
                           Charge wallet credits (platform billing)
                         </Label>
@@ -1014,7 +1010,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                         <div className="space-y-1">
                           <Label
                             htmlFor="platform-charge-nyxid-credentials-only"
-                            className="text-14 font-medium"
                           >
                             Charge only NyxID-provided credentials
                           </Label>
@@ -1042,7 +1037,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
 
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="space-y-2">
-                          <Label className="text-14 font-medium">
+                          <Label>
                             Charge by
                           </Label>
                           <Select
@@ -1121,7 +1116,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                     <Separator className="my-2" />
                     <div className="space-y-4">
                       <div className="space-y-1">
-                        <h3 className="text-15 font-semibold">
+                        <h3 className="type-card-title">
                           Delegation Token Injection
                         </h3>
                         <p className="text-13 text-muted-foreground">
@@ -1136,7 +1131,6 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
                       <div className="flex items-center justify-between rounded-lg border border-border p-3">
                         <Label
                           htmlFor="inject-delegation-token"
-                          className="text-14 font-medium"
                         >
                           Inject delegation token
                         </Label>

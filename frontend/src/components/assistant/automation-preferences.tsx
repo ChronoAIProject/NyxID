@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import { ChevronRight } from "lucide-react";
 import {
@@ -196,7 +197,7 @@ function AutomationPreferencesForm({
           ] as const
         ).map(([key, label, min, max]) => (
           <GroupedRow key={key} asChild>
-            <label>
+            <Label>
               <span className="flex-1">{label}</span>
               <GroupedInput
                 className="w-20 text-right"
@@ -207,7 +208,7 @@ function AutomationPreferencesForm({
                 aria-invalid={Boolean(form.formState.errors[key])}
                 {...form.register(key, { valueAsNumber: true, min, max })}
               />
-            </label>
+            </Label>
           </GroupedRow>
         ))}
         <GroupedFooter>

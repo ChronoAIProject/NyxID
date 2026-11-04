@@ -223,7 +223,7 @@ function MachinesContent() {
         </TabsList>
         <TabsContent value="machines" className="mt-6 space-y-6">
           <section aria-label="Remote machines" className="space-y-3">
-            <h3 className="text-15 font-semibold">Remote machines</h3>
+            <h3 className="type-card-title">Remote machines</h3>
             <p className="text-14 text-muted-foreground">
               Personal hosted machines with a fixed workspace and selected
               capabilities. Resource state, runtime billing and execution
@@ -258,7 +258,7 @@ function MachinesContent() {
               </p>
             )}
           </section>
-          <h3 className="text-15 font-semibold">Self-hosted machines</h3>
+          <h3 className="type-card-title">Self-hosted machines</h3>
           {nodes.isPending || orgs.isPending ? (
             <p role="status">Loading machines…</p>
           ) : null}
@@ -414,7 +414,7 @@ function RemoteMachineList({
             key={machine.node_id}
             className="space-y-3 rounded-xl border border-border/50 bg-card p-4"
           >
-            <h4 className="break-all text-15 font-semibold">
+            <h4 className="break-all type-card-title">
               {machine.name ?? machine.sandbox_name}
             </h4>
             {state(machine)}

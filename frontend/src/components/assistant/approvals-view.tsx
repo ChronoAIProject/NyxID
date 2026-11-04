@@ -67,7 +67,7 @@ function EmptyState({ history = false }: { readonly history?: boolean }) {
   return (
     <div className="flex flex-col items-center py-12 text-center">
       <ShieldCheck aria-hidden className="mb-3 size-6 text-text-tertiary" />
-      <p className="text-15 font-medium">
+      <p className="type-card-title">
         {history ? "No decisions yet" : "Nothing waiting on you"}
       </p>
       <p className="mt-1 text-13 text-text-tertiary">
@@ -114,7 +114,7 @@ function HistorySection({
                   >
                     {entry.block.body}
                   </ApprovalAction>
-                  <p className="mt-1 text-13 font-normal text-text-tertiary">
+                  <p className="mt-1 type-secondary text-text-tertiary">
                     <span
                       className={
                         decision === "approved"
@@ -245,7 +245,7 @@ export function ApprovalsView() {
                     aria-label={`${entry.serviceName} request`}
                     className="assistant-workspace-approval space-y-2"
                   >
-                    <h3 className="flex items-center gap-2 px-4 text-14 font-medium">
+                    <h3 className="flex items-center gap-2 px-4 type-row-title">
                       <ServiceIcon
                         slug={`api-${entry.block.service_slug}`}
                         size="xs"

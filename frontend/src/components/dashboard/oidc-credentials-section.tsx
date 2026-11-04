@@ -88,7 +88,7 @@ export function OidcCredentialsSection({
       ) : credentials ? (
         <div className="space-y-3">
           <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
-            <div className="flex items-center gap-2 text-14 font-medium text-warning">
+            <div className="flex items-center gap-2 type-row-title text-warning">
               <AlertTriangle className="h-4 w-4" />
               Store this secret securely
             </div>
@@ -99,7 +99,7 @@ export function OidcCredentialsSection({
           </div>
 
           <div>
-            <p className="mb-1 text-13 font-medium text-muted-foreground">
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">
               Client Secret
             </p>
             <div className="flex items-center gap-2">
@@ -136,7 +136,7 @@ export function OidcCredentialsSection({
           <Separator />
 
           <div>
-            <p className="mb-2 text-13 font-medium text-muted-foreground">
+            <p className="mb-2 type-secondary-emphasis text-muted-foreground">
               Redirect URIs
             </p>
             <RedirectUriEditor
@@ -149,7 +149,7 @@ export function OidcCredentialsSection({
             <>
               <Separator />
               <div>
-                <p className="mb-1 text-13 font-medium text-muted-foreground">
+                <p className="mb-1 type-secondary-emphasis text-muted-foreground">
                   Delegation Scopes
                 </p>
                 <p className="text-14">{credentials.delegation_scopes}</p>
@@ -184,7 +184,7 @@ export function OidcCredentialsSection({
               </Button>
             ) : (
               <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
-                <p className="text-14 font-medium text-destructive">
+                <p className="type-row-title text-destructive">
                   This will invalidate the current secret immediately.
                 </p>
                 <p className="text-13 text-muted-foreground">

@@ -39,10 +39,10 @@ export function ToastViewport({ position }: { readonly position: "top-center" | 
         classNames: {
           toast:
             "group !flex-wrap !rounded-xl !border !text-15 !shadow-lg !shadow-primary/5 !gap-3 !p-3 !border-border [&_[data-content]]:!min-w-0 [&_[data-content]]:!flex-[1_1_calc(100%_-_22px_-_var(--spacing)*3)] [&:not([data-type])]:!bg-card [&:not([data-type])]:!text-foreground [&_[data-icon]]:!flex [&_[data-icon]]:!h-[22px] [&_[data-icon]]:!w-[22px] [&_[data-icon]]:!shrink-0 [&_[data-icon]]:!items-center [&_[data-icon]]:!justify-center [&_[data-icon]]:!rounded-[6px] [&_[data-icon]>svg]:!h-3 [&_[data-icon]>svg]:!w-3 [&_[data-icon]]:!m-0",
-          title: "!text-15 !font-medium !text-foreground",
-          description: "!font-normal !text-14 !mt-0 !text-muted-foreground whitespace-pre-line break-words",
-          actionButton: "!text-14 !font-medium !min-h-control !h-auto !max-w-full !whitespace-normal !break-words !ml-0 !py-1.5 !bg-primary !text-primary-foreground",
-          cancelButton: "!text-14 !font-medium !min-h-control !h-auto !max-w-full !whitespace-normal !break-words !ml-auto !py-1.5 !bg-muted !text-muted-foreground",
+          title: "!type-toast-title !text-foreground",
+          description: "!type-toast-description !mt-0 !text-muted-foreground whitespace-pre-line break-words",
+          actionButton: "!type-toast-action !min-h-control !h-auto !max-w-full !whitespace-normal !break-words !ml-0 !py-1.5 !bg-primary !text-primary-foreground",
+          cancelButton: "!type-toast-action !min-h-control !h-auto !max-w-full !whitespace-normal !break-words !ml-auto !py-1.5 !bg-muted !text-muted-foreground",
           // Typed backgrounds mix the accent INTO the solid card color
           // (color-mix) instead of a low-alpha tint — page content must not
           // bleed through toasts.

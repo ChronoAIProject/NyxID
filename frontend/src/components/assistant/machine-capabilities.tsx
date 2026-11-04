@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges, changeList, recordChanges } from "@/lib/grouped-form-changes";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
@@ -127,7 +128,7 @@ function MachineCapabilityPage(
     <>
       <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
         <span className="block">{machine.name}</span>
-        <span className="block text-13 font-normal text-text-tertiary">
+        <span className="block type-secondary text-text-tertiary">
           {needsSelection
             ? "Needs owner selection"
             : machine.mode === "separated"
@@ -330,7 +331,7 @@ export function MachineCapabilityForm({
         {machine.can_edit && machine.mode !== "shared_legacy" ? (
           <>
             <GroupedRow asChild interactive>
-              <label>
+              <Label>
                 <span className="min-w-0 flex-1">
                   I explicitly choose shared legacy access and acknowledge this
                   warning.
@@ -340,7 +341,7 @@ export function MachineCapabilityForm({
                   checked={legacyAccepted}
                   onCheckedChange={(value) => setLegacyAccepted(value === true)}
                 />
-              </label>
+              </Label>
             </GroupedRow>
             <GroupedRow asChild interactive>
               <button
@@ -375,13 +376,13 @@ export function MachineCapabilityForm({
         footer="Shell commands can read and write anything their OS user can access, even with file tools off. Saving changes cancels this agent’s current work on this machine."
       >
         <fieldset disabled={blocked || mutation.isPending} className="min-w-0">
-          <legend className="sr-only">Allowed capabilities</legend>
+          <Label asChild><legend className="sr-only">Allowed capabilities</legend></Label>
           {(Object.keys(labels) as Array<keyof typeof labels>).map((key) => (
             <GroupedRow key={key} asChild interactive>
-              <label>
+              <Label>
                 <span className="min-w-0 flex-1">
                   {labels[key]}
-                  <span className="block text-13 font-normal text-text-tertiary">
+                  <span className="block type-secondary text-text-tertiary">
                     {descriptions[key]}{!machine.ceiling[key] ? " · Off on node" : ""}
                   </span>
                 </span>
@@ -398,7 +399,7 @@ export function MachineCapabilityForm({
                     if (key === "browser" && value !== true) { form.setValue("capabilities.computer", false); form.setValue("capabilities.developer_browser", false); }
                   }}
                 />
-              </label>
+              </Label>
             </GroupedRow>
           ))}
         </fieldset>

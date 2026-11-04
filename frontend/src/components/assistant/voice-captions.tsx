@@ -18,7 +18,7 @@ export function VoiceCaptionText({
       className={
         caption.speaker === "user"
           ? "ml-auto max-w-[90%] rounded-xl bg-overlay px-3 py-2 text-15"
-          : "ml-[30px] whitespace-pre-wrap px-[7px] text-15 leading-relaxed"
+          : "ml-[30px] whitespace-pre-wrap px-[7px] text-15 "
       }
       data-voice-caption={caption.id}
     >

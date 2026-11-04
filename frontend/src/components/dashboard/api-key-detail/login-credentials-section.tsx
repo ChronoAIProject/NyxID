@@ -38,7 +38,7 @@ export function LoginCredentialsSection({
   return (
     <section className="space-y-4 border-t border-border/50 pt-6">
       <div>
-        <h2 className="text-15 font-semibold">Login credentials</h2>
+        <h2 className="type-card-title">Login credentials</h2>
         <p className="mt-1 text-14 text-muted-foreground">
           Revoking or rotating this key also invalidates all its login
           credentials.

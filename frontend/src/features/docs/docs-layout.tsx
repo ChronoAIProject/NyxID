@@ -61,10 +61,10 @@ function SurfaceSwitcher({
             to="/docs/$"
             params={{ _splat: firstSlug(tab.id) }}
             onClick={onNavigate}
-            className={`flex items-center gap-3 rounded-md px-3 py-2 text-15 transition-colors ${
+            className={`flex items-center gap-3 rounded-md px-3 py-2 transition-colors ${
               active
-                ? "bg-overlay-strong font-medium text-foreground"
-                : "text-muted-foreground hover:bg-overlay hover:text-foreground"
+                ? "type-active-nav-item bg-overlay-strong text-foreground"
+                : "type-nav-item text-muted-foreground hover:bg-overlay hover:text-foreground"
             }`}
           >
             <Icon
@@ -104,10 +104,10 @@ function SidebarGroups({
                     to="/docs/$"
                     params={{ _splat: page.slug }}
                     onClick={onNavigate}
-                    className={`block rounded-md px-3 py-1.5 text-14 transition-colors ${
+                    className={`block rounded-md px-3 py-1.5 transition-colors ${
                       active
-                        ? "bg-overlay-strong font-medium text-foreground"
-                        : "text-muted-foreground hover:bg-overlay hover:text-foreground"
+                        ? "type-row-title bg-overlay-strong text-foreground"
+                        : "type-body text-muted-foreground hover:bg-overlay hover:text-foreground"
                     }`}
                   >
                     {page.title}
@@ -202,7 +202,7 @@ export function DocsLayout({
           </span>
           <Link
             to="/docs"
-            className="font-display text-15 font-semibold tracking-tight text-foreground"
+            className="font-display type-card-title tracking-tight text-foreground"
           >
             Docs
           </Link>
@@ -211,7 +211,7 @@ export function DocsLayout({
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-14 font-medium text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
+              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 type-row-title text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
             >
               <Search className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Search</span>
@@ -231,7 +231,7 @@ export function DocsLayout({
             </a>
             <a
               href={isAuthed ? "/dashboard" : "/login"}
-              className="rounded-lg bg-primary px-4 py-1.5 text-14 font-medium text-white transition-colors hover:bg-nyx-600"
+              className="rounded-lg bg-primary px-4 py-1.5 type-row-title text-white transition-colors hover:bg-nyx-600"
             >
               {isAuthed ? "Dashboard" : "Log in"}
             </a>
@@ -267,10 +267,10 @@ export function DocsLayout({
                         <a
                           href={`#${item.id}`}
                           aria-current={active ? "location" : undefined}
-                          className={`-ml-px block border-l pl-3 text-14 transition-colors ${
+                          className={`-ml-px block border-l pl-3 transition-colors ${
                             active
-                              ? "border-nyx-700 font-medium text-foreground dark:border-nyx-secondary-400"
-                              : "border-transparent text-muted-foreground hover:border-border hover:text-foreground"
+                              ? "type-row-title border-nyx-700 text-foreground dark:border-nyx-secondary-400"
+                              : "type-body border-transparent text-muted-foreground hover:border-border hover:text-foreground"
                           }`}
                         >
                           {item.text}
@@ -291,7 +291,7 @@ export function DocsLayout({
           <div className="absolute inset-0 bg-black/60" onClick={() => setMobileNav(false)} />
           <div className="absolute top-0 left-0 h-full w-72 overflow-y-auto border-r border-border bg-background p-5">
             <div className="mb-5 flex items-center justify-between">
-              <span className="font-display text-15 font-semibold tracking-tight text-foreground">
+              <span className="font-display type-card-title tracking-tight text-foreground">
                 Docs
               </span>
               <button type="button" aria-label="Close" onClick={() => setMobileNav(false)}>

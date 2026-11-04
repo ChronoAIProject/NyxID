@@ -110,7 +110,7 @@ export function NodeScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-nodes" className="text-14">
+              <Label htmlFor="allow-all-nodes">
                 Allow all nodes
               </Label>
             </div>
@@ -128,7 +128,7 @@ export function NodeScopeCard({
                         checked={selectedIds.includes(n.id)}
                         onCheckedChange={() => toggleNode(n.id)}
                       />
-                      <Label htmlFor={`node-${n.id}`} className="text-14">
+                      <Label htmlFor={`node-${n.id}`}>
                         {n.name}
                         <Badge
                           variant={

@@ -186,7 +186,7 @@ export function AdminNodesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">Failed to load nodes</p>
+            <p className="type-row-title text-muted-foreground">Failed to load nodes</p>
             <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
@@ -194,7 +194,7 @@ export function AdminNodesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MagicBoxIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No nodes found</p>
+            <p className="type-row-title text-muted-foreground">No nodes found</p>
             <p className="text-13 text-muted-foreground">
               {search || statusFilter
                 ? "No nodes match your filters."
@@ -253,10 +253,10 @@ export function AdminNodesPage() {
                   )}
 
                   <div className="pr-8">
-                    <p className="text-15 font-semibold text-foreground truncate">
+                    <p className="type-card-title text-foreground truncate">
                       {node.name}
                       {node.metadata?.agent_version && (
-                        <span className="ml-2 text-13 font-normal text-muted-foreground">
+                        <span className="ml-2 type-secondary text-muted-foreground">
                           v{node.metadata.agent_version}
                         </span>
                       )}

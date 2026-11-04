@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -217,8 +218,8 @@ function UsageTrendChart({
               aria-pressed={option === measure}
               onClick={() => setPicked(option)}
               className={cn(
-                "rounded px-2 py-0.5 text-13 text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
-                option === measure && "bg-muted font-medium text-foreground",
+                "rounded px-2 py-0.5 type-button text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+                option === measure && "bg-muted text-foreground",
               )}
             >
               {trendLabel(option)}
@@ -515,7 +516,7 @@ function ConnectionUsage({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h5
           id={`usage-history-${connection.id}`}
-          className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+          className="type-table-header uppercase tracking-[1.5px] text-text-tertiary"
         >
           Usage history
         </h5>
@@ -549,13 +550,13 @@ function ConnectionUsage({
           <dl className="grid gap-3 sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">Calls</dt>
-              <dd className="mt-1 text-14 font-medium tabular-nums">
+              <dd className="mt-1 type-row-title tabular-nums">
                 {summary.calls.toLocaleString()}
               </dd>
             </div>
             <div>
               <dt className="text-muted-foreground">Usage</dt>
-              <dd className="mt-1 text-14 font-medium tabular-nums">
+              <dd className="mt-1 type-row-title tabular-nums">
                 {summary.quantities
                   .map(
                     ({ metric, quantity }) =>
@@ -566,7 +567,7 @@ function ConnectionUsage({
             </div>
             <div>
               <dt className="text-muted-foreground">NyxID credits used</dt>
-              <dd className="mt-1 text-14 font-medium tabular-nums">
+              <dd className="mt-1 type-row-title tabular-nums">
                 {!summary.billable
                   ? "None"
                   : summary.charged == null
@@ -679,13 +680,13 @@ function ConnectionBillingPanel({
       aria-label={`Billing for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="inline-flex items-center gap-2 text-14 font-medium">
+        <h4 className="inline-flex items-center gap-2 type-row-title">
           <CreditCard className="size-4 text-primary-text" /> Billing
         </h4>
         {insight.billing?.context !== "configuration" &&
           !!insight.usage?.access.keys.length && (
             <div className="flex items-center gap-2 text-13">
-              <span className="text-muted-foreground">Show for</span>
+              <Label asChild><span className="text-muted-foreground">Show for</span></Label>
               <Select value={caller} onValueChange={setCaller}>
                 <SelectTrigger
                   aria-label="Preview billing for"
@@ -708,7 +709,7 @@ function ConnectionBillingPanel({
       {plain ? (
         <>
           <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-            <p className="text-14 font-medium">
+            <p className="type-row-title">
               {chargedAnyway ? "Credits were charged recently" : plain.headline}
             </p>
             <p className="mt-1 text-13 text-muted-foreground">
@@ -723,7 +724,7 @@ function ConnectionBillingPanel({
           >
             <h5
               id={`billing-details-${connection.id}`}
-              className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+              className="type-table-header uppercase tracking-[1.5px] text-text-tertiary"
             >
               Details
             </h5>
@@ -800,7 +801,7 @@ export function ConnectionInsightPanel({
         aria-label={`Agent key access for ${connection.label}`}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h4 className="inline-flex items-center gap-2 text-14 font-medium">
+          <h4 className="inline-flex items-center gap-2 type-row-title">
             <UsersRound className="size-4 text-primary-text" />{" "}
             {usage.access.basis === "configuration"
               ? "Agent keys in scope"
@@ -923,7 +924,7 @@ export function ConnectionInsightPanel({
       aria-label={`Recent requests for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="inline-flex items-center gap-2 text-14 font-medium">
+        <h4 className="inline-flex items-center gap-2 type-row-title">
           <Activity className="size-4 text-primary-text" /> Recent requests
         </h4>
         <span className="text-13 text-muted-foreground">

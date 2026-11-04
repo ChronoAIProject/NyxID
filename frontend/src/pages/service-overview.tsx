@@ -83,7 +83,7 @@ export function ServiceOverviewPage() {
           ? { view: "routing" }
           : {}
       }
-      className="inline-flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
+      className="inline-flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
     >
       <ArrowLeft className="size-3" />
       All services
@@ -153,7 +153,7 @@ export function ServiceOverviewPage() {
               href={entry.documentation_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-14 font-medium text-primary-text hover:underline"
+              className="type-row-title text-primary-text hover:underline"
             >
               Service documentation
             </a>

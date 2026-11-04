@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { PublicationOperations } from "@/components/services/tool-publication";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -78,7 +79,7 @@ export function AdminToolsPage() {
                 key={supplier}
                 className="rounded-xl border border-border/50 bg-card p-4"
               >
-                <h2 className="text-15 font-semibold">{supplier}</h2>
+                <h2 className="type-card-title">{supplier}</h2>
                 <p className="text-13 text-text-tertiary">
                   {
                     tools.filter((t) => (t.supplier ?? t.name) === supplier)
@@ -114,7 +115,7 @@ export function AdminToolsPage() {
                         {tool.icon_url && (
                           <ServiceIcon iconUrl={tool.icon_url} size="md" />
                         )}
-                        <h2 className="text-15 font-semibold">{tool.name}</h2>
+                        <h2 className="type-card-title">{tool.name}</h2>
                         <Button variant="ghost" asChild>
                           <Link
                             to="/services/$serviceId/edit"
@@ -287,7 +288,7 @@ function AddToolDialog({
             }
           })}
         >
-          <label className="block text-14">
+          <Label className="block">
             Creation method
             <Select
               value={form.watch("creation_mode")}
@@ -305,9 +306,9 @@ function AddToolDialog({
                 <SelectItem value="new">New service</SelectItem>
               </SelectContent>
             </Select>
-          </label>
+          </Label>
           {form.watch("creation_mode") === "twin" && (
-            <label className="block text-14">
+            <Label className="block">
               Source service
               <Select
                 value={form.watch("twin_of_service_id")}
@@ -339,25 +340,25 @@ function AddToolDialog({
                 Copies transport and operations as drafts. Credentials stay with
                 the source.
               </p>
-            </label>
+            </Label>
           )}
           {["name", "slug", "supplier"].map((name) => (
-            <label key={name} className="block text-14">
+            <Label key={name} className="block">
               {name.replaceAll("_", " ")}
               <Input
                 {...form.register(
                   name as "name" | "slug" | "supplier" | "openapi_spec_url",
                 )}
               />
-            </label>
+            </Label>
           ))}
           {form.watch("creation_mode") === "new" && (
             <fieldset className="space-y-3">
-              <label className="block text-14">
+              <Label className="block">
                 Base URL
                 <Input {...form.register("base_url")} />
-              </label>
-              <label className="block text-14">
+              </Label>
+              <Label className="block">
                 Auth method
                 <Select
                   value={form.watch("auth_method")}
@@ -377,15 +378,15 @@ function AddToolDialog({
                     <SelectItem value="header">Header</SelectItem>
                   </SelectContent>
                 </Select>
-              </label>
-              <label className="block text-14">
+              </Label>
+              <Label className="block">
                 Key header
                 <Input {...form.register("auth_key_name")} />
-              </label>
-              <label className="block text-14">
+              </Label>
+              <Label className="block">
                 OpenAPI spec URL
                 <Input {...form.register("openapi_spec_url")} />
-              </label>
+              </Label>
             </fieldset>
           )}
           <div className="flex flex-wrap gap-1">

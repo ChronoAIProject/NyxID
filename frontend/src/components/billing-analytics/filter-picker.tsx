@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useId, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -100,7 +101,7 @@ export function FilterPicker({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 space-y-3 p-3">
         <div className="flex items-center justify-between">
-          <span className="text-14 font-medium">{label}</span>
+          <span className="type-row-title">{label}</span>
           <span className="text-13 text-muted-foreground">
             {draft.length} selected
           </span>
@@ -249,12 +250,12 @@ export function AnalyticsSelect({
         inline ? "flex flex-wrap items-center gap-2" : "space-y-1.5",
       )}
     >
-      <label
+      <Label
         htmlFor={id}
-        className="min-w-0 break-words text-14 font-medium text-muted-foreground"
+        className="min-w-0 break-words text-muted-foreground"
       >
         {label}
-      </label>
+      </Label>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger
           id={id}

@@ -91,32 +91,70 @@ scales the 4px `--spacing` unit from 0.5×–2×, with the same step. Dragging p
 the multiplier; release applies it, and native keyboard adjustments apply directly.
 
 Use these semantic roles in both shells and all themed overlays. Shared primitive
-assignments live in `lib/typography.ts`; numeric classes in markup follow this table.
+assignments live in `lib/typography.ts` and `typography.css`. Use the `type-*`
+role utilities (or `TEXT_STYLES`) in markup. Each owns size, weight and line height;
+consumers customize layout and semantic color, not individual typography properties.
 
-| Role | Token | Weight | Default CSS px (1×) |
-|---|---|---:|---:|
-| Desktop page title | `text-28` | 700 | 23.8 |
-| Mobile page title | `text-22` | 700 | 18.7 |
-| Section heading | `text-20` | 600 | 17 |
-| Card / dialog / sheet title | `text-15` | 600 | 12.75 |
-| Navigation item, inactive / active | `text-15` | 400 / 500 | 12.75 |
-| Body / page description / table cell | `text-14` | 400 | 11.9 |
-| List row identity / approval service / automation label | `text-14` | 500 | 11.9 |
-| Form label / button / action link / tab | `text-14` | 500 | 11.9 |
-| Input / select value / menu item | `text-14` | 400 | 11.9 |
-| Helper / secondary caption / timestamp | `text-13` | 400 | 11.05 |
-| Field validation error | `text-13` | 500 | 11.05 |
-| Tooltip | `text-13` | 400 | 11.05 |
-| Group label / badge | `text-12` | 500 | 10.2 |
-| Table column heading | `text-12` | 600 | 10.2 |
-| Account name | `text-14` | 500 | 11.9 |
-| Account email | `text-12` | 400 | 10.2 |
-| Toast title | `text-15` | 500 | 12.75 |
-| Toast description | `text-14` | 400 | 11.9 |
-| Toast action / cancel | `text-14` | 500 | 11.9 |
-| Transcript / composer prose | `text-16` | 400 | 13.6 |
-| Prominent metric | `text-28` | 600 | 23.8 |
-| Code / terminal | `text-14` | 400 | 11.9 |
+| Role | Token | Weight | Line height | Default CSS px (1×) |
+|---|---|---:|---:|---:|
+| Desktop page title | `text-28` | 700 | 1.1 | 23.8 |
+| Mobile page title | `text-22` | 700 | 1.1 | 18.7 |
+| Section heading | `text-20` | 600 | 1.5 | 17 |
+| Card / dialog / sheet title | `text-15` | 600 | 1.5 | 12.75 |
+| Navigation item, inactive / active | `text-15` | 400 / 500 | 1.5 | 12.75 |
+| Body / page description / table cell | `text-14` | 400 | 1.5 | 11.9 |
+| List row identity / approval service / automation label | `text-14` | 500 | 1.5 | 11.9 |
+| Form label / button / action link / tab | `text-14` | 500 | 1.5 | 11.9 |
+| Input / select value / menu item | `text-14` | 400 | 1.5 | 11.9 |
+| Helper / secondary caption / timestamp | `text-13` | 400 | 1.5 | 11.05 |
+| Field validation error | `text-13` | 500 | 1.5 | 11.05 |
+| Tooltip | `text-13` | 400 | 1.5 | 11.05 |
+| Group label / badge | `text-12` | 500 | 1.5 | 10.2 |
+| Table column heading | `text-12` | 600 | 1.5 | 10.2 |
+| Account name | `text-14` | 500 | 1.5 | 11.9 |
+| Account email | `text-12` | 400 | 1.5 | 10.2 |
+| Toast title | `text-15` | 500 | 1.5 | 12.75 |
+| Toast description | `text-14` | 400 | 1.5 | 11.9 |
+| Toast action / cancel | `text-14` | 500 | 1.5 | 11.9 |
+| Transcript / composer prose | `text-16` | 400 | 1.625 | 13.6 |
+| Prominent metric | `text-28` | 600 | 1.25 | 23.8 |
+| Code / terminal | `text-14` | 400 | 1.625 | 11.9 |
+
+`Label`, `FormLabel` and `GroupedLabel` share the field-label implementation:
+`type-field-label` (text-14/500, 1.5 line height). Use `Label asChild` for legends
+or captions whose controls already have an accessible name. Keep native `htmlFor`
+or wrapping-label associations for editable fields. Never put size, weight or
+line-height classes on these consumers. Inline grouped controls and stacked
+editor captions use the same field-label role; help text uses the secondary role.
+
+Line heights are unitless role values: body, secondary, caption, label, controls
+and card/dialog titles use `--line-body` (1.5); page titles use `--line-page-title`
+(1.1); metrics use `--line-metric` (1.25); transcript prose, composer and code use
+`--line-prose` (1.625). Plain numeric size utilities inherit the surrounding role line box.
+Do not author `leading-*` or inline line-height overrides in themed consumers.
+CSS consumers use role utilities through `@apply`; library renderers read
+`computedTextLineHeight`. Never-themed public prose retains its own typography and 1.4 base line box; shared
+primitives preserve their original public label/title line boxes with `unthemed:`.
+
+Inline emphasis is explicit: `type-secondary-emphasis` uses text-13/500,
+`type-secondary-strong` text-13/600, and `type-body-strong` text-14/600, all at 1.5.
+`type-data-total` uses text-15/500 for compact numeric totals. Decorative onboarding
+monograms use `type-brand-monogram` (text-14/700) and `type-brand-letter`
+(text-28/700), both at 1.5; these are brand glyphs, not UI labels.
+These preserve emphasis in dense data and rich content; they are not field-label,
+button or title substitutes. Rich-content headings retain their hierarchy: text-24/600, text-20/600,
+text-17/600, text-16/600 and text-16/500, all at the 1.5 title line box;
+inline chat mentions use text-16/500 with the transcript line box. These exceptions
+exist because data emphasis and nested prose headings are distinct from UI titles.
+Decorative avatar initials use the shared `type-avatar-initials` roles: text-12,
+text-13 for large avatars, and text-15 for thread-header avatars, each weight 600
+at the body line box. Avatar counts use the corresponding group-label, secondary
+emphasis or compact-data role. Their visual hierarchy follows the avatar size.
+The source guard rejects new size/weight pairs, local line-height assignments,
+native label wrappers and typography overrides on shared labels, including
+local class constants, template fragments and important (`!`) utilities. Sonner uses important shared toast roles so vendor
+styles cannot replace their weights or line boxes. Test fixtures
+and never-themed protocol/landing/blog pages are the documented source exclusions.
 
 Themed application source uses numeric roles, with `text-12` as the smallest role.
 Do not use Tailwind size aliases, arbitrary font sizes, fixed CSS `font-size` or
@@ -161,8 +199,10 @@ description gap, action gap and wrapping. Shared shell navigation, group labels
 and account blocks own their padding, gaps, radii and icon dimensions.
 Every expanded, collapsed and mobile navigation stack uses `shell-nav-stack`,
 with half a spacing unit between rows. Service cards in Studio and Plugins share
-`ServiceCardHeader`: the card-title role with tight tracking and a ten-spacing-unit
-icon container. Both keep the same icon surface, border, corners and title gap.
+`ServiceCardSummary`, composing `ServiceCardHeader`: the card-title role with tight tracking and a ten-spacing-unit
+icon container. Both keep the same icon surface, border, corners and title gap. The summary owns
+two spacing units from header to description, a body-role description at 1.5 line
+height, and two reserved lines (`2lh`). Plugins retain content-driven equal rows.
 The header owns one visual title line and subtitle offset. An interactive title
 uses a vertically centered hit target outside that line's layout, preserving the
 shared control minimum without pushing the subtitle down. Approval identity and
@@ -639,7 +679,7 @@ The shell tokens above are necessary but not sufficient — almost every page in
 Every content page starts with `<PageHeader title description? actions? leading? />`.
 
 - Layout: flex column on mobile, `sm:flex-row sm:items-start sm:justify-between sm:gap-4`
-- Title: `text-22 sm:text-28 font-bold leading-none tracking-tight`, inline `letterSpacing: -0.03em`. The mobile page-title role is intentional — never override.
+- Title: the responsive page-title role (`type-compact-page-title sm:type-page-title`), inline `letterSpacing: -0.03em`. The mobile page-title role is intentional — never override.
 - `leading` slot: 32–48px avatar/icon to the left of the title (`OrgAvatar`, status dot, color chip)
 - `description`: `text-14 text-muted-foreground` directly below the title group
 - `actions` slot: right-aligned, `flex flex-wrap items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
@@ -714,7 +754,7 @@ Illustrations live in `components/icons/empty-state/` — pick a thematically re
 ### Code blocks
 Two flavors, used everywhere docs/credentials/configs appear (`guide`, `ai-setup`, `integration-guide`, `key-detail`, `nodes`):
 
-- **Block:** `<pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-14 leading-relaxed">…`. Optional filename `Badge` above. Copy button absolutely positioned top-right (`absolute top-2 right-2 h-7 w-7` or `h-8 w-8`, ghost icon button, swaps to a green `Check` for ~2s after copy).
+- **Block:** `<pre className="rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono type-code">…`. Optional filename `Badge` above. Copy button absolutely positioned top-right (`absolute top-2 right-2 h-7 w-7` or `h-8 w-8`, ghost icon button, swaps to a green `Check` for ~2s after copy).
 - **Inline chip:** `<code className="rounded bg-muted px-1.5 py-0.5 text-14">snippet</code>` for short identifiers in prose.
 - **`CopyableField`** (shared) — single-line value with a copy button. `rounded-xl border border-border bg-muted font-mono` body + absolutely-positioned `h-8 w-8` (or `h-7 w-7` `size="sm"`) copy button at right-center. Use for tokens, IDs, URIs displayed once.
 
@@ -768,7 +808,7 @@ A 2px gradient bar pinned to the very top of the viewport (`fixed top-0 left-0 r
 The dashboard (after onboarding completes) follows this composition top-to-bottom:
 
 1. **Optional `OnboardingChecklist`** — only when no API keys exist; see Onboarding above.
-2. **Greeting** — `text-22 sm:text-28 font-bold leading-[1.1]` inline `letterSpacing: -0.03em`, "Welcome back, {name}". Email below at `text-14 text-muted-foreground`.
+2. **Greeting** — `type-compact-page-title sm:type-page-title` inline `letterSpacing: -0.03em`, "Welcome back, {name}". Email below at `text-14 text-muted-foreground`.
 3. **Status grid + Security Posture row** — `flex flex-col md:flex-row gap-4`:
    - Left: `flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3` of 6 `StatusCell`s (Email, MFA, Services, API Keys, Nodes, Approvals). Each cell is its own `rounded-xl border border-border/50 bg-card px-4 py-3` link with a 32×32 icon tile, group-label role (`text-12 font-medium`, uppercase), body-role value (`text-14 font-normal`).
    - Right: `AccountPostureCard` — `w-[280px] rounded-xl border border-border/50 bg-card`, header (icon + "Security Posture" + colored status label), 4-item checklist with semantic icon coloring, footer with `0 of 4` counter and a `h-1.5` progress bar filled with `nyx-gradient-vivid`.
@@ -797,6 +837,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 | Date | Decision | Rationale |
 |------|----------|-----------|
 | 2026-11-04 | One control treatment and page rhythm in both shells | Shared themed controls and portals use the same density, padding, gaps, minimums, icons and radii. WorkspacePageHeader composes PageHeader; content insets, section gaps and card gaps share shell classes. Assistant-only root CSS is limited to transcript tick slots. Browser parity covers real shells and portals at all supported audit scales. |
+| 2026-11-05 | Roles own line boxes and form captions | One field-label implementation serves all themed forms, including custom editor captions. Shared role utilities own size, weight and line height; source checks reject local overrides. Service summaries share header, description gap and two-line reservation. Actual create dialogs, settings forms and full service descriptions join the cross-shell parity matrix. |
 | 2026-11-04 | Custom role and enlarged-text guarantees | Custom onboarding actions are text-14/500 and prominent analytics values are text-28/600. The shared 24px hit-area floor covers custom Studio actions as well as primitives. Toast actions and analytics filters reflow; chart axes refresh cached font measurement after Display changes. Active recipes reference the semantic role table. |
 | 2026-11-04 | Canonical text numbers and shared semantic roles | Every text-N is N/16rem, defined once. A simultaneous markup/CSS migration preserves the current reading sizes; a separate change corrects semantic roles using the table above. Studio, NyxBot, auth/docs, charts, Billing, onboarding and portals use the same roles and weights. Root 0.85 rebase and spacing preferences are unchanged. Touch fields floor the input role at 16px; shared targets floor at 24px. |
 | 2026-11-04 | One reading scale across Studio and NyxBot | The themed root owns the reading tokens and 1.5 body line height, so route changes and portals cannot change a token’s rendered size. Shared navigation icons follow their labels in both shells. The later one-treatment decision also makes control sizing and density global to themed surfaces. Never-themed landing/blog defaults remain separate. |

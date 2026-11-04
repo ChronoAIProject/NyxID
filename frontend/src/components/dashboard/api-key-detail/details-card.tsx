@@ -147,7 +147,7 @@ export function DetailsCard({
         ) : (
           <div className="flex items-start justify-between">
             <div>
-              <p className="text-14 font-medium">{name}</p>
+              <p className="type-row-title">{name}</p>
               {description && (
                 <p className="text-13 text-muted-foreground">{description}</p>
               )}
@@ -225,7 +225,7 @@ export function DetailsCard({
                         )
                       }
                     />
-                    <Label htmlFor={`scope-${s}`} className="text-14">
+                    <Label htmlFor={`scope-${s}`}>
                       {s}
                     </Label>
                   </div>

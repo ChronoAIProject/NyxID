@@ -45,11 +45,16 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     function scroll(event: Event) {
       if (event.target === transcript) updateHeader();
     }
-    const observer = new ResizeObserver(() => {
+    let measurementFrame = 0;
+    const measure = () => {
+      measurementFrame = 0;
       setAvailable(boundary.clientWidth);
       setScrollbar(transcript ? transcript.offsetWidth - transcript.clientWidth : 0);
       setComposerInset(composer ? Math.max(0, element.getBoundingClientRect().bottom - composer.getBoundingClientRect().top) : null);
       updateHeader();
+    };
+    const observer = new ResizeObserver(() => {
+      if (!measurementFrame) measurementFrame = requestAnimationFrame(measure);
     });
     function findTranscript() {
       // A dock holds the composer and anything stacked on it (a failure
@@ -86,6 +91,7 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     findTranscript();
     checkRail();
     return () => {
+      cancelAnimationFrame(measurementFrame);
       cancelAnimationFrame(railCheck);
       observer.disconnect();
       mutations.disconnect();

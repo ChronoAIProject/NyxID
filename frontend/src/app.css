@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./typography.css";
 
 /* Class-based `dark:` variant. By default Tailwind v4 binds `dark:` to
    `@media (prefers-color-scheme: dark)`; we rebind it to the dashboard's
@@ -16,10 +17,6 @@
    loses contrast on a light canvas. Untouched by `light:` = unchanged in dark and
    on the never-themed public pages. */
 @custom-variant light (&:where(.theme-light, .theme-light *));
-
-/* Shared primitives preserve their existing assignments on never-themed pages.
-   This variant assigns canonical tokens; it never changes token definitions. */
-@custom-variant unthemed (&:where(html:not(.theme-light):not(.theme-dark) *));
 
 /* Window-height tiers for full-viewport page chrome: the CLI wizard shell
    shrinks its header and footer to stay within 20% of a short window. The
@@ -135,6 +132,27 @@
      size changes the root font size. */
   --spacing: 4px;
 
+  /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
+  --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
+  --font-display: "Mona Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* ── Chart Colors ── */
+  --chart-1: #A672FB;
+  --chart-2: #5A2AF1;
+  --chart-3: #7C4DFF;
+  --chart-4: #B388FF;
+  --chart-5: #6200EA;
+
+  /* ── Landing Page Surfaces ── */
+  --color-landing-bg: #0D0D0D;
+  --color-landing-surface: #171717;
+  --color-landing-surface-raised: #262626;
+  --color-landing-border-subtle: rgba(90, 42, 241, 0.15);
+}
+
+/* Keep every canonical size available to runtime canvas and audit consumers. */
+@theme static {
   /* ── Text scale (rem → follows the root font size set by Appearance) ──
      Every token is its nominal size divided by 16: text-N = N/16rem.
      The themed root applies the 0.85 display baseline. Use tokens instead of
@@ -153,24 +171,6 @@
   --text-24: 1.5rem;
   --text-28: 1.75rem;
   --text-36: 2.25rem;
-
-  /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
-  --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
-  --font-display: "Mona Sans", system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
-
-  /* ── Chart Colors ── */
-  --chart-1: #A672FB;
-  --chart-2: #5A2AF1;
-  --chart-3: #7C4DFF;
-  --chart-4: #B388FF;
-  --chart-5: #6200EA;
-
-  /* ── Landing Page Surfaces ── */
-  --color-landing-bg: #0D0D0D;
-  --color-landing-surface: #171717;
-  --color-landing-surface-raised: #262626;
-  --color-landing-border-subtle: rgba(90, 42, 241, 0.15);
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -275,8 +275,7 @@ html.theme-dark {
 }
 
 html:is(.theme-light, .theme-dark) body {
-  font-size: var(--text-14);
-  line-height: 1.5;
+  @apply type-body;
 }
 
 html:is(.theme-light, .theme-dark) {
@@ -330,8 +329,7 @@ html:is(.theme-light, .theme-dark) .shell-user-block { min-width: 0; min-height:
    Studio and the assistant, including Studio's mobile navigation. */
 .shell-nav-item {
   min-width: 0;
-  font-size: var(--text-15);
-  line-height: 1.5;
+  @apply type-nav-item;
   column-gap: calc(0.5em * var(--display-density, 1));
   padding: calc(0.375em * var(--display-density, 1)) calc(0.75em * var(--display-density, 1));
   min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
@@ -354,9 +352,7 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
   min-width: 0;
   display: block;
   padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
-  line-height: 1.5;
-  font-size: var(--text-12);
-  font-weight: 500;
+  @apply type-group-label;
   text-transform: uppercase;
   letter-spacing: 1.5px;
   color: var(--color-text-tertiary);
@@ -368,8 +364,7 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: var(--text-14);
-  font-weight: 500;
+  @apply type-account-name;
   color: var(--color-foreground);
 }
 
@@ -377,8 +372,7 @@ html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-ic
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  font-size: var(--text-12);
-  font-weight: 400;
+  @apply type-account-email;
   color: var(--color-text-tertiary);
 }
 
@@ -429,8 +423,7 @@ html:is(.theme-light, .theme-dark) [data-grouped-list] [data-slot="grouped-selec
 [data-grouped-row].grouped-field > span:first-child,
 [data-grouped-row].grouped-field > label,
 [data-grouped-row].grouped-field > label > span:first-child {
-  font-size: var(--text-14);
-  font-weight: 500;
+  @apply type-field-label;
   color: var(--color-text-tertiary);
 }
 
@@ -610,7 +603,7 @@ body {
 
 body {
   font-family: var(--font-sans);
-  line-height: 1.4;
+  line-height: var(--line-public-body);
 }
 
 /* Label-to-input spacing */
@@ -1367,9 +1360,7 @@ html.theme-dark .assistant-halo--visible {
   background: color-mix(in srgb, var(--color-primary) 13%, transparent);
   color: var(--color-foreground);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 24%, transparent);
-  font-weight: 500;
-  font-size: var(--text-16);
-  line-height: inherit;
+  @apply type-chat-mention;
 }
 .composer-mention[data-composer-mention="agent"] {
   color: var(--color-primary);
@@ -1616,7 +1607,6 @@ html:is(.theme-light, .theme-dark) [data-icon-button] {
 }
 
 /* Field-label role is identical for shared and manually authored forms. */
-html:is(.theme-light, .theme-dark) label {
-  font-size: var(--text-14);
-  font-weight: 500;
+html:is(.theme-light, .theme-dark) [data-field-label] {
+  @apply type-field-label;
 }

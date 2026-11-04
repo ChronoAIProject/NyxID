@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges, changeLines } from "@/lib/grouped-form-changes";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
@@ -105,7 +106,7 @@ export function SkillPreloadSettings({
         />
         {enabled ? (
           <GroupedRow asChild className="grouped-field">
-            <label>
+            <Label>
               <span>Files to preload</span>
               <GroupedTextarea
                 aria-label={`Preload files for ${name}`}
@@ -115,7 +116,7 @@ export function SkillPreloadSettings({
                 disabled={disabled || save.isPending}
                 {...form.register("paths")}
               />
-            </label>
+            </Label>
           </GroupedRow>
         ) : null}
       </GroupedList>

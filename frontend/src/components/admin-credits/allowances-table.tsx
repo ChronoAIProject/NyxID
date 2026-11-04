@@ -99,7 +99,7 @@ export function AllowancesTable({
             key={bundle.id}
             className="relative rounded-xl border border-border/50 bg-card p-4"
           >
-            <div className="text-15 font-semibold">{name(bundle)}</div>
+            <div className="type-card-title">{name(bundle)}</div>
             <div className="my-2 text-13">{units(bundle)}</div>
             <div className="mb-2 text-13 text-muted-foreground">
               {billingTargetLabel(bundle)}

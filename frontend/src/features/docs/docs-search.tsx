@@ -158,7 +158,7 @@ export function DocsSearch({
                         <span className="font-mono text-12 tracking-wider text-nyx-secondary-400 uppercase">
                           {TAB_LABEL[docTabForSlug(slug)] ?? ""}
                         </span>
-                        <span className="text-14 font-medium text-foreground">{e.title}</span>
+                        <span className="type-row-title text-foreground">{e.title}</span>
                       </div>
                       {e.description && (
                         <p className="mt-0.5 line-clamp-1 text-13 text-text-tertiary">{e.description}</p>

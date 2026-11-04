@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import type { ReactNode } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -25,7 +26,7 @@ export function Choice({
   disabled?: boolean;
 }) {
   return (
-    <label className="space-y-1 text-14">
+    <Label className="space-y-1">
       <span>{label}</span>
       <Select value={value} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger aria-label={label}>
@@ -39,7 +40,7 @@ export function Choice({
           ))}
         </SelectContent>
       </Select>
-    </label>
+    </Label>
   );
 }
 export function NumberInput({
@@ -56,7 +57,7 @@ export function NumberInput({
   max?: number;
 }) {
   return (
-    <label className="space-y-1 text-14">
+    <Label className="space-y-1">
       <span>{label}</span>
       <Input
         aria-label={label}
@@ -66,7 +67,7 @@ export function NumberInput({
         value={Number.isFinite(value) ? value : ""}
         onChange={(e) => onChange(e.target.valueAsNumber)}
       />
-    </label>
+    </Label>
   );
 }
 export function Toggle({
@@ -79,10 +80,10 @@ export function Toggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-3 text-14">
+    <Label className="flex items-center justify-between gap-3">
       <span>{label}</span>
       <Switch aria-label={label} checked={checked} onCheckedChange={onChange} />
-    </label>
+    </Label>
   );
 }
 export function PolicyEditor({
@@ -156,10 +157,10 @@ export function PolicyEditor({
         }
       />
       <fieldset className="space-y-2">
-        <legend className="text-14 font-medium">Retry causes</legend>
+        <Label asChild><legend className="">Retry causes</legend></Label>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {retryTriggers.map((trigger) => (
-            <label key={trigger} className="flex items-center gap-2 text-14">
+            <Label key={trigger} className="flex items-center gap-2">
               <Checkbox
                 checked={policy.retry_on.includes(trigger)}
                 onCheckedChange={(v) =>
@@ -172,7 +173,7 @@ export function PolicyEditor({
                 }
               />
               {trigger.replaceAll("_", " ")}
-            </label>
+            </Label>
           ))}
         </div>
       </fieldset>

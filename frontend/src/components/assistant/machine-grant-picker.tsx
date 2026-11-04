@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { useState } from "react";
 import { Check } from "lucide-react";
@@ -59,9 +60,9 @@ export function MachineGrantPicker({
   );
   return (
     <fieldset disabled={disabled} className="min-w-0">
-      <legend className="sr-only">
+      <Label asChild><legend className="sr-only">
         {kind === "machines" ? "Machines" : "Saved logins"}
-      </legend>
+      </legend></Label>
       <GroupedList
         title={kind === "machines" ? "Machines" : "Saved logins"}
         footer={

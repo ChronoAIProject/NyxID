@@ -77,7 +77,7 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      `inline-flex shrink-0 items-center justify-center whitespace-nowrap px-3 py-2 ${TEXT_STYLES.tab} unthemed:text-12 unthemed:font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground data-[state=active]:font-medium`,
+      `inline-flex shrink-0 items-center justify-center whitespace-nowrap px-3 py-2 ${TEXT_STYLES.tab} unthemed:text-12 unthemed:font-normal text-text-tertiary transition-colors duration-300 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 -mb-px data-[state=active]:text-foreground unthemed:data-[state=active]:font-medium`,
       className,
     )}
     {...props}

@@ -34,7 +34,7 @@ function Section({
   return (
     <section aria-labelledby={id} data-tour={id} className="space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h2 id={id} className="text-15 font-semibold text-foreground">
+        <h2 id={id} className="type-card-title text-foreground">
           {title}
         </h2>
         {action}
@@ -148,7 +148,7 @@ export function AwayList({
             <>
               <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
               {item.kind === "request" ? (
-                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-12 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
+                <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning light:border-transparent light:bg-warning light:text-white">
                   Needs a decision
                 </span>
               ) : (
@@ -260,7 +260,7 @@ function RosterCard({
         <AgentAvatar agent={agent} size="lg" />
         <div className="min-w-0 flex-1">
           <p className="flex min-w-0 items-baseline gap-1.5">
-            <span className="truncate text-15 font-semibold text-foreground">
+            <span className="truncate type-card-title text-foreground">
               {agentTitle(agent)}
             </span>
             {handle ? (
@@ -334,7 +334,7 @@ function GroupCard({
             </span>
           ) : null}
         </div>
-        <span className="truncate text-15 font-semibold text-foreground">
+        <span className="truncate type-card-title text-foreground">
           {group.name}
         </span>
         <span className="truncate text-13 text-text-tertiary">
@@ -403,7 +403,7 @@ export function NyxBotHome({
           <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
           <div className="min-w-0 space-y-1">
             <h1
-              className="text-22 font-bold leading-[1.1] text-foreground sm:text-28"
+              className="type-compact-page-title text-foreground sm:type-page-title"
               style={{ letterSpacing: "-0.03em" }}
             >
               {greetingFor(now)}
@@ -475,7 +475,7 @@ export function NyxBotHome({
                   aria-label={section.label}
                   className="space-y-2"
                 >
-                  <h3 className="text-12 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                  <h3 className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
                     {section.label}
                   </h3>
                   <ul className="grid gap-3 sm:grid-cols-2">

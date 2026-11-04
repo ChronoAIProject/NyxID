@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -270,7 +271,7 @@ function BasicRuntimeForm({
           void save();
         }}
       >
-        <label className="flex items-start gap-2">
+        <Label className="flex items-start gap-2">
           <Checkbox
             checked={publicEnabled}
             onCheckedChange={(value) => setPublic(value === true)}
@@ -278,8 +279,8 @@ function BasicRuntimeForm({
           <span>
             Public FAQ — approved help for visitors, without personal data.
           </span>
-        </label>
-        <label className="flex items-start gap-2">
+        </Label>
+        <Label className="flex items-start gap-2">
           <Checkbox
             checked={personal}
             onCheckedChange={(value) => setPersonal(value === true)}
@@ -288,9 +289,9 @@ function BasicRuntimeForm({
             Personal NyxBot — sign in, review consent and confirm in this
             private conversation.
           </span>
-        </label>
+        </Label>
         {runtime?.public_policy ? (
-          <label className="block space-y-1">
+          <Label className="block space-y-1">
             Public answers
             <select
               aria-label="Public answers"
@@ -303,7 +304,7 @@ function BasicRuntimeForm({
               </option>
               <option value="ai">Saved public AI configuration</option>
             </select>
-          </label>
+          </Label>
         ) : (
           <p className="text-muted-foreground">
             Public answers use the built-in approved FAQ. No inference credits

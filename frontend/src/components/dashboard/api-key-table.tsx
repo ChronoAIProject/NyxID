@@ -129,7 +129,7 @@ export function ApiKeyTable({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <CogsIcon className="h-64 w-64 text-muted-foreground/30" />
         <div className="space-y-1">
-          <p className="text-14 font-medium text-muted-foreground">No API keys yet</p>
+          <p className="type-row-title text-muted-foreground">No API keys yet</p>
           <p className="text-13 text-muted-foreground">
             Create one to get started.
           </p>
@@ -189,7 +189,7 @@ export function ApiKeyTable({
                 <CardContent className="flex h-full min-h-[140px] flex-col gap-3 p-4">
                   <div className="flex items-start justify-between gap-2 pr-8">
                     <div className="min-w-0">
-                      <p className="truncate text-14 font-medium text-foreground">{key.name}</p>
+                      <p className="truncate type-row-title text-foreground">{key.name}</p>
                       <code className="text-14 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
                     </div>
                   </div>
@@ -241,7 +241,7 @@ export function ApiKeyTable({
               <div className="absolute right-3 top-3" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
                 {renderActions(key)}
               </div>
-              <p className="pr-10 text-15 font-semibold text-foreground truncate">{key.name}</p>
+              <p className="pr-10 type-card-title text-foreground truncate">{key.name}</p>
               <code className="text-14 font-mono text-muted-foreground">{key.key_prefix}••••••••</code>
               <div className="mt-2 flex flex-wrap gap-1">
                 {key.platform && <Badge variant="secondary">{key.platform}</Badge>}

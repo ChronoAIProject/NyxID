@@ -83,7 +83,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
       aria-label="Channel health"
       className="space-y-2 rounded-md border border-border p-3"
     >
-      <div className="flex items-center gap-2 text-15 font-medium">
+      <div className="flex items-center gap-2 type-card-title">
         Health
         <Badge variant={healthy ? "success" : "warning"}>
           {healthy ? "Healthy" : "Needs attention"}

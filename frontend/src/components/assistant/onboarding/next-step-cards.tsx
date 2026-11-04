@@ -55,10 +55,10 @@ export function NextStepCards({
                     />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block break-words text-14 font-medium text-foreground">
+                    <span className="block break-words type-row-title text-foreground">
                       {step.title}
                     </span>
-                    <span className="block text-13 font-normal leading-snug text-muted-foreground">
+                    <span className="block type-secondary text-muted-foreground">
                       {step.description}
                     </span>
                   </span>

@@ -107,8 +107,8 @@ export function TeachingEmptyState({
     >
       <Icon className={cn(iconClassName ?? DEFAULT_ICON_CLASS)} />
       <div className="space-y-1.5 max-w-md">
-        <p className="text-15 font-semibold text-foreground">{title}</p>
-        <p className="text-14 text-muted-foreground leading-relaxed">
+        <p className="type-card-title text-foreground">{title}</p>
+        <p className="text-14 text-muted-foreground">
           {description}
         </p>
       </div>

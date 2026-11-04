@@ -163,7 +163,7 @@ function RegisterNodeDialog({
                 value={createdToken.token}
               />
               <div className="rounded-lg bg-muted p-3 space-y-2">
-                <p className="text-13 font-medium text-text-tertiary">
+                <p className="type-secondary-emphasis text-text-tertiary">
                   Run on your node
                 </p>
                 <div>
@@ -362,7 +362,7 @@ export function NodesPage() {
               <>
                 <div className="flex items-center justify-center gap-2">
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <p className="text-14 font-medium text-foreground">Waiting for your node to connect…</p>
+                  <p className="type-row-title text-foreground">Waiting for your node to connect…</p>
                 </div>
                 <p className="text-14 text-muted-foreground">
                   Run the registration command on the node. We&apos;ll take you to its page automatically.
@@ -370,7 +370,7 @@ export function NodesPage() {
               </>
             ) : (
               <>
-                <p className="text-14 font-medium text-foreground">No Credential Nodes</p>
+                <p className="type-row-title text-foreground">No Credential Nodes</p>
                 <p className="text-14 text-muted-foreground">
                   Create a registration token to get started.
                 </p>
@@ -403,10 +403,10 @@ export function NodesPage() {
                     </Button>
                   </div>
                 )}
-                <p data-machine-card-title="" className="pr-10 text-15 font-semibold text-foreground truncate">
+                <p data-machine-card-title="" className="pr-10 type-card-title text-foreground truncate">
                   {node.name}
                   {node.metadata?.agent_version && (
-                    <span className="ml-2 text-13 font-normal text-muted-foreground">
+                    <span className="ml-2 type-secondary text-muted-foreground">
                       v{node.metadata.agent_version}
                     </span>
                   )}
@@ -449,10 +449,10 @@ export function NodesPage() {
                       </Button>
                     </div>
                   )}
-                  <p data-machine-card-title="" className="pr-10 text-15 font-semibold text-foreground truncate">
+                  <p data-machine-card-title="" className="pr-10 type-card-title text-foreground truncate">
                     {node.name}
                     {node.metadata?.agent_version && (
-                      <span className="ml-2 text-13 font-normal text-muted-foreground">
+                      <span className="ml-2 type-secondary text-muted-foreground">
                         v{node.metadata.agent_version}
                       </span>
                     )}

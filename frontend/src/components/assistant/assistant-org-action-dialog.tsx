@@ -523,7 +523,7 @@ export function AssistantOrgActionDialog({
             {(action === "member_add" || action === "invite") &&
             allowedServiceIds !== undefined ? (
               <div className="space-y-1.5">
-                <p className="text-13 font-medium">Allowed services</p>
+                <p className="type-secondary-emphasis">Allowed services</p>
                 <p className="break-all font-mono text-13 text-muted-foreground">
                   {allowedServiceIds.length > 0
                     ? allowedServiceIds.join(", ")
@@ -540,7 +540,7 @@ export function AssistantOrgActionDialog({
               <p className="font-mono text-13 text-muted-foreground">{orgId}</p>
             ) : null}
             {destructive && (
-              <label className="flex items-start gap-2 text-14">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
@@ -549,7 +549,7 @@ export function AssistantOrgActionDialog({
                   <ShieldAlert className="size-3" />I understand this access
                   change is destructive.
                 </span>
-              </label>
+              </Label>
             )}
           </div>
         ) : null}

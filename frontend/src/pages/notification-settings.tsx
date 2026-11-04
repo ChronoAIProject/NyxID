@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -596,7 +597,7 @@ export function NotificationSettingsPage() {
                           {device.platform === "apns" ? "iOS" : "Android"}
                         </Badge>
                         <div className="space-y-0.5">
-                          <p className="text-14 font-medium">
+                          <p className="type-row-title">
                             {device.device_name ?? "Unknown device"}
                           </p>
                           <p className="text-13 text-muted-foreground">
@@ -881,7 +882,7 @@ export function NotificationSettingsPage() {
                     >
                       <div className="flex items-center justify-between">
                         <div className="space-y-0.5">
-                          <p className="text-14 font-medium">
+                          <p className="type-row-title">
                             {config.service_name}
                           </p>
                           <p className="text-13 text-muted-foreground">
@@ -922,9 +923,7 @@ export function NotificationSettingsPage() {
                           <TabsContent value="simple" className="mt-3">
                             <div className="flex flex-col gap-3">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-13 text-muted-foreground">
-                                  Mode:
-                                </span>
+                                <Label htmlFor={`approval-mode-${mutationKey}`}>Mode</Label>
                                 <Select
                                   value={config.approval_mode}
                                   onValueChange={(value) =>
@@ -935,7 +934,7 @@ export function NotificationSettingsPage() {
                                     )
                                   }
                                 >
-                                  <SelectTrigger className="h-7 w-[180px] text-14">
+                                  <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
@@ -955,9 +954,9 @@ export function NotificationSettingsPage() {
                               </div>
                               <div className="flex flex-wrap gap-3">
                                 {approvalVerbs.map((verb) => (
-                                  <label
+                                  <Label
                                     key={verb}
-                                    className="flex items-center gap-2 text-14 text-muted-foreground"
+                                    className="flex items-center gap-2 text-muted-foreground"
                                   >
                                     <Switch
                                       checked={enabledVerbs.includes(verb)}
@@ -971,7 +970,7 @@ export function NotificationSettingsPage() {
                                       }
                                     />
                                     {approvalVerbLabels[verb]}
-                                  </label>
+                                  </Label>
                                 ))}
                               </div>
                             </div>
@@ -1021,7 +1020,7 @@ export function NotificationSettingsPage() {
                 <p className="text-13 text-muted-foreground">
                   Send this to @{linkData.bot_username}
                 </p>
-                <code className="mt-2 block text-14 font-normal">
+                <code className="mt-2 block type-body">
                   /start {linkData.link_code}
                 </code>
               </div>
@@ -1116,9 +1115,9 @@ export function NotificationSettingsPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label className="text-14 font-medium" htmlFor="service-select">
+              <Label htmlFor="service-select">
                 Service
-              </label>
+              </Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
@@ -1141,7 +1140,7 @@ export function NotificationSettingsPage() {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-14 font-medium">Require Approval</p>
+                <p className="type-row-title">Require Approval</p>
                 <p className="text-13 text-muted-foreground">
                   Whether this service requires approval for programmatic
                   access.
@@ -1158,12 +1157,12 @@ export function NotificationSettingsPage() {
             {selectedApprovalRequired && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label
-                    className="text-14 font-medium"
+                  <Label
+
                     htmlFor="approval-mode-select"
                   >
                     Approval Mode
-                  </label>
+                  </Label>
                   <Select
                     value={selectedApprovalMode}
                     onValueChange={(v) =>
@@ -1185,14 +1184,14 @@ export function NotificationSettingsPage() {
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-14 font-medium">
+                  <p className="type-row-title">
                     Require Approval For
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3">
                     {approvalVerbs.map((verb) => (
-                      <label
+                      <Label
                         key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-14 text-muted-foreground"
+                        className="flex items-center justify-between rounded-lg border border-border p-3 text-muted-foreground"
                       >
                         <span>{approvalVerbLabels[verb]}</span>
                         <Switch
@@ -1213,7 +1212,7 @@ export function NotificationSettingsPage() {
                             });
                           }}
                         />
-                      </label>
+                      </Label>
                     ))}
                   </div>
                 </div>

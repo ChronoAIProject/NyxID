@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expectReadableToast } from "./contrast";
 import type { QueryClient } from "@tanstack/react-query";
 
-const properties = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap", "rowGap", "minHeight", "minWidth", "lineHeight", "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius", "fontSize", "fontWeight"] as const;
+const properties = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "columnGap", "rowGap", "minHeight", "minWidth", "lineHeight", "letterSpacing", "borderTopLeftRadius", "borderTopRightRadius", "borderBottomLeftRadius", "borderBottomRightRadius", "fontSize", "fontWeight"] as const;
 const fontResponses = new Map<string, Promise<{ body: Buffer; contentType: string }>>();
 
 async function readings(page: Page, selector: string) {
@@ -43,7 +43,7 @@ async function openRoute(page: Page, path: string, scale: number, density: numbe
     localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: scale, density, mode: theme, motion: "reduce" }, version: 2 }));
     localStorage.setItem("nyxid.telemetry_consent.v3.test-user", JSON.stringify({ enabled: false, asked: true }));
   }, { scale, density, theme });
-  await page.goto(`${path}?mock=1`);
+  await page.goto(`${path}${path.includes("?") ? "&" : "?"}mock=1`);
   await expect(page.locator(".shell-page-content")).toBeVisible();
   if (!mount) {
     await settleLayout(page);
@@ -55,6 +55,7 @@ async function openRoute(page: Page, path: string, scale: number, density: numbe
   });
   await expect(page.locator('[data-parity="input"]')).toBeVisible();
   await expect(page.locator('[data-parity="hidden-icon"]')).toBeHidden();
+  await expect.poll(() => page.evaluate(() => Boolean(window.treatmentFixture))).toBe(true);
   await settleLayout(page);
 }
 
@@ -188,7 +189,9 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
       evidence.push({ studio, assistant, pair });
     }
     expect(errors).toEqual([]);
-    await test.info().attach("equivalent-list-roles.json", { body: JSON.stringify({ theme, width, scale, density, evidence }, null, 2), contentType: "application/json" });
+    const metrics = JSON.stringify({ theme, width, scale, density, evidence }, null, 2);
+    await test.info().attach("equivalent-list-roles.json", { body: metrics, contentType: "application/json" });
+    if (process.env.NYX_REVIEW_SHOTS) await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${density}-list-roles.json`), metrics);
     await context.close();
   });
 }
@@ -239,13 +242,37 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
         const headerBox = element.getBoundingClientRect(), titleBox = title.getBoundingClientRect(), subtitleBox = subtitle.getBoundingClientRect();
         const icon = element.querySelector("[data-service-card-icon]")!;
         const style = getComputedStyle(text), box = icon.getBoundingClientRect(), iconStyle = getComputedStyle(icon);
+        const summary = element.closest("[data-service-card-summary]")!;
+        const description = summary.querySelector("[data-service-card-description]")!;
+        const detailStyle = getComputedStyle(description), detailBox = description.getBoundingClientRect();
+        const detail = { size: detailStyle.fontSize, weight: detailStyle.fontWeight, lineHeight: detailStyle.lineHeight, tracking: detailStyle.letterSpacing, reserved: detailStyle.minHeight, gap: detailBox.top - headerBox.bottom };
         const range = document.createRange();
         range.selectNodeContents(text);
         const glyph = range.getBoundingClientRect();
-        return { fontSize: style.fontSize, fontWeight: style.fontWeight, tracking: style.letterSpacing, titleHeight: titleBox.height, titleOffset: titleBox.top - headerBox.top, textOffset: glyph.top - titleBox.top, subtitleOffset: subtitleBox.top - headerBox.top, subtitleHeight: subtitleBox.height, icon: { width: box.width, height: box.height, radius: iconStyle.borderRadius, padding: iconStyle.padding, background: iconStyle.backgroundColor, border: iconStyle.border } };
+        return { description: detail, fontSize: style.fontSize, fontWeight: style.fontWeight, tracking: style.letterSpacing, titleHeight: titleBox.height, titleOffset: titleBox.top - headerBox.top, textOffset: glyph.top - titleBox.top, subtitleOffset: subtitleBox.top - headerBox.top, subtitleHeight: subtitleBox.height, icon: { width: box.width, height: box.height, radius: iconStyle.borderRadius, padding: iconStyle.padding, background: iconStyle.backgroundColor, border: iconStyle.border } };
       });
       expect(header.fontSize).toBe(`${15 * 0.85 * scale}px`);
       expect(header.fontWeight).toBe("600");
+      expect(header.description.size).toBe(`${14 * 0.85 * scale}px`);
+      expect(header.description.weight).toBe("400");
+      expect(parseFloat(header.description.lineHeight)).toBeCloseTo(14 * 0.85 * scale * 1.5, 2);
+      expect(parseFloat(header.description.reserved)).toBeCloseTo(14 * 0.85 * scale * 3, 1);
+      expect(header.description.gap).toBeCloseTo(8 * density, 1);
+      // A wrapping example in the real component, restored before other measurements.
+      const wrapped = await service.evaluate(element => {
+        const summary = element.closest<HTMLElement>("[data-service-card-summary]")!;
+        const description = summary.querySelector<HTMLElement>("[data-service-card-description]")!;
+        const original = description.textContent, width = summary.style.width;
+        description.textContent = "GitHub API proxied via NyxID proxy. Access repositories, issues and pull requests using your connected account.";
+        summary.style.width = "12rem";
+        const style = getComputedStyle(description);
+        const result = { height: description.getBoundingClientRect().height, lineHeight: style.lineHeight, clamp: style.webkitLineClamp };
+        description.textContent = original;
+        summary.style.width = width;
+        return result;
+      });
+      expect(wrapped.clamp).toBe("2");
+      expect(wrapped.height).toBeCloseTo(parseFloat(wrapped.lineHeight) * 2, 1);
       expect(header.icon.width).toBeCloseTo(40 * density, 1);
       expect(header.icon.height).toBeCloseTo(40 * density, 1);
       if (!assistant) {
@@ -255,7 +282,7 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
       }
       headers.push(header);
       const cards = assistant ? await pluginCardBounds(page) : null;
-      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && (scale === 0.5 || scale === 1)) {
+      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && [0.5, 1, 2].includes(scale)) {
         await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
         await service.evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
         await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${assistant ? "plugins" : "keys"}.png`) });
@@ -370,7 +397,7 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
     await page.addInitScript(theme => localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: 1, density: 1, mode: theme }, version: 2 })), theme);
     const pages = [];
     for (const path of ["/approvals/history", "/assistant/approvals", "/keys", "/assistant/plugins"]) {
-      await page.goto(`${path}?mock=1`);
+      await page.goto(`${path}${path.includes("?") ? "&" : "?"}mock=1`);
       await expect(page.locator('[data-page-header]')).toBeVisible();
       const metrics = await page.locator('[data-page-header]').evaluate(header => {
         const s = getComputedStyle(header), heading = getComputedStyle(header.querySelector('[data-page-heading]')!), content = getComputedStyle(document.querySelector('.shell-page-content')!), stack = getComputedStyle(header.closest('.shell-page-stack')!);
@@ -386,6 +413,91 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
     }
     await test.info().attach("page-spacing.json", { body: JSON.stringify(pages, null, 2), contentType: "application/json" });
     if (process.env.NYX_TREATMENT_SHOTS) await writeFile(join(process.env.NYX_TREATMENT_SHOTS, `${theme}-${width}-page-spacing.json`), JSON.stringify(pages, null, 2));
+    await context.close();
+  });
+}
+
+/** Inspect native associations and the caption's inherited role in actual forms. */
+async function realFormLabels(container: import("@playwright/test").Locator, scale: number) {
+  const labels = container.locator("label:visible");
+  await expect(labels.first()).toBeVisible();
+  const fields = await labels.evaluateAll(elements => elements.map(element => {
+    const label = element as HTMLLabelElement, style = getComputedStyle(label);
+    const caption = label.querySelector("span:first-child"), captionStyle = caption ? getComputedStyle(caption) : style;
+    return { name: (caption?.textContent ?? label.textContent)?.trim(), associated: Boolean(label.control), marker: label.hasAttribute("data-field-label"), role: { size: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, tracking: style.letterSpacing }, caption: { size: captionStyle.fontSize, weight: captionStyle.fontWeight, lineHeight: captionStyle.lineHeight } };
+  }));
+  for (const field of fields) {
+    expect(field.marker, field.name).toBe(true);
+    expect(parseFloat(field.role.size), field.name).toBeCloseTo(14 * 0.85 * scale, 2);
+    expect(field.role.weight, field.name).toBe("500");
+    expect(parseFloat(field.role.lineHeight), field.name).toBeCloseTo(14 * 0.85 * scale * 1.5, 2);
+    expect(field.caption, field.name).toEqual({ size: field.role.size, weight: field.role.weight, lineHeight: field.role.lineHeight });
+  }
+  return fields;
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) for (const scale of [0.5, 1, 1.5, 2]) for (const density of [1, 1.4]) {
+  test(`real create dialogs and settings field-label parity (${theme}, ${width}, text ${scale}×, spacing ${density}×)`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width, height: 1000 }, isMobile: width === 390, hasTouch: width === 390, reducedMotion: "reduce" });
+    const page = await context.newPage(), errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.route("**/api/**", route => route.fulfill({ json: {} }));
+    await page.route("**/api/v1/triggers/preview", route => route.fulfill({ json: { next_runs: [], description: "Schedule preview" } }));
+    const evidence = [], roles = [], dialogs = [];
+    for (const path of ["/triggers", "/assistant/automations", "/settings", "/assistant/automations?panel=nyxbot&nyxbot=1"]) {
+      await openRoute(page, path, scale, density, theme, false);
+      let container;
+      if (path === "/triggers" || path === "/assistant/automations") {
+        const name = path === "/triggers" ? "Create Trigger" : "Create automation";
+        await page.getByRole("button", { name, exact: true }).click();
+        container = page.getByRole("dialog", { name, exact: true });
+      } else if (path.includes("panel=")) container = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
+      else container = page.locator(".shell-page-content");
+      await settleLayout(page);
+      const initial = await realFormLabels(container, scale);
+      const textRoles = await container.locator("h2, p[id], input:not([type=hidden]), button[type=submit]").evaluateAll(elements => elements.filter(element => element.getClientRects().length).map(element => {
+        const style = getComputedStyle(element);
+        return { tag: element.tagName, type: element.getAttribute("type"), size: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, tracking: style.letterSpacing };
+      }));
+      if (path === "/triggers" || path === "/assistant/automations") {
+        const typography = (locator: import("@playwright/test").Locator) => locator.evaluate(element => {
+          const style = getComputedStyle(element);
+          return { size: style.fontSize, weight: style.fontWeight, lineHeight: style.lineHeight, tracking: style.letterSpacing };
+        });
+        const dialogRoles = {
+          title: await typography(container.getByRole("heading", { name: path === "/triggers" ? "Create Trigger" : "Create automation", exact: true })),
+          input: await typography(container.getByRole("textbox", { name: "Label", exact: true })),
+          submit: await typography(container.getByRole("button", { name: path === "/triggers" ? "Create" : "Save automation", exact: true })),
+        };
+        dialogs.push(dialogRoles);
+      }
+      expect(initial.some(field => field.associated), path).toBe(true);
+      roles.push(initial[0]!.role);
+      if (process.env.NYX_REVIEW_SHOTS && density === 1 && [1, 2].includes(scale)) {
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${path.replace(/[^a-z]+/g, "-")}-form.png`) });
+      }
+      const extra = [];
+      if (path === "/triggers") {
+        await container.getByRole("combobox", { name: "Verification", exact: true }).click();
+        await page.getByRole("option", { name: "HMAC-SHA256", exact: true }).click();
+        await container.getByRole("combobox", { name: "Delivery Target", exact: true }).click();
+        await page.getByRole("option", { name: "Webhook", exact: true }).click();
+        extra.push(...await realFormLabels(container, scale));
+      } else if (path === "/assistant/automations") {
+        await container.getByRole("tab", { name: "Webhook", exact: true }).click();
+        await container.getByRole("combobox", { name: "Inbound verification", exact: true }).click();
+        await page.getByRole("option", { name: "HMAC-SHA256", exact: true }).click();
+        extra.push(...await realFormLabels(container, scale));
+      }
+      evidence.push({ path, initial, extra, textRoles });
+    }
+    for (const role of roles) expect(role).toEqual(roles[0]);
+    expect(dialogs[1]).toEqual(dialogs[0]);
+    expect(errors).toEqual([]);
+    const metrics = JSON.stringify({ theme, width, scale, density, evidence }, null, 2);
+    await test.info().attach("real-field-labels.json", { body: metrics, contentType: "application/json" });
+    if (process.env.NYX_REVIEW_SHOTS) await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${scale}-${density}-real-labels.json`), metrics);
     await context.close();
   });
 }

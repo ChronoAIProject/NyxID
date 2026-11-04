@@ -22,8 +22,16 @@ export function typographyViolations(file, source) {
   if (!excluded(file) && source.includes('--assistant-density')) errors.push('shared spacing must use --display-density');
   const fail = (offset, message) => errors.push(`line ${source.slice(0, offset).split('\n').length}: ${message}`);
   const classes = (text, offset) => {
+    if (!excluded(file)) {
+      const themed = text.split(/\s+/).filter(token => !token.startsWith('unthemed:'))
+        .map(token => token.replace(/(^|:)!/g, '$1').replace(/!$/, '')).join(' ');
+      if (/(?:^|\s)(?:\S*:)?leading-/.test(themed)) fail(offset, 'line-height belongs to a shared typography role');
+      if (/(?:^|\s)(?:\S*:)?(?:text-\d+|type-[\w-]+)\b/.test(themed) && /(?:^|\s)(?:\S*:)?font-(normal|medium|semibold|bold)\b/.test(themed)) {
+        fail(offset, 'size, weight and line-height must come from one shared typography role');
+      }
+    }
     if (/\bfont-display\b/.test(text) && /\btext-28\b/.test(text) && !/\bfont-(semibold|bold)\b/.test(text)) {
-      fail(offset, 'prominent metrics use text-28 font-semibold (page titles use font-bold)');
+      fail(offset, 'prominent metrics use type-metric (page titles use type-page-title)');
     }
     for (const match of text.matchAll(/(?<![\w-])(?:[^\s"'`]*:)?text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl)(?![\w-])|text-\[(?:[.\d]+(?:px|rem|em))\]/g)) {
       if (match[0].includes('unthemed:')) continue;
@@ -35,6 +43,7 @@ export function typographyViolations(file, source) {
     css.walkRules(rule => {
       if (!/\.nb-(primary|secondary|provider)\b|\.nb-device-login\s*>\s*button/.test(rule.selector)) return;
       const declarations = Object.fromEntries(rule.nodes.filter(node => node.type === 'decl').map(node => [node.prop, node.value]));
+      if (rule.nodes.some(node => node.type === 'atrule' && node.name === 'apply' && node.params === 'type-button')) return;
       if ('font-size' in declarations && (declarations['font-size'] !== 'var(--text-14)' || declarations['font-weight'] !== '500')) {
         errors.push(`${rule.selector}: custom onboarding actions must use the button role, text-14 / 500`);
       }
@@ -47,25 +56,55 @@ export function typographyViolations(file, source) {
       }
       if (!excluded(file) && /^(font|font-size)$/.test(decl.prop) && !decl.value.includes('var(--text-') && !/^(inherit|initial|unset)$/.test(decl.value)) errors.push(`${decl.prop}: ${decl.value} must use a numeric token`);
       if (!excluded(file) && /var\(--text-(9|10|11)\)/.test(decl.value)) errors.push(`${decl.value} is below the readable role minimum`);
+      if (!excluded(file) && file !== 'typography.css' && decl.prop === 'font' && !/^(inherit|initial|unset)$/.test(decl.value)) errors.push('font shorthands bypass role line-height; use a shared role and font-family');
+      if (!excluded(file) && file !== 'typography.css' && decl.prop === 'font-weight' && !(decl.parent.type === 'atrule' && decl.parent.name === 'font-face')) errors.push('font weight belongs to a shared typography role');
+      if (/^--line-/.test(decl.prop) && file !== 'typography.css') errors.push('role line-height definitions belong only in typography.css');
+      if (!excluded(file) && decl.prop === 'line-height' && !/^(?:inherit|normal|var\(--line-(?:body|public-body|title|page-title|metric|prose)\))$/.test(decl.value)) errors.push(`${decl.value}: line-height must consume a shared role`);
     });
     css.walkAtRules('apply', rule => classes(rule.params, rule.source.start.offset));
-  } else if (!excluded(file) && /fontSize|font-display|(?<![\w-])font\s*:|text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl|\[)/.test(source)) {
+  } else if (!excluded(file)) {
+    // Most modules cannot contain a violation. Keep the repository scan cheap
+    // enough for the default test timeout, including on a busy CI worker.
+    const needsAst = /<label\b|<legend\b|fontSize|font-display|\bfont\s*:|\blineHeight\s*:|leading-|text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl|\[)/.test(source)
+      || /<(?:Label|FormLabel|GroupedLabel)\b[^>]*className/.test(source)
+      || (/font-(?:normal|medium|semibold|bold)/.test(source) && /text-\d|type-|TEXT_STYLES\./.test(source));
+    if (!needsAst) return errors;
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, file.endsWith('tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const constants = new Map();
+    function findConstants(node) {
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) constants.set(node.name.text, node.initializer);
+      ts.forEachChild(node, findConstants);
+    }
+    findConstants(ast);
+    function classFragments(node, seen = new Set()) {
+      if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) return [node.text];
+      if (ts.isIdentifier(node) && constants.has(node.text) && !seen.has(node.text)) {
+        return classFragments(constants.get(node.text), new Set([...seen, node.text]));
+      }
+      if (ts.isPropertyAccessExpression(node) && node.expression.getText(ast) === 'TEXT_STYLES') return ['type-shared-role'];
+      const fragments = [];
+      ts.forEachChild(node, child => { fragments.push(...classFragments(child, seen)); });
+      return fragments;
+    }
     function visit(node) {
+      if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(ast) === 'label') fail(node.getStart(ast), 'form labels must use the shared Label/FormLabel/GroupedLabel implementation');
+      if (ts.isJsxOpeningElement(node) && node.tagName.getText(ast) === 'legend' && !(ts.isJsxElement(node.parent.parent) && node.parent.parent.openingElement.tagName.getText(ast) === 'Label')) fail(node.getStart(ast), 'fieldset captions must use Label asChild to retain native legend semantics');
+      if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && /^(Label|FormLabel|GroupedLabel)$/.test(node.tagName.getText(ast))) {
+        const attribute = node.attributes.properties.find(property => ts.isJsxAttribute(property) && property.name.getText(ast) === 'className');
+        if (attribute && /(?:type-[\w-]+|text-\d+|font-(?:normal|medium|semibold|bold)|leading-)/.test(classFragments(attribute).join(' ').replace(/unthemed:[\w-]+/g, ''))) fail(attribute.getStart(ast), 'field labels own their typography; consumers may only customize layout and color');
+      }
       if (ts.isJsxAttribute(node) && node.name.getText(ast) === 'className' && node.initializer && ts.isJsxExpression(node.initializer)) {
-        const fragments = [];
-        function collect(child) {
-          if (ts.isStringLiteral(child) || ts.isNoSubstitutionTemplateLiteral(child)) fragments.push(child.text);
-          ts.forEachChild(child, collect);
-        }
-        collect(node.initializer);
-        classes(fragments.join(' '), node.getStart(ast));
+        classes(classFragments(node.initializer).join(' '), node.getStart(ast));
+      }
+      if (ts.isTemplateExpression(node) && node.getText(ast).includes('TEXT_STYLES.')) {
+        classes(node.head.text + node.templateSpans.map(span => `${span.expression.getText(ast).startsWith('TEXT_STYLES.') ? ' type-shared-role ' : ' '}${span.literal.text}`).join(''), node.getStart(ast));
       }
       if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) classes(node.text, node.getStart(ast));
       if ((ts.isPropertyAssignment(node) && /^(fontSize|font)$/.test(node.name.getText(ast))) || (ts.isJsxAttribute(node) && node.name.getText(ast) === 'fontSize')) {
         const value = (node.initializer?.getText(ast) ?? '');
         if (!/var\(--text-|computedTextSize\(|^tokenSize$|inherit/.test(value)) fail(node.getStart(ast), `${node.name.getText(ast)} must use a numeric token, computedTextSize for canvas consumers`);
       }
+      if (ts.isPropertyAssignment(node) && node.name.getText(ast) === 'lineHeight' && !/computedTextLineHeight\(/.test(node.initializer.getText(ast))) fail(node.getStart(ast), 'library line-height must consume computedTextLineHeight');
       ts.forEachChild(node, visit);
     }
     visit(ast);

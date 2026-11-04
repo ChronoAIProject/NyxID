@@ -299,14 +299,14 @@ export function AnalyticsWorkspace({
                           : "text-muted-foreground",
                       )}
                     />
-                    <span className="text-15 font-semibold">
+                    <span className="type-card-title">
                       {TEMPLATE_COPY[layout].name}
                     </span>
                     <span className="sr-only">
                       {TEMPLATE_COPY[layout].reference}
                     </span>
                     {TEMPLATE_COPY[layout].recommended && (
-                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 text-12 font-medium text-nyx-secondary-400">
+                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 type-group-label text-nyx-secondary-400">
                         Recommended
                       </span>
                     )}
@@ -318,7 +318,7 @@ export function AnalyticsWorkspace({
         )}
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <h2 className="truncate text-15 font-semibold">
+            <h2 className="truncate type-card-title">
               {activeTab === "dashboard" ? view.name : "Usage records"}
             </h2>
             <span
@@ -376,7 +376,7 @@ export function AnalyticsWorkspace({
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-80 space-y-4 p-4">
                   <div>
-                    <h3 className="text-15 font-semibold">Your saved views</h3>
+                    <h3 className="type-card-title">Your saved views</h3>
                     <p className="mt-1 text-13 text-muted-foreground">
                       Private to your account. Exploring never overwrites a
                       named view.
@@ -535,7 +535,7 @@ export function AnalyticsWorkspace({
           <AdminUsagePreload filters={view.filters} search={preloadSearch} />
         )}
       </Tabs>
-      <p className="text-12 leading-relaxed text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         Usage windows are UTC and end-exclusive. Gross cost includes wallet,
         grant, and allowance funding. Billing-account filters select who paid;
         acting-user filters select who made the request.

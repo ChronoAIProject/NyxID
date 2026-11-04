@@ -142,7 +142,7 @@ export function CmaSessionIndicator({
           : "CMA activity in this session"
       }
       title={`${sessions.length} CMA session${sessions.length === 1 ? "" : "s"}`}
-      className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-12 font-medium text-muted-foreground"
+      className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 type-group-label text-muted-foreground"
     >
       <CmaGlyph aria-hidden="true" className="h-3.5 w-3.5" /> CMA
       <span
@@ -193,7 +193,7 @@ function CmaSessionCard({
           className="h-4 w-4 shrink-0 text-muted-foreground"
         />
         <h2
-          className="min-w-0 flex-1 basis-32 line-clamp-2 break-words text-15 font-semibold leading-snug"
+          className="min-w-0 flex-1 basis-32 line-clamp-2 break-words type-card-title"
           title={state.title}
         >
           {state.title}
@@ -486,14 +486,14 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
       {state.notice ? (
         <p
           role="note"
-          className="text-13 leading-relaxed text-muted-foreground"
+          className="text-13 text-muted-foreground"
         >
           {state.notice}
         </p>
       ) : null}
       <section aria-label="CMA activity">
         <div className="mb-0.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-          <h4 className="text-12 font-medium text-text-tertiary">
+          <h4 className="type-group-label text-text-tertiary">
             Recent actions
           </h4>
           {actions.length > 3 ? (
@@ -529,14 +529,14 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
                     <Circle className="h-3 w-3 text-text-tertiary" />
                   )}
                 </span>
-                <span className="min-w-0 break-words leading-snug text-muted-foreground">
+                <span className="min-w-0 break-words text-muted-foreground">
                   {action.title}
                 </span>
               </li>
             ))}
           </ol>
         ) : (
-          <p className="text-13 leading-relaxed text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             {state.status === "working"
               ? "CMA is working. Actions will appear as it reports them."
               : "New session activity will appear here."}

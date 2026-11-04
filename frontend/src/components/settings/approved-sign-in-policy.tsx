@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useSaveSecurityPreferences } from "@/hooks/use-security-preferences";
@@ -34,9 +35,9 @@ export function ApprovedSignInPolicy() {
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1">
-          <label htmlFor="skip-approved-sign-in-mfa" className="text-14 font-medium">
+          <Label htmlFor="skip-approved-sign-in-mfa">
             Skip MFA for NyxID app sign-ins
-          </label>
+          </Label>
           <p id="skip-approved-sign-in-description" className="text-14 text-muted-foreground">
             Approve QR or typed sign-in codes from a signed-in NyxID app or browser without
             another authenticator code. Enabled by default; turn this off to require MFA

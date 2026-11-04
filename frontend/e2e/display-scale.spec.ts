@@ -20,13 +20,14 @@ async function fixture(page: Page, path: string) {
   }));
   await page.goto(`${path}?display-fixture`);
   await expect(page.getByRole("textbox", { name: "Email", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => Boolean(window.displayFixture))).toBe(true);
   await page.addStyleTag({ content: "*,*::before,*::after { animation:none!important; transition:none!important; }" });
 }
 
 async function metrics(page: Page, selector: string) {
   return page.locator(selector).evaluateAll(elements => elements.map(element => {
     const style = getComputedStyle(element), box = element.getBoundingClientRect();
-    return { size: parseFloat(style.fontSize), weight: style.fontWeight, width: box.width, height: box.height };
+    return { size: parseFloat(style.fontSize), weight: style.fontWeight, lineHeight: parseFloat(style.lineHeight), width: box.width, height: box.height };
   }));
 }
 
@@ -79,6 +80,7 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
           const reading = (await metrics(page, selector))[0]!;
           expect(reading.size, `${path} ${kind}`).toBeCloseTo(n * 0.85 * scale, 2);
           expect(reading.weight, `${path} ${kind}`).toBe(weight);
+          expect(reading.lineHeight, `${path} ${kind} line box`).toBeCloseTo(n * 0.85 * scale * 1.5, 2);
           portals.push({ kind, size: reading.size, weight: reading.weight });
           if (kind === "dialog" || kind === "sheet") {
             const close = page.locator(`[data-fixture-portal="${kind}"] button`).filter({ has: page.locator('span.sr-only') });
@@ -95,6 +97,15 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
           if (kind === "toast") {
             const toast = page.locator('[data-sonner-toast]');
             const bounds = await toast.boundingBox();
+            for (const [selector, n, weight] of [["[data-title]", 15, "500"], ["[data-description]", 14, "400"], ["[data-button]", 14, "500"]] as const) {
+              const text = await metrics(page, `[data-sonner-toast] ${selector}`);
+              expect(text.length).toBeGreaterThan(0);
+              for (const reading of text) {
+                expect(reading.size).toBeCloseTo(n * 0.85 * scale, 2);
+                expect(reading.weight).toBe(weight);
+                expect(reading.lineHeight).toBeCloseTo(n * 0.85 * scale * 1.5, 2);
+              }
+            }
             for (const child of await toast.locator('[data-content], [data-title], [data-description], [data-button]').all()) {
               const box = (await child.boundingBox())!;
               expect(box.x).toBeGreaterThanOrEqual(bounds!.x);

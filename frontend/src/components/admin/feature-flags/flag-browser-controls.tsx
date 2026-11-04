@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import type { ReactNode } from "react";
 import { Folder, Search, SlidersHorizontal, Tag } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -131,7 +132,7 @@ function FilterSelect({
   children: ReactNode;
 }) {
   return (
-    <label className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-hairline px-2.5 text-text-tertiary transition-colors hover:border-hairline-strong has-[select:focus-visible]:ring-2 has-[select:focus-visible]:ring-ring">
+    <Label className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-hairline px-2.5 text-text-tertiary transition-colors hover:border-hairline-strong has-[select:focus-visible]:ring-2 has-[select:focus-visible]:ring-ring">
       {icon}
       <span className="sr-only">{label}</span>
       <select
@@ -142,6 +143,6 @@ function FilterSelect({
       >
         {children}
       </select>
-    </label>
+    </Label>
   );
 }

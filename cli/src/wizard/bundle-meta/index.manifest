@@ -190,5 +190,6 @@ frontend/src/stores/credits-denial-store.ts
 frontend/src/stores/service-card-view-store.ts
 frontend/src/stores/theme-store.ts
 frontend/src/types/options.ts
+frontend/src/typography.css
 frontend/src/wizard-entry.tsx
 frontend/wizard.html

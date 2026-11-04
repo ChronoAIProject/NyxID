@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -141,7 +142,7 @@ function KeyRotationResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-15 font-medium">
+            <p className="type-card-title">
               {result.replayed ? "Existing replacement key" : "Assistant key rotated"}
             </p>
             <p className="break-all font-mono text-14 text-muted-foreground">
@@ -166,13 +167,13 @@ function KeyRotationResult({
               {copied ? <Check className="text-success" /> : <Copy />}
             </Button>
           </div>
-          <label className="flex cursor-pointer items-start gap-2 text-14">
+          <Label className="flex cursor-pointer items-start gap-2">
             <Checkbox
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
             />
             <span>I saved this replacement key in a secure location.</span>
-          </label>
+          </Label>
         </div>
       )}
       {verified ? (
@@ -364,7 +365,7 @@ export function AssistantKeyRotateDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-13 leading-relaxed text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               NyxID preserves the key's authority and disables this exact
               predecessor atomically.
             </p>

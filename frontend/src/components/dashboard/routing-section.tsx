@@ -107,7 +107,7 @@ export function RoutingSection({
 
         {!readOnly && picking && (
           <div className="space-y-2">
-            <Label className="text-14">Select routing</Label>
+            <Label>Select routing</Label>
             <Select
               onValueChange={handleSelectNode}
               defaultValue={nodeId ?? "direct"}

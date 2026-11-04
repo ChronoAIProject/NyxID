@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { TelegramManagers } from "@/components/telegram-managers";
 import {
   PlatformHelpEditor,
@@ -80,7 +81,7 @@ export function GatewayCleanupControls({
   if (!tasks.data?.length && !tasks.error) return null;
   return (
     <section className="space-y-3 rounded-lg border border-border p-3">
-      <h3 className="text-14 font-medium">Previous gateway connections</h3>
+      <h3 className="type-row-title">Previous gateway connections</h3>
       <p className="text-14 text-muted-foreground">
         Inspect a previous connection before resolving its cleanup. A changed
         remote binding is kept; recovery never deletes a different version.
@@ -144,9 +145,9 @@ export function GatewayCleanupControls({
                 setConfirmation(checked ? reviewKey : undefined)
               }
             />
-            <label htmlFor={`gateway-review-${current.task_id}`}>
+            <Label htmlFor={`gateway-review-${current.task_id}`}>
               I reviewed this connection and resolution.
-            </label>
+            </Label>
           </div>
           <Button
             disabled={

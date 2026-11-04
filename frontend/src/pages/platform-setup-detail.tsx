@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { creditUnit } from "@/lib/platform-onboarding";
 import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
@@ -188,7 +189,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                 {approval.data.manager_revision}.
               </p>
             )}
-            <label className="flex gap-2">
+            <Label className="flex gap-2">
               <Checkbox
                 checked={currentReview}
                 onCheckedChange={(checked) =>
@@ -199,7 +200,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                 I approve these exact saved facts, limits, model and bot
                 identity.
               </span>
-            </label>
+            </Label>
             <Button
               disabled={!actor || !currentReview || mutation.isPending}
               onClick={() => {
@@ -383,7 +384,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
               ))}
               {setup.template === "restaurant-starter" && (
                 <div className="space-y-3">
-                  <h3 className="text-15 font-semibold">
+                  <h3 className="type-card-title">
                     Frequently asked questions
                   </h3>
                   {form.watch("facts.faq").map((_, index) => (
@@ -446,7 +447,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                   </Button>
                 </div>
               )}
-              <h3 className="text-15 font-semibold">Runtime limits</h3>
+              <h3 className="type-card-title">Runtime limits</h3>
               <p className="text-14 text-muted-foreground">
                 These caps are reviewed separately from activation. Public
                 restaurant requests require staff confirmation.
@@ -559,7 +560,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
               ? "Customer receipt verified."
               : "Customer receipt has not been verified."}
           </p>
-          <label className="flex items-start gap-2">
+          <Label className="flex items-start gap-2">
             <Checkbox
               checked={reviewed}
               onCheckedChange={(value) => setReviewed(value === true)}
@@ -568,7 +569,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
             <span>
               I reviewed every saved answer and limit in this revision.
             </span>
-          </label>
+          </Label>
           <div className="flex flex-wrap justify-end gap-2">
             <Button
               disabled={
@@ -615,7 +616,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
             {bindings.error && (
               <ErrorBanner message="Could not load your bindings." />
             )}
-            <label className="block space-y-2">
+            <Label className="block space-y-2">
               Your linked private Telegram account
               <select
                 className="h-8 w-full rounded-lg border border-input bg-background px-3 text-14"
@@ -630,7 +631,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                   </option>
                 ))}
               </select>
-            </label>
+            </Label>
             <Button
               disabled={
                 !bindingId ||

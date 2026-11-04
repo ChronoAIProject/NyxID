@@ -103,14 +103,14 @@ for (const width of [320, 1280]) {
       await page.keyboard.press("Escape");
 
       const input = composerInput(page);
-      await expect.poll(() => input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBe(16 * textScale);
+      await expect.poll(() => input.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(13.6 * textScale, 2);
       await expect.poll(() => input.evaluate((el) => ({
         height: el.clientHeight,
         content: el.scrollHeight,
         overflow: getComputedStyle(el).overflowY,
       }))).toMatchObject({ overflow: "scroll" });
       const bubble = page.getByText(message, { exact: true });
-      expect(await bubble.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBe(16 * textScale);
+      expect(await bubble.evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(13.6 * textScale, 2);
       await expectContained(bubble);
       await expectContained(page.getByRole("main"));
       const send = await page.getByRole("button", { name: "Send message", exact: true }).boundingBox();
@@ -120,7 +120,7 @@ for (const width of [320, 1280]) {
       await expectPaddedIcon(page.getByRole("button", { name: "Send message", exact: true }), spacing, true);
 
       await page.reload();
-      await expect.poll(() => composerInput(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBe(16 * textScale);
+      await expect.poll(() => composerInput(page).evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeCloseTo(13.6 * textScale, 2);
       const reopened = await openDisplay(page);
       await expect(reopened.getByRole("slider", { name: "Text size", exact: true })).toHaveValue(String(textScale));
       await expect(reopened.getByRole("slider", { name: "Spacing", exact: true })).toHaveValue(String(spacing));

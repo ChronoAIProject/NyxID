@@ -89,7 +89,7 @@ export function ComposerConnectionPicker({
                 aria-label={group.name}
                 className="space-y-1"
               >
-                <h3 className="text-14 font-semibold">{group.name}</h3>
+                <h3 className="type-body-strong">{group.name}</h3>
                 {group.connections.map((key) => (
                   <button
                     key={key.id}

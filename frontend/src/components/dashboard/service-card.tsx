@@ -86,7 +86,7 @@ export function ServiceCard({
             }
             size="md"
           />
-          <h3 className="truncate text-15 font-normal text-foreground">
+          <h3 className="truncate type-nav-item text-foreground">
             {service.name}
           </h3>
         </div>

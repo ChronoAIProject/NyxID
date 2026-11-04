@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { NyxbotRealWork } from "./nyxbot-real-work";
 import { Input as ThresholdInput } from "@/components/ui/input";
 import { NyxbotModelUsage } from "./nyxbot-model-usage";
@@ -54,13 +55,13 @@ function Stat({
 }) {
   return (
     <Card className="min-w-0 px-4 py-4">
-      <p className="text-12 font-medium uppercase tracking-[1.5px] text-muted-foreground">
+      <p className="type-group-label uppercase tracking-[1.5px] text-muted-foreground">
         {label}
       </p>
-      <p className="mt-3 font-display text-28 font-semibold leading-none tracking-tight tabular-nums">
+      <p className="mt-3 font-display type-metric tracking-tight tabular-nums">
         {value}
       </p>
-      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
+      <p className="mt-2 text-12 text-muted-foreground">
         {detail}
       </p>
     </Card>
@@ -123,7 +124,7 @@ export function NyxbotUsage() {
   return (
     <div className="analytics-visuals space-y-4">
       <div>
-        <h2 className="font-display text-15 font-semibold tracking-tight">
+        <h2 className="font-display type-card-title tracking-tight">
           NyxBot usage & feedback
         </h2>
         <p className="mt-1 text-14 text-muted-foreground">
@@ -149,7 +150,7 @@ export function NyxbotUsage() {
             >
               Last 30 days
             </Button>
-            <label className="space-y-1 text-14 text-muted-foreground">
+            <Label className="space-y-1 text-muted-foreground">
               From
               <Input
                 type="date"
@@ -158,8 +159,8 @@ export function NyxbotUsage() {
                   setDates({ ...dates, from: event.target.value })
                 }
               />
-            </label>
-            <label className="space-y-1 text-14 text-muted-foreground">
+            </Label>
+            <Label className="space-y-1 text-muted-foreground">
               To
               <Input
                 type="date"
@@ -168,7 +169,7 @@ export function NyxbotUsage() {
                   setDates({ ...dates, to: event.target.value })
                 }
               />
-            </label>
+            </Label>
             <span className="pb-2 text-13 text-text-tertiary">UTC</span>
           </div>
         }
@@ -186,7 +187,7 @@ export function NyxbotUsage() {
       ) : (
         <>
           <div className="flex items-center gap-3 text-14">
-            <label className="flex items-center gap-2">
+            <Label className="flex items-center gap-2">
               Weekly work threshold
               <ThresholdInput
                 aria-label="Weekly work threshold"
@@ -201,12 +202,12 @@ export function NyxbotUsage() {
                     setThreshold(value);
                 }}
               />
-            </label>
+            </Label>
           </div>
           {data?.real_work && <NyxbotRealWork data={data.real_work} />}
           {data?.real_work_unavailable && (
             <Card className="space-y-3 p-4">
-              <h3 className="font-display text-15 font-semibold">
+              <h3 className="font-display type-card-title">
                 Weekly real work
               </h3>
               <ErrorBanner
@@ -290,7 +291,7 @@ export function NyxbotUsage() {
           </div>
           <div className="grid min-w-0 gap-3 lg:grid-cols-2">
             <Card className="analytics-panel analytics-chart min-w-0 p-4">
-              <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
+              <h3 className="font-display type-card-title tracking-tight">
                 Session activity
               </h3>
               <p className="mb-4 mt-1 text-14 text-muted-foreground">
@@ -407,7 +408,7 @@ export function NyxbotUsage() {
               <Legend />
             </Card>
             <Card className="analytics-panel analytics-chart min-w-0 p-4">
-              <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
+              <h3 className="font-display type-card-title tracking-tight">
                 Feedback over time
               </h3>
               <p className="mb-4 mt-1 text-14 text-muted-foreground">
@@ -506,7 +507,7 @@ export function NyxbotUsage() {
             <Card className="p-4">
               <div className="flex flex-wrap justify-between gap-4">
                 <div>
-                  <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
+                  <h3 className="font-display type-card-title tracking-tight">
                     Turn outcomes
                   </h3>
                   <p className="mt-1 text-13 text-text-tertiary">
@@ -625,7 +626,7 @@ export function NyxbotUsage() {
             key={`${from}:${to}`}
             range={feedbackParams}
           />
-          <p className="text-13 leading-relaxed text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             Sessions are conversation threads with user input, including channel
             input. Turn outcomes include specialist and automated work; mirrored
             voice replies count once per turn. Feedback includes group replies.

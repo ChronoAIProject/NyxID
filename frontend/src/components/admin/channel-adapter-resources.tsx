@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAuthStore } from "@/stores/auth-store";
@@ -104,7 +105,7 @@ function ResourceManagement() {
       className="space-y-6 rounded-xl border border-border bg-card p-5 text-14"
     >
       <div>
-        <h2 className="text-16 font-semibold">
+        <h2 className="type-subheading">
           Platform phone accounts and allocations
         </h2>
         <p className="mt-2 text-muted-foreground">
@@ -427,9 +428,9 @@ function ResourceManagement() {
                 )}
               />
               <div>
-                <label htmlFor="allocation-owner-search">
+                <Label htmlFor="allocation-owner-search">
                   Find owner by email
-                </label>
+                </Label>
                 <Input
                   id="allocation-owner-search"
                   value={search}

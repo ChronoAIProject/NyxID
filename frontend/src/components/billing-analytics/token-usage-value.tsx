@@ -40,7 +40,7 @@ export function TokenUsageValue({
             event.preventDefault();
             setOpen(true);
           }}
-          className="cursor-pointer rounded-sm text-left font-display text-28 font-semibold leading-none tracking-tight tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+          className="cursor-pointer rounded-sm text-left font-display type-metric tracking-tight tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
         >
           {formatAnalyticsValue(value, "tokens", true)}
         </button>
@@ -86,13 +86,13 @@ export function TokenUsageValue({
                 </dl>
               </>
             )}
-            <p className="text-13 leading-relaxed text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Image and voice tokens are included in the total when reported.
               {details.length === 0 &&
                 " No separate image or voice breakdown was recorded for this selection."}
             </p>
             {(usage.cached_tokens > 0 || usage.cache_creation_tokens > 0) && (
-              <p className="text-13 leading-relaxed text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Cache read {number(usage.cached_tokens)} · cache write{" "}
                 {number(usage.cache_creation_tokens)}. These can overlap input
                 counts and are not added to the total.
@@ -101,7 +101,7 @@ export function TokenUsageValue({
           </div>
         )}
         {!totalSelected && selected.length > 1 && (
-          <p className="text-13 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Selected counts are added together. Cache counts can overlap input;
             use Total tokens for the input + output total.
           </p>

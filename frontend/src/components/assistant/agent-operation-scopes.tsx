@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { DrawerSearchRevealContext } from "@/lib/drawer-search";
 import { SectionInfo } from "@/components/ui/section-info";
 import { describeChanges, changeList } from "@/lib/grouped-form-changes";
@@ -176,7 +177,7 @@ export function AgentOperationScopes({
                 <span className="block font-medium">
                   {service.service_name}
                 </span>
-                <span className="text-13 font-normal text-text-tertiary">
+                <span className="type-secondary text-text-tertiary">
                   {service.all_operations
                     ? "All operations"
                     : `${service.endpoint_ids.length + service.rules.length} selected operations`}
@@ -244,7 +245,7 @@ export function AgentOperationScopes({
               </Button>
               <h2
                 tabIndex={-1}
-                className="mt-3 flex items-center gap-1 break-words px-4 text-15 font-semibold outline-none"
+                className="mt-3 flex items-center gap-1 break-words px-4 type-card-title outline-none"
               >
                 {service.service_name}
                 {guests ? " · Guest operations" : " · Operations"}
@@ -377,7 +378,7 @@ export function OperationSelectionForm({
         }
       >
         <GroupedRow data-drawer-search-target={`operations-${guests ? "guest-" : ""}${service.service_id}`}>
-          <span className="mr-auto">Allowed operations</span>
+          <Label asChild><span className="mr-auto">Allowed operations</span></Label>
           <Select
             value={guests ? guestMode : all ? "all" : "selected"}
             disabled={disabled}
@@ -454,7 +455,7 @@ export function OperationSelectionForm({
                       interactive
                       className="items-start"
                     >
-                      <label>
+                      <Label>
                         <Checkbox
                           checked={selected.includes(operation.endpoint_id)}
                           disabled={disabled}
@@ -474,28 +475,28 @@ export function OperationSelectionForm({
                           <span className="block break-all font-mono">
                             {operation.method} {operation.path}
                           </span>
-                          <span className="block text-13 font-normal text-text-tertiary">
+                          <span className="block type-secondary text-text-tertiary">
                             {operation.summary}
                           </span>
                           <span className="flex gap-1">
                             {operation.read_only ? (
-                              <span className="text-13 font-normal text-text-tertiary">
+                              <span className="type-secondary text-text-tertiary">
                                 Read only
                               </span>
                             ) : null}
                             {operation.changes_existing ? (
-                              <span className="text-13 font-normal text-warning">
+                              <span className="type-secondary text-warning">
                                 Changes existing
                               </span>
                             ) : null}
                             {savedInputs[operation.endpoint_id] ? (
-                              <span className="text-13 font-normal text-text-tertiary">
+                              <span className="type-secondary text-text-tertiary">
                                 Value limits
                               </span>
                             ) : null}
                           </span>
                         </span>
-                      </label>
+                      </Label>
                     </GroupedRow>
                   ))}
                   {!operations.length ? (

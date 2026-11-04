@@ -101,7 +101,7 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary-text" aria-hidden="true" />
         </div>
-        <h1 className="text-28 font-normal tracking-tight">
+        <h1 className="type-metric tracking-tight">
           MFA verification
         </h1>
         <p className="text-14 unthemed:text-12 text-muted-foreground">

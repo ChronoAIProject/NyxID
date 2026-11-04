@@ -24,11 +24,11 @@ export function ServiceCardHeader({
 }) {
   return (
     <div data-service-card-header="" className={cn("flex items-start gap-3", className)}>
-      <span data-service-card-icon="" className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50 text-15 font-semibold text-muted-foreground">
+      <span data-service-card-icon="" className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50 type-card-title text-muted-foreground">
         {icon}
       </span>
       <div className="min-w-0 flex-1">
-        <h3 id={titleId} title={name} data-service-card-title="" className={cn(TEXT_STYLES.cardTitle, "relative leading-normal tracking-tight")}>
+        <h3 id={titleId} title={name} data-service-card-title="" className={cn(TEXT_STYLES.cardTitle, "relative tracking-tight")}>
           <span aria-hidden={titleAction ? true : undefined} className={cn("block truncate", titleAction && "invisible")}>{name}</span>
           {titleAction && (
             <button
@@ -40,7 +40,7 @@ export function ServiceCardHeader({
             </button>
           )}
         </h3>
-        <p data-service-card-subtitle="" title={subtitleTitle} className="mt-0.5 truncate text-13 leading-normal text-muted-foreground">{subtitle}</p>
+        <p data-service-card-subtitle="" title={subtitleTitle} className="mt-0.5 truncate type-secondary text-muted-foreground">{subtitle}</p>
       </div>
       {children}
     </div>

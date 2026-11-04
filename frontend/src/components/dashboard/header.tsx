@@ -87,7 +87,7 @@ export function Header({
         >
           <Menu className="h-5 w-5 text-muted-foreground" />
         </button>
-        <h1 className="text-15 font-semibold md:text-20">
+        <h1 className="type-card-title md:type-section-heading">
           {title}
         </h1>
       </div>
@@ -104,7 +104,7 @@ export function Header({
               aria-label="User menu"
             >
               <div className="hidden flex-col items-end gap-0.5 sm:flex">
-                <span className="text-15 font-medium text-foreground">
+                <span className="type-card-title text-foreground">
                   {user?.display_name ?? user?.email ?? "User"}
                 </span>
                 {user?.display_name && (

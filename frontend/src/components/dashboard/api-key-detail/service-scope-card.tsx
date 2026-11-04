@@ -183,7 +183,7 @@ function ServiceScopeEditor({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-14">
+              <Label htmlFor="allow-all-services">
                 Allow all services
               </Label>
             </div>
@@ -204,7 +204,7 @@ function ServiceScopeEditor({
                           onCheckedChange={() => toggleService(k.id)}
                         />
                         <ServiceIcon slug={k.catalog_service_slug} iconUrl={connectionIconUrl(k)} size="2xs" />
-                        <Label htmlFor={`svc-${k.id}`} className="text-14">
+                        <Label htmlFor={`svc-${k.id}`}>
                           {k.label}
                           <span className="text-muted-foreground">
                             {" "}

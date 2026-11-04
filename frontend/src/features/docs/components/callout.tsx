@@ -30,7 +30,7 @@ export function Callout({
   return (
     <div className={`my-5 flex gap-3 rounded-xl border px-4 py-3 ${style.box}`}>
       <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${style.tint}`} aria-hidden />
-      <div className="space-y-2 text-14 leading-relaxed text-muted-foreground [&_a]:text-nyx-secondary-400 [&_code]:text-14 [&_p]:m-0">
+      <div className="space-y-2 type-prose text-muted-foreground [&_a]:text-nyx-secondary-400 [&_code]:text-14 [&_p]:m-0">
         {children}
       </div>
     </div>

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { CompactScroll } from "@/components/ui/compact-title";
 import { FormViewport } from "@/components/ui/form-viewport";
 import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
@@ -147,7 +148,7 @@ export function MachineSettings({
                 footer="Recommended. Updates wait until no job, turn, live desktop or owner control is active. You receive an update notification."
               >
                 <GroupedRow asChild interactive>
-                  <label>
+                  <Label>
                     <span className="min-w-0 flex-1">
                       Update automatically when idle
                     </span>
@@ -156,7 +157,7 @@ export function MachineSettings({
                       disabled={!canManage}
                       onCheckedChange={(value) => setAutomaticDraft(value === true)}
                     />
-                  </label>
+                  </Label>
                 </GroupedRow>
               </GroupedList>
             </>
@@ -283,7 +284,7 @@ export function MachineSettings({
                 footer={<p className="text-warning">{SINGLE_USER_WARNING}</p>}
               >
                 <GroupedRow asChild interactive>
-                  <label>
+                  <Label>
                     <span className="min-w-0 flex-1">
                       Allow saved-login typing on this machine
                     </span>
@@ -295,11 +296,11 @@ export function MachineSettings({
                         setAcknowledged(false);
                       }}
                     />
-                  </label>
+                  </Label>
                 </GroupedRow>
                 {allow && !node.allow_single_user_saved_logins && (
                   <GroupedRow asChild interactive>
-                    <label>
+                    <Label>
                       <span className="min-w-0 flex-1">
                         I understand the shared-user risk and allow typing.
                       </span>
@@ -309,7 +310,7 @@ export function MachineSettings({
                         onCheckedChange={(value) => setAcknowledged(value === true)
                         }
                       />
-                    </label>
+                    </Label>
                   </GroupedRow>
                 )}
               </GroupedList>
@@ -373,12 +374,12 @@ export function MachineSettings({
                   <GroupedRow role="status" title="Loading specialists…" />
                 ) : specialists.length ? (
                   <fieldset disabled={saving}>
-                    <legend className="sr-only">
+                    <Label asChild><legend className="sr-only">
                       Specialists allowed on this machine
-                    </legend>
+                    </legend></Label>
                     {specialists.map((agent) => (
                       <GroupedRow key={agent.id} asChild interactive>
-                        <label>
+                        <Label>
                           <span className="min-w-0 flex-1">
                             {agent.display_name ?? agent.name}
                           </span>
@@ -395,7 +396,7 @@ export function MachineSettings({
                               }))
                             }
                           />
-                        </label>
+                        </Label>
                       </GroupedRow>
                     ))}
                   </fieldset>

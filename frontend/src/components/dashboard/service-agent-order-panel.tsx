@@ -123,7 +123,7 @@ export function ServiceAgentOrderPanel({
                       event.preventDefault();
                   }}
                   data-service-order-help
-                  className="max-w-[min(20rem,calc(100vw-2rem))] space-y-2 text-13 leading-relaxed"
+                  className="max-w-[min(20rem,calc(100vw-2rem))] space-y-2 text-13"
                 >
                   <ul className="space-y-2">
                     <li>Connections that match equally are shown in your order.</li>

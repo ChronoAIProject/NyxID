@@ -111,16 +111,16 @@ function StepDetails({ step }: { readonly step: ChatActorStep }) {
   return (
     <div className="min-w-0 flex-1">
       <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="min-w-0 break-words text-14 font-medium text-foreground">
+        <span className="min-w-0 break-words type-row-title text-foreground">
           {step.description}
         </span>
         <span
-          className={`text-12 font-medium ${STATUS_STYLE[step.status]}`}
+          className={`type-group-label ${STATUS_STYLE[step.status]}`}
         >
           {words(step.status)}
         </span>
         <span
-          className={`rounded border px-1.5 py-0.5 text-12 font-medium ${effectStyle(step.externalEffect)}`}
+          className={`rounded border px-1.5 py-0.5 type-group-label ${effectStyle(step.externalEffect)}`}
         >
           {words(step.externalEffect)}
         </span>
@@ -225,7 +225,7 @@ export function TaskPlanCard({
     >
       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border bg-overlay/50 px-3 py-2.5">
         <div className="min-w-0 flex-1">
-          <h3 className="break-words text-14 font-semibold text-foreground">
+          <h3 className="break-words type-body-strong text-foreground">
             {plan.title}
           </h3>
           <p className="mt-0.5 text-12 text-text-tertiary">
@@ -234,18 +234,18 @@ export function TaskPlanCard({
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          <span className="rounded border border-border bg-background px-1.5 py-0.5 text-12 font-medium text-muted-foreground">
+          <span className="rounded border border-border bg-background px-1.5 py-0.5 type-group-label text-muted-foreground">
             {words(plan.status)}
           </span>
           {plan.gate ? (
-            <span className="rounded border border-warning/25 bg-warning/[0.07] px-1.5 py-0.5 text-12 font-medium text-warning">
+            <span className="rounded border border-warning/25 bg-warning/[0.07] px-1.5 py-0.5 type-group-label text-warning">
               {plan.gate.mode} / {plan.gate.status ?? "ready"}
             </span>
           ) : null}
         </div>
       </div>
       {plan.gate?.reason ? (
-        <p className="border-b border-border px-3 py-2 text-12 leading-relaxed text-muted-foreground">
+        <p className="border-b border-border px-3 py-2 text-12 text-muted-foreground">
           {plan.gate.reason}
         </p>
       ) : null}

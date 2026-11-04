@@ -172,7 +172,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-15 font-semibold">
+        <h3 className="mb-2 font-display type-card-title">
           Role not found
         </h3>
         <p className="mb-4 text-14 text-muted-foreground">

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
@@ -74,9 +75,9 @@ export function UserPicker({
         {selected
           .filter((id) => !filtered.some((user) => user.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-14"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -91,12 +92,12 @@ export function UserPicker({
                   id}{" "}
                 (outside current results)
               </span>
-            </label>
+            </Label>
           ))}
         {filtered.map((user) => {
           const checked = selected.includes(user.id);
           return (
-            <label
+            <Label
               key={user.id}
               className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
             >
@@ -111,14 +112,14 @@ export function UserPicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-14 font-medium">
+                <span className="block truncate type-row-title">
                   {user.display_name || user.slug || user.email}
                 </span>
                 <span className="block truncate text-13 text-muted-foreground">
                   {user.slug ? `Organization / ${user.slug}` : user.email}
                 </span>
               </span>
-            </label>
+            </Label>
           );
         })}
         {failed ? (
@@ -192,9 +193,9 @@ export function ServicePicker({
         {selected
           .filter((id) => !filtered.some((service) => service.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-14"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -207,13 +208,13 @@ export function ServicePicker({
                 {services.find((service) => service.id === id)?.name ?? id}{" "}
                 (outside current results)
               </span>
-            </label>
+            </Label>
           ))}
         {filtered.map((service) => {
           const checked = selected.includes(service.id);
           const metric = resolveServiceBillingMetric(service);
           return (
-            <label
+            <Label
               key={service.id}
               className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
             >
@@ -230,7 +231,7 @@ export function ServicePicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-14 font-medium">
+                <span className="block truncate type-row-title">
                   {service.name}
                 </span>
                 <span className="block truncate text-13 text-muted-foreground">
@@ -240,7 +241,7 @@ export function ServicePicker({
               <Badge variant="secondary" className="shrink-0">
                 {metric}
               </Badge>
-            </label>
+            </Label>
           );
         })}
         {filtered.length === 0 ? (
@@ -372,9 +373,9 @@ function MemberPicker({
         {selected
           .filter((id) => !filtered.some((item) => item.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-14"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -387,10 +388,10 @@ function MemberPicker({
                 {items.find((item) => item.id === id)?.name ?? id} (outside
                 current results)
               </span>
-            </label>
+            </Label>
           ))}
         {filtered.map((item) => (
-          <label
+          <Label
             key={item.id}
             className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
           >
@@ -405,14 +406,14 @@ function MemberPicker({
               }
             />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-14 font-medium">
+              <span className="block truncate type-row-title">
                 {item.name}
               </span>
               <span className="block truncate text-13 text-muted-foreground">
                 {item.detail}
               </span>
             </span>
-          </label>
+          </Label>
         ))}
         {error ? (
           <p role="alert" className="px-3 py-3 text-14 text-destructive">

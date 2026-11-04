@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -178,7 +179,7 @@ export function DeveloperAppDetail({
   if (!app) {
     return (
       <div className="space-y-4">
-        <h2 className="text-28 md:text-36 font-normal tracking-tight">
+        <h2 className="type-metric md:type-metric tracking-tight">
           Developer App
         </h2>
         <p className="text-muted-foreground">
@@ -341,9 +342,9 @@ export function DeveloperAppDetail({
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-14 font-medium" htmlFor="edit-app-name">
+              <Label htmlFor="edit-app-name">
                 Application Name
-              </label>
+              </Label>
               <Input
                 id="edit-app-name"
                 value={name}
@@ -351,12 +352,12 @@ export function DeveloperAppDetail({
               />
             </div>
             <div className="space-y-2">
-              <label
-                className="text-14 font-medium"
+              <Label
+
                 htmlFor="edit-redirect-uris"
               >
                 Redirect URIs (one per line)
-              </label>
+              </Label>
               <textarea
                 id="edit-redirect-uris"
                 value={redirectUrisText}
@@ -365,7 +366,7 @@ export function DeveloperAppDetail({
               />
             </div>
             <div className="space-y-3">
-              <label className="text-14 font-medium">Allowed Scopes</label>
+              <Label>Allowed Scopes</Label>
               <div className="space-y-2">
                 {OIDC_SCOPES.map((scope) => (
                   <div key={scope.id} className="flex items-start gap-2">
@@ -381,10 +382,10 @@ export function DeveloperAppDetail({
                         );
                       }}
                     />
-                    <div className="grid gap-0.5 leading-none">
-                      <label
+                    <div className="grid gap-0.5">
+                      <Label
                         htmlFor={`scope-edit-${scope.id}`}
-                        className="text-14 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                        className="peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                       >
                         {scope.label}
                         {scope.required && (
@@ -392,7 +393,7 @@ export function DeveloperAppDetail({
                             (required)
                           </span>
                         )}
-                      </label>
+                      </Label>
                       {"hint" in scope && scope.hint && (
                         <p className="text-13 text-muted-foreground">
                           {scope.hint}
@@ -405,9 +406,9 @@ export function DeveloperAppDetail({
             </div>
             <div className="space-y-3">
               <div>
-                <label className="text-14 font-medium">
+                <Label>
                   Default Services
-                </label>
+                </Label>
                 <p className="text-13 text-muted-foreground">
                   Catalog services this app requests at consent time. Users
                   keep the final say.
@@ -429,15 +430,15 @@ export function DeveloperAppDetail({
                         );
                       }}
                     />
-                    <label
+                    <Label
                       htmlFor={`default-service-${entry.slug}`}
-                      className="cursor-pointer text-14 font-medium leading-none"
+                      className="cursor-pointer"
                     >
                       {entry.name}
-                      <span className="ml-1 text-13 font-normal text-muted-foreground">
+                      <span className="ml-1 text-muted-foreground">
                         {entry.slug}
                       </span>
-                    </label>
+                    </Label>
                   </div>
                 ))}
                 {(catalog ?? []).length === 0 && (

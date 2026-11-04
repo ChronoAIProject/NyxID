@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Copy, Network, Trash2 } from "lucide-react";
@@ -77,7 +78,7 @@ function UpstreamResponse({
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-12 font-semibold uppercase text-text-tertiary">
+        <h4 className="type-table-header uppercase text-text-tertiary">
           Upstream response {index + 1}
         </h4>
         {response ? (
@@ -166,7 +167,7 @@ function ResponseCapture({
   return (
     <section className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-12 font-semibold uppercase text-text-tertiary">
+        <h4 className="type-table-header uppercase text-text-tertiary">
           Delivered response
         </h4>
         <Badge variant="secondary">
@@ -185,7 +186,7 @@ function ResponseCapture({
               aria-selected={!rendered}
               onClick={() => onRenderedChange(false)}
               className={cn(
-                "h-6 rounded-md px-2 text-12 font-medium",
+                "h-6 rounded-md px-2 type-group-label ",
                 !rendered
                   ? "bg-overlay-strong text-foreground"
                   : "text-text-tertiary hover:text-muted-foreground",
@@ -199,7 +200,7 @@ function ResponseCapture({
               aria-selected={rendered}
               onClick={() => onRenderedChange(true)}
               className={cn(
-                "h-6 rounded-md px-2 text-12 font-medium",
+                "h-6 rounded-md px-2 type-group-label ",
                 rendered
                   ? "bg-overlay-strong text-foreground"
                   : "text-text-tertiary hover:text-muted-foreground",
@@ -217,7 +218,7 @@ function ResponseCapture({
         <AssistantWireReplayView exchange={entry} />
       ) : capture.sse ? (
         <div className="overflow-hidden rounded-lg border border-border/60 bg-background/60">
-          <div className="max-h-96 overflow-auto font-mono text-12 leading-normal">
+          <div className="max-h-96 overflow-auto font-mono text-12">
             {capture.sse.lines.slice(0, visibleLines).map((line, index) => (
               <div
                 key={`${String(index)}-${line.ending}`}
@@ -252,7 +253,7 @@ function ResponseCapture({
           ) : null}
         </div>
       ) : capture.body ? (
-        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 leading-normal text-muted-foreground">
+        <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 text-muted-foreground">
           {capture.body.text}
         </pre>
       ) : (
@@ -280,14 +281,14 @@ function WireLogPayload({
           key={`${envelope.path}-${String(index)}`}
           className="space-y-2"
         >
-          <h4 className="text-12 font-semibold uppercase text-text-tertiary">
+          <h4 className="type-table-header uppercase text-text-tertiary">
             Request {index + 1} - backend echo
           </h4>
-          <p className="text-13 leading-normal text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Reconstructed request assembled by NyxID before credential and
             identity injection; headers are an allowlisted subset.
           </p>
-          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 leading-normal text-muted-foreground">
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-14 text-muted-foreground">
             {requestJson(envelope)}
           </pre>
         </section>
@@ -425,7 +426,7 @@ function WireLogEntry({
                 <TooltipContent>NyxID response to this browser</TooltipContent>
               </Tooltip>
             </span>
-            <span className="mt-1 block break-all font-mono text-13 leading-normal text-muted-foreground">
+            <span className="mt-1 block break-all font-mono text-13 text-muted-foreground">
               {entry.label}
             </span>
           </span>
@@ -563,9 +564,9 @@ export function AssistantWireLogPanel({
         </SheetHeader>
 
         <div className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-2 border-b border-border/60 px-5 py-3">
-          <label
+          <Label
             htmlFor="wire-log-capture"
-            className="flex items-center gap-2 text-14 font-medium text-foreground"
+            className="flex items-center gap-2 text-foreground"
           >
             <Switch
               id="wire-log-capture"
@@ -574,10 +575,10 @@ export function AssistantWireLogPanel({
               aria-label="Capture Aevatar exchanges"
             />
             Capture
-          </label>
-          <label
+          </Label>
+          <Label
             htmlFor="wire-log-responses"
-            className="flex items-center gap-2 text-14 font-medium text-foreground"
+            className="flex items-center gap-2 text-foreground"
           >
             <Switch
               id="wire-log-responses"
@@ -586,10 +587,10 @@ export function AssistantWireLogPanel({
               aria-label="Show Aevatar responses"
             />
             Responses
-          </label>
-          <label
+          </Label>
+          <Label
             htmlFor="wire-log-all-conversations"
-            className="flex items-center gap-2 text-14 font-medium text-foreground"
+            className="flex items-center gap-2 text-foreground"
           >
             <Switch
               id="wire-log-all-conversations"
@@ -598,7 +599,7 @@ export function AssistantWireLogPanel({
               aria-label="Show all conversations"
             />
             All conversations
-          </label>
+          </Label>
           <Button
             type="button"
             variant="ghost"
@@ -654,7 +655,7 @@ export function AssistantWireLogPanel({
           )}
         </div>
 
-        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-13 leading-normal text-text-tertiary">
+        <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-13 text-text-tertiary">
           <p>
             Raw captures are session-only and may contain sensitive payloads
             verbatim without the chat renderer's credential redaction, including

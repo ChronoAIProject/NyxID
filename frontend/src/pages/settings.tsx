@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
@@ -193,9 +194,9 @@ function ProfileTab() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <label className="text-14 font-medium" htmlFor="profile-name">
+          <Label htmlFor="profile-name">
             Name
-          </label>
+          </Label>
           <Input
             id="profile-name"
             value={displayName}
@@ -205,9 +206,9 @@ function ProfileTab() {
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <label className="text-14 font-medium" htmlFor="profile-email">
+            <Label htmlFor="profile-email">
               Email
-            </label>
+            </Label>
             {user?.email_verified ? (
               <Badge variant="success" className="text-12">
                 Verified
@@ -445,12 +446,12 @@ function SecurityTab() {
               </div>
             )}
             <div className="space-y-2">
-              <label
-                className="text-14 font-medium"
+              <Label
+
                 htmlFor="disable-mfa-code"
               >
                 Authenticator or recovery code
-              </label>
+              </Label>
               <Input
                 id="disable-mfa-code"
                 value={disableMfaCode}
@@ -462,12 +463,12 @@ function SecurityTab() {
               />
             </div>
             {isPasswordUser && <div className="space-y-2">
-              <label
-                className="text-14 font-medium"
+              <Label
+
                 htmlFor="disable-mfa-password"
               >
                 Password
-              </label>
+              </Label>
               <Input
                 id="disable-mfa-password"
                 type="password"
@@ -675,12 +676,12 @@ function SecurityTab() {
           <AccountDeletionDisclosure />
 
           <div className="space-y-2">
-            <label
-              className="text-14 font-medium"
+            <Label
+
               htmlFor="delete-account-email"
             >
               Email
-            </label>
+            </Label>
             <Input
               id="delete-account-email"
               value={deleteConfirmEmail}
@@ -776,7 +777,7 @@ function McpTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-15 font-medium">MCP (Model Context Protocol)</h3>
+        <h3 className="type-card-title">MCP (Model Context Protocol)</h3>
         <p className="text-14 text-muted-foreground">
           Install NyxID as an MCP server in your client of choice.
         </p>
@@ -801,7 +802,7 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-13 font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Or copy manually
               </p>
               <Badge variant="secondary" className="text-12">
@@ -809,7 +810,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {cursorConfig}
               </pre>
               <CopyInlineButton text={cursorConfig} label="Cursor config" />
@@ -836,7 +837,7 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-13 font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Or add manually
               </p>
               <Badge variant="secondary" className="text-12">
@@ -844,7 +845,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {claudeConfig}
               </pre>
               <CopyInlineButton
@@ -874,7 +875,7 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-13 font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Or add manually
               </p>
               <Badge variant="secondary" className="text-12">
@@ -882,7 +883,7 @@ function McpTab() {
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {codexConfig}
               </pre>
               <CopyInlineButton text={codexConfig} label="Codex config" />
@@ -892,7 +893,7 @@ function McpTab() {
       </Card>
 
       <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
-        <p className="mb-1 text-15 font-medium">How it works</p>
+        <p className="mb-1 type-card-title">How it works</p>
         <p className="text-13 text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
           OAuth flow in your browser to authenticate. Once authenticated, the
@@ -958,7 +959,7 @@ function SessionsTab() {
         {!sessions || sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <PowerButtonIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-14 font-medium text-foreground">No Active Sessions</p>
+            <p className="type-row-title text-foreground">No Active Sessions</p>
             <p className="text-14 text-muted-foreground">
               Your active sessions across devices will appear here.
             </p>
@@ -988,7 +989,7 @@ function SessionsTab() {
                   </div>
                   <div className="flex items-center gap-2 pr-10">
                     {getDeviceIcon(session.user_agent)}
-                    <p className="min-w-0 flex-1 truncate text-15 font-bold">
+                    <p className="min-w-0 flex-1 truncate type-card-title">
                       {deviceLabel}
                     </p>
                     {session.is_current && (

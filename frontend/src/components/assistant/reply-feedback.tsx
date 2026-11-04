@@ -176,7 +176,7 @@ function FeedbackDetails({
                 )
               }
               className={cn(
-                "inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-14 font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.97]",
+                "inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 type-row-title transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.97]",
                 on
                   ? "bg-nyx-secondary-400/15 pl-3 text-foreground ring-1 ring-inset ring-nyx-secondary-400/60"
                   : "text-muted-foreground ring-1 ring-inset ring-hairline-strong hover:bg-overlay-strong hover:text-foreground",

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import {
@@ -593,7 +594,7 @@ export function VoicePanel({
               onOpenAutoFocus={(e) => e.preventDefault()}
             >
               <p className="font-medium">Voice settings</p>
-              <label className="block">
+              <Label className="block">
                 Voice source
                 <select
                   aria-label="Voice source"
@@ -619,8 +620,8 @@ export function VoicePanel({
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="block">
+              </Label>
+              <Label className="block">
                 Voice
                 <select
                   aria-label="Voice"
@@ -637,8 +638,8 @@ export function VoicePanel({
                     </option>
                   ))}
                 </select>
-              </label>
-              <label className="block">
+              </Label>
+              <Label className="block">
                 Microphone
                 <select
                   aria-label="Microphone mode"
@@ -657,8 +658,8 @@ export function VoicePanel({
                   </option>
                   <option value="push_to_talk">Hold to talk</option>
                 </select>
-              </label>
-              <label className="flex items-center gap-2">
+              </Label>
+              <Label className="flex items-center gap-2">
                 <input
                   type="checkbox"
                   checked={notifyOnCompletion}
@@ -671,7 +672,7 @@ export function VoicePanel({
                   }
                 />
                 Notify when a task finishes
-              </label>
+              </Label>
               <p className="text-text-tertiary">
                 {isGrok ? "Grok requires Hold to talk. " : ""}Audio goes to{" "}
                 {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps the
@@ -851,7 +852,7 @@ export function VoicePanel({
       className="max-h-[50dvh] overflow-y-auto rounded-xl border border-border bg-card p-3 text-14 shadow-sm"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-15 font-semibold">
+        <h2 className="type-card-title">
           {settingsOnly ? "Voice settings" : "Talk to your assistant"}
         </h2>
         {!settingsOnly && (
@@ -921,7 +922,7 @@ export function VoicePanel({
       )}
       {!active && (
         <div className="mt-4 flex flex-wrap gap-3">
-          <label>
+          <Label>
             Voice source
             <select
               aria-label="Voice source"
@@ -949,8 +950,8 @@ export function VoicePanel({
                 </option>
               ))}
             </select>
-          </label>
-          <label>
+          </Label>
+          <Label>
             Voice
             <select
               aria-label="Voice"
@@ -967,8 +968,8 @@ export function VoicePanel({
                 </option>
               ))}
             </select>
-          </label>
-          <label>
+          </Label>
+          <Label>
             Microphone
             <select
               aria-label="Microphone mode"
@@ -987,11 +988,11 @@ export function VoicePanel({
                 Automatic{isGrok ? " (not available in Grok beta)" : ""}
               </option>
             </select>
-          </label>
+          </Label>
         </div>
       )}
       {!active && (
-        <label className="mt-3 flex items-center gap-2">
+        <Label className="mt-3 flex items-center gap-2">
           <input
             type="checkbox"
             checked={notifyOnCompletion}
@@ -1004,7 +1005,7 @@ export function VoicePanel({
             }
           />
           Notify when tasks finish after this call (no message preview)
-        </label>
+        </Label>
       )}
       {!active && option && <VoiceCreditUsage option={option} />}
       {settingsError && (

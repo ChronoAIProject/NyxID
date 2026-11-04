@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useSavedLogins } from "@/hooks/use-saved-logins";
@@ -297,8 +298,8 @@ function AgentDetailsSheetContent({
             <div className="agent-header-row relative flex min-h-8 items-center gap-2">
               {agent ? <>
                 <span className="agent-header-avatar flex size-8 shrink-0 items-center justify-center"><AgentAvatar agent={agent} size="lg" /></span>
-                <p title={agentTitle(agent)} className={`agent-header-name min-w-0 truncate text-15 font-semibold ${searchOpen ? "max-w-[30%] shrink" : "flex-1"}`}>{agentTitle(agent)}</p>
-              </> : <span className="min-w-0 flex-1 text-15 font-semibold">Agent details</span>}
+                <p title={agentTitle(agent)} className={`agent-header-name min-w-0 truncate type-card-title ${searchOpen ? "max-w-[30%] shrink" : "flex-1"}`}>{agentTitle(agent)}</p>
+              </> : <span className="min-w-0 flex-1 type-card-title">Agent details</span>}
               <div ref={setSearchHost} className={searchOpen ? "min-w-0 flex-1" : "shrink-0"} />
               <SheetClose asChild>
                 <button type="button" aria-label="Close agent details" data-icon-button="" className="agent-header-icon"><X aria-hidden className="size-4" /></button>
@@ -723,7 +724,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                           }
                         />
                       </FormControl>
-                      <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
+                      <FormDescription className="basis-full type-secondary text-text-tertiary">
                           The @handle used in groups and by NyxBot.
                         </FormDescription>
                       <GroupedFooter>
@@ -750,7 +751,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">
                         Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}.
                         Leave empty to use it.
                       </FormDescription>
@@ -776,7 +777,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         disabled={readOnly}
                         onChange={field.onChange}
                       />
-                      <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
+                      <FormDescription className="basis-full type-secondary text-text-tertiary">
                           Used by this agent's new threads. Each thread can
                           switch from its composer.
                         </FormDescription>
@@ -797,7 +798,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                   className="!flex-row !flex-wrap !items-center !gap-3"
                 >
                   <FormItem>
-                    <FormLabel className="mr-auto text-14 font-medium text-foreground">
+                    <FormLabel className="mr-auto text-foreground">
                       Access mode
                     </FormLabel>
                     <Select
@@ -830,7 +831,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         ))}
                       </SelectContent>
                     </Select>
-                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">
                         {
                           ACCESS_MODE_DESCRIPTION[
                             effectiveAccessMode(workspaceMode, field.value)
@@ -851,7 +852,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 <GroupedRow search={{ id: "profile-channel_checking_notice", title: "Channel progress reply", breadcrumb: "Overview › Profile", keywords: field.value ? "On" : "Off" }} asChild className="grouped-field">
                   <FormItem>
                     <div className="flex items-center justify-between gap-3">
-                      <FormLabel className="text-14 font-medium text-foreground">
+                      <FormLabel className="text-foreground">
                         Channel progress reply
                       </FormLabel>
                       <FormControl>
@@ -862,7 +863,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         />
                       </FormControl>
                     </div>
-                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">
                         After five seconds, send “Got it, let me check and get
                         back to you.” if an external check is needed. Attached
                         skill reads and tool discovery do not trigger it. The
@@ -915,7 +916,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <FormDescription className="basis-full text-13 font-normal text-text-tertiary">
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">
                         Personality and tone only; it never changes what the
                         agent may do.
                       </FormDescription>
@@ -1101,7 +1102,7 @@ function GrantsForm({
                   >
                     <GroupedRow search={{ id: "account-read", title: "Read my account", breadcrumb: "Access › Account", keywords: field.value ? "On" : "Off" }}>
                       <div className="mr-auto">
-                        <FormLabel className="text-14 font-medium text-foreground">
+                        <FormLabel className="text-foreground">
                           Read my account
                         </FormLabel>
                       </div>
@@ -1180,12 +1181,12 @@ function GuestAccessList({
           const id = `guest-access-${slug}`;
           return (
             <GroupedRow key={slug} role="listitem" search={{ id: `guest-${slug}`, title: slug, breadcrumb: "Access › Guest access", keywords: GUEST_ACCESS_LABEL[value[slug] ?? "use"] }}>
-              <label
+              <Label
                 htmlFor={id}
-                className="min-w-0 flex-1 break-words text-14 font-medium text-foreground"
+                className="min-w-0 flex-1 break-words text-foreground"
               >
                 {slug}
-              </label>
+              </Label>
               <Select
                 value={value[slug] ?? "use"}
                 disabled={disabled}
@@ -1291,16 +1292,15 @@ function MemoryList({
             }
           >
             <GroupedRow search={{ id: "memory-note", title: editing ? "Edit note" : "Add a note", breadcrumb: "Memory", keywords: memoryForm.watch("text") }} className="grouped-field">
-              <label
+              <Label
                 htmlFor="shared-memory-note"
-                className="text-14 font-medium"
               >
                 {editing
                   ? "Edit shared note"
                   : agent.owner_kind === "org"
                     ? "Add shared note"
                     : "Note"}
-              </label>
+              </Label>
               <GroupedTextarea
                 id="shared-memory-note"
                 className="min-h-20"
@@ -1358,7 +1358,7 @@ function MemoryList({
                   <p className="whitespace-pre-wrap break-words text-14 text-foreground">
                     {note.text}
                   </p>
-                  <p className="font-mono text-13 font-normal text-text-tertiary">
+                  <p className="font-mono type-secondary text-text-tertiary">
                     {formatDateTime(note.updated_at)}
                   </p>
                 </div>

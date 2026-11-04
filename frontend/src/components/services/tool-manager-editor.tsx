@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -53,10 +54,10 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
           }
         })}
       >
-        <label className="text-14">
+        <Label>
           API base URL
           <Input disabled={!!frozen} {...destination.register("base_url")} />
-        </label>
+        </Label>
         <p className="text-13 text-text-tertiary">
           {frozen
             ? "Destination frozen. Changes require an Admin."
@@ -75,7 +76,7 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
         )}
       </form>
       <section className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-        <h2 className="text-15 font-semibold">Shared vendor credential</h2>
+        <h2 className="type-card-title">Shared vendor credential</h2>
         <p className="text-14 text-muted-foreground">
           {service.auth_method === "none"
             ? "No credential required."
@@ -121,7 +122,7 @@ export function ToolManagerEditor({ service }: { service: DownstreamService }) {
         )}
       </section>
       <section className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
-        <h2 className="text-15 font-semibold">Tool icon</h2>
+        <h2 className="type-card-title">Tool icon</h2>
         {service.icon_url && (
           <span role="img" aria-label="Current tool icon" className="inline-flex">
             <ServiceIcon iconUrl={service.icon_url} size="lg" />

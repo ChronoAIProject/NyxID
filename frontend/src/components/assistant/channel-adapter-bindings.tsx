@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -199,8 +200,8 @@ function BindingCard({
           }
         />
         <GroupedRow asChild className="block space-y-0.5">
-          <label>
-            <span className="text-13 font-normal text-text-tertiary">
+          <Label>
+            <span className="text-text-tertiary">
               Webhook URL
             </span>
             <Input
@@ -208,7 +209,7 @@ function BindingCard({
               value={b.webhook_url}
               readOnly
             />
-          </label>
+          </Label>
         </GroupedRow>
         <GroupedDisclosure
           aria-expanded={detail}
@@ -541,12 +542,12 @@ function SetupForm({
             )}
           />
           <GroupedRow>
-            <label
-              className="min-w-0 flex-1 text-14 font-medium text-foreground"
+            <Label
+              className="min-w-0 flex-1 text-foreground"
               htmlFor="adapter-credential-mode"
             >
               Credentials
-            </label>
+            </Label>
             <Select
               value={mode}
               onValueChange={(v) => {
@@ -586,14 +587,14 @@ function SetupForm({
               ))}
           </GroupedRow>
           <GroupedRow>
-            <label
-              className="min-w-0 flex-1 text-14 font-medium text-foreground"
+            <Label
+              className="min-w-0 flex-1 text-foreground"
               htmlFor="adapter-connection"
             >
               {mode === "connection"
                 ? "Service connection"
                 : "Platform service"}
-            </label>
+            </Label>
             <Select
               value={selectedConnection}
               onValueChange={(id) =>

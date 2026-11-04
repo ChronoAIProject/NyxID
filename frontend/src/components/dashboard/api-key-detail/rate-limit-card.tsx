@@ -90,7 +90,7 @@ export function RateLimitCard({
         {editing ? (
           <div className="space-y-3">
             <div className="space-y-1.5">
-              <Label className="text-14">Requests per second</Label>
+              <Label>Requests per second</Label>
               <Input
                 type="number"
                 min={1}
@@ -100,7 +100,7 @@ export function RateLimitCard({
               />
             </div>
             <div className="space-y-1.5">
-              <Label className="text-14">Burst limit</Label>
+              <Label>Burst limit</Label>
               <Input
                 type="number"
                 min={1}

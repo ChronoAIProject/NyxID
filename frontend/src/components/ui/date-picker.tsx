@@ -233,7 +233,7 @@ export function DatePicker(props: DatePickerProps) {
             >
               <ChevronLeft className="h-4 w-4" aria-hidden="true" />
             </button>
-            <span className="text-14 unthemed:text-12 font-medium">
+            <span className="type-row-title unthemed:text-12">
               {MONTHS[viewMonth]} {viewYear}
             </span>
             <button
@@ -251,7 +251,7 @@ export function DatePicker(props: DatePickerProps) {
             {DAYS.map((d, i) => (
               <span
                 key={i}
-                className="text-12 unthemed:text-10 font-semibold uppercase tracking-[1px] text-text-tertiary py-1"
+                className="type-table-header unthemed:text-10 uppercase tracking-[1px] text-text-tertiary py-1"
               >
                 {d}
               </span>
@@ -274,7 +274,7 @@ export function DatePicker(props: DatePickerProps) {
                   aria-pressed={sel}
                   onClick={() => selectDay(cell.date)}
                   className={cn(
-                    "flex h-8 w-full items-center justify-center rounded-md text-14 unthemed:text-12 transition-colors",
+                    "flex h-8 w-full items-center justify-center rounded-md type-button unthemed:text-12 transition-colors",
                     !cell.current && "text-text-tertiary/40",
                     cell.current &&
                       !sel &&
@@ -282,8 +282,8 @@ export function DatePicker(props: DatePickerProps) {
                       "text-foreground hover:bg-overlay-strong",
                     (cell.disabled || selectionLimitReached) &&
                       "cursor-not-allowed opacity-30",
-                    sel && "bg-primary text-primary-foreground font-medium",
-                    tod && !sel && "font-medium text-primary-text",
+                    sel && "bg-primary text-primary-foreground",
+                    tod && !sel && "text-primary-text",
                   )}
                 >
                   {cell.day}

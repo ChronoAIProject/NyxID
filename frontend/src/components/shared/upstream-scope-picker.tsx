@@ -210,7 +210,7 @@ export function UpstreamScopePicker({
 
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-14">Scopes</Label>
+      <Label>Scopes</Label>
       {pills.length > 0 ? (
         <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
@@ -338,7 +338,7 @@ export function UpstreamScopePicker({
       ) : null}
       {grantedSet && hasChanges ? (
         <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-14">
-          <span className="text-13 font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="type-secondary-emphasis uppercase tracking-wide text-muted-foreground">
             Changes
           </span>
           {added.length > 0 ? (

@@ -696,7 +696,7 @@ interface CustomServiceFormProps {
 }
 
 function RequiredMarker() {
-  return <span aria-hidden="true" className="ml-0.5 leading-none text-destructive">*</span>;
+  return <span aria-hidden="true" className="ml-0.5 text-destructive">*</span>;
 }
 
 /**
@@ -952,7 +952,7 @@ function CustomServiceForm({
           // id is locked at this point — to change it the user
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-13 font-medium text-foreground">Routed via node</p>
+            <p className="type-secondary-emphasis text-foreground">Routed via node</p>
             <code className="font-mono text-14 text-muted-foreground">
               {viaNode}
             </code>
@@ -1403,7 +1403,7 @@ function CatalogConfirmForm({
                 href={entry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-14 font-medium text-muted-foreground underline-offset-2 hover:underline"
+                className="mt-1 inline-flex items-center gap-1 type-row-title text-muted-foreground underline-offset-2 hover:underline"
               >
                 Get an API key
                 <ExternalLink className="h-3 w-3" />
@@ -1455,7 +1455,7 @@ function CatalogConfirmForm({
 
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-13 font-medium text-foreground">Routed via node</p>
+            <p className="type-secondary-emphasis text-foreground">Routed via node</p>
             <code className="font-mono text-14 text-muted-foreground">
               {viaNode}
             </code>

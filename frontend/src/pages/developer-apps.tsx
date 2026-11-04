@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -24,7 +25,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  
+
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
@@ -88,7 +89,7 @@ function StatCard({
       <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
           <p className="text-14 text-muted-foreground">{title}</p>
-          <p className="text-28 font-semibold text-foreground">{value}</p>
+          <p className="type-metric text-foreground">{value}</p>
           <p className="text-13 text-text-tertiary">{description}</p>
         </div>
         <Icon className="h-5 w-5 text-primary-text" />
@@ -168,7 +169,7 @@ export function DeveloperAppsPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
             Developer Apps
           </h2>
           <p className="text-14 text-muted-foreground">
@@ -182,9 +183,9 @@ export function DeveloperAppsPage() {
               checked={showInactive}
               onCheckedChange={setShowInactive}
             />
-            <label htmlFor="show-inactive" className="text-14 text-muted-foreground cursor-pointer">
+            <Label htmlFor="show-inactive" className="text-muted-foreground cursor-pointer">
               Show inactive
-            </label>
+            </Label>
           </div>
           <AddCtaButton label="New Application" onClick={() => setCreateOpen(true)} />
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
@@ -197,9 +198,9 @@ export function DeveloperAppsPage() {
               </DialogHeader>
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-14 font-medium" htmlFor="app-name">
+                  <Label htmlFor="app-name">
                     Application Name
-                  </label>
+                  </Label>
                   <Input
                     id="app-name"
                     value={name}
@@ -208,12 +209,12 @@ export function DeveloperAppsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label
-                    className="text-14 font-medium"
+                  <Label
+
                     htmlFor="redirect-uris"
                   >
                     Redirect URIs (one per line)
-                  </label>
+                  </Label>
                   <textarea
                     id="redirect-uris"
                     value={redirectUrisText}
@@ -227,7 +228,7 @@ export function DeveloperAppsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-14 font-medium">Client Type</label>
+                  <Label>Client Type</Label>
                   <Select
                     value={clientType}
                     onValueChange={(value: "public" | "confidential") =>
@@ -244,7 +245,7 @@ export function DeveloperAppsPage() {
                   </Select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-14 font-medium">Allowed Scopes</label>
+                  <Label>Allowed Scopes</Label>
                   <p className="text-13 text-muted-foreground">
                     OIDC scopes this app can request. Determines what user data
                     and NyxID capabilities are included in tokens.
@@ -264,10 +265,10 @@ export function DeveloperAppsPage() {
                             );
                           }}
                         />
-                        <div className="grid gap-0.5 leading-none">
-                          <label
+                        <div className="grid gap-0.5">
+                          <Label
                             htmlFor={`scope-create-${scope.id}`}
-                            className="text-14 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                            className="peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                           >
                             {scope.label}
                             {scope.required && (
@@ -275,7 +276,7 @@ export function DeveloperAppsPage() {
                                 (required)
                               </span>
                             )}
-                          </label>
+                          </Label>
                           {"hint" in scope && scope.hint && (
                             <p className="text-13 text-muted-foreground">
                               {scope.hint}
@@ -418,7 +419,7 @@ export function DeveloperAppsPage() {
           <div className="xl:col-span-2 flex flex-col items-center justify-center gap-1 py-12 text-center">
             <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground" />
             <div className="space-y-1">
-              <p className="text-14 font-medium text-muted-foreground">
+              <p className="type-row-title text-muted-foreground">
                 {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
               </p>
               <p className="text-13 text-muted-foreground">

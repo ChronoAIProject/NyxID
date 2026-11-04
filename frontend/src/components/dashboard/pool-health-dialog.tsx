@@ -102,7 +102,7 @@ export function PoolHealthDialog({
               className="flex items-center justify-between gap-3 rounded-xl border border-border/50 p-3"
             >
               <div className="min-w-0 flex-1">
-                <div className="break-words text-14 font-medium">
+                <div className="break-words type-row-title">
                   {row.name || row.slug}{" "}
                   <Badge variant={row.eligible ? "success" : "warning"}>
                     {row.reason

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import type { UseFormReturn } from "react-hook-form";
 import { API_KEY_SCOPES, type CreateApiKeyFormData } from "@/schemas/api-keys";
@@ -57,7 +58,7 @@ export function ApiKeyResourceFields({
                     <FormLabel>
                       {kind === "services" ? "Services" : "Nodes"}
                     </FormLabel>
-                    <label className="flex items-center gap-2 text-14 unthemed:text-14">
+                    <Label className="flex items-center gap-2 unthemed:text-14">
                       <Checkbox
                         checked={field.value ?? false}
                         onCheckedChange={(checked) => {
@@ -66,7 +67,7 @@ export function ApiKeyResourceFields({
                         }}
                       />
                       Allow all {kind}
-                    </label>
+                    </Label>
                   </div>
                 </FormItem>
               )}
@@ -79,10 +80,10 @@ export function ApiKeyResourceFields({
                   <FormItem>
                     <div className="max-h-48 space-y-2 overflow-y-auto">
                       {resources.map((resource) => (
-                        <label
+                        <Label
                           key={resource.id}
                           htmlFor={`${prefix}-${kind}-${resource.id}`}
-                          className="flex items-start gap-2 text-14 unthemed:text-14"
+                          className="flex items-start gap-2 unthemed:text-14"
                         >
                           <Checkbox
                             id={`${prefix}-${kind}-${resource.id}`}
@@ -96,7 +97,7 @@ export function ApiKeyResourceFields({
                           <span className="min-w-0 break-words">
                             {resource.name}
                           </span>
-                        </label>
+                        </Label>
                       ))}
                       {resources.length === 0 && (
                         <p className="text-14 unthemed:text-12 text-muted-foreground">
@@ -176,9 +177,9 @@ export function ApiKeyScopesField({ form }: Props) {
                 scope,
               );
               return (
-                <label
+                <Label
                   key={scope}
-                  className="flex cursor-pointer items-center gap-2 text-14 unthemed:text-14"
+                  className="flex cursor-pointer items-center gap-2 unthemed:text-14"
                 >
                   <Checkbox
                     checked={isSelected}
@@ -189,7 +190,7 @@ export function ApiKeyScopesField({ form }: Props) {
                     }
                   />
                   {scope}
-                </label>
+                </Label>
               );
             })}
           </div>
@@ -209,14 +210,14 @@ export function ApiKeyExpiryField({ form, allowNeverExpires = true }: Props & {
       {allowNeverExpires && (
         <FormField control={form.control} name="never_expires" render={({ field }) => (
           <FormItem>
-            <label className="flex items-center gap-2 text-14 unthemed:text-14">
+            <Label className="flex items-center gap-2 unthemed:text-14">
               <Checkbox checked={field.value ?? false} onCheckedChange={(checked) => {
                 field.onChange(checked === true);
                 form.setValue("expires_at", checked === true ? null
                   : new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10));
               }} />
               No expiry
-            </label>
+            </Label>
             <FormMessage />
           </FormItem>
         )} />

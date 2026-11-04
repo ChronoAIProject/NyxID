@@ -38,8 +38,8 @@ export function DetailRow({
           <span
             className={
               mono
-                ? "min-w-0 break-words text-right font-mono text-13 text-foreground"
-                : "min-w-0 break-words text-right font-medium text-foreground"
+                ? "min-w-0 break-words text-right font-mono type-secondary text-foreground"
+                : "min-w-0 break-words text-right type-row-title text-foreground"
             }
           >
             {value}

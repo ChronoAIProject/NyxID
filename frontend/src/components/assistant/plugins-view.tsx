@@ -33,7 +33,7 @@ import { AssistantLinkModal } from "./assistant-link-modals";
 import { WorkspacePageHeader } from "./workspace-page-header";
 import { ManageConnectionModal } from "./manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
-import { ServiceCardHeader } from "@/components/shared/service-card-header";
+import { ServiceCardSummary } from "@/components/shared/service-card-summary";
 import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
 import {
@@ -116,7 +116,8 @@ function PluginCard({
           onClick={onActivate}
         />
       ) : null}
-      <ServiceCardHeader
+      <ServiceCardSummary
+        description={item.description}
         name={item.name}
         subtitleTitle={status}
         className="pointer-events-none"
@@ -143,19 +144,13 @@ function PluginCard({
           </>
         }
       />
-      <p
-        title={item.description}
-        className="pointer-events-none line-clamp-2 break-words text-14 leading-relaxed text-muted-foreground"
-      >
-        {item.description}
-      </p>
       <div className="pointer-events-none mt-auto flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-13">
         <div className="pointer-events-auto relative flex min-w-0 items-center gap-2">
           {secondary}
         </div>
         <span
           aria-hidden
-          className="flex items-center gap-1 text-14 font-medium"
+          className="flex items-center gap-1 type-row-title"
         >
           {actionLabel}
           {onActivate || href ? <ArrowRight className="size-[1em]" /> : null}
@@ -174,7 +169,7 @@ function SectionHeading({
 }) {
   return (
     <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
-      <h2 className="text-15 font-medium">{children}</h2>
+      <h2 className="type-card-title">{children}</h2>
       {actions}
     </div>
   );
@@ -236,7 +231,7 @@ function ConnectorCard({
           <button
             type="button"
             disabled={busy}
-            className="min-h-8 text-14 font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="min-h-8 type-row-title text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => onConnect(item.connectOwnSlug!, true)}
           >
             Connect your own

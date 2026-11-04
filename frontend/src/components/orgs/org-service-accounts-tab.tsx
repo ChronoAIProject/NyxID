@@ -204,7 +204,7 @@ export function OrgServiceAccountsTab({
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               {search ? "No Results" : "No Service Accounts"}
             </p>
             <p className="text-13 text-muted-foreground">
@@ -463,7 +463,7 @@ function CredentialRow({
 }) {
   return (
     <div>
-      <p className="mb-1 text-13 font-medium text-muted-foreground">{label}</p>
+      <p className="mb-1 type-secondary-emphasis text-muted-foreground">{label}</p>
       <div className="flex items-center gap-2">
         <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono text-14">
           {value}

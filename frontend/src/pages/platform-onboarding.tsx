@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -77,7 +78,7 @@ export function PlatformOnboardingPage() {
             key={template.id}
             className="space-y-4 rounded-xl border border-border bg-card p-4"
           >
-            <h2 className="text-15 font-semibold">{template.name}</h2>
+            <h2 className="type-card-title">{template.name}</h2>
             <p className="text-14 text-muted-foreground">
               {template.description}
             </p>
@@ -234,7 +235,7 @@ function BindingReview({ code }: { code: string }) {
                   Linking to <strong>{user.email}</strong>. To use another
                   account, sign out before continuing.
                 </p>
-                <label className="flex items-start gap-2">
+                <Label className="flex items-start gap-2">
                   <Checkbox
                     checked={replace}
                     onCheckedChange={(value) => setReplace(value === true)}
@@ -243,7 +244,7 @@ function BindingReview({ code }: { code: string }) {
                     Replace this chat's existing account binding, if it has one.
                     The previous account's setups remain theirs.
                   </span>
-                </label>
+                </Label>
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button
                     disabled={decision.isPending}
@@ -541,7 +542,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               </div>
             ))}
           </dl>
-          <label className="flex gap-2">
+          <Label className="flex gap-2">
             <Checkbox
               checked={
                 review?.id === draft.id && review.revision === draft.revision
@@ -554,7 +555,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               I recognize these facts from my private Telegram chat and want
               this draft in my account.
             </span>
-          </label>
+          </Label>
           <Button
             disabled={
               review?.id !== draft.id ||
@@ -589,7 +590,7 @@ function AnonymousDrafts() {
           review its unowned drafts. Adoption saves a draft; it does not
           provision or activate a bot.
         </p>
-        <label className="block space-y-2">
+        <Label className="block space-y-2">
           Linked chat
           <select
             value={selectedId}
@@ -604,7 +605,7 @@ function AnonymousDrafts() {
               </option>
             ))}
           </select>
-        </label>
+        </Label>
         {selected && (
           <AnonymousDraftReview
             key={`${selected.id}:${selected.generation}`}
@@ -657,7 +658,7 @@ export function PlatformSetupsPage() {
             className="space-y-3 rounded-xl border border-border bg-card p-4"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-15 font-semibold">{setup.facts.name}</h2>
+              <h2 className="type-card-title">{setup.facts.name}</h2>
               <Badge
                 variant={setup.state === "active" ? "success" : "secondary"}
               >

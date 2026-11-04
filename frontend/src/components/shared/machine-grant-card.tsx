@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -728,7 +729,7 @@ function MachineGrantCardContent({
             {grant && Object.keys(grant.assignments).length > 1 ? (
               <div className="space-y-2 text-14">
                 <p>{SHARED_LEGACY_WARNING}</p>
-                <label className="flex items-start gap-2">
+                <Label className="flex items-start gap-2">
                   <Checkbox
                     checked={removeLegacyAccepted}
                     onCheckedChange={(checked) =>
@@ -737,7 +738,7 @@ function MachineGrantCardContent({
                   />
                   I explicitly allow shared legacy access for the retained
                   Machines and acknowledge this warning.
-                </label>
+                </Label>
               </div>
             ) : null}
             <DialogFooter>

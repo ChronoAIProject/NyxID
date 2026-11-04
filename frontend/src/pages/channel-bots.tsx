@@ -187,7 +187,7 @@ function BotCard({
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
         </Button>
       </div>
-      <p className="pr-10 text-15 font-semibold text-foreground truncate">{bot.label}</p>
+      <p className="pr-10 type-card-title text-foreground truncate">{bot.label}</p>
       <p className="text-13 text-muted-foreground">{bot.platform_bot_username || "No username"}</p>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {ownerLabel && <Badge variant="secondary">{ownerLabel}</Badge>}
@@ -274,7 +274,7 @@ function EmptyState() {
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <RobotIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-14 font-medium text-muted-foreground">No channel bots yet</p>
+        <p className="type-row-title text-muted-foreground">No channel bots yet</p>
         <p className="text-13 text-muted-foreground">
           Add a messaging platform bot to relay conversations to your AI agents.
         </p>
@@ -579,7 +579,7 @@ function DeviceChannelCard({
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
         </Button>
       </div>
-      <p className="pr-10 text-15 font-semibold text-foreground truncate">
+      <p className="pr-10 type-card-title text-foreground truncate">
         {conversation.platform_conversation_id}
       </p>
       <div className="mt-1 flex items-center gap-2">
@@ -714,7 +714,7 @@ function DeviceChannelsSection({
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <h2 className="text-15 font-semibold">Device Channels</h2>
+          <h2 className="type-card-title">Device Channels</h2>
           <p className="text-14 text-muted-foreground">
             HTTP Event Gateway channels for analyzers, sensors, and other
             non-bot event sources.
@@ -734,7 +734,7 @@ function DeviceChannelsSection({
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">No device channels yet</p>
+            <p className="type-row-title text-muted-foreground">No device channels yet</p>
             <p className="text-13 text-muted-foreground">
               Create one to let devices push events into the channel relay
               pipeline.
@@ -855,7 +855,7 @@ function ChannelBotsList() {
       {telegram.data?.request && (
         <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-1">
-            <p className="text-14 font-medium">Telegram setup in progress</p>
+            <p className="type-row-title">Telegram setup in progress</p>
             <p className="break-words text-13 text-muted-foreground">
               Continue setting up {telegram.data.request.label} from your saved step.
             </p>

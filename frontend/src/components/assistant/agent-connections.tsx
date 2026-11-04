@@ -177,7 +177,7 @@ function ConnectionGroups({
                     <li>
                       <span className="min-w-0 flex-1 break-words">
                         <span className="block font-medium">{key.label}</span>
-                        <span className="text-13 font-normal text-text-tertiary">
+                        <span className="type-secondary text-text-tertiary">
                           {connectionOwnerLabel(key)} · {key.slug}
                           {connectionAvailable(key) ? "" : " · Unavailable"}
                         </span>

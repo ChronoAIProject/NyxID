@@ -196,7 +196,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-14 font-medium text-muted-foreground">No Authorized Apps</p>
+          <p className="type-row-title text-muted-foreground">No Authorized Apps</p>
           <p className="text-13 text-muted-foreground">
             No applications have been authorized.
           </p>
@@ -224,7 +224,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
             </div>
-            <p className="pr-10 text-15 font-bold">
+            <p className="pr-10 type-card-title">
               {consent.client_name}
             </p>
             <div className="mt-2 flex flex-wrap gap-1">
@@ -235,7 +235,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
               ))}
             </div>
             <div className="mt-3 space-y-1">
-              <p className="text-13 font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Service access
               </p>
               <ServiceAccess consent={consent} />
@@ -275,7 +275,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
-              <p className="pr-10 text-15 font-bold">
+              <p className="pr-10 type-card-title">
                 {consent.client_name}
               </p>
               <div className="mt-2 flex flex-wrap gap-1">
@@ -286,7 +286,7 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 ))}
               </div>
               <div className="mt-3 space-y-1">
-                <p className="text-13 font-medium text-muted-foreground">
+                <p className="type-secondary-emphasis text-muted-foreground">
                   Service access
                 </p>
                 <ServiceAccess consent={consent} />
@@ -466,7 +466,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <BiometricLockIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-14 font-medium text-muted-foreground">No Authorizations</p>
+          <p className="type-row-title text-muted-foreground">No Authorizations</p>
           <p className="text-13 text-muted-foreground">
             No broker authorizations issued. Apps that hold server-side credentials on your behalf will appear here.
           </p>
@@ -494,7 +494,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
             </div>
-            <p className="pr-10 text-15 font-bold">
+            <p className="pr-10 type-card-title">
               {binding.client_name ?? binding.client_id}
             </p>
             <p
@@ -547,7 +547,7 @@ function AuthorizationsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                   <Trash2 className="h-4 w-4 text-destructive" />
                 </Button>
               </div>
-              <p className="pr-10 text-15 font-bold">
+              <p className="pr-10 type-card-title">
                 {binding.client_name ?? binding.client_id}
               </p>
               <p

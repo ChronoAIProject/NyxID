@@ -300,7 +300,7 @@ function AdminUserDetailPageEditor({ userId }: { readonly userId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-15 font-semibold">
+        <h3 className="mb-2 font-display type-card-title">
           Account source unavailable
         </h3>
         <p className="mb-4 text-14 text-muted-foreground">
@@ -780,7 +780,7 @@ function UserRolesSection({
 
         {directRoles.length > 0 && (
           <div>
-            <p className="mb-1 text-13 font-medium text-muted-foreground">
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">
               Direct Roles
             </p>
             <div className="flex flex-wrap gap-2">
@@ -806,7 +806,7 @@ function UserRolesSection({
 
         {inheritedRoles.length > 0 && (
           <div>
-            <p className="mb-1 text-13 font-medium text-muted-foreground">
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">
               Inherited from Groups
             </p>
             <div className="flex flex-wrap gap-2">
@@ -821,7 +821,7 @@ function UserRolesSection({
 
         {effectivePermissions.length > 0 && (
           <div>
-            <p className="mb-1 text-13 font-medium text-muted-foreground">
+            <p className="mb-1 type-secondary-emphasis text-muted-foreground">
               Effective Permissions
             </p>
             <div className="flex flex-wrap gap-1">

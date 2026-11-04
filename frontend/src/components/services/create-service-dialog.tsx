@@ -278,7 +278,6 @@ export function CreateServiceDialog({
                 <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <Label
                     htmlFor="create-ssh-cert-auth"
-                    className="text-14 font-medium"
                   >
                     Enable short-lived SSH certificates
                   </Label>

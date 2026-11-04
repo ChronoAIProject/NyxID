@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { ArrowRight, ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -156,7 +157,7 @@ export function AssistantNodeTransferDialog({
                 {params.newOwnerUserId}
               </Badge>
             </div>
-            <label className="flex items-start gap-2">
+            <Label className="flex items-start gap-2">
               <Checkbox
                 checked={confirmed}
                 onCheckedChange={(value) => setConfirmed(value === true)}
@@ -165,7 +166,7 @@ export function AssistantNodeTransferDialog({
                 <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
                 the current owner will lose control of this node.
               </span>
-            </label>
+            </Label>
           </div>
         ) : null}
 

@@ -442,7 +442,7 @@ function RemoteMachineDetailView({
         >
           {title && (
             <div className="space-y-1">
-              <h3 className="text-15 font-semibold">{title}</h3>
+              <h3 className="type-card-title">{title}</h3>
               <p className="text-14 text-muted-foreground">{attention}</p>
             </div>
           )}
@@ -517,7 +517,7 @@ function RemoteMachineDetailView({
           >
             <div className="min-w-0 space-y-1">
               <p className="text-13 text-muted-foreground">Execution</p>
-              <p className="text-15 font-semibold">
+              <p className="type-card-title">
                 {machine.authorization_state === "active" && canPause
                   ? "Runtime authorized"
                   : "Execution unavailable"}
@@ -528,7 +528,7 @@ function RemoteMachineDetailView({
             </div>
             <div className="min-w-0 space-y-1">
               <p className="text-13 text-muted-foreground">Runtime billing</p>
-              <p className="text-15 font-semibold">{accounting.label}</p>
+              <p className="type-card-title">{accounting.label}</p>
               <p className="text-13 text-muted-foreground">
                 {accounting.detail}
               </p>
@@ -538,7 +538,7 @@ function RemoteMachineDetailView({
             </div>
             <div className="min-w-0 space-y-1">
               <p className="text-13 text-muted-foreground">Node connection</p>
-              <p className="text-15 font-semibold">
+              <p className="type-card-title">
                 {node
                   ? node.is_connected
                     ? "WSS connected"
@@ -1039,7 +1039,7 @@ function LifecycleActionDialog({
                           }
                         />
                       </FormControl>
-                      <FormLabel className="min-w-0 flex-1 text-14">
+                      <FormLabel className="min-w-0 flex-1">
                         I understand{" "}
                         {action === "delete"
                           ? "the irreversible data loss and cleanup policy"
@@ -1209,7 +1209,7 @@ function RemoteMachineTimeline({
             className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-15 font-semibold">
+              <span className="type-card-title">
                 {readable(event.kind)}
               </span>
               <time
@@ -1537,9 +1537,9 @@ function RemoteMachineClientSetup() {
           ["Codex", "~/.codex/config.toml", buildCodexConfig(url)],
         ] as const).map(([name, path, value]) => (
           <GroupedRow key={name} className="block space-y-1">
-            <p className="text-13 font-normal text-text-tertiary">{name} · {path}</p>
+            <p className="type-secondary text-text-tertiary">{name} · {path}</p>
             <div className="relative">
-              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono text-14 font-normal leading-relaxed">{value}</pre>
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono type-body">{value}</pre>
               <Button size="icon" variant="ghost" className="absolute right-0 top-0"
                 aria-label={`Copy ${name} HTTP MCP config`}
                 onClick={() =>

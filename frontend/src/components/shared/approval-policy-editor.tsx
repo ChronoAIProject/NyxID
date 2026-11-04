@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { Label } from "@/components/ui/label";
+import { useId, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -57,6 +58,7 @@ export function ApprovalPolicyEditor({
   rules,
   onSave,
 }: ApprovalPolicyEditorProps) {
+  const defaultId = useId();
   const [draftRules, setDraftRules] = useState<readonly ApprovalRule[]>(rules);
   const [draftDefaultEffect, setDraftDefaultEffect] =
     useState<ApprovalEffect>(defaultEffect ?? "auto_allow");
@@ -113,14 +115,14 @@ export function ApprovalPolicyEditor({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-13 text-muted-foreground">Default:</span>
+        <Label htmlFor={defaultId}>Default</Label>
         <Select
           value={draftDefaultEffect}
           onValueChange={(value) =>
             setDraftDefaultEffect(value as ApprovalEffect)
           }
         >
-          <SelectTrigger className="h-8 w-[190px] text-14">
+          <SelectTrigger id={defaultId} className="h-8 w-[190px]">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -145,7 +147,7 @@ export function ApprovalPolicyEditor({
               className="space-y-3 rounded-lg border border-border p-3"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-14 font-medium">
+                <span className="type-row-title">
                   Rule {index + 1}
                 </span>
                 <Button
@@ -163,9 +165,9 @@ export function ApprovalPolicyEditor({
                 <span className="text-13 text-muted-foreground">Methods</span>
                 <div className="flex flex-wrap gap-2">
                   {approvalMethods.map((method) => (
-                    <label
+                    <Label
                       key={method}
-                      className="flex items-center gap-2 text-14 text-muted-foreground"
+                      className="flex items-center gap-2 text-muted-foreground"
                     >
                       <Checkbox
                         checked={rule.methods.includes(method)}
@@ -175,15 +177,15 @@ export function ApprovalPolicyEditor({
                         disabled={disabled}
                       />
                       {method}
-                    </label>
+                    </Label>
                   ))}
                 </div>
               </div>
 
               <div className="space-y-2">
-                <label className="text-14 text-muted-foreground">
+                <Label className="text-muted-foreground">
                   Resource pattern
-                </label>
+                </Label>
                 <Input
                   value={rule.resource_pattern}
                   onChange={(event) =>
@@ -198,9 +200,9 @@ export function ApprovalPolicyEditor({
 
               <div className="flex flex-wrap gap-3">
                 {approvalVerbs.map((verb) => (
-                  <label
+                  <Label
                     key={verb}
-                    className="flex items-center gap-2 text-14 text-muted-foreground"
+                    className="flex items-center gap-2 text-muted-foreground"
                   >
                     <Checkbox
                       checked={rule.verbs.includes(verb)}
@@ -210,7 +212,7 @@ export function ApprovalPolicyEditor({
                       disabled={disabled}
                     />
                     {approvalVerbLabels[verb]}
-                  </label>
+                  </Label>
                 ))}
               </div>
 

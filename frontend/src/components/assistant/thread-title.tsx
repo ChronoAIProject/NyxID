@@ -28,7 +28,7 @@ export function ThreadTitle({
         className={cn(
           "group flex min-w-0 max-w-full items-center gap-2 text-left",
           heading
-            ? "text-15 font-semibold text-foreground"
+            ? "type-card-title text-foreground"
             : "text-14 text-muted-foreground hover:text-foreground",
         )}
         onClick={() => {
@@ -71,7 +71,7 @@ export function ThreadTitle({
         <Input
           autoFocus
           aria-label="Chat title"
-          className={heading ? "h-8 min-w-0 flex-1 text-14 font-normal" : undefined}
+          className={heading ? "h-8 min-w-0 flex-1 type-body " : undefined}
           maxLength={200}
           {...form.register("title")}
         />

@@ -100,7 +100,7 @@ export function StickyTitle({ title, children, actions, column = false }: { read
   }, []);
   return <>
     <div data-sticky-title="" data-visible={compact} aria-hidden={!compact || !actions ? true : undefined} className={cn("compact-title-bar pointer-events-none fixed z-20 hidden items-center justify-between gap-3 border-b border-border/50 bg-background py-2 md:flex", column && "max-w-2xl", compact ? "pointer-events-auto opacity-100" : "invisible opacity-0")} style={bounds}>
-      <span aria-hidden className="min-w-0 truncate text-15 font-semibold">{title}</span>
+      <span aria-hidden className="min-w-0 truncate type-card-title">{title}</span>
       {compact && actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
     </div>
     <div ref={heading} data-large-title="" className={column ? "max-w-2xl" : undefined}>{children}</div>

@@ -478,7 +478,7 @@ export function ChannelConversationDetailPage() {
           onRetryBotOwner={() => void refetchBot()}
         />
       )}
-      {activities.length > 0 && <h2 className="text-15 font-medium">Message history</h2>}
+      {activities.length > 0 && <h2 className="type-card-title">Message history</h2>}
       {/* Message list */}
       {error ? (
         <ErrorBanner
@@ -491,7 +491,7 @@ export function ChannelConversationDetailPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               No Messages
             </p>
             <p className="text-13 text-muted-foreground">

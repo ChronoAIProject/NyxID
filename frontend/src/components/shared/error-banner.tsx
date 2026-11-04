@@ -32,7 +32,7 @@ export function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
           type="button"
           onClick={handleRetry}
           disabled={retrying}
-          className="inline-flex items-center justify-center shrink-0 rounded-lg border border-destructive/20 bg-destructive/10 w-[52px] h-[30px] text-14 unthemed:text-12 font-medium text-destructive transition-colors duration-200 hover:bg-destructive/15 disabled:opacity-60"
+          className="inline-flex items-center justify-center shrink-0 rounded-lg border border-destructive/20 bg-destructive/10 w-[52px] h-[30px] type-row-title unthemed:text-12 text-destructive transition-colors duration-200 hover:bg-destructive/15 disabled:opacity-60"
         >
           {retrying ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />

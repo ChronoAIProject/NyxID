@@ -1,5 +1,6 @@
+import { Label } from "@/components/ui/label";
 import { GroupedRow } from "@/components/ui/grouped-list";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Check, ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,6 +28,7 @@ export function TimezoneSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const resetOnOpen = useRef(false);
   const suggested = browserTimezone();
   const zones = [
     ...new Set([
@@ -37,7 +39,13 @@ export function TimezoneSelect({
     ]),
   ].filter(Boolean);
   const picker = (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={(next) => {
+      if (next && resetOnOpen.current) {
+        setSearch("");
+        resetOnOpen.current = false;
+      }
+      setOpen(next);
+    }}>
       <PopoverTrigger asChild>
         <Button
           type="button"
@@ -49,7 +57,7 @@ export function TimezoneSelect({
           aria-invalid={invalid}
           className={
             grouped
-              ? "h-auto min-h-8 max-w-full gap-2 whitespace-normal px-0 text-right font-medium"
+              ? "h-auto min-h-8 max-w-full gap-2 whitespace-normal px-0 text-right"
               : "w-full justify-between"
           }
         >
@@ -79,11 +87,13 @@ export function TimezoneSelect({
                 type="button"
                 role="option"
                 aria-selected={zone === value}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-14 hover:bg-accent focus-visible:bg-accent"
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left type-menu-item hover:bg-accent focus-visible:bg-accent"
                 onClick={() => {
                   onChange(zone);
+                  // Keep the closing surface stable while Floating UI measures it.
+                  // Clear the selection search before the next surface mounts.
+                  resetOnOpen.current = true;
                   setOpen(false);
-                  setSearch("");
                 }}
               >
                 <Check
@@ -103,7 +113,7 @@ export function TimezoneSelect({
     <GroupedRow title={label} accessory={picker} />
   ) : (
     <div className="space-y-1 text-14">
-      <span>{label}</span>
+      <Label asChild><span>{label}</span></Label>
       {picker}
     </div>
   );

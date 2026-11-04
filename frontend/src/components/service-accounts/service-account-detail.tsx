@@ -317,7 +317,7 @@ function ServiceAccountDetailEditor({
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-15 font-semibold">
+        <h3 className="mb-2 type-card-title">
           Service account not found
         </h3>
         <p className="mb-4 text-14 text-muted-foreground">
@@ -553,7 +553,7 @@ function ServiceAccountDetailEditor({
                 render={({ field }) => (
                   <FormItem className="flex items-center justify-between rounded-lg border p-3">
                     <div className="space-y-0.5">
-                      <FormLabel className="text-14 font-medium">
+                      <FormLabel>
                         Active
                       </FormLabel>
                       <p className="text-13 text-muted-foreground">
@@ -626,7 +626,7 @@ function ServiceAccountDetailEditor({
               </div>
 
               <div>
-                <p className="mb-1 text-13 font-medium text-muted-foreground">
+                <p className="mb-1 type-secondary-emphasis text-muted-foreground">
                   New Client Secret
                 </p>
                 <div className="flex items-center gap-2">

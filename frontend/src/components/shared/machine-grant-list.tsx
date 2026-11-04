@@ -59,7 +59,7 @@ export function MachineGrantList({ machineId }: { readonly machineId: string }) 
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
   return <section aria-labelledby="external-machine-grants" className="space-y-3">
-    <div className="flex items-center justify-between gap-3"><h3 id="external-machine-grants" className="text-15 font-semibold">External subject permissions</h3><Button variant="outline" size="sm" onClick={() => void query.refetch()}>Refresh grants</Button></div>
+    <div className="flex items-center justify-between gap-3"><h3 id="external-machine-grants" className="type-card-title">External subject permissions</h3><Button variant="outline" size="sm" onClick={() => void query.refetch()}>Refresh grants</Button></div>
     <p className="text-14 text-muted-foreground">Each row is this account’s real OAuth client or parent Key. Child login credentials share their parent’s grant and task view. Labels and MCP connection names do not create independent permissions. Historical and revoked grants remain visible. Use Load older grants when the server provides another page.</p>
     {query.isPending && <p role="status">Loading external Machine permissions…</p>}
     {query.error && <ErrorBanner message={machineGrantUnavailable(query.error) ? "The per-Machine grant view is not available on this server yet. Manage permissions from the original Key or Authorized Apps page; no empty authorization state has been inferred." : "Could not load external Machine permissions. Retry before relying on this view."} onRetry={() => void query.refetch()} />}
@@ -69,7 +69,7 @@ export function MachineGrantList({ machineId }: { readonly machineId: string }) 
       const assignment = grant.assignments[machineId];
       const expired = new Date(grant.expires_at).getTime() <= now;
       return <article key={grant.id} className="space-y-3 rounded-lg border border-border bg-card p-4">
-        <div className="flex flex-wrap items-center gap-2"><h4 className="text-15 font-medium">{grant.source.kind === "api_key" ? "Parent Key" : "OAuth client"}</h4><Badge variant={grant.status === "revoked" || expired ? "warning" : "secondary"}>{grant.status === "revoked" ? "Revoked" : expired ? "Expired" : "Active grant"}</Badge><span className="text-13 text-muted-foreground">Revision {grant.revision} · policy {grant.policy_revision}</span></div>
+        <div className="flex flex-wrap items-center gap-2"><h4 className="type-card-title">{grant.source.kind === "api_key" ? "Parent Key" : "OAuth client"}</h4><Badge variant={grant.status === "revoked" || expired ? "warning" : "secondary"}>{grant.status === "revoked" ? "Revoked" : expired ? "Expired" : "Active grant"}</Badge><span className="text-13 text-muted-foreground">Revision {grant.revision} · policy {grant.policy_revision}</span></div>
         <p className="break-all font-mono text-13">{grant.source.kind === "api_key" ? grant.source.api_key_id : grant.source.oauth_client_id}</p>
         <p className="text-13 text-muted-foreground">Expires {formatDate(grant.expires_at)}. Current source authentication and execution authority are revalidated on every use; an active grant alone does not establish either.</p>
         <GrantValidity key={`${machineId}-${grant.id}-${grant.revision}`} grant={grant} active={grant.status === "active" && !expired} />

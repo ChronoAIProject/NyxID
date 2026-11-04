@@ -200,7 +200,7 @@ export function LiveReplay({
       <div aria-hidden="true" className="pointer-events-none select-none">
         <div className="flex items-center gap-2 border-b border-border/50 bg-sidebar px-3 py-2">
           <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="sm" />
-          <span className="text-14 font-medium text-foreground">NyxBot</span>
+          <span className="type-row-title text-foreground">NyxBot</span>
         </div>
         <div className="flex h-[18.75rem] flex-col justify-end gap-3 overflow-hidden px-4 pt-3">
           {scene.messages.map((entry) => (

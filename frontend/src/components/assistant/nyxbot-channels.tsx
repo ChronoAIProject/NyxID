@@ -453,7 +453,7 @@ export function ChannelBotsManager({
                     <li>
                       <div className="min-w-0 flex-1">
                         <p>{bot.label}</p>
-                        <p className="text-13 font-normal text-text-tertiary">
+                        <p className="type-secondary text-text-tertiary">
                           {channelPlatformName(bot.platform)}
                           {bot.user_id !== currentUserId
                             ? ` · ${orgName(bot.user_id) ?? ""}`

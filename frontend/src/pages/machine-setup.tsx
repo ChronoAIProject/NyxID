@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
 import { MachineSeparationSupport } from "@/components/shared/machine-isolation";
@@ -323,7 +324,7 @@ function MachineSetupContent() {
                 name="separation"
                 render={({ field }) => (
                   <FormItem inline>
-                    <FormLabel className="flex-1 text-14 font-medium text-foreground">
+                    <FormLabel className="flex-1 text-foreground">
                       Agent separation
                     </FormLabel>
                     <Select value={field.value ?? "automatic"} disabled={locked} onValueChange={value => {
@@ -346,13 +347,13 @@ function MachineSetupContent() {
               />
               {form.watch("separation") === "shared_legacy" && (
                 <GroupedRow asChild>
-                  <label>
+                  <Label>
                     <span className="flex-1">
                       I explicitly accept shared legacy access and this warning.
                     </span>
                     <Switch disabled={locked} checked={form.watch("legacy_warning_acknowledged") === true} onCheckedChange={value => form.setValue("legacy_warning_acknowledged", value === true)} />
                     <FormField control={form.control} name="legacy_warning_acknowledged" render={() => <FormMessage />} />
-                  </label>
+                  </Label>
                 </GroupedRow>
               )}
             </GroupedList>
@@ -360,7 +361,7 @@ function MachineSetupContent() {
               {(["shell", "files", "browser", "computer"] as const).map(
                 (capability) => (
                   <GroupedRow key={capability} asChild>
-                    <label>
+                    <Label>
                       <span className="flex-1">{labels[capability]}</span>
                       <Checkbox
                         disabled={locked}
@@ -374,7 +375,7 @@ function MachineSetupContent() {
                           )
                         }
                       />
-                    </label>
+                    </Label>
                   </GroupedRow>
                 ),
               )}
@@ -456,7 +457,7 @@ function MachineSetupContent() {
               }
             >
               <GroupedRow asChild>
-                <label>
+                <Label>
                   <Switch
                     className="order-last shrink-0"
                     checked={form.watch("automatic_updates") ?? true}
@@ -466,7 +467,7 @@ function MachineSetupContent() {
                     }
                   />
                   <span className="flex-1">Update automatically when idle</span>
-                </label>
+                </Label>
               </GroupedRow>
             </GroupedList>
             {!locked && (
@@ -594,7 +595,7 @@ function MachinePairContent() {
             footer="Automatic updates wait for jobs, turns and live desktop sessions to end, and notify you."
           >
             <GroupedRow asChild>
-              <label>
+              <Label>
                 <Switch
                   className="order-last shrink-0"
                   checked={automatic}
@@ -604,12 +605,12 @@ function MachinePairContent() {
                 <span className="flex-1">
                   Update automatically when idle (recommended)
                 </span>
-              </label>
+              </Label>
             </GroupedRow>
             {!decision.data ? (
               <>
                 <GroupedRow asChild>
-                  <label>
+                  <Label>
                     <Switch
                       className="order-last shrink-0"
                       checked={confirmed}
@@ -619,7 +620,7 @@ function MachinePairContent() {
                     <span className="flex-1">
                       I started this setup and recognize this machine.
                     </span>
-                  </label>
+                  </Label>
                 </GroupedRow>
               </>
             ) : (

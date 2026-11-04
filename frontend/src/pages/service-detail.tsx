@@ -1009,7 +1009,7 @@ function AnonymousEndpointsSection({
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
           <Globe2 className="h-4 w-4 text-primary-text" />
-          <span className="text-15 font-medium">Public proxy rules</span>
+          <span className="type-card-title">Public proxy rules</span>
         </div>
 
         <Form {...form}>

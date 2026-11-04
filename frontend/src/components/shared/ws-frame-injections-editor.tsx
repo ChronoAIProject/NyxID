@@ -152,7 +152,7 @@ export function WsFrameInjectionsEditor({
         hasErrors ? "border-destructive" : "border-border/50",
       )}
     >
-      <summary className="cursor-pointer text-15 font-semibold text-foreground">
+      <summary className="cursor-pointer type-card-title text-foreground">
         WebSocket auth frames
       </summary>
       <div className="mt-4 space-y-3">
@@ -206,7 +206,7 @@ export function WsFrameInjectionsEditor({
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <p className="text-13 font-medium">Rule {index + 1}</p>
+                <p className="type-secondary-emphasis">Rule {index + 1}</p>
                 <Button
                   type="button"
                   variant="ghost"
@@ -367,7 +367,6 @@ export function WsFrameInjectionsEditor({
                 />
                 <Label
                   htmlFor={`ws-consume-trigger-${index}`}
-                  className="text-14 font-medium"
                 >
                   Consume trigger frame
                 </Label>

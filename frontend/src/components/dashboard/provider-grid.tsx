@@ -216,7 +216,7 @@ export function ProviderGrid() {
   const scopeSelector = showScopeSelect ? (
     <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 text-13 font-medium text-muted-foreground">
+        <div className="flex items-center gap-2 type-secondary-emphasis text-muted-foreground">
           <Building2 className="h-3.5 w-3.5" />
           Owner
         </div>
@@ -243,7 +243,7 @@ export function ProviderGrid() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-14 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               No Provider Tokens
             </p>
             <p className="text-13 text-muted-foreground">

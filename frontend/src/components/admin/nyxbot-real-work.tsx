@@ -67,7 +67,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
     <Card className="space-y-4 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-display text-15 font-semibold">
+          <h3 className="font-display type-card-title">
             Weekly real work
           </h3>
           <p className="mt-1 text-14 text-muted-foreground">
@@ -280,14 +280,14 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
           </div>
         </details>
       ))}
-      <p className="text-13 leading-relaxed text-text-tertiary">
+      <p className="text-13 text-text-tertiary">
         Success is completed tasks divided by settled tasks with a successful
         business call, including tasks that later failed or stopped. Helpful
         feedback uses votes on completed real work. Model calls, platform
         credentials and chat alone do not count. Each triggered run and mirrored
         voice reply counts once.
       </p>
-      <p className="text-13 leading-relaxed text-text-tertiary">
+      <p className="text-13 text-text-tertiary">
         Activation includes each prior stage, observed through the selected end
         date; organization assistants count as having NyxBot. The median is
         estimated for owners reaching every stage. Reports use retained records

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useDrawerSearchEntries, useDrawerSearchEnabled } from "@/lib/drawer-search";
 import {
   GroupedList,
@@ -388,7 +389,7 @@ export function ChannelChats({
             }
           />
           <GroupedRow asChild interactive>
-            <label>
+            <Label>
               <span className="min-w-0 flex-1">
                 Also apply to existing private chats
               </span>
@@ -399,7 +400,7 @@ export function ChannelChats({
                   setApplyToExisting(checked === true)
                 }
               />
-            </label>
+            </Label>
           </GroupedRow>
           {applyToExisting ? (
             <GroupedRow asChild interactive>

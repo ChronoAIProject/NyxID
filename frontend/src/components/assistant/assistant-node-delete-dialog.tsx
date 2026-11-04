@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -118,7 +119,7 @@ export function AssistantNodeDeleteDialog({
                 {params.nodeId}
               </Badge>
             </div>
-            <label className="flex items-start gap-2">
+            <Label className="flex items-start gap-2">
               <Checkbox
                 checked={confirmed}
                 onCheckedChange={(value) => setConfirmed(value === true)}
@@ -127,7 +128,7 @@ export function AssistantNodeDeleteDialog({
                 <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
                 this removes node routing and pending credential work.
               </span>
-            </label>
+            </Label>
           </div>
         ) : null}
 

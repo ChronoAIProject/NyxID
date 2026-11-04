@@ -390,7 +390,7 @@ export function AdminFeatureFlagsPage() {
 
       {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-card px-3 py-2 shadow-sm">
-          <span className="flex items-center gap-2 text-14 font-medium text-foreground">
+          <span className="flex items-center gap-2 type-row-title text-foreground">
             <span
               aria-hidden
               className="size-1.5 shrink-0 rounded-full bg-warning"
@@ -798,7 +798,7 @@ function FlagTableRows({
         <TableRow className="bg-muted/30 hover:bg-muted/30">
           <TableCell
             colSpan={FLAG_TABLE_COLUMNS}
-            className="py-1.5 text-12 font-medium uppercase tracking-[1.5px] text-text-tertiary"
+            className="py-1.5 type-group-label uppercase tracking-[1.5px] text-text-tertiary"
           >
             {section.label}
             <span className="ml-2 font-normal tabular-nums">
@@ -830,7 +830,7 @@ function FlagTableRows({
                   onClick={onToggle}
                   aria-expanded={open}
                   aria-controls={editorId}
-                  className="rounded-sm text-left font-mono text-15 font-semibold text-foreground [overflow-wrap:anywhere] underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  className="rounded-sm text-left font-mono type-card-title text-foreground [overflow-wrap:anywhere] underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                 >
                   <BreakableKey value={flag.key} />
                 </button>
@@ -1190,7 +1190,6 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
-          className="text-14 font-medium"
         >
           Description — what this flag controls
         </Label>
@@ -1207,7 +1206,6 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-owner-${flag.key}`}
-          className="text-14 font-medium"
         >
           Owner — who to ask about it
         </Label>
@@ -1468,7 +1466,7 @@ function FlagsEmptyState({
       <div>
         <p
           className={cn(
-            "text-14 font-medium",
+            "type-row-title ",
             error ? "text-destructive" : "text-foreground",
           )}
         >
@@ -1489,7 +1487,7 @@ function Group({
 }) {
   return (
     <div className="grid gap-2 border-t border-border/40 pt-4 first:border-t-0 first:pt-0 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-4">
-      <p className="text-13 font-semibold text-text-tertiary sm:pt-1.5">
+      <p className="type-secondary-strong text-text-tertiary sm:pt-1.5">
         {label}
       </p>
       <div className="min-w-0">{children}</div>
@@ -1517,7 +1515,7 @@ function ScopeRow({
         pending && "bg-primary/[0.07]",
       )}
     >
-      <span className="flex min-w-0 items-center gap-1.5 text-14 font-medium text-foreground">
+      <Label asChild><span className="flex min-w-0 items-center gap-1.5 text-foreground">
         {/* Dot slot is always reserved so labels don't shift when a row
             becomes pending; only its color/visibility changes. */}
         <span
@@ -1528,7 +1526,7 @@ function ScopeRow({
           )}
         />
         <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
-      </span>
+      </span></Label>
       <Select
         value={state}
         disabled={disabled}

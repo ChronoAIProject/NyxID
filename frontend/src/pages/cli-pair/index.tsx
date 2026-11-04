@@ -920,7 +920,7 @@ function ResumedCreateWarningPanel({
       <div className="flex flex-col gap-2 sm:flex-row">
         <a
           href={manageHref}
-          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 text-14 font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex flex-1 items-center justify-center rounded-lg bg-primary px-3 py-2 type-row-title text-primary-foreground hover:bg-primary/90"
         >
           Open {manageLabel}
         </a>
@@ -1055,7 +1055,7 @@ function NotifyingCliPanel({
           <button
             type="button"
             onClick={onRetry}
-            className="rounded-lg border bg-primary px-4 py-2 text-14 font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            className="rounded-lg border bg-primary px-4 py-2 type-row-title text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
           >
             Retry
           </button>

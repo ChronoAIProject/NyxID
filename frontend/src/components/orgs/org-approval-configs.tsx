@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
 import { Shield, RotateCcw, Trash2 } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -356,7 +357,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 >
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
-                      <p className="text-14 font-medium">
+                      <p className="type-row-title">
                         {config.service_name}
                       </p>
                       <p className="text-13 text-muted-foreground">
@@ -389,9 +390,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       <TabsContent value="simple" className="mt-3">
                         <div className="flex flex-col gap-3">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-13 text-muted-foreground">
-                              Mode:
-                            </span>
+                            <Label htmlFor={`approval-mode-${mutationKey}`}>Mode</Label>
                             <Select
                               value={config.approval_mode}
                               onValueChange={(value) =>
@@ -402,7 +401,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                 )
                               }
                             >
-                              <SelectTrigger className="h-7 w-[180px] text-14">
+                              <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
@@ -422,9 +421,9 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                           </div>
                           <div className="flex flex-wrap gap-3">
                             {approvalVerbs.map((verb) => (
-                              <label
+                              <Label
                                 key={verb}
-                                className="flex items-center gap-2 text-14 text-muted-foreground"
+                                className="flex items-center gap-2 text-muted-foreground"
                               >
                                 <Switch
                                   checked={enabledVerbs.includes(verb)}
@@ -438,7 +437,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                   }
                                 />
                                 {approvalVerbLabels[verb]}
-                              </label>
+                              </Label>
                             ))}
                           </div>
                         </div>
@@ -483,12 +482,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label
-                className="text-14 font-medium"
+              <Label
+
                 htmlFor="org-service-select"
               >
                 Service
-              </label>
+              </Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
@@ -516,7 +515,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-14 font-medium">Require Approval</p>
+                <p className="type-row-title">Require Approval</p>
                 <p className="text-13 text-muted-foreground">
                   Whether members must get an admin&rsquo;s approval to use
                   this service.
@@ -533,12 +532,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             {selectedApprovalRequired && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label
-                    className="text-14 font-medium"
+                  <Label
+
                     htmlFor="org-approval-mode-select"
                   >
                     Approval Mode
-                  </label>
+                  </Label>
                   <Select
                     value={selectedApprovalMode}
                     onValueChange={(v) =>
@@ -560,14 +559,14 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-14 font-medium">
+                  <p className="type-row-title">
                     Require Approval For
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3">
                     {approvalVerbs.map((verb) => (
-                      <label
+                      <Label
                         key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-14 text-muted-foreground"
+                        className="flex items-center justify-between rounded-lg border border-border p-3 text-muted-foreground"
                       >
                         <span>{approvalVerbLabels[verb]}</span>
                         <Switch
@@ -588,7 +587,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                             });
                           }}
                         />
-                      </label>
+                      </Label>
                     ))}
                   </div>
                 </div>
@@ -678,7 +677,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                 className="flex items-center justify-between rounded-lg border border-border p-4"
               >
                 <div className="space-y-0.5">
-                  <p className="text-14 font-medium">{grant.service_name}</p>
+                  <p className="type-row-title">{grant.service_name}</p>
                   <p className="text-13 text-muted-foreground">
                     {grant.requester_label ?? grant.requester_type} ·
                     granted {formatDate(grant.granted_at)} · expires{" "}

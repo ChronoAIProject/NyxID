@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { flushSync } from "react-dom";
 import {
   assertRemoteMachineAdmission,
@@ -295,7 +296,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
             name="name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel className="text-14 font-medium text-text-tertiary">
+                <FormLabel className="text-text-tertiary">
                   Machine name
                 </FormLabel>
                 <FormControl>
@@ -308,11 +309,11 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
         </GroupedList>
         <GroupedList title="Enable on this machine">
           <fieldset disabled={locked}>
-            <legend className="sr-only">Enable on this machine</legend>
+            <Label asChild><legend className="sr-only">Enable on this machine</legend></Label>
             {(["shell", "files", "browser", "computer"] as const).map(
               (capability) => (
                 <GroupedRow key={capability} asChild interactive>
-                  <label>
+                  <Label>
                     <Checkbox
                       checked={capabilities.includes(capability)}
                       disabled={
@@ -336,7 +337,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
                       }
                     />
                     {labels[capability]}
-                  </label>
+                  </Label>
                 </GroupedRow>
               ),
             )}
@@ -635,7 +636,7 @@ function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props
                   />
                 </FormControl>
                 <div className="min-w-0 flex-1">
-                  <FormLabel className="text-14 font-medium text-foreground">
+                  <FormLabel className="text-foreground">
                     {freeSlot
                       ? "I accept the shared environment, fixed specification, and data policies."
                       : "I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions."}

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useKeys } from "@/hooks/use-keys";
 import {
@@ -206,12 +207,12 @@ export function VerifyKeyCard({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="space-y-1.5">
-          <label
+          <Label
             htmlFor="verify-key-paste"
-            className="text-14 font-medium text-foreground"
+            className="text-foreground"
           >
             Agent key
-          </label>
+          </Label>
           <Input
             id="verify-key-paste"
             type="password"
@@ -222,7 +223,7 @@ export function VerifyKeyCard({
             onChange={(e) => setPastedKey(e.target.value)}
             disabled={status === "pending"}
           />
-          <p className="text-13 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Paste the agent key you copied when you created it. NyxID does not
             store this paste — it&apos;s only used for this test.
           </p>
@@ -230,12 +231,12 @@ export function VerifyKeyCard({
 
         {candidateSlugs.length > 1 && (
           <div className="space-y-1.5">
-            <label
+            <Label
               htmlFor="verify-key-slug-picker"
-              className="text-14 font-medium text-foreground"
+              className="text-foreground"
             >
               Test against
-            </label>
+            </Label>
             <select
               id="verify-key-slug-picker"
               value={allowedSlug ?? ""}
@@ -249,7 +250,7 @@ export function VerifyKeyCard({
                 </option>
               ))}
             </select>
-            <p className="text-13 leading-relaxed text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Pick a service whose downstream credential is fully configured.
               The test will probe this slug (should return 2xx) and a
               deliberately-invalid slug (should return 4xx).
@@ -300,7 +301,7 @@ export function VerifyKeyCard({
                 </span>
                 <span
                   className={cn(
-                    "text-13 font-medium",
+                    "type-secondary-emphasis ",
                     r.expected === "allowed"
                       ? "text-success/80"
                       : "text-destructive/80",
@@ -314,13 +315,13 @@ export function VerifyKeyCard({
         )}
 
         {errorMessage && (
-          <p className="text-13 leading-relaxed text-destructive">
+          <p className="text-13 text-destructive">
             {errorMessage}
           </p>
         )}
 
         {allowedSlug === null && (
-          <p className="text-13 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Connect a service first so this key has something allowed to call.
           </p>
         )}

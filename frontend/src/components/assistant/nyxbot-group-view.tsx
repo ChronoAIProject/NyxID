@@ -174,7 +174,7 @@ export function GroupMessageRow({
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
         <UserMessageBubble className="max-w-[90%] text-16 [overflow-wrap:anywhere] sm:max-w-[78%]">
-          {message.author ? <p className="mb-1 text-13 font-medium">{message.author.display_name}</p> : null}
+          {message.author ? <p className="mb-1 type-secondary-emphasis">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
             <p className="mb-1 text-13">
               {recipientLine(message.recipient_agent_ids, members)}
@@ -224,7 +224,7 @@ export function GroupMessageRow({
       </button>
       <div className="min-w-0">
         <div className="mb-0.5 flex flex-wrap items-baseline gap-x-2">
-          <span className="text-14 font-medium text-foreground">{title}</span>
+          <span className="type-row-title text-foreground">{title}</span>
           {handle ? (
             <span className="text-13 text-text-tertiary">{handle}</span>
           ) : null}
@@ -482,7 +482,7 @@ function GroupHeader({
       <div className="space-y-1.5">
         <HeaderBar>
           <HeaderItem className="flex h-7 min-w-0 items-center">
-            <h2 className={cn("truncate font-semibold text-foreground", compact ? "text-13" : "text-15")}>
+            <h2 className={cn("truncate text-foreground", compact ? "type-secondary-strong" : "type-card-title")}>
               {group?.name ?? "Loading group…"}
             </h2>
           </HeaderItem>

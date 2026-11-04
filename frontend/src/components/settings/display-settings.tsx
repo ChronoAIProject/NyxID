@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState, type ReactNode } from "react";
 import { Check, Monitor, Moon, Palette, PanelLeft, RotateCcw, SlidersHorizontal, Sun, SunMoon, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -54,8 +55,8 @@ function DisplaySectionHeader({ icon: Icon, title, children }: {
     <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--display-density,1))] space-y-0">
       <Icon data-ui-icon="" aria-hidden="true" className="mt-[0.125em] shrink-0 text-17 text-text-tertiary" />
       <div className="min-w-0 space-y-1.5">
-        <CardTitle className="text-15 leading-snug">{title}</CardTitle>
-        <CardDescription className="leading-relaxed">{children}</CardDescription>
+        <CardTitle className="text-15">{title}</CardTitle>
+        <CardDescription>{children}</CardDescription>
       </div>
     </CardHeader>
   );
@@ -95,9 +96,9 @@ function SegmentedChoice<T extends string | number>({
             event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
           }}
           className={cn(
-            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 text-14 transition-colors",
+            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 type-button transition-colors",
             value === option.value
-              ? "bg-overlay-strong font-medium text-foreground"
+              ? "bg-overlay-strong text-foreground"
               : "text-muted-foreground hover:text-foreground",
           )}
         >
@@ -121,8 +122,8 @@ function SettingRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
       <div className="min-w-0 flex-1 basis-[18em]">
-        <p className="text-15 font-medium leading-snug">{title}</p>
-        <p className="mt-1 text-14 leading-relaxed text-muted-foreground">{description}</p>
+        <Label asChild><p>{title}</p></Label>
+        <p className="mt-1 text-14 text-muted-foreground">{description}</p>
       </div>
       {children}
     </div>
@@ -337,14 +338,14 @@ function ColorEditor() {
           className="space-y-3 rounded-xl border p-4"
           style={{ backgroundColor: color("background"), color: color("foreground"), borderColor: color("border") }}
         >
-          <p className="text-14 font-medium">Chat preview · {editMode}</p>
+          <p className="type-row-title">Chat preview · {editMode}</p>
           <UserMessageBubble
             className="ml-auto w-fit max-w-[85%] text-16"
             style={{ backgroundColor: color("chat-bubble"), color: color("chat-bubble-foreground") }}
           >
             Show me the services I have connected.
           </UserMessageBubble>
-          <p className="text-16 leading-relaxed">You can manage your connected services in Plugins.</p>
+          <p className="text-16">You can manage your connected services in Plugins.</p>
         </section>
 
         <ul className="grid gap-x-8 gap-y-2 sm:grid-cols-2" aria-label={`${editMode} theme colors`}>
@@ -353,10 +354,10 @@ function ColorEditor() {
             const customized = key in overrides;
             return (
               <li key={key} className="flex flex-wrap items-center gap-2">
-                <span className="min-w-0 flex-1 text-14">
+                <Label asChild><span className="min-w-0 flex-1">
                   {label}
                   {customized && <span className="ml-2 text-13 text-text-tertiary">Customized</span>}
-                </span>
+                </span></Label>
                 <input
                   type="color"
                   aria-label={`${label} color`}
@@ -386,7 +387,7 @@ function ColorEditor() {
         </ul>
 
         <div className="space-y-1.5">
-          <p className="text-14 font-medium">Readability</p>
+          <p className="type-row-title">Readability</p>
           <ul className="space-y-1" aria-label="Contrast checks">
             {CONTRAST_CHECKS.map((check) => {
               const ratio = contrastRatio(color(check.fg), color(check.bg));

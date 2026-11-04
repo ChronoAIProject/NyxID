@@ -215,7 +215,7 @@ export function TelegramNew({
     <div className={fullPage ? "space-y-4 break-words" : "space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5"}>
       {error && <ErrorBanner message={error.message} />}
       {link && begin.error && (
-        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-14 font-medium underline underline-offset-4">
+        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="type-row-title underline underline-offset-4">
           Open existing Telegram setup
         </a>
       )}
@@ -232,7 +232,7 @@ export function TelegramNew({
         </div>
       ) : fullPage ? (
         <div className="space-y-4">
-          <p className="text-13 leading-relaxed text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Choose your bot’s name and username in Telegram. NyxID connects it automatically when you finish.
           </p>
           {canLaunch && (
@@ -273,7 +273,7 @@ export function TelegramNew({
             {creating ? <Check className="size-3 text-success" /> : "1"}
           </span>
           <div className="space-y-2">
-            <p className="text-14 font-medium">Continue in Telegram</p>
+            <p className="type-row-title">Continue in Telegram</p>
             <p className="text-13 text-muted-foreground">
               Create a new bot for the account selected above. NyxID will
               connect it automatically when you finish Telegram’s form.
@@ -319,7 +319,7 @@ export function TelegramNew({
             {connected ? <Check className="size-3 text-success" /> : "2"}
           </span>
           <div className="space-y-2">
-            <p className="text-14 font-medium">Create your bot</p>
+            <p className="type-row-title">Create your bot</p>
             <p className="text-13 text-muted-foreground">
               In the setup chat, tap <strong>Create bot</strong> and finish
               Telegram’s name and username form. Tap <strong>Start</strong>{" "}

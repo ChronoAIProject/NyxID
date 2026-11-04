@@ -80,7 +80,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           <Link to={logoHref} className="flex items-center transition-opacity hover:opacity-80">
             <NyxidLogo className="h-8 w-auto" />
           </Link>
-          <h1 className="text-22 sm:text-28 font-bold text-foreground">{title}</h1>
+          <h1 className="type-compact-page-title sm:type-page-title text-foreground">{title}</h1>
           {effectiveDate && (
             <p className="text-13 text-text-tertiary">Effective date: {effectiveDate}</p>
           )}
@@ -100,13 +100,13 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
               remarkPlugins={[remarkGfm]}
               components={{
                 h2: ({ children }) => (
-                  <h2 className="text-20 font-semibold text-foreground mt-6 first:mt-0">{children}</h2>
+                  <h2 className="type-section-heading text-foreground mt-6 first:mt-0">{children}</h2>
                 ),
                 h3: ({ children }) => (
-                  <h3 className="text-14 font-semibold text-foreground mt-4">{children}</h3>
+                  <h3 className="type-body-strong text-foreground mt-4">{children}</h3>
                 ),
                 p: ({ children }) => (
-                  <p className="text-14 leading-relaxed text-muted-foreground">{children}</p>
+                  <p className="text-14 text-muted-foreground">{children}</p>
                 ),
                 ul: ({ children }) => (
                   <ul className="list-inside list-disc space-y-1 pl-2 text-14 text-muted-foreground">
@@ -139,7 +139,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
         <div className="flex justify-center">
           <Link
             to="/"
-            className="flex items-center gap-1.5 text-14 font-medium text-violet-400 transition-colors hover:text-violet-300"
+            className="flex items-center gap-1.5 type-row-title text-violet-400 transition-colors hover:text-violet-300"
           >
             <ArrowLeft className="h-3 w-3" />
             Back to NyxID

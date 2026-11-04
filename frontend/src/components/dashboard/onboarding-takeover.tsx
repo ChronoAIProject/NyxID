@@ -75,7 +75,7 @@ export function OnboardingTakeover() {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-48 p-2">
               <div className="px-2 py-1.5">
-                <p className="text-14 font-medium text-foreground">{user?.display_name ?? "User"}</p>
+                <p className="type-row-title text-foreground">{user?.display_name ?? "User"}</p>
                 <p className="text-13 text-text-tertiary">{user?.email ?? ""}</p>
               </div>
               <DropdownMenuItem
@@ -114,12 +114,12 @@ export function OnboardingTakeover() {
         {/* Copy */}
         <div className="space-y-3">
           <h1
-            className="text-28 font-bold leading-[1.1] text-foreground"
+            className="type-page-title text-foreground"
             style={{ letterSpacing: "-0.03em" }}
           >
             Welcome, {userName}
           </h1>
-          <p className="text-14 leading-relaxed text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Connect your first AI service to get started with NyxID. Your
             agents will proxy requests through NyxID so credentials never
             leave your control.

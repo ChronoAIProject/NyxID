@@ -151,7 +151,7 @@ function LarkPermissionSetupCard({
       <CardContent className="space-y-3">
         {scopes.length > 0 && (
           <div>
-            <p className="text-13 font-medium text-text-tertiary uppercase tracking-wide">
+            <p className="type-secondary-emphasis text-text-tertiary uppercase tracking-wide">
               Scopes pre-selected
             </p>
             <ul className="mt-2 flex flex-wrap gap-2">
@@ -980,16 +980,16 @@ function ServiceSection({
         )}
 
         {credentialMissing && (
-          <p className="text-13 font-medium text-warning">
+          <p className="type-secondary-emphasis text-warning">
             Reconnect or delete this service before enabling it.
           </p>
         )}
 
         {nodeWarning && (
-          <p className="text-13 text-destructive font-medium">{nodeWarning}</p>
+          <p className="type-secondary-emphasis text-destructive">{nodeWarning}</p>
         )}
         {nodeHint && (
-          <p className="text-13 text-muted-foreground font-medium">
+          <p className="type-secondary-emphasis text-muted-foreground">
             {nodeHint}
           </p>
         )}
@@ -1058,7 +1058,7 @@ function UserAgentOverrideSection({
       </CardHeader>
       <CardContent>
         <div className="space-y-1">
-          <Label className="text-14 text-muted-foreground">User-Agent</Label>
+          <Label className="text-muted-foreground">User-Agent</Label>
           {editingUa ? (
             <div className="flex items-center gap-2">
               <Input
@@ -1185,11 +1185,11 @@ function NodeSetupHelper({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <p className="text-13 font-medium text-muted-foreground">
+        <p className="type-secondary-emphasis text-muted-foreground">
           Recommended (auto-detects requirements):
         </p>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14 leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14">
             {setupCommand}
           </pre>
           <Button
@@ -1201,9 +1201,9 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-13 font-medium text-muted-foreground">Manual:</p>
+        <p className="type-secondary-emphasis text-muted-foreground">Manual:</p>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14 leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14">
             {manualCommand}
           </pre>
           <Button
@@ -1258,7 +1258,7 @@ function SshConnectionSection({
       <CardContent className="space-y-4">
         <div className="grid gap-4 text-14 sm:grid-cols-2">
           <div>
-            <span className="text-13 font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               Host
             </span>
             <p>
@@ -1267,7 +1267,7 @@ function SshConnectionSection({
           </div>
           {certTtlMinutes !== null && (
             <div>
-              <span className="text-13 font-medium text-muted-foreground">
+              <span className="type-secondary-emphasis text-muted-foreground">
                 Certificate TTL
               </span>
               <p>{certTtlMinutes} minutes</p>
@@ -1277,7 +1277,7 @@ function SshConnectionSection({
 
         {principals && principals.length > 0 && (
           <div>
-            <span className="text-13 font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               Allowed Principals
             </span>
             <div className="mt-1 flex flex-wrap gap-1.5">
@@ -1292,11 +1292,11 @@ function SshConnectionSection({
 
         {caPublicKey && (
           <div>
-            <span className="text-13 font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               CA Public Key
             </span>
             <div className="relative mt-1">
-              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {caPublicKey}
               </pre>
               <Button
@@ -1312,7 +1312,7 @@ function SshConnectionSection({
         )}
 
         <div className="rounded-lg border border-border bg-muted/50 p-3 space-y-2">
-          <p className="text-13 font-medium">Target Machine Setup</p>
+          <p className="type-secondary-emphasis">Target Machine Setup</p>
           <ol className="list-decimal list-inside space-y-1 text-13 text-muted-foreground">
             <li>
               Add the CA public key to{" "}
@@ -1596,7 +1596,7 @@ function ApiUsageSection({
       </CardHeader>
       <CardContent className="min-w-0 space-y-4">
         <div>
-          <p className="mb-1.5 text-13 font-medium text-muted-foreground">
+          <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">
             Base URL
           </p>
           <div className="relative">
@@ -1638,7 +1638,7 @@ function ApiUsageSection({
         </div>
 
         <div>
-          <p className="mb-1.5 text-13 font-medium text-muted-foreground">
+          <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">
             Authentication
           </p>
           <div className="space-y-2 text-13 text-muted-foreground">
@@ -1674,7 +1674,7 @@ function ApiUsageSection({
 
         {apiKeyExample && (
           <div>
-            <p className="mb-1.5 text-13 font-medium text-muted-foreground">
+            <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">
               Example (with API key)
             </p>
             {modelExample.needsProviderModelNote && requestBody && (
@@ -1685,7 +1685,7 @@ function ApiUsageSection({
               </p>
             )}
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {apiKeyExample}
               </pre>
               <Button
@@ -1702,7 +1702,7 @@ function ApiUsageSection({
 
         {bearerTokenExample && (
           <details className="rounded-lg border border-border bg-muted/20 p-3">
-            <summary className="cursor-pointer text-13 font-medium text-muted-foreground">
+            <summary className="cursor-pointer type-secondary-emphasis text-muted-foreground">
               Advanced: Bearer token example
             </summary>
             <div className="mt-3 space-y-2">
@@ -1712,7 +1712,7 @@ function ApiUsageSection({
                 most users, prefer the API Key example above.
               </p>
               <div className="relative">
-                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14 leading-relaxed">
+                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                   {bearerTokenExample}
                 </pre>
                 <Button
@@ -1850,7 +1850,7 @@ function LabelEditor({
   if (readOnly) {
     return (
       <h2
-        className="text-28 font-bold leading-none tracking-tight"
+        className="type-page-title tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1892,7 +1892,7 @@ function LabelEditor({
         <Input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          className="text-14 font-normal tracking-tight md:text-14"
+          className="type-body tracking-tight md:type-body"
           autoFocus
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSave();
@@ -1917,7 +1917,7 @@ function LabelEditor({
   return (
     <div className="flex items-center gap-2">
       <h2
-        className="text-28 font-bold leading-none tracking-tight"
+        className="type-page-title tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -2096,7 +2096,7 @@ function AccessPolicySection({
       <CardContent>
         <div className="flex items-center justify-between gap-4 rounded-lg border border-border/50 px-3 py-2">
           <div className="min-w-0">
-            <Label htmlFor="admin-only-policy" className="text-14 font-medium">
+            <Label htmlFor="admin-only-policy">
               Admin-only execution
             </Label>
             <p className="text-13 text-muted-foreground">
@@ -2205,7 +2205,7 @@ function DefaultHeadersSection({
       <CardContent className="space-y-4">
         {catalogHeaders && catalogHeaders.length > 0 && (
           <div className="space-y-2">
-            <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
               From catalog (admin-configured)
             </p>
             <DefaultHeadersEditor
@@ -2221,7 +2221,7 @@ function DefaultHeadersSection({
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-13 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
               Your headers
             </p>
             {!readOnly && !editing && (
@@ -2354,7 +2354,7 @@ function WsFrameInjectionsSection({
     <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
         <div>
-          <h3 className="text-15 font-semibold text-foreground">
+          <h3 className="type-card-title text-foreground">
             WebSocket auth frames
           </h3>
           <p className="text-13 text-muted-foreground mt-0.5">
@@ -2596,7 +2596,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">Back to services</Link>
         </div>
       )}
-      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-14 font-medium text-muted-foreground hover:text-foreground">
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex type-row-title text-muted-foreground hover:text-foreground">
         ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
       </Link>
       <div className="flex flex-col gap-2">
@@ -2612,7 +2612,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (
                 <h2
-                  className="text-28 font-bold leading-none tracking-tight"
+                  className="type-page-title tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
                 >
                   {keyInfo.label}
@@ -2697,7 +2697,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <Shield className="h-4.5 w-4.5 text-success" />
             </div>
             <div>
-              <p className="text-15 font-semibold text-foreground">
+              <p className="type-card-title text-foreground">
                 Shared from {source.org_name}
               </p>
               <p className="text-13 text-muted-foreground">
@@ -2713,7 +2713,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <div className="space-y-1">
-              <p className="text-15 font-semibold text-foreground">
+              <p className="type-card-title text-foreground">
                 Credential missing
               </p>
               <p className="text-14 text-warning">
@@ -2750,25 +2750,25 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
             <CardContent className="space-y-3">
               <div className="grid gap-4 text-14 sm:grid-cols-2">
                 <div>
-                  <span className="text-13 font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Endpoint
                   </span>
                   <p className="text-13">Platform managed</p>
                 </div>
                 <div>
-                  <span className="text-13 font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Proxy Path
                   </span>
                   <p className="text-13">/proxy/s/{keyInfo.slug}</p>
                 </div>
                 <div>
-                  <span className="text-13 font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Auth Method
                   </span>
                   <p className="text-13">{autoConnectedAuthLabel}</p>
                 </div>
                 <div>
-                  <span className="text-13 font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Routing
                   </span>
                   {/*
@@ -2847,7 +2847,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               mechanics. */}
           {keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
             <details className="rounded-xl border border-border/50 bg-card p-4">
-              <summary className="cursor-pointer text-14 font-medium text-foreground">
+              <summary className="cursor-pointer type-row-title text-foreground">
                 Advanced: inherited request headers
               </summary>
               <div className="mt-4">

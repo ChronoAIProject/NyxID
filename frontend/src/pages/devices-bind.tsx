@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useWatch } from "react-hook-form";
@@ -145,7 +146,7 @@ export function DevicesBindPage() {
       style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
     >
       <header className="flex flex-col gap-1">
-        <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">
+        <h1 className="type-section-heading text-foreground sm:type-metric">
           Bind device
         </h1>
         <p className="break-words text-15 text-muted-foreground">
@@ -286,7 +287,7 @@ export function DevicesBindPage() {
                     return (
                       <FormItem>
                         <FormLabel>Grant proxy access to (optional)</FormLabel>
-                        <FormDescription className="text-14 leading-relaxed">
+                        <FormDescription className="text-14">
                           Pick which of your services this device should be
                           allowed to proxy through. You can add more later from
                           the API Keys page.
@@ -328,17 +329,17 @@ export function DevicesBindPage() {
                                         )
                                       }
                                     />
-                                    <label
+                                    <Label
                                       htmlFor={checkboxId}
                                       className="min-w-0 flex-1 cursor-pointer"
                                     >
-                                      <span className="block truncate text-15 font-medium text-foreground">
+                                      <span className="block truncate text-foreground">
                                         {service.label}
                                       </span>
                                       <span className="block truncate font-mono text-14 text-muted-foreground">
                                         {service.slug}
                                       </span>
-                                    </label>
+                                    </Label>
                                   </div>
                                 );
                               })
@@ -412,7 +413,7 @@ function DetailRow({
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/30 px-3 py-2">
-      <dt className="text-13 font-medium uppercase text-muted-foreground">
+      <dt className="type-secondary-emphasis uppercase text-muted-foreground">
         {label}
       </dt>
       <dd className="mt-1 truncate font-mono text-15 text-foreground">

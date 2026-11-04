@@ -116,7 +116,7 @@ export function ApprovalGrantsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-2">
-            <p className="text-14 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               {grantModeStatusUnavailable
                 ? "Policy Status Unavailable"
                 : grantModeKnownOff
@@ -160,7 +160,7 @@ export function ApprovalGrantsPage() {
                   </Button>
                 </div>
                 <div className="flex min-w-0 items-center gap-2 pr-10">
-                  <p className="truncate text-15 font-semibold text-foreground">
+                  <p className="truncate type-card-title text-foreground">
                     {grant.service_name}
                   </p>
                   {grant.org_scoped && (

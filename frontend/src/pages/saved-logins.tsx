@@ -137,7 +137,7 @@ function SavedLoginCard({
 }) {
   return (
     <article className="space-y-3 rounded-xl border border-border bg-card p-4">
-      <h2 className="font-display text-15 font-medium">{login.label}</h2>
+      <h2 className="font-display type-card-title">{login.label}</h2>
       <p className="break-all text-14 text-muted-foreground">
         {login.allowed_origins.join(", ")}
       </p>

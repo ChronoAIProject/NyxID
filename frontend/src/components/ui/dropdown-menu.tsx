@@ -115,7 +115,7 @@ const DropdownMenuLabel = React.forwardRef<
   <DropdownMenuPrimitive.Label
     ref={ref}
     className={cn(
-      `px-3.5 py-2 ${TEXT_STYLES.groupHeading} font-medium text-muted-foreground unthemed:text-15`,
+      `px-3.5 py-2 ${TEXT_STYLES.groupHeading} text-muted-foreground unthemed:text-15`,
       inset && "pl-8",
       className,
     )}

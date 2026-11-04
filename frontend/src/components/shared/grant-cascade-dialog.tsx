@@ -85,7 +85,7 @@ export function GrantCascadeDialog({
             </p>
           )}
 
-          <p className="text-13 leading-relaxed text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             {grantCascadeCaveat(details.provider_name)}
           </p>
         </div>

@@ -186,7 +186,7 @@ export function BillingMultiSelect({
             >
               <button
                 type="button"
-                className="min-w-0 break-words rounded text-left text-14 font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="min-w-0 break-words rounded text-left type-row-title outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label={`Edit ${itemLabel.toLowerCase()} filter: ${nameOf(value)}`}
                 onClick={() => setOpen(true)}
               >

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import {
   GroupedList,
   GroupedRow,
@@ -72,12 +73,12 @@ export function DirectChatControls({
       footer="A skill teaches the model about NyxID; it cannot take actions here."
     >
       <GroupedRow>
-        <label
+        <Label
           htmlFor="direct-chat-model"
-          className="min-w-0 flex-1 text-14 font-medium"
+          className="min-w-0 flex-1"
         >
           Model
-        </label>
+        </Label>
         <Select
           value={settings.model}
           onValueChange={setModel}
@@ -96,12 +97,12 @@ export function DirectChatControls({
         </Select>
       </GroupedRow>
       <GroupedRow>
-        <label
+        <Label
           htmlFor="direct-chat-effort"
-          className="min-w-0 flex-1 text-14 font-medium"
+          className="min-w-0 flex-1"
         >
           Reasoning effort
-        </label>
+        </Label>
         <Select
           value={settings.effort ?? "default"}
           onValueChange={(value) =>
@@ -123,12 +124,12 @@ export function DirectChatControls({
         </Select>
       </GroupedRow>
       <GroupedRow>
-        <label
+        <Label
           htmlFor="direct-chat-skill"
-          className="min-w-0 flex-1 text-14 font-medium"
+          className="min-w-0 flex-1"
         >
           NyxID knowledge
-        </label>
+        </Label>
         <Select
           value={settings.skillSlug ?? "none"}
           onValueChange={(value) => setSkill(value === "none" ? null : value)}

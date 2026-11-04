@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { ChevronDown, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -50,7 +51,7 @@ export function TokenMetricCaption({
   selected: readonly TokenMetric[];
 }) {
   return (
-    <div className="mt-2 flex min-w-0 items-start text-12 leading-relaxed text-muted-foreground">
+    <div className="mt-2 flex min-w-0 items-start text-12 text-muted-foreground">
       <span className="min-w-0 break-words">
         {selected.map((metric) => MEASURE_LABELS[metric]).join(" · ")}
         {hasRedundantTokenSelection(selected) && (
@@ -112,7 +113,7 @@ export function TokenMetricPicker({
           {custom && (
             <>
               {" "}
-              <span className="shrink-0 rounded border border-border px-1 text-12 leading-4">
+              <span className="shrink-0 rounded border border-border px-1 text-12">
                 ({selected.length})
               </span>
             </>
@@ -122,9 +123,9 @@ export function TokenMetricPicker({
       </PopoverTrigger>
       <PopoverContent align="end" className="w-52 space-y-0.5 p-2">
         {TOKEN_METRICS.map((metric) => (
-          <label
+          <Label
             key={metric}
-            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-14 hover:bg-overlay"
+            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-overlay"
           >
             <Checkbox
               checked={selected.includes(metric)}
@@ -132,7 +133,7 @@ export function TokenMetricPicker({
               disabled={selected.length === 1 && selected[0] === metric}
             />
             {MEASURE_LABELS[metric]}
-          </label>
+          </Label>
         ))}
       </PopoverContent>
     </Popover>

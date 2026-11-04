@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from "react";
-import { computedTextSize } from "@/lib/typography";
+import { computedTextSize, computedTextLineHeight } from "@/lib/typography";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -130,7 +130,7 @@ export function SshWebTerminal({
       fontFamily:
         "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, 'Courier New', monospace",
       fontSize: computedTextSize(14),
-      lineHeight: 1.2,
+      lineHeight: computedTextLineHeight("prose"),
       scrollback: 5000,
       theme: {
         background: "#0f172a",
@@ -395,7 +395,7 @@ export function SshWebTerminal({
           <button
             type="button"
             onClick={connect}
-            className="ml-auto rounded px-2 py-0.5 text-14 font-medium text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
+            className="ml-auto rounded px-2 py-0.5 type-row-title text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
           >
             Reconnect
           </button>

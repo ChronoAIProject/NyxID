@@ -290,7 +290,7 @@ export function AssistantDeveloperAppActionDialog({
               </p>
             )}
             {destructive ? (
-              <label className="flex items-start gap-2 text-14">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
@@ -299,7 +299,7 @@ export function AssistantDeveloperAppActionDialog({
                   <ShieldAlert className="size-3" />I understand this revokes
                   OAuth access.
                 </span>
-              </label>
+              </Label>
             ) : null}
           </div>
         )}

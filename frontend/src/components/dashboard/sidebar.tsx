@@ -253,7 +253,7 @@ export function AssistantNavEntry({
       </span>
       <span
         className={cn(
-          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-12 font-semibold text-nyx-secondary-400",
+          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 type-table-header text-nyx-secondary-400",
           collapsed && "hidden",
         )}
       >
@@ -419,7 +419,7 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="text-15 font-medium text-foreground">
+                <p className="type-card-title text-foreground">
                   Sidebar control
                 </p>
               </div>

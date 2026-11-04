@@ -233,7 +233,7 @@ export function ApiKeyCreateConfirm({
                   side="right"
                   align="start"
                   sideOffset={8}
-                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13"
                 >
                   <div className="flex flex-col gap-4">
                     <p>

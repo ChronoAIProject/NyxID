@@ -78,7 +78,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
             checked={accepted}
             onCheckedChange={(checked) => onAccepted(checked === true)}
           />
-          <Label htmlFor={id} className="text-14 leading-normal">
+          <Label htmlFor={id}>
             I accept this reduced scope ({omissions.length} declared omission
             {omissions.length === 1 ? "" : "s"}).
           </Label>
@@ -244,12 +244,12 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   }
   if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
   return <section aria-label="Review skill draft" className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
-    <p className="text-15 font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
+    <p className="type-card-title">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
     {data ? <p className="text-14">Attach to {data.agent_name}</p> : null}
     <p className="text-14 text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>
     {data?.base_scripts_not_copied ? <p className="text-14 text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
     {data?.files.map((file) => <div key={file.path}>
-      <p className="text-14 font-medium">{file.path}</p>
+      <p className="type-row-title">{file.path}</p>
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-14">{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">

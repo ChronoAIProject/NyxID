@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { useMachineActivity } from "@/hooks/use-machine-activity";
 import { Button } from "@/components/ui/button";
@@ -29,7 +30,7 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
         and private conversations are not shown.
       </p>
       <div className="space-y-1 text-13">
-        <label htmlFor="machine-activity-agent">Agent</label>
+        <Label htmlFor="machine-activity-agent">Agent</Label>
         <Select value={agent || "all"} onValueChange={selectAgent}>
           <SelectTrigger
             id="machine-activity-agent"

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import {
   GroupedFooter,
   GroupedList,
@@ -37,7 +38,7 @@ function ThreadRow({
             ) : (
               <span className="flex-1 text-14">{thread.label}</span>
             )}
-            <span className="text-13 font-normal text-text-tertiary">
+            <span className="type-secondary text-text-tertiary">
               {thread.state === "active" && thread.follow_readiness !== "ready"
                 ? "Unavailable"
                 : labels[thread.state]}
@@ -59,7 +60,7 @@ function ThreadRow({
               </Button>
             ) : null}
           </div>
-          <p className="text-13 font-normal text-text-tertiary">
+          <p className="type-secondary text-text-tertiary">
             {thread.last_admitted_at
               ? `Last activity ${formatRelativeTime(thread.last_admitted_at)}. `
               : ""}
@@ -129,7 +130,7 @@ export function ChannelThreads({
       {open ? (
         <>
           <GroupedRow asChild interactive>
-            <label>
+            <Label>
               <span className="min-w-0 flex-1">
                 Include stopped and expired threads
               </span>
@@ -137,7 +138,7 @@ export function ChannelThreads({
                 checked={history}
                 onCheckedChange={(value) => setHistory(value === true)}
               />
-            </label>
+            </Label>
           </GroupedRow>
           {threads.error ? (
             <GroupedRow asChild interactive>

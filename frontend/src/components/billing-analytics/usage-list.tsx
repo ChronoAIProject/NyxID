@@ -164,7 +164,7 @@ function Identity({ user }: { user: AdminUsageIdentity }) {
     <div className="min-w-0">
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="text-14 font-medium">{user.display_name}</span>
+          <span className="type-row-title">{user.display_name}</span>
         </TooltipTrigger>
         <TooltipContent>{user.id}</TooltipContent>
       </Tooltip>
@@ -269,10 +269,10 @@ function ServiceName({
   service: Pick<AdminUsageService, "service_name" | "service_slug">;
 }) {
   return (
-    <div className="text-14 font-medium">
+    <div className="type-row-title">
       {service.service_name}
       {service.service_slug && (
-        <div className="text-13 font-normal text-muted-foreground">
+        <div className="type-secondary text-muted-foreground">
           {service.service_slug}
         </div>
       )}
@@ -400,7 +400,7 @@ function UserServices({
   });
   return (
     <div className="space-y-3 p-3">
-      <p className="text-14 font-medium">Services for {user.display_name}</p>
+      <p className="type-row-title">Services for {user.display_name}</p>
       {usage.isPending ? (
         <Skeleton className="h-20" />
       ) : usage.isError ? (
@@ -606,7 +606,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
             {data.totals.events === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
                 <ArticleIcon className="h-48 w-48 text-muted-foreground/30" />
-                <p className="text-14 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   No usage in this window.
                 </p>
                 <p className="text-14 text-muted-foreground">
@@ -651,14 +651,14 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                   />
                 </div>
                 <section className="space-y-3">
-                  <h2 className="text-15 font-semibold">By service</h2>
+                  <h2 className="type-card-title">By service</h2>
                   <ServiceTable
                     services={data.by_service}
                     tokenView={tokenView}
                   />
                 </section>
                 <section className="space-y-3">
-                  <h2 className="text-15 font-semibold">
+                  <h2 className="type-card-title">
                     Platform key vs own key
                   </h2>
                   <StatsTable
@@ -678,7 +678,7 @@ export function AdminUsageList({ filters }: { filters: AnalyticsFilters }) {
                 <section className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
-                      <h2 className="text-15 font-semibold">Top users</h2>
+                      <h2 className="type-card-title">Top users</h2>
                       <p className="text-13 text-muted-foreground">
                         Ranked by user, service, and billing owner.
                       </p>

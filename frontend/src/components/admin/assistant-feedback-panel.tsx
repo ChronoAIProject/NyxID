@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
 import {
   ChevronLeft,
@@ -85,7 +86,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
     <Card aria-labelledby="assistant-feedback-heading">
       <div className="space-y-4 border-b border-border/50 p-4">
         <div>
-          <h2 id="assistant-feedback-heading" className="font-display text-15 font-semibold leading-none tracking-tight">
+          <h2 id="assistant-feedback-heading" className="font-display type-card-title tracking-tight">
             Recent feedback
           </h2>
           <p className="mt-1 text-14 text-muted-foreground">
@@ -93,7 +94,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-3">
-          <label className="w-36 space-y-1 text-14 text-muted-foreground">
+          <Label className="w-36 space-y-1 text-muted-foreground">
             Vote
             <Select
               value={vote}
@@ -111,8 +112,8 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
                 <SelectItem value="down">Not helpful</SelectItem>
               </SelectContent>
             </Select>
-          </label>
-          <label className="w-36 space-y-1 text-14 text-muted-foreground">
+          </Label>
+          <Label className="w-36 space-y-1 text-muted-foreground">
             Agent
             <Select
               value={agentKind}
@@ -130,7 +131,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
                 <SelectItem value="specialist">Specialist</SelectItem>
               </SelectContent>
             </Select>
-          </label>
+          </Label>
           <form
             className="flex items-end gap-2"
             onSubmit={(event) => {
@@ -140,7 +141,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
               setModel(typeof value === "string" ? value.trim() : "");
             }}
           >
-            <label className="space-y-1 text-14 text-muted-foreground">
+            <Label className="space-y-1 text-muted-foreground">
               Model
               <Input
                 key={model}
@@ -149,7 +150,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
                 defaultValue={model}
                 className="w-44"
               />
-            </label>
+            </Label>
             <Button type="submit" variant="outline">
               Apply
             </Button>
@@ -257,7 +258,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
               className="mx-auto mb-3 size-5 text-text-tertiary"
               aria-hidden="true"
             />
-            <p className="text-15 font-medium">
+            <p className="type-card-title">
               {filtered
                 ? "No feedback matches these filters."
                 : "No feedback in this period."}

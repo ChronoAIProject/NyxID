@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { flushSync } from "react-dom";
 import { useEffect, useState } from "react";
@@ -62,7 +63,7 @@ import {
 export const PERSONA_HINT = "e.g. warm, concise, uses emoji sparingly";
 
 export const TEXTAREA_CLASS =
-  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-14 leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-input-focus focus-visible:outline-none aria-invalid:border-destructive";
+  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-14 text-foreground placeholder:text-text-tertiary focus-visible:border-input-focus focus-visible:outline-none aria-invalid:border-destructive";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -187,7 +188,7 @@ export function ServiceGrantPicker({
               >
                 <span className="min-w-0 flex-1 break-words text-foreground">
                   {service.label}
-                  <span className="mt-0.5 block font-mono text-13 font-normal text-text-tertiary">
+                  <span className="mt-0.5 block font-mono type-secondary text-text-tertiary">
                     {service.slug}
                   </span>
                 </span>
@@ -240,9 +241,9 @@ function AgentOwnerPicker({
       }
     >
       <GroupedRow>
-        <label className="flex-1 text-14 font-medium" htmlFor="agent-owner">
+        <Label className="flex-1" htmlFor="agent-owner">
           Ownership
-        </label>
+        </Label>
         <Select
           value={value ?? "personal"}
           onValueChange={(id) => onChange(id === "personal" ? undefined : id)}
@@ -382,7 +383,7 @@ export function NewAgentDialog({
                     <GroupedField>
                       <GroupedLabel>
                         Display name{" "}
-                        <span className="font-normal text-text-tertiary">
+                        <span className="text-text-tertiary">
                           (optional)
                         </span>
                       </GroupedLabel>
@@ -425,7 +426,7 @@ export function NewAgentDialog({
                     <GroupedField>
                       <GroupedLabel>
                         Persona{" "}
-                        <span className="font-normal text-text-tertiary">
+                        <span className="text-text-tertiary">
                           (optional)
                         </span>
                       </GroupedLabel>
@@ -491,7 +492,7 @@ export function NewAgentDialog({
                     <GroupedList title="Account access">
                       <GroupedField inline>
                         <div className="min-w-0 flex-1">
-                          <FormLabel className="text-14 font-medium">
+                          <FormLabel>
                             Read my account
                           </FormLabel>
                           <GroupedDescription>

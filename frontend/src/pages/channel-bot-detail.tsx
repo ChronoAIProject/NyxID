@@ -221,7 +221,7 @@ function ConversationsSection({
       {activities.length > 0 && <ChannelActivities scope="bot" id={botId} descriptors={activities} />}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <h3 className="text-15 font-medium">Conversation Routes</h3>
+          <h3 className="type-card-title">Conversation Routes</h3>
           <p className="text-14 text-muted-foreground">
             Map conversations to AI agents for message relay.
           </p>
@@ -274,7 +274,7 @@ function ConversationsSection({
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
-                  <p className="pr-10 text-15 font-semibold text-foreground truncate">
+                  <p className="pr-10 type-card-title text-foreground truncate">
                     {conv.platform_conversation_id || conv.platform_sender_id || "—"}
                   </p>
                   <p className="text-13 text-muted-foreground">Agent: {agentName}</p>
@@ -571,7 +571,7 @@ export function AddRouteDialog({
                 checked={watch("default_agent") ?? false}
                 onCheckedChange={(v) => setValue("default_agent", v)}
               />
-              <Label htmlFor="default_agent" className="text-14">
+              <Label htmlFor="default_agent">
                 Set as default agent for this bot
               </Label>
             </div>
@@ -731,7 +731,7 @@ function LarkPermissionSetupSection({
         </p>
         {scopes.length > 0 && (
           <div className="mt-3">
-            <p className="text-13 font-medium text-text-tertiary uppercase tracking-wide">
+            <p className="type-secondary-emphasis text-text-tertiary uppercase tracking-wide">
               Scopes pre-selected
             </p>
             <ul className="mt-2 flex flex-wrap gap-2">
@@ -1039,7 +1039,7 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
   return (
     <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6">
       <div className="space-y-1">
-        <p className="text-15 font-medium text-foreground">
+        <p className="type-card-title text-foreground">
           {isDiscord ? "Finish Discord setup" : "Finish webhook setup"}
         </p>
         <p className="text-14 text-muted-foreground">

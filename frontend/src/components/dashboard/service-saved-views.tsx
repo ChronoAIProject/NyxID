@@ -64,7 +64,7 @@ export function ServiceSavedViews({
           className="w-96 max-w-[calc(100vw-2rem)] space-y-3"
         >
           <div>
-            <h3 className="text-15 font-semibold">Saved views</h3>
+            <h3 className="type-card-title">Saved views</h3>
             <p className="mt-1 text-13 text-muted-foreground">
               Save named filter combinations. The default opens when you return
               to AI Services.
@@ -79,7 +79,7 @@ export function ServiceSavedViews({
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    className="min-w-0 flex-1 rounded p-1 text-left text-14 font-medium hover:bg-accent"
+                    className="min-w-0 flex-1 rounded p-1 text-left type-row-title hover:bg-accent"
                     onClick={() => {
                       onRestore(saved.filters, saved.id);
                       setOpen(false);
@@ -94,7 +94,7 @@ export function ServiceSavedViews({
                         />
                       )}
                     </span>
-                    <span className="mt-1 block text-13 font-normal text-muted-foreground">
+                    <span className="mt-1 block type-secondary text-muted-foreground">
                       {view.workspace.default_id === saved.id
                         ? "Default · "
                         : ""}

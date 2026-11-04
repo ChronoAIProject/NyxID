@@ -318,10 +318,10 @@ export function ChannelBotSetup({
                 aria-hidden="true"
               />
               <div className="space-y-1">
-                <p className="text-15 font-medium">
+                <p className="type-card-title">
                   {createdBot?.label || label || "Channel bot created"}
                 </p>
-                <p className="text-13 leading-relaxed text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {stayInPlace && connectedBotId
                     ? `${connectedBotLabel || label || "Your bot"} is connected. NyxBot will continue in this chat.`
                     : createdBot?.webhook_secret
@@ -464,7 +464,7 @@ export function ChannelBotSetup({
                           label: label || undefined,
                           target_org_id: targetOrgId ?? undefined,
                         }}
-                        className="inline-flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
+                        className="inline-flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
                       >
                         <ExternalLink className="size-3" aria-hidden="true" />
                         Open full setup page
@@ -517,10 +517,10 @@ export function ChannelBotSetup({
                 className="rounded-lg border border-border/70 bg-muted/30 p-3"
                 open={!fullPage}
               >
-                <summary className="cursor-pointer text-14 font-medium">
+                <summary className="cursor-pointer type-row-title">
                   {setupNote.title}
                 </summary>
-                <p className="mt-2 text-13 leading-relaxed text-muted-foreground">
+                <p className="mt-2 text-13 text-muted-foreground">
                   {setupNote.text}
                 </p>
               </details>

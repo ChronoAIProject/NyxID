@@ -306,7 +306,7 @@ export function AssistantServiceRotateCredentialDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="text-15 font-medium">Rotated service</p>
+              <p className="type-card-title">Rotated service</p>
               <p className="break-all font-mono text-14 text-muted-foreground">
                 {resultId}
               </p>

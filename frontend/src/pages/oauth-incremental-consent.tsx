@@ -23,18 +23,18 @@ function ServiceIdentity({
   const source = service.credential_source;
   return (
     <span className="block min-w-0">
-      <span className="block break-words text-15 font-medium text-foreground">
+      <span className="block break-words type-card-title text-foreground">
         {service.label || service.catalog_service_name || service.slug}
       </span>
       {service.catalog_service_description && (
-        <span className="mt-1 line-clamp-2 block break-words text-14 leading-relaxed text-muted-foreground">
+        <span className="mt-1 line-clamp-2 block break-words text-14 text-muted-foreground">
           {service.catalog_service_description}
         </span>
       )}
-      <span className="mt-1 block break-all text-13 font-normal text-text-tertiary">
+      <span className="mt-1 block break-all type-secondary text-text-tertiary">
         {service.slug}
       </span>
-      <span className="mt-1 block text-13 font-normal text-muted-foreground">
+      <span className="mt-1 block type-secondary text-muted-foreground">
         {source.type === "org"
           ? `Organization · ${source.org_name}`
           : "Personal"}
@@ -160,12 +160,12 @@ export function OAuthIncrementalConsentPage({
             <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
               <NyxidIcon className="size-8" />
             </div>
-            <span className="text-13 font-medium text-foreground">NyxID</span>
+            <span className="type-secondary-emphasis text-foreground">NyxID</span>
           </div>
-          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
+          <h1 className="break-words type-compact-page-title text-foreground sm:type-page-title">
             Update service access
           </h1>
-          <p className="max-w-md break-words text-14 leading-relaxed text-muted-foreground">
+          <p className="max-w-md break-words text-14 text-muted-foreground">
             <span className="font-medium text-foreground">
               {snapshot?.client_name ?? "This application"}
             </span>{" "}
@@ -199,13 +199,13 @@ export function OAuthIncrementalConsentPage({
                     >
                       <h2
                         id="incremental-services"
-                        className="text-15 font-semibold text-foreground"
+                        className="type-card-title text-foreground"
                       >
                         {additions.length
                           ? `Allow ${additions.length} additional ${additions.length === 1 ? "service" : "services"}`
                           : "No additional services needed"}
                       </h2>
-                      <p className="mt-1.5 text-14 leading-relaxed text-muted-foreground">
+                      <p className="mt-1.5 text-14 text-muted-foreground">
                         {requiredAdditions.length
                           ? "These services are required to continue. Cancel if you do not want to grant access."
                           : "The requested services are already included in this application's access."}
@@ -241,7 +241,7 @@ export function OAuthIncrementalConsentPage({
                       })}
                       {optional.length > 0 && (
                         <details className="group mt-4">
-                          <summary className="flex cursor-pointer list-none items-center justify-between text-14 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                          <summary className="flex cursor-pointer list-none items-center justify-between type-row-title text-muted-foreground [&::-webkit-details-marker]:hidden">
                             Add optional services{" "}
                             <ChevronDown
                               className="h-4 w-4 transition-transform group-open:rotate-180"
@@ -284,7 +284,7 @@ export function OAuthIncrementalConsentPage({
                       >
                         <h2
                           id="incremental-permissions"
-                          className="text-15 font-semibold text-foreground"
+                          className="type-card-title text-foreground"
                         >
                           Allow {addedScopes.length} additional{" "}
                           {addedScopes.length === 1
@@ -298,7 +298,7 @@ export function OAuthIncrementalConsentPage({
                                 {OAUTH_SCOPE_META[scope]?.title ?? scope}
                               </p>
                               {OAUTH_SCOPE_META[scope]?.description && (
-                                <p className="mt-1 leading-relaxed text-muted-foreground">
+                                <p className="mt-1 text-muted-foreground">
                                   {OAUTH_SCOPE_META[scope].description}
                                 </p>
                               )}
@@ -313,11 +313,11 @@ export function OAuthIncrementalConsentPage({
                     >
                       <h2
                         id="incremental-existing"
-                        className="text-15 font-semibold text-foreground"
+                        className="type-card-title text-foreground"
                       >
                         Already authorized
                       </h2>
-                      <p className="mt-1.5 text-14 leading-relaxed text-muted-foreground">
+                      <p className="mt-1.5 text-14 text-muted-foreground">
                         {snapshot.allow_all_services
                           ? "This application already has access to all available services. This access will be retained."
                           : "Your existing access will be retained. You can manage it separately in Authorized Applications."}
@@ -349,10 +349,10 @@ export function OAuthIncrementalConsentPage({
                       aria-hidden="true"
                     />
                     <div>
-                      <h2 className="text-14 font-semibold text-foreground">
+                      <h2 className="type-body-strong text-foreground">
                         Make sure you trust {snapshot.client_name}
                       </h2>
-                      <p className="mt-2 text-14 leading-relaxed text-muted-foreground">
+                      <p className="mt-2 text-14 text-muted-foreground">
                         This app may receive the account information above and
                         use the services you approve. You can revoke access
                         later from Authorized Applications.
@@ -361,7 +361,7 @@ export function OAuthIncrementalConsentPage({
                   </div>
                 </section>
                 <details className="group border-t border-border py-4">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-14 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-row-title text-muted-foreground [&::-webkit-details-marker]:hidden">
                     App details{" "}
                     <ChevronDown
                       className="h-4 w-4 transition-transform group-open:rotate-180"

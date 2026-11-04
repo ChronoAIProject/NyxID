@@ -542,7 +542,7 @@ function StandardConsentPage({
     return (
       <ConsentShell email={email} preview={Boolean(preview)}>
         <header className="py-12 text-center">
-          <h1 className="text-22 font-bold leading-tight text-foreground sm:text-28">
+          <h1 className="type-compact-page-title text-foreground sm:type-page-title">
             Invalid consent request
           </h1>
         </header>
@@ -562,9 +562,9 @@ function StandardConsentPage({
             <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
               <NyxidIcon className="size-8" />
             </div>
-            <span className="text-13 font-medium text-foreground">NyxID</span>
+            <span className="type-secondary-emphasis text-foreground">NyxID</span>
           </div>
-          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
+          <h1 className="break-words type-compact-page-title text-foreground sm:type-page-title">
             {bindingReview
               ? isLarkBinding
                 ? "Review Lark bot access"
@@ -573,7 +573,7 @@ function StandardConsentPage({
                 ? "Authorize Lark bot"
                 : "Authorize application"}
           </h1>
-          <p className="max-w-md break-words text-14 leading-relaxed text-muted-foreground">
+          <p className="max-w-md break-words text-14 text-muted-foreground">
             {bindingReview ? (
               <>
                 Review the NyxID services available to{" "}
@@ -592,7 +592,7 @@ function StandardConsentPage({
             )}
           </p>
           {preview && (
-            <p className="text-13 font-medium uppercase text-muted-foreground">
+            <p className="type-secondary-emphasis uppercase text-muted-foreground">
               Preview · Decisions disabled
             </p>
           )}
@@ -611,7 +611,7 @@ function StandardConsentPage({
         >
           <h2
             id="oauth-permissions"
-            className="text-15 font-semibold text-foreground"
+            className="type-card-title text-foreground"
           >
             This will allow {clientName} to:
           </h2>
@@ -622,10 +622,10 @@ function StandardConsentPage({
                   <ScopeIcon scope="openid" />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <p className="text-15 font-medium text-foreground">
+                  <p className="type-card-title text-foreground">
                     Your NyxID profile
                   </p>
-                  <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
+                  <p className="mt-1 text-14 text-muted-foreground">
                     {identityScopeSummary(identityScopes)}
                   </p>
                   <code className="mt-1 block break-all text-14 text-muted-foreground">
@@ -646,13 +646,13 @@ function StandardConsentPage({
                   </span>
                   <div className="min-w-0 flex-1">
                     <p
-                      className={`text-15 font-medium text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
+                      className={`type-card-title text-foreground ${meta ? "break-words" : "break-all font-mono"}`}
                     >
                       {meta?.title ?? item}
                     </p>
                     {meta && (
                       <>
-                        <p className="mt-1 text-14 leading-relaxed text-muted-foreground">
+                        <p className="mt-1 text-14 text-muted-foreground">
                           {meta.description}
                         </p>
                         <code className="mt-1 block break-all text-14 text-muted-foreground">
@@ -686,7 +686,7 @@ function StandardConsentPage({
             <div className="flex items-center justify-between gap-4">
               <h2
                 id="oauth-services"
-                className="text-15 font-semibold text-foreground"
+                className="type-card-title text-foreground"
               >
                 Service access
               </h2>
@@ -702,7 +702,7 @@ function StandardConsentPage({
                 {customize ? "Done" : "Customize"}
               </Button>
             </div>
-            <p className="mt-1.5 text-14 leading-relaxed text-muted-foreground">
+            <p className="mt-1.5 text-14 text-muted-foreground">
               {serviceAccess.allow_all_services
                 ? bindingReview && currentBindingAllowsAllServices
                   ? "This binding currently authorizes all available services."
@@ -725,12 +725,12 @@ function StandardConsentPage({
                         className="flex flex-col gap-2 py-3.5 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
                       >
                         <div className="min-w-0">
-                          <p className="break-words text-15 font-medium text-foreground">
+                          <p className="break-words type-card-title text-foreground">
                             {item.primary}
                           </p>
                           {item.description && (
                             <p
-                              className="mt-1 line-clamp-2 break-words text-14 leading-relaxed text-muted-foreground"
+                              className="mt-1 line-clamp-2 break-words text-14 text-muted-foreground"
                               title={item.description}
                             >
                               {item.description}
@@ -773,7 +773,7 @@ function StandardConsentPage({
                     ))}
                     {unmatchedDefaults.map((name) => (
                       <div key={`unmatched-${name}`} className="py-3.5">
-                        <p className="break-words text-14 leading-relaxed text-muted-foreground">
+                        <p className="break-words text-14 text-muted-foreground">
                           <span className="font-medium text-foreground">
                             {name}
                           </span>{" "}
@@ -830,14 +830,14 @@ function StandardConsentPage({
                               <div className="min-w-0">
                                 <Label
                                   htmlFor={`oauth-service-${service.id}`}
-                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-14 font-medium leading-5 text-foreground`}
+                                  className={`${requiredByApp ? "cursor-default" : "cursor-pointer"} text-foreground`}
                                 >
-                                  <span className="block break-words font-medium">
+                                  <span className="block break-words">
                                     {serviceDisplayName(service)}
                                   </span>
                                   {service.catalog_service_description?.trim() && (
                                     <span
-                                      className="mt-1 line-clamp-2 break-words text-14 font-normal leading-relaxed text-muted-foreground"
+                                      className="mt-1 line-clamp-2 break-words type-body text-muted-foreground"
                                       title={
                                         service.catalog_service_description
                                       }
@@ -846,7 +846,7 @@ function StandardConsentPage({
                                     </span>
                                   )}
                                   {serviceSecondaryText(service) && (
-                                    <span className="mt-1 block break-words text-13 font-normal text-text-tertiary">
+                                    <span className="mt-1 block break-words type-secondary text-text-tertiary">
                                       {serviceSecondaryText(service)}
                                     </span>
                                   )}
@@ -859,7 +859,7 @@ function StandardConsentPage({
                                     >
                                       Org
                                     </Badge>
-                                    <span className="break-words text-13 font-normal text-muted-foreground">
+                                    <span className="break-words type-secondary text-muted-foreground">
                                       {orgName}
                                     </span>
                                   </div>
@@ -947,11 +947,11 @@ function StandardConsentPage({
             <div>
               <h2
                 id="oauth-trust"
-                className="text-14 font-semibold text-foreground"
+                className="type-body-strong text-foreground"
               >
                 Make sure you trust {clientName}
               </h2>
-              <p className="mt-2 text-14 leading-relaxed text-muted-foreground">
+              <p className="mt-2 text-14 text-muted-foreground">
                 This app may receive the account information above and use the
                 services you approve. Continue only if you trust it. You can
                 revoke access later from Authorized Applications.
@@ -966,7 +966,7 @@ function StandardConsentPage({
             agentAccess && "lg:col-start-1 lg:row-start-3 lg:self-start",
           )}
         >
-          <summary className="flex cursor-pointer list-none items-center justify-between text-14 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center justify-between text-muted-foreground [&::-webkit-details-marker]:hidden">
             App details
             <ChevronDown
               className="h-4 w-4 transition-transform group-open:rotate-180"

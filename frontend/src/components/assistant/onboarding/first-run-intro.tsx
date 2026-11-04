@@ -372,10 +372,10 @@ function Welcome({
         className="max-w-md space-y-2 animate-in fade-in-0 slide-in-from-bottom-2 duration-500 fill-mode-both motion-reduce:animate-none"
         style={{ animationDelay: "120ms" }}
       >
-        <DialogTitle className="text-22 font-bold text-foreground sm:text-28" style={{ letterSpacing: "-0.03em" }}>
+        <DialogTitle className="type-compact-page-title text-foreground sm:type-page-title" style={{ letterSpacing: "-0.03em" }}>
           {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
         </DialogTitle>
-        <DialogDescription className="text-14 leading-relaxed text-muted-foreground">
+        <DialogDescription className="text-14 text-muted-foreground">
           I'm NyxBot, your personal chief of staff. Give me a minute and I'll show you how we'll work together.
         </DialogDescription>
       </div>
@@ -463,8 +463,8 @@ function StepHeading({
   return (
     <>
       <div className="space-y-1 pr-8 md:pr-6">
-        <DialogTitle className="text-15 font-semibold text-foreground">{title}</DialogTitle>
-        <DialogDescription className="text-14 leading-relaxed text-muted-foreground">
+        <DialogTitle className="type-card-title text-foreground">{title}</DialogTitle>
+        <DialogDescription className="text-14 text-muted-foreground">
           {description}
         </DialogDescription>
       </div>
@@ -477,7 +477,7 @@ function Points({ items }: { readonly items: readonly string[] }) {
   return (
     <ul className="space-y-1.5">
       {items.map((item) => (
-        <li key={item} className="flex gap-2 text-14 leading-snug text-muted-foreground">
+        <li key={item} className="flex gap-2 text-14 text-muted-foreground">
           <Check aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-success" />
           {item}
         </li>
@@ -552,7 +552,7 @@ function ChoiceGrid({
               disabled={leaving}
               onClick={() => onToggle(choice.id)}
               className={cn(
-                "inline-flex max-w-full items-center gap-2 rounded-full border py-1 pr-3 pl-1 text-left text-14 font-medium transition-[background-color,border-color,opacity,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
+                "inline-flex max-w-full items-center gap-2 rounded-full border py-1 pr-3 pl-1 text-left type-row-title transition-[background-color,border-color,opacity,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
                 "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus",
                 leaving && "scale-95 opacity-0",
                 active
@@ -588,7 +588,7 @@ function ChoiceIcon({ name, active }: { readonly name: string; readonly active: 
 
 function Overline({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="pt-1 text-12 font-medium uppercase tracking-[0.125em] text-text-tertiary">{children}</p>
+    <p className="pt-1 type-group-label uppercase tracking-[0.125em] text-text-tertiary">{children}</p>
   );
 }
 

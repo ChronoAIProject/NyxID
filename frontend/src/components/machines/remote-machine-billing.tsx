@@ -289,14 +289,14 @@ export function RemoteMachineBilling({
             </p>
           </DetailSection>
           <div className="space-y-3">
-            <h3 className="text-15 font-semibold">Runtime intervals</h3>
+            <h3 className="type-card-title">Runtime intervals</h3>
             <div className="flex flex-col gap-3 md:hidden">
               {data.intervals.map((row) => (
                 <article
                   key={row.interval_id}
                   className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
                 >
-                  <p className="break-all text-15 font-semibold">
+                  <p className="break-all type-card-title">
                     {row.interval_id}
                   </p>
                   <Badge variant={row.settled ? "success" : "warning"}>

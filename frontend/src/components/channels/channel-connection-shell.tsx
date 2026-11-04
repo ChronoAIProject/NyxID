@@ -49,7 +49,7 @@ export function ChannelConnectionShell({
                   href={guideUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
+                  className="inline-flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
                 >
                   Channel setup guide
                   <ExternalLink className="size-3" aria-hidden="true" />
@@ -65,20 +65,20 @@ export function ChannelConnectionShell({
                 <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
                   <NyxidIcon className="size-9" alt="" />
                 </div>
-                <span className="text-14 font-medium">NyxID</span>
+                <span className="type-row-title">NyxID</span>
               </div>
               <ConnectionArc complete={complete} />
               <div className="flex w-20 flex-col items-center gap-2.5">
                 <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
                   <ChannelIcon platform={platform} />
                 </div>
-                <span className="text-center text-14 font-medium">
+                <span className="text-center type-row-title">
                   {platformName ?? "Channel"}
                 </span>
               </div>
             </div>
             <div className="mb-7 space-y-2 text-center">
-              <h1 className="font-display text-22 font-bold leading-tight tracking-tight sm:text-28">
+              <h1 className="font-display type-compact-page-title tracking-tight sm:type-page-title">
                 {platform === "telegram"
                   ? complete
                     ? "Your Telegram bot is connected"
@@ -89,7 +89,7 @@ export function ChannelConnectionShell({
                       : `Create your ${platformName} channel bot`
                     : "Set up your channel bot"}
               </h1>
-              <p className="text-14 leading-relaxed text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 {complete
                   ? "Finish any platform setup, then choose an agent to respond to your messages."
                   : platform === "telegram-new"

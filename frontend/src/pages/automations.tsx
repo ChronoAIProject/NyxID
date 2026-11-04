@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
 import { TEXT_STYLES } from "@/lib/typography";
 import { formatCapacityWait } from "@/lib/assistant/capacity-wait";
@@ -250,7 +251,7 @@ function AutomationsContent() {
                 <span data-trigger-title="" className={`block break-words ${TEXT_STYLES.rowTitle}`}>
                   {row.label}
                 </span>
-                <span className="mt-0.5 block text-13 font-normal text-text-tertiary">
+                <span className="mt-0.5 block type-secondary text-text-tertiary">
                   {target(row)} ·{" "}
                   {row.source === "schedule" ? "Schedule" : "Webhook"} ·{" "}
                   <span
@@ -261,7 +262,7 @@ function AutomationsContent() {
                     {row.status === "active" ? "Active" : "Paused"}
                   </span>
                 </span>
-                <span className="mt-1 block text-13 font-normal text-text-tertiary">
+                <span className="mt-1 block type-secondary text-text-tertiary">
                   {row.source === "webhook"
                     ? "Runs on webhook events"
                     : row.next_run_at
@@ -271,7 +272,7 @@ function AutomationsContent() {
                     : "Not run yet"}
                 </span>
                 {row.pause_reason && (
-                  <span className="mt-1 block text-13 font-normal text-warning">
+                  <span className="mt-1 block type-secondary text-warning">
                     {automationPauseReason(row.pause_reason)}
                   </span>
                 )}
@@ -438,8 +439,8 @@ export function AutomationEditor({
   function input(name: keyof AutomationForm, label: string, type = "text") {
     return (
       <GroupedRow key={name} asChild className="block space-y-0.5">
-        <label>
-          <span className="text-13 font-normal text-text-tertiary">
+        <Label>
+          <span className="text-text-tertiary">
             {label}
           </span>
           <GroupedInput
@@ -450,7 +451,7 @@ export function AutomationEditor({
             {...form.register(name, { valueAsNumber: name === "amount" })}
           />
           {fieldError(name)}
-        </label>
+        </Label>
       </GroupedRow>
     );
   }
@@ -504,7 +505,7 @@ export function AutomationEditor({
   ) {
     return (
       <GroupedRow className="block space-y-2">
-        <p className="text-14 font-medium">{label}</p>
+        <Label asChild><p>{label}</p></Label>
         <SegmentedControl
           value={values[name]}
           onValueChange={(value) =>
@@ -622,8 +623,8 @@ export function AutomationEditor({
                 {input("label", "Label")}
                 {values.delivery_type === "assistant" && (
                   <GroupedRow asChild className="block space-y-0.5">
-                    <label>
-                      <span className="text-13 font-normal text-text-tertiary">
+                    <Label>
+                      <span className="text-text-tertiary">
                         Instruction
                       </span>
                       <GroupedTextarea
@@ -634,7 +635,7 @@ export function AutomationEditor({
                         aria-describedby="automation-instruction-error"
                       />
                       {fieldError("instruction")}
-                    </label>
+                    </Label>
                   </GroupedRow>
                 )}
               </GroupedList>

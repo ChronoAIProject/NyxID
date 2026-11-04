@@ -84,14 +84,14 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
           <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/5 bg-white/5 text-[#c6ef68]">
             <CmaGlyph className="size-6" />
           </span>
-          <h3 className="min-w-0 flex-1 text-14 font-semibold tracking-tight">Delegated to CMA</h3>
-          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-13 font-medium", tones[tone])}>
+          <h3 className="min-w-0 flex-1 type-body-strong tracking-tight">Delegated to CMA</h3>
+          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 type-secondary-emphasis ", tones[tone])}>
             <span aria-hidden className={cn("size-1.5 rounded-full bg-current", pending && tone === "active" && "motion-safe:animate-pulse")} />
             {label}
           </span>
         </div>
         <p className="mt-3 text-13 text-zinc-400">ChronoAI Managed Agent</p>
-        <dl className="mt-1.5 space-y-1 break-all font-mono text-12 leading-relaxed text-zinc-400">
+        <dl className="mt-1.5 space-y-1 break-all font-mono text-12 text-zinc-400">
           {operation.agent_id && <div><dt className="inline text-zinc-500">Agent </dt><dd className="inline select-all">{operation.agent_id}</dd></div>}
           {operation.operation_id && operation.operation_id !== operation.agent_id && <div><dt className="inline text-zinc-500">Operation </dt><dd className="inline select-all">{operation.operation_id}</dd></div>}
           {operation.idempotency_key && <div><dt className="inline text-zinc-500">Idempotency-Key </dt><dd className="inline select-all">{operation.idempotency_key}</dd></div>}

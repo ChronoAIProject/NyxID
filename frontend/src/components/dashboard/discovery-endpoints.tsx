@@ -37,7 +37,7 @@ export function DiscoveryEndpoints({
 
   return (
     <div>
-      <p className="mb-2 text-13 font-medium text-muted-foreground">
+      <p className="mb-2 type-secondary-emphasis text-muted-foreground">
         Discovery Endpoints
       </p>
       <div className="space-y-1">

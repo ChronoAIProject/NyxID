@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { describeChanges } from "@/lib/grouped-form-changes";
 import { useState } from "react";
 import { z } from "zod";
@@ -262,7 +263,7 @@ function AgentAssignment({
               }
             >
               <GroupedRow asChild interactive>
-                <label>
+                <Label>
                   <Switch
                     className="order-last shrink-0"
                     checked={form.watch("assigned")}
@@ -273,7 +274,7 @@ function AgentAssignment({
                   <span className="min-w-0 flex-1">
                     Assign this machine to {agent.display_name ?? agent.name}
                   </span>
-                </label>
+                </Label>
               </GroupedRow>
             </GroupedList>
             <GroupedFormActions

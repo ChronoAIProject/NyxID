@@ -72,7 +72,7 @@ export function MemberRow({
     <TableRow>
       <TableCell>
         <div className="flex flex-col gap-0.5">
-          <span className="text-14 font-medium text-foreground">
+          <span className="type-row-title text-foreground">
             {displayName}
             {isSelf && (
               <span className="ml-2 text-13 text-muted-foreground">(you)</span>

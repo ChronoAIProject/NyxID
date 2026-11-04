@@ -12,7 +12,7 @@ export function MetricBlock({
   return (
     <div className="rounded-lg border border-border/70 bg-overlay px-3 py-3">
       <div className="text-13 text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-20 font-semibold leading-tight">
+      <div className="mt-1 truncate type-section-heading">
         {value}
       </div>
       {detail && (

@@ -67,14 +67,14 @@ function SkillHistory({
               <li>
                 <div className="min-w-0 flex-1">
                   <p>{HISTORY_LABELS[item.event_type] ?? "Skill activity"}</p>
-                  <p className="text-13 font-normal text-text-tertiary">
+                  <p className="type-secondary text-text-tertiary">
                     {new Date(item.created_at).toLocaleString()}
                     {item.revision !== null
                       ? ` · Revision ${item.revision}`
                       : ""}
                   </p>
                   {item.skills.length ? (
-                    <p className="text-13 font-normal text-text-tertiary">
+                    <p className="type-secondary text-text-tertiary">
                       {item.skills
                         .map(
                           (pin) =>
@@ -197,7 +197,7 @@ function AttachedSkill({
       >
         <span className="min-w-0 flex-1">
           <span className="block">{skill.name}</span>
-          <span className="block truncate text-13 font-normal text-text-tertiary" title={description}>
+          <span className="block truncate type-secondary text-text-tertiary" title={description}>
             {skill.disabled ? "Disabled" : description}
           </span>
         </span>
@@ -567,7 +567,7 @@ export function AgentSkills({
                 onClick={() => choose(item.id, item.name)}
               >
                 <span className="block">{item.name}</span>
-                <span className="block text-13 font-normal text-text-tertiary">
+                <span className="block type-secondary text-text-tertiary">
                   {item.description}
                 </span>
               </GroupedDisclosure>

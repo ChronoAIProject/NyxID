@@ -69,7 +69,7 @@ export function NyxAgentAcknowledgementCard({
         <p className="text-13 text-muted-foreground">This confirmation can no longer be allowed. Ask for a new request to retry.</p>
         {onRequestAgain ? <Button variant="outline" size="sm" disabled={deciding} onClick={onRequestAgain}>Ask for a new confirmation</Button> : null}
       </> : null}
-      {row.review_path ? <a className="text-14 font-medium underline" href={row.review_path}>Open request</a> : null}
+      {row.review_path ? <a className="type-row-title underline" href={row.review_path}>Open request</a> : null}
     </section>;
   }
 
@@ -89,11 +89,11 @@ export function NyxAgentAcknowledgementCard({
       className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
       {routed ? (
-        <p className="text-12 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+        <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">
           Requested from NyxBot
         </p>
       ) : null}
-      <p className="text-15 font-medium text-foreground">{label}</p>
+      <p className="type-card-title text-foreground">{label}</p>
       {acknowledgement.confirmation ? (
         <p className="text-13 text-muted-foreground">
           <span
@@ -136,7 +136,7 @@ export function NyxAgentAcknowledgementCard({
             : "This permission applies to this chat only."}
         {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
       </p>
-      {acknowledgement.review_path ? <a className="text-14 font-medium underline" href={acknowledgement.review_path}>Open request</a> : null}
+      {acknowledgement.review_path ? <a className="type-row-title underline" href={acknowledgement.review_path}>Open request</a> : null}
       {error ? (
         <p role="alert" className="text-14 text-destructive">
           {error}

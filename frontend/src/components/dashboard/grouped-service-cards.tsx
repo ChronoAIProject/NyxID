@@ -41,7 +41,7 @@ import {
   matchingConnections,
 } from "@/lib/service-view";
 import { ServiceIcon } from "@/components/service-icon";
-import { ServiceCardHeader } from "@/components/shared/service-card-header";
+import { ServiceCardSummary } from "@/components/shared/service-card-summary";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -361,59 +361,53 @@ function GroupCard({
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
-            <Glide>
-              <ServiceCardHeader
-                name={group.name}
-                titleId={headingId}
-                icon={<ServiceIcon slug={group.iconSlug} iconUrl={group.iconUrl} size="md" />}
-                titleAction={{
-                  onClick: () => onToggle(cardRef.current),
-                  "aria-expanded": expanded,
-                  "aria-controls": contentId,
-                }}
-                subtitle={
-                  <>
-                    {matchingCount < count
-                      ? `${matchingCount} of ${count}`
-                      : count}{" "}
-                    {count === 1 ? "connection" : "connections"}
-                  </>
-                }
-              >
-                {group.connections.some((connection) => connection.offering_kind === "tool") && (
-                  <Badge variant="secondary">Tool · your key</Badge>
-                )}
-                {!expanded && preferred?.preference_rank === 1 && (
-                  <button
-                    type="button"
-                    onClick={() => onToggle(cardRef.current)}
-                    className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                    aria-label={`Preferred: ${preferred.label}`}
-                    title={group.connections
-                      .filter((connection) => connection.preference_rank != null)
-                      .map(
-                        (connection) =>
-                          `#${connection.preference_rank} · ${connection.label}`,
-                      )
-                      .join("\n")}
-                  >
-                    <Badge variant="accent">Preferred: {preferred.label}</Badge>
-                  </button>
-                )}
-                {disabled > 0 && (
-                  <Badge variant="secondary">{disabled} disabled</Badge>
-                )}
-              </ServiceCardHeader>
-            </Glide>
-            {!expanded && (
-              <Glide className="shrink-0">
-                <p className="line-clamp-2 min-h-[2lh] text-14 text-muted-foreground">
-                  {search.trim()
-                    ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
-                    : group.description}
-                </p>
-              </Glide>
-            )}
+            <ServiceCardSummary
+              wrap={(content) => <Glide>{content}</Glide>}
+              hideDescription={expanded}
+              description={search.trim()
+                ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
+                : group.description}
+              name={group.name}
+              titleId={headingId}
+              icon={<ServiceIcon slug={group.iconSlug} iconUrl={group.iconUrl} size="md" />}
+              titleAction={{
+                onClick: () => onToggle(cardRef.current),
+                "aria-expanded": expanded,
+                "aria-controls": contentId,
+              }}
+              subtitle={
+                <>
+                  {matchingCount < count
+                    ? `${matchingCount} of ${count}`
+                    : count}{" "}
+                  {count === 1 ? "connection" : "connections"}
+                </>
+              }
+            >
+              {group.connections.some((connection) => connection.offering_kind === "tool") && (
+                <Badge variant="secondary">Tool · your key</Badge>
+              )}
+              {!expanded && preferred?.preference_rank === 1 && (
+                <button
+                  type="button"
+                  onClick={() => onToggle(cardRef.current)}
+                  className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  aria-label={`Preferred: ${preferred.label}`}
+                  title={group.connections
+                    .filter((connection) => connection.preference_rank != null)
+                    .map(
+                      (connection) =>
+                        `#${connection.preference_rank} · ${connection.label}`,
+                    )
+                    .join("\n")}
+                >
+                  <Badge variant="accent">Preferred: {preferred.label}</Badge>
+                </button>
+              )}
+              {disabled > 0 && (
+                <Badge variant="secondary">{disabled} disabled</Badge>
+              )}
+            </ServiceCardSummary>
             <div
               className={cn(
                 "mt-auto text-13",
@@ -479,7 +473,7 @@ function GroupCard({
                     </TooltipTrigger>
                     <TooltipContent
                       collisionPadding={12}
-                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words leading-relaxed [overflow-wrap:anywhere]"
+                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words [overflow-wrap:anywhere]"
                     >
                       {agents.title}
                     </TooltipContent>
@@ -558,7 +552,7 @@ function GroupCard({
                 to="/keys/services/$groupId"
                 params={{ groupId: group.id }}
                 aria-label={`View all ${group.name} service details`}
-                className="text-14 font-medium text-primary-text hover:underline"
+                className="type-row-title text-primary-text hover:underline"
               >
                 Service details
               </Link>
@@ -632,7 +626,7 @@ function GroupCard({
                           ? selectedPool.user_id
                           : undefined,
                     }}
-                    className="ml-auto text-14 font-medium text-primary-text hover:underline"
+                    className="ml-auto type-row-title text-primary-text hover:underline"
                   >
                     Manage in Service Pools
                   </Link>
