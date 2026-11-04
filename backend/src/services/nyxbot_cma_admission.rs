@@ -1651,6 +1651,7 @@ mod tests {
                 current_response_id: None,
                 desktop: Some(false),
                 sandbox_status: Some("active".into()),
+                callback_url: None,
             })
         }
         async fn pause_sandbox(&self, _: &str, _: &str, _: &str) -> CmaResult<CmaLifecycleResult> {

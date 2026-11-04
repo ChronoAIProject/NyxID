@@ -135,6 +135,25 @@ pub struct CmaAgent {
     pub current_response_id: Option<String>,
     pub desktop: Option<bool>,
     pub sandbox_status: Option<String>,
+    /// Missing preserves the previous observation; null or invalid clears it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_agent_callback_url",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub callback_url: Option<Option<String>>,
+}
+
+fn deserialize_agent_callback_url<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(Some(super::cma_operation::validated_callback_url(
+        value.as_str(),
+    )))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1387,6 +1406,9 @@ fn parse_agent(body: &Value, owner_id: &str, agent_id: &str) -> CmaResult<CmaAge
         sandbox_status: value
             .get("sandbox")
             .and_then(|sandbox| text(sandbox, "status", 120)),
+        callback_url: value
+            .get("callback_url")
+            .map(|callback| super::cma_operation::validated_callback_url(callback.as_str())),
     })
 }
 
@@ -1901,6 +1923,82 @@ mod tests {
         );
         assert!(agent.profile.as_ref().unwrap().get("secret").is_none());
         assert!(parse_agent(&body, "owner", "agent_2").is_err());
+    }
+
+    #[test]
+    fn cma_agent_callback_preserves_the_observed_safe_url_and_identity() {
+        for callback in [
+            "https://CMA.example:8443/agents/agent_1",
+            "http://localhost:8080/agents/agent_1",
+        ] {
+            let body = json!({"agent":{
+                "id":"agent_1","owner":"owner","status":"working","revision":7,
+                "sandbox":{"id":"sandbox_1"},"workspace":{"id":"workspace_1"},
+                "worktree":{"id":"worktree_1"},"callback_url":callback
+            }});
+            let agent = parse_agent(&body, "owner", "agent_1").unwrap();
+            let projected = serde_json::to_value(&agent).unwrap();
+            assert_eq!(projected.get("callback_url"), Some(&json!(callback)));
+            assert_eq!(agent.status, "working");
+            assert_eq!(agent.revision, Some(7));
+            assert_eq!(agent.owner_id.as_deref(), Some("owner"));
+            assert_eq!(agent.sandbox_id.as_deref(), Some("sandbox_1"));
+            assert_eq!(agent.workspace_id.as_deref(), Some("workspace_1"));
+            assert_eq!(agent.worktree_id.as_deref(), Some("worktree_1"));
+            assert!(parse_agent(&body, "other-owner", "agent_1").is_err());
+            assert!(parse_agent(&body, "owner", "different-agent").is_err());
+        }
+    }
+
+    #[test]
+    fn cma_agent_callback_omission_does_not_fabricate_a_destination() {
+        let body = json!({
+            "callback_url":"https://unrelated.example/agents/other",
+            "agent":{"id":"agent_1","owner":"owner","status":"ready"}
+        });
+        let agent = parse_agent(&body, "owner", "agent_1").unwrap();
+        let projected = serde_json::to_value(agent).unwrap();
+        assert!(projected.get("callback_url").is_none());
+        assert_eq!(projected["status"], "ready");
+    }
+
+    #[test]
+    fn cma_agent_callback_null_and_invalid_values_clear_without_losing_status() {
+        for callback in [
+            json!(null),
+            json!(123),
+            json!(true),
+            json!({"url":"https://cma.example/agents/agent_1"}),
+            json!(["https://cma.example/agents/agent_1"]),
+            json!(""),
+            json!("/agents/agent_1"),
+            json!("javascript:alert(1)"),
+            json!("data:text/html,agent"),
+            json!("https://user:secret@cma.example/agents/agent_1"),
+            json!("https://cma.example/agents/agent_1?token=secret"),
+            json!("https://cma.example/agents/agent_1#token"),
+            json!("http://169.254.169.254/latest/meta-data"),
+            json!("http://metadata.google.internal/agents/agent_1"),
+            json!("https://cma.example/agents/agent_1\n"),
+            json!("https://cma.example/agents/agent_1\u{0000}"),
+            json!("https://cma.example/agents/agent 1"),
+            json!("https://cma.example\\agents\\agent_1"),
+            json!(format!("https://cma.example/{}", "a".repeat(2048))),
+        ] {
+            let body = json!({
+                "id":"agent_1","owner":"owner","status":"failed",
+                "callback_url":callback
+            });
+            let agent = parse_agent(&body, "owner", "agent_1").unwrap();
+            let projected = serde_json::to_value(agent).unwrap();
+            assert_eq!(
+                projected.get("callback_url"),
+                Some(&Value::Null),
+                "invalid or withdrawn callback must remain an explicit clear: {callback}"
+            );
+            assert_eq!(projected["status"], "failed");
+            assert_eq!(projected["id"], "agent_1");
+        }
     }
 
     fn sandbox_with_profile(id: &str, profile: &str, revision: Value) -> Value {

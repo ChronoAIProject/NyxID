@@ -248,11 +248,18 @@ async fn verify_parent(gateway: &dyn CmaGateway, owner: &str, remote: &CmaAgent)
 }
 
 fn observation_fields(remote: &CmaAgent, now: DateTime<Utc>) -> Document {
-    doc! {"label":remote.name.clone().unwrap_or_else(||"CMA Agent".into()),
+    let mut fields = doc! {"label":remote.name.clone().unwrap_or_else(||"CMA Agent".into()),
     "observation_state":observation_state(&remote.status).as_str(),"resource_state":&remote.status,
     "profile_snapshot":bson::to_bson(&safe_profile(remote.profile.as_ref())).unwrap_or(bson::Bson::Null),
     "phase":&remote.phase,"last_observed":bson::DateTime::from_chrono(now),
-    "last_observed_revision":remote.revision,"updated_at":bson::DateTime::from_chrono(now)}
+    "last_observed_revision":remote.revision,"updated_at":bson::DateTime::from_chrono(now)};
+    if let Some(callback) = &remote.callback_url {
+        fields.insert(
+            "callback_url",
+            super::cma_operation::validated_callback_url(callback.as_deref()),
+        );
+    }
+    fields
 }
 
 /// Register only a resource observed through the owner-authenticated boundary.
@@ -512,6 +519,7 @@ mod tests {
             current_response_id: None,
             desktop: Some(true),
             sandbox_status: Some("active".into()),
+            callback_url: None,
         }
     }
     #[test]
@@ -542,6 +550,98 @@ mod tests {
             AgentObservationState::Unknown
         );
         assert!(unavailable(&CmaGatewayError::Forbidden).is_none());
+    }
+
+    fn apply_callback_observation(
+        callback: Option<serde_json::Value>,
+    ) -> (NyxbotCmaAgent, Document) {
+        let now = Utc::now();
+        let mut stored = doc! {
+            "_id":"internal-agent","user_id":"owner","cma_service_id":"catalog-service",
+            "cma_agent_id":"agent","cma_sandbox_id":"sandbox",
+            "cma_workspace_id":"workspace","cma_worktree_id":"worktree","sandbox_generation":3,
+            "created_at":bson::DateTime::from_chrono(now),"updated_at":bson::DateTime::from_chrono(now),
+            "last_observed_revision":6,"source_conversation_id":"private-chat",
+            "callback_url":"https://old.example/agents/agent"
+        };
+        let previous: NyxbotCmaAgent = bson::from_document(stored.clone()).unwrap();
+        let mut payload = serde_json::to_value(remote()).unwrap();
+        payload.as_object_mut().unwrap().remove("callback_url");
+        if let Some(callback) = callback {
+            payload["callback_url"] = callback;
+        }
+        payload["status"] = serde_json::json!("working");
+        payload["revision"] = serde_json::json!(7);
+        payload["profile"] = serde_json::json!({"model":"model_1","api_key":"not stored"});
+        let observed: CmaAgent = serde_json::from_value(payload).unwrap();
+        verify_observation(&previous, &observed).unwrap();
+        let fields = observation_fields(&observed, now);
+        // Apply the same $set fields used by registration and live detail to an
+        // existing BSON row, including an earlier callback and immutable IDs.
+        stored.extend(fields.clone());
+        let updated = bson::from_document(stored).unwrap();
+        (updated, fields)
+    }
+
+    #[test]
+    fn cma_agent_callback_observation_replaces_the_stored_url_without_changing_identity() {
+        let callback = "https://CMA.example:8443/agents/agent";
+        let (updated, fields) = apply_callback_observation(Some(serde_json::json!(callback)));
+        assert_eq!(updated.callback_url.as_deref(), Some(callback));
+        assert_eq!(fields.get_str("callback_url").unwrap(), callback);
+        assert_eq!(updated.observation_state, AgentObservationState::Running);
+        assert_eq!(updated.resource_state.as_deref(), Some("working"));
+        assert_eq!(updated.last_observed_revision, Some(7));
+        assert_eq!(updated.cma_agent_id, "agent");
+        assert_eq!(updated.user_id, "owner");
+        assert_eq!(updated.cma_service_id, "catalog-service");
+        assert_eq!(updated.cma_sandbox_id.as_deref(), Some("sandbox"));
+        assert_eq!(updated.cma_workspace_id.as_deref(), Some("workspace"));
+        assert_eq!(updated.cma_worktree_id.as_deref(), Some("worktree"));
+        assert_eq!(updated.sandbox_generation, Some(3));
+        assert_eq!(
+            updated.source_conversation_id.as_deref(),
+            Some("private-chat")
+        );
+        assert_eq!(
+            updated.profile_snapshot,
+            Some(serde_json::json!({"model":"model_1"}))
+        );
+        let public = serde_json::to_value(dto(&updated, None, None)).unwrap();
+        assert!(public.get("callback_url").is_none());
+        assert_eq!(public["status"], "working");
+    }
+
+    #[test]
+    fn cma_agent_callback_observation_omission_preserves_the_stored_url() {
+        let (updated, fields) = apply_callback_observation(None);
+        assert!(!fields.contains_key("callback_url"));
+        assert_eq!(
+            updated.callback_url.as_deref(),
+            Some("https://old.example/agents/agent")
+        );
+        assert_eq!(updated.observation_state, AgentObservationState::Running);
+    }
+
+    #[test]
+    fn cma_agent_callback_observation_null_and_invalid_values_clear_the_stored_url() {
+        for callback in [
+            serde_json::json!(null),
+            serde_json::json!({"url":"https://cma.example/agents/agent"}),
+            serde_json::json!("javascript:alert(1)"),
+            serde_json::json!("https://cma.example/agents/agent?token=secret"),
+            serde_json::json!(format!("https://cma.example/{}", "a".repeat(2048))),
+        ] {
+            let (updated, fields) = apply_callback_observation(Some(callback.clone()));
+            assert_eq!(
+                fields.get("callback_url"),
+                Some(&bson::Bson::Null),
+                "withdrawn or invalid callback must clear persisted metadata: {callback}"
+            );
+            assert!(updated.callback_url.is_none());
+            assert_eq!(updated.observation_state, AgentObservationState::Running);
+            assert_eq!(updated.resource_state.as_deref(), Some("working"));
+        }
     }
 
     #[test]

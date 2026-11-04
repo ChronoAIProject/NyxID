@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   mergeCmaEvents,
   normalizeCmaEvent,
@@ -106,6 +106,32 @@ it("reads split UTF-8 and CRLF SSE frames with a separate event cursor", async (
       event: "cma.agent.event",
       data: { message: "你好" },
     },
+  ]);
+});
+it("reports nonempty transport activity without turning comments into events", async () => {
+  const encoder = new TextEncoder();
+  const onActivity = vi.fn();
+  const response = new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const chunk of [
+          new Uint8Array(),
+          encoder.encode(": keep-"),
+          encoder.encode("alive\n\n"),
+          new Uint8Array(),
+          encoder.encode('id: committed\ndata: {"message":"Done"}\n\n'),
+        ])
+          controller.enqueue(chunk);
+        controller.close();
+      },
+    }),
+  );
+  const frames = [];
+  for await (const frame of readCmaStream(response, onActivity))
+    frames.push(frame);
+  expect(onActivity).toHaveBeenCalledTimes(3);
+  expect(frames).toEqual([
+    { id: "committed", event: undefined, data: { message: "Done" } },
   ]);
 });
 it("rejects an oversized event before buffering an unbounded response", async () => {

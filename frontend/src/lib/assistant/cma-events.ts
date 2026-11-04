@@ -158,6 +158,7 @@ export interface CmaSseFrame {
 /** CMA is its own protocol. Never feed its frames to the NyxAgent tool reducer. */
 export async function* readCmaStream(
   response: Response,
+  onActivity?: () => void,
 ): AsyncGenerator<CmaSseFrame> {
   if (!response.body) throw new Error("CMA event stream is unavailable");
   const reader = response.body.getReader();
@@ -173,6 +174,8 @@ export async function* readCmaStream(
         throw new Error(
           "CMA stream byte limit reached. Reconnect to continue.",
         );
+      // Comment heartbeats and partial frames are transport activity, not events.
+      if (value.byteLength > 0) onActivity?.();
       buffer += decoder.decode(value, { stream: true });
       let match: RegExpExecArray | null;
       while ((match = /\r\n\r\n|\n\n|\r\r/.exec(buffer))) {

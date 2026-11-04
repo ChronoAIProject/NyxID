@@ -6,13 +6,14 @@
 
 | 检查 | 结果与范围 |
 | --- | --- |
-| Rust 编译与合并回归 | 最终源码完成测试目标编译，合并筛选运行结果为 **244 passed、0 failed、1 ignored**，覆盖 CMA、异步操作、原生工具权限、调用续接、功能开关、catalog overlay、账号工具与指令上下文。此前 `cargo check -p nyxid --bin nyxid-server --tests` 也已通过。 |
+| Rust 主体实现编译与合并回归 | 主体实现提交 `1441c6a37` 完成测试目标编译，合并筛选运行结果为 **244 passed、0 failed、1 ignored**，覆盖 CMA、异步操作、原生工具权限、调用续接、功能开关、catalog overlay、账号工具与指令上下文。此前 `cargo check -p nyxid --bin nyxid-server --tests` 也已通过。M3 补充核对发现的修复单独记录，避免把此前结果当作新代码的验证。 |
+| Rust M3 补充回归 | 修复后再次完成测试目标编译，CMA 筛选结果为 **109 passed、0 failed、1 ignored**，包含全部 6 项新增 callback 回归和 10 项既有 MongoDB 事务用例；后者输出均为成功且没有数据库跳过消息。 |
 | 双账号隔离回归 | 初始筛选器未匹配实际模块路径；用同一份新编译测试程序补跑 `two_accounts_keep_real_credentials_memory_tools_payers_and_web_continuity`，**1 passed、0 failed**。两轮合计 245 个不同用例通过。 |
 | MongoDB | 使用隔离的 MongoDB 8.0 副本集 `cmaTest`，监听 `127.0.0.1:27019`。10 个新增事务用例另以 `--nocapture` 复核，**10 passed、0 failed、0 ignored**，输出没有数据库跳过消息；这 10 项已包含在上述 245 项中，不重复计数。事务探针也验证了在一个事务内删除发现记录，并把其部分唯一索引 remote ID 合并到原创建记录；探针数据库已删除。 |
-| Vitest | 12 个相关文件累计 140 条通过，覆盖 DTO、HTTP 边界、hooks、Sandbox/Agent 页面、事件游标、Desktop 文案、任务卡、人工协助卡及续接。 |
-| Playwright | `npx playwright test e2e/cma-worker.spec.ts`：11 条通过；覆盖 1440 × 1000 和 390 × 844。 |
+| Vitest | M3 心跳修复后重新运行 12 个相关文件，148 条通过，覆盖 DTO、HTTP 边界、hooks、Sandbox/Agent 页面、事件游标、SSE 活动计时、Desktop 文案、任务卡、人工协助卡及续接。 |
+| Playwright | M3 心跳修复后重新运行 `npx playwright test e2e/cma-worker.spec.ts --workers=1`：11 条通过；覆盖 1440 × 1000 和 390 × 844。 |
 | 前端生产构建 | `npm run build` 通过，包括 TypeScript、主应用、legal prerender、credential-accept 和 mock 排除检查。保留原有 CSS 与大 chunk 警告，未修改无关构建配置。 |
-| ESLint | 变更的 TS/TSX 文件定向检查通过；最终 Desktop 文案和新增浏览器测试文件再次检查通过。 |
+| ESLint | 变更的 TS/TSX 文件定向检查通过；最终 Desktop 文案、新增浏览器测试文件及 M3 心跳修复的四个 TS/TSX 文件再次检查通过。 |
 | 格式和空白 | `cargo fmt --all --check` 与 `git diff --cached --check` 通过。 |
 
 浏览器测试使用实际应用页面及 HTTP hooks，在现有端口 4611 的测试环境中拦截 API/WS。测试模式的 assistant HTTP mock 仅对 CMA 路径让出控制，由 Playwright 提供固定响应；没有替换生产组件或修改真实后端资源。这些测试证明本地页面和传输边界行为，不证明真实 CMA 事件或 RFB 连接已经互通。
@@ -21,7 +22,7 @@
 
 最终运行沿用 CI 的 `RUST_MIN_STACK=8388608`。默认 libtest 栈曾导致栈溢出，该次运行不计入通过结果。最终合并回归的唯一 ignored 项为既有的 `services::resource_request_proof::tests::joined::serve_joined_cma_acceptance_fixture`，它要求独立的 CMA 配对环境和私有 manifest；本次未执行，也不计作通过。
 
-## 后端验证命令与证据
+## 主体实现的后端验证命令与证据
 
 以下为最终合并运行的实际命令，工作目录为仓库根目录：
 
@@ -80,6 +81,31 @@ target/debug/deps/nyxid_server-1140cef517551115 \
 
 结果：`10 passed; 0 failed; 0 ignored`，运行 1.25 秒。输出保存在 `/tmp/nyxid-cma-worker-v1-final-mongo.log`。这些本机临时日志不作为仓库交付文件。
 
+## M3 补充核对与修复
+
+用户明确确认 M1 + M2 + M3 中本仓库可完成的工作均应继续推进后，按方案 §7 复核消费端，发现并补齐两项遗漏：
+
+- **Agent callback 观测更新**：内部 Agent 模型已有 `callback_url`，但 Agent detail 解析和登记/刷新链路原来丢弃该字段。补充三态解析和共用写入投影：字段缺省保留旧值，有效 URL 保存原始安全值，显式 null 或非法值写 BSON null。复用已有 watch URL 校验器，维持 DTO 不暴露该字段和 watch 原有消费行为。
+- **SSE 心跳活动**：原解析器不会把注释心跳当业务事件，hook 却只在业务事件到达时重置空闲计时，导致每 15 秒正常心跳的连接在 60 秒被误断。改为非空实际传输活动续期；注释不会推进业务游标、生成事件或触发查询刷新，空 chunk 不续期，握手及绝对寿命限制保持。
+
+callback 的修改前运行完成测试目标编译，6 项回归得到 **2 passed、4 failed**。四个失败均为预期行为断言：有效 URL 在解析或存储更新中丢失，显式 null 没有清除旧值。日志为 `/tmp/nyxid-cma-worker-v1-m3-callback-red.log`，过滤器为 `cma_agent_callback`。这些新增用例验证真实解析、serde 和共用 `$set` 的 BSON 表达，不把它们计作新的 MongoDB 事务验收。
+
+SSE 的修改前运行得到 **4 failed、10 passed**，修复后两份相关测试 **14 passed**。协调复核重新运行全部 12 份相关前端测试，**148 passed**；浏览器测试 **11 passed**，完整生产构建和四文件 ESLint 通过。新增测试辅助函数的类型收窄在生产构建中发现后已修正，并重跑相关测试与构建。最新日志为 `/tmp/nyxid-cma-worker-v1-m3-frontend-tests.log`、`/tmp/nyxid-cma-worker-v1-m3-frontend-build.log` 和 `/tmp/nyxid-cma-worker-v1-m3-playwright.log`。
+
+后端修复后的实际命令如下：
+
+```bash
+RUST_MIN_STACK=8388608 \
+CARGO_INCREMENTAL=0 \
+CARGO_BUILD_JOBS=2 \
+CARGO_PROFILE_TEST_DEBUG=0 \
+CARGO_PROFILE_DEV_DEBUG=0 \
+NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27019/?replicaSet=cmaTest' \
+cargo test -p nyxid --bin nyxid-server cma -- --nocapture --test-threads=4
+```
+
+测试目标编译完成，运行结果为 **109 passed、0 failed、1 ignored**，耗时 34.40 秒；日志为 `/tmp/nyxid-cma-worker-v1-m3-cma-green.log`。6 项 callback 回归全部通过，日志逐项确认全部 10 个既有 MongoDB 事务用例成功，没有数据库跳过消息。唯一 ignored 仍是上文说明的真实 CMA 配对夹具。两项修复均经过独立的规格与代码质量复审；`cargo fmt --all --check` 和 `git diff --check` 通过。
+
 ## 覆盖的关键行为
 
 - 空页面不创建资源；开关关闭时隐藏入口，并阻止页面发起 CMA 请求。
@@ -88,6 +114,8 @@ target/debug/deps/nyxid_server-1140cef517551115 \
 - 通用创建端点在其 24 小时去重缓存到期前停止不确定重放；已有资源回执只做读取恢复。永久 lifecycle 身份继续保持同 body/key。
 - 退休要求输入环境名称，HTTP 202 显示处理中并保留 `1 / 1 used`；观察确认退休后才释放。
 - 当前任务绑定精确 Agent/Response；缺少绑定不选择最新任务，身份不匹配不展示输出或建立事件流。共享 Agent 历史明确标注，游标与当前 Response 分离。
+- 内部 Agent 引用的 callback 与既有 watch 共用 URL 安全规则；缺省保留、有效值替换、null/无效值清除，Agent 公共 DTO 继续排除此字段。
+- SSE 注释心跳和其他非空传输活动重置 60 秒空闲计时，不生成业务事件、改变游标或触发查询刷新；空 chunk 不续期。20 秒握手和 5 分钟绝对期限仍生效，卸载、取消或 owner 变化后的迟到字节不能重新安装计时器。
 - Desktop 从只读模式开始，缺少能力或 Agent 不可用时不建立连接、不创建资源；页面关闭不取消远端任务。
 - 已提交 watch 的后续确认不依赖新增 UI 功能开关；每次观察仍检查当前密钥、授权、原始绑定与操作/输入范围。
 - CPU/内存读取 Sandbox 指定的 Profile 固定 revision；返回身份不匹配或配置不可读时保留未知。每页最多八个不同配置读取、共两秒预算，不改用最新版本。

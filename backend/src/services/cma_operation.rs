@@ -208,7 +208,7 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
 }
 
 /// A browser-only link: no DNS lookup, server-side fetch, or URL derivation.
-fn validated_callback_url(value: Option<&str>) -> Option<String> {
+pub(super) fn validated_callback_url(value: Option<&str>) -> Option<String> {
     let value = value?;
     if !(value.starts_with("https://") || value.starts_with("http://"))
         || value

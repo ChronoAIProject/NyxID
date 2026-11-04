@@ -157,6 +157,10 @@ export function useCmaEventStream(
     const abort = new AbortController();
     let disposed = false;
     let timeout: ReturnType<typeof setTimeout>;
+    const current = () =>
+      !disposed &&
+      !abort.signal.aborted &&
+      useAuthStore.getState().user?.id === scope.owner;
     const expire = () => {
       if (disposed || useAuthStore.getState().user?.id !== scope.owner) return;
       setResult((previous) => ({
@@ -169,6 +173,7 @@ export function useCmaEventStream(
       abort.abort();
     };
     const armIdle = () => {
+      if (!current()) return;
       clearTimeout(timeout);
       timeout = setTimeout(expire, 60_000);
     };
@@ -180,8 +185,6 @@ export function useCmaEventStream(
         : (initialCursor ?? undefined);
     resume.current = { identity, cursor };
     let refreshAt = 0;
-    const current = () =>
-      !abort.signal.aborted && useAuthStore.getState().user?.id === scope.owner;
     async function observe() {
       await Promise.resolve();
       if (!current()) return;
@@ -206,9 +209,8 @@ export function useCmaEventStream(
         if (!current()) return;
         armIdle();
         setResult((previous) => ({ ...previous, state: "connected" }));
-        for await (const frame of readCmaStream(response)) {
+        for await (const frame of readCmaStream(response, armIdle)) {
           if (!current()) break;
-          armIdle();
           const data = frame.data as Record<string, unknown> | null;
           if (frame.event?.endsWith("error") || data?.type === "error")
             throw new Error(

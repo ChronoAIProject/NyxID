@@ -2,6 +2,8 @@
 
 **Goal:** Implement the NyxID side of the authoritative [source plan](../../../2026-11-03-cma-worker-v1-implementation.md): one personal-owner Sandbox slot, durable creation/Agent references, CMA operations and native bridges, first-party management, and the Agent execution view.
 
+**Confirmed scope (2026-11-04):** The user requested M1 + M2 + M3 and all work feasible inside this repository. The tasks below include the NyxID-side M3 consumers, relay and catalog contract. Target CMA quota, producer changes and live deployment acceptance remain tracked dependencies in the [M3 mapping](../../2026-11-04-cma-worker-v1-out-of-scope.md), rather than being considered complete from local fixtures.
+
 **Architecture:** Keep task submission/result delivery in `cma_operation` and assistant watches. Add the owner-authenticated catalog gateway, final-dispatch admission, durable reference/creation services, management handlers and frontend. The reconciled [design](../specs/2026-11-04-cma-worker-v1-design.md) describes the current contract.
 
 **Status convention:** A checked implementation item means the code or regression source is present. It does not by itself claim that a test command ran or passed. The original plan's historical red-test steps are explicitly **not reconstructed** below. Final validation and local integration evidence are recorded under Task 7 and in the linked validation record. Original per-task commit recipes are superseded by a coordinated final review and local implementation commit.
@@ -124,10 +126,11 @@
 - [x] Add all three owned collections to personal erasure and use the persistent erasure barrier for reference/creation writes.
 - [x] Record external CMA quota/callback work, the login-key contract discrepancy, Remote Machine removal and excluded Sandbox-level APIs in `docs/2026-11-04-cma-worker-v1-out-of-scope.md`.
 - [x] Reconcile this generated checklist and design with exact raw bytes, separate creation durability, permanent-versus-generic retry rules, actual routes/tools and noVNC/RFB.
-- [x] Record final backend compile and focused test evidence: the final binary compiled, 244 tests passed with one pre-existing live-CMA fixture ignored, and the separately selected account-parity regression passed. All ten new Mongo-backed transactional cases were explicitly rerun with `--nocapture` against the isolated replica set and passed without skip messages; see the [validation record](../../2026-11-04-cma-worker-v1-validation.md).
-- [x] Record final frontend test counts, type/build results and scoped lint results after the final source edits: 140 related Vitest tests, current production build and scoped ESLint passed; see the [validation record](../../2026-11-04-cma-worker-v1-validation.md).
+- [x] Record backend compile and focused test evidence: the main implementation passed 244 tests with one pre-existing live-CMA fixture ignored, plus the separate account-parity regression. After the M3 follow-up, the final binary compiled again and passed 109 CMA tests with the same one ignored fixture, including all six new callback regressions and all ten Mongo-backed transactional cases without skip messages; see the [validation record](../../2026-11-04-cma-worker-v1-validation.md).
+- [x] Record final frontend test counts, type/build results and scoped lint results after the final source edits: 148 related Vitest tests, current production build and scoped ESLint passed; see the [validation record](../../2026-11-04-cma-worker-v1-validation.md).
 - [x] Record the final Playwright fixture run, viewport coverage and any limitations: 11 tests passed at desktop/mobile widths, with all CMA API/WS traffic intercepted; see the validation record for the live CMA boundary.
 - [x] Review the final diff and preserve implementation, tests and validation in a local commit on `codex/cma-worker-v1`. Keep the worktree and the untracked source/preview references. No push, PR, merge or deployment is part of this delivery.
+- [x] Complete the repository-side M3 follow-up: preserve Agent callback observation tri-state through parsing and storage, and treat nonempty SSE transport activity as idle-timer activity without creating business events. Both fixes have observed failing-before/passing-after regression evidence and independent specification/quality review; live CMA deployment conditions remain separate.
 
 ### Backend verification commands
 
