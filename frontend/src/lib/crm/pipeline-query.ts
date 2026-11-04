@@ -3,6 +3,12 @@ import type {
   CrmFilter,
   CrmTableQuery,
 } from "@/schemas/crm";
+import { crmTableQuerySchema } from "@/schemas/crm";
+
+export type CrmPipelineLanePlan =
+  | { readonly kind: "query"; readonly query: CrmTableQuery }
+  | { readonly kind: "empty" }
+  | { readonly kind: "invalid"; readonly error: Error };
 
 function stageFilter(
   stageField: string,
@@ -17,13 +23,35 @@ export function crmPipelineLaneQuery(
   query: CrmTableQuery,
   stageField: string,
   stageValues: readonly string[],
-): CrmTableQuery {
-  return {
+): CrmPipelineLanePlan {
+  const base = crmTableQuerySchema.safeParse(query);
+  if (!base.success) return { kind: "invalid", error: base.error };
+
+  const allowedStages = [...new Set(stageValues)].filter((stageValue) =>
+    crmPipelineStageMatches(query.filters, stageField, stageValue),
+  );
+  if (allowedStages.length === 0) return { kind: "empty" };
+
+  const foldedStage = stageFilter(stageField, allowedStages);
+  let stageInserted = false;
+  const filters = query.filters.flatMap((filter) => {
+    if (filter.field !== stageField) return [filter];
+    if (stageInserted) return [];
+    stageInserted = true;
+    return [foldedStage];
+  });
+  if (!stageInserted) filters.push(foldedStage);
+
+  const laneQuery: CrmTableQuery = {
     ...query,
     cursor: undefined,
     page_size: Math.min(query.page_size ?? 50, 50),
-    filters: [...query.filters, stageFilter(stageField, stageValues)],
+    filters,
   };
+  const parsed = crmTableQuerySchema.safeParse(laneQuery);
+  return parsed.success
+    ? { kind: "query", query: laneQuery }
+    : { kind: "invalid", error: parsed.error };
 }
 
 export function crmPipelineCountQuery(

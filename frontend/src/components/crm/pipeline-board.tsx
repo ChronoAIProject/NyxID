@@ -154,24 +154,36 @@ function PipelineLane({
   readonly readOnly: boolean;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: stage.value });
+  const lanePlan = crmPipelineLaneQuery(
+    query,
+    stageField.key,
+    stageValues?.length ? stageValues : [stage.value],
+  );
   const lane = useCrmTableQuery(
-    crmPipelineLaneQuery(
-      query,
-      stageField.key,
-      stageValues?.length ? stageValues : [stage.value],
-    ),
+    lanePlan.kind === "query" ? lanePlan.query : undefined,
     ownerId,
+    { enabled: lanePlan.kind === "query" },
   );
-  const titleField = lane.data?.object.fields.find(
-    (field) => field.type === "text" && field.required,
-  );
-  const rows = applyOptimisticPipelineRows(
-    lane.data?.rows ?? [],
-    stage.value,
-    moves,
-    (move) =>
-      crmPipelineStageMatches(query.filters, stageField.key, move.to),
-  );
+  const titleField =
+    lanePlan.kind === "query"
+      ? lane.data?.object.fields.find(
+          (field) => field.type === "text" && field.required,
+        )
+      : undefined;
+  const rows =
+    lanePlan.kind === "query"
+      ? applyOptimisticPipelineRows(
+          lane.data?.rows ?? [],
+          stage.value,
+          moves,
+          (move) =>
+            crmPipelineStageMatches(query.filters, stageField.key, move.to),
+        )
+      : [];
+  const isPending = lanePlan.kind === "query" && lane.isPending;
+  const isError =
+    lanePlan.kind === "invalid" ||
+    (lanePlan.kind === "query" && lane.isError);
   return (
     <section
       ref={setNodeRef}
@@ -186,12 +198,12 @@ function PipelineLane({
         </span>
       </header>
       <div className="min-h-24 space-y-2 p-2">
-        {lane.isPending ? (
+        {isPending ? (
           <p role="status" className="p-2 text-11 text-text-tertiary">
             Loading...
           </p>
         ) : null}
-        {lane.isError ? (
+        {isError ? (
           <p role="alert" className="p-2 text-11 text-destructive">
             Could not load this lane.
           </p>
@@ -220,7 +232,7 @@ function PipelineLane({
             />
           );
         })}
-        {!lane.isPending && rows.length === 0 ? (
+        {!isPending && !isError && rows.length === 0 ? (
           <p className="p-2 text-center text-11 text-text-tertiary">
             No records
           </p>

@@ -134,7 +134,7 @@ export function useCrmTableQuery(
     },
     enabled:
       (options?.enabled ?? true) &&
-      Boolean(actor && owner && query && parsed?.success),
+      Boolean(actor && owner && query),
     retry: false,
     refetchInterval: CRM_POLL_INTERVAL_MS,
     refetchIntervalInBackground: false,
