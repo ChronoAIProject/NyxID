@@ -119,12 +119,6 @@ export function AssistantActivityDisclosure({
           { backgroundColor: colors.segmentTrack, opacity: pressed ? 0.65 : 1 },
         ]}
       >
-        <View
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-        >
-          <Chevron size={14} color={colors.textSecondary} />
-        </View>
         <ActivityStatusIcon status={status} />
         <Label
           muted
@@ -137,6 +131,12 @@ export function AssistantActivityDisclosure({
             ? ` · latest ${activities.length} of ${total} shown`
             : ""}
         </Label>
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          <Chevron size={16} color={colors.textSecondary} />
+        </View>
       </Pressable>
       {open ? (
         <View style={[styles.details, { borderColor: colors.borderSoft }]}>
@@ -287,20 +287,19 @@ function DeliveryNotice({
 }
 
 const styles = StyleSheet.create({
-  // A quiet one-line pill; details open beneath it on a thin left rule.
+  // A slim full-width row that reads as tappable (tint and a trailing
+  // chevron); details open beneath it on a thin left rule.
   container: { gap: 6 },
   summary: {
     flexDirection: "row",
     alignItems: "center",
-    alignSelf: "flex-start",
-    maxWidth: "100%",
-    gap: 6,
-    minHeight: TOUCH_TARGET - 14,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: radius.md + 6,
+    gap: 8,
+    minHeight: TOUCH_TARGET - 6,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: radius.md + 2,
   },
-  count: { fontSize: 12, lineHeight: 18, flexShrink: 1 },
+  count: { fontSize: 13, lineHeight: 18, flex: 1 },
   status: {
     width: 20,
     height: 20,

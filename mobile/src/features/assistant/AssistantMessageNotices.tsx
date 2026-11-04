@@ -4,7 +4,7 @@ import * as Clipboard from "expo-clipboard";
 import { CircleAlert } from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
-import { TOUCH_TARGET } from "../../theme/designTokens";
+import { TOUCH_TARGET, fonts } from "../../theme/designTokens";
 import type { AssistantMessage } from "./assistantTypes";
 import {
   diagnosticId,
@@ -202,14 +202,19 @@ export function QuietButton({
       onPress={onPress}
       style={({ pressed }) => [
         styles.button,
-        { backgroundColor: colors.segmentTrack, opacity: pressed ? 0.6 : 1 },
+        {
+          backgroundColor: colors.primaryTone.bg,
+          borderColor: colors.primaryTone.border,
+          opacity: disabled ? 0.5 : pressed ? 0.6 : 1,
+        },
       ]}
     >
       {icon}
       <Label
         maxFontSizeMultiplier={1.3}
         style={{
-          color: disabled ? colors.textMuted : colors.textPrimary,
+          color: colors.primaryOnTint,
+          fontFamily: fonts.bodySemi,
           fontSize: 13,
           lineHeight: 17,
         }}
@@ -233,12 +238,13 @@ const styles = StyleSheet.create({
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   details: { padding: 10, borderRadius: 8, borderWidth: 1, gap: 4 },
   button: {
-    minHeight: TOUCH_TARGET - 14,
+    minHeight: TOUCH_TARGET - 12,
     flexDirection: "row",
     alignItems: "center",
     alignSelf: "flex-start",
     gap: 5,
-    paddingHorizontal: 11,
-    borderRadius: 15,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
   },
 });
