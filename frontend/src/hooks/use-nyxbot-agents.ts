@@ -31,6 +31,8 @@ export const nyxBotQueryKeys = {
   settings: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "settings"] as const,
   models: (userId: string | undefined) => ["assistant", "nyxagent", userId, "models"] as const,
+  onboarding: (userId: string | undefined) =>
+    ["assistant", "nyxagent", userId, "onboarding"] as const,
   /** Prefix of the channel list and every channel's chats. */
   channels: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "channels"] as const,
@@ -186,6 +188,13 @@ export function useLinkNyxBotChannel() {
   return useAgentsMutation(
     ({ channelAgentId, agentId }: { channelAgentId: string; agentId: string }) =>
       nyxBotApi.linkChannel(channelAgentId, agentId),
+    true,
+  );
+}
+
+export function useRetryNyxBotChannelGateway() {
+  return useAgentsMutation(
+    ({ channelAgentId }: { channelAgentId: string }) => nyxBotApi.retryChannelGateway(channelAgentId),
     true,
   );
 }

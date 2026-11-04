@@ -1,37 +1,41 @@
 import type { ViewStyle } from "react-native";
 import type { ThemeColors } from "../theme/mobileTheme";
 
-/** Native grouped choices need visible edges even when page and card are white. */
+/**
+ * The iOS segmented control: a borderless translucent track with the selected
+ * segment raised on it. The track tint reads on white pages and grey sheets.
+ */
 export function createSegmentControlStyles(colors: ThemeColors) {
   return {
     container: {
       flexDirection: "row",
-      padding: 3,
-      gap: 3,
-      borderWidth: 1,
+      padding: 2,
+      gap: 2,
+      borderWidth: 0,
       borderRadius: 10,
-      backgroundColor: colors.ghostBg,
-      borderColor: colors.border,
+      backgroundColor: colors.segmentTrack,
     },
     item: {
       flex: 1,
       minWidth: 0,
-      minHeight: 44,
+      minHeight: 40,
       paddingHorizontal: 8,
-      paddingVertical: 8,
+      paddingVertical: 6,
       alignItems: "center",
       justifyContent: "center",
-      borderRadius: 7,
-      borderWidth: 1,
-      borderColor: "transparent",
+      borderRadius: 8,
+      borderWidth: 0,
     },
     selected: {
-      backgroundColor: colors.card,
-      borderColor: colors.controlBorder,
+      backgroundColor: colors.segmentSelected,
+      shadowColor: "#000",
+      shadowOpacity: 0.12,
+      shadowRadius: 4,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 2,
     },
     pressed: {
-      backgroundColor: colors.navActive,
-      borderColor: colors.controlBorder,
+      opacity: 0.6,
     },
   } satisfies Record<string, ViewStyle>;
 }

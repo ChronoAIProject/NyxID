@@ -1,8 +1,6 @@
-import Constants from "expo-constants";
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,6 +11,8 @@ import Markdown from "react-native-markdown-display";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { SkeletonRows } from "../../components/Skeleton";
+import { NYXID_LEGAL_BASE_URL } from "../../lib/env";
 import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -27,7 +27,8 @@ import { spacing, typeScale } from "../../theme/designTokens";
  * Source of truth: frontend/public/legal/{privacy,terms}.md
  * Served at: <LEGAL_BASE_URL>/legal/<doc>.md
  *
- * `LEGAL_BASE_URL` is per-profile (DEV_/PROD_) in mobile/.env.*.
+ * `LEGAL_BASE_URL` is per-profile (DEV_/PROD_) in mobile/.env.*; production builds
+ * with a second domain set use the one selected at launch (see `lib/domains.ts`).
  */
 type Props = {
   title: string;
@@ -51,13 +52,8 @@ function stripFrontMatter(md: string): {
 }
 
 function resolveDocUrl(docKey: "privacy" | "terms"): string | null {
-  const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, unknown>;
-  const baseUrl =
-    typeof extra.LEGAL_BASE_URL === "string"
-      ? extra.LEGAL_BASE_URL.replace(/\/$/, "")
-      : "";
-  if (!baseUrl) return null;
-  return `${baseUrl}/legal/${docKey}.md`;
+  if (!NYXID_LEGAL_BASE_URL) return null;
+  return `${NYXID_LEGAL_BASE_URL}/legal/${docKey}.md`;
 }
 
 export function LegalDocumentScreen({
@@ -155,9 +151,11 @@ export function LegalDocumentScreen({
           ) : content ? (
             <Markdown style={markdownStyles}>{content}</Markdown>
           ) : (
-            <View style={styles.loading}>
-              <ActivityIndicator color={colors.textSecondary} />
-            </View>
+            <SkeletonRows
+              rows={6}
+              icon={false}
+              accessibilityLabel={`Loading ${title.toLowerCase()}`}
+            />
           )}
         </View>
       </ScrollView>
@@ -176,10 +174,6 @@ const createStyles = (c: ThemeColors) =>
     scrollContentExtra: {
       paddingTop: 64,
       paddingBottom: spacing.xxxl,
-    },
-    loading: {
-      paddingVertical: spacing.xxl,
-      alignItems: "center",
     },
     errorTitle: {
       color: c.textPrimary,

@@ -6540,6 +6540,7 @@ mod tests {
         // credential whose secret is envelope-encrypted with the test keys.
         db.collection::<ApiKey>(API_KEYS)
             .insert_one(ApiKey {
+                permission_policy_id: None,
                 id: api_key_id.clone(),
                 user_id: user_id.clone(),
                 name: "coding-agent".to_string(),

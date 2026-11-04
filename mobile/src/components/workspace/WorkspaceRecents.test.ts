@@ -46,6 +46,7 @@ test("Recents uses plain text rows, caps the sidebar at eight, and opens exact t
     "react-native": native,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "../../lib/time": { formatRelativeTimeFromMs },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
     "./useWorkspaceRecents": {
       useWorkspaceRecents: () => ({ rows, online: true }),
     },
@@ -89,7 +90,7 @@ test("Recents uses plain text rows, caps the sidebar at eight, and opens exact t
 test("Recents communicates empty, loading, failed and offline states without invented rows", () => {
   for (const [state, copy] of [
     [{ online: true }, "No recent chats."],
-    [{ online: true, loading: true }, "Loading recent chats…"],
+    [{ online: true, loading: true }, "skeleton:Loading recent chats"],
     [{ online: true, error: true }, "Couldn’t load recent chats."],
     [{ online: false, loading: true }, "Offline · showing saved recent chats."],
   ] as const) {
@@ -97,6 +98,7 @@ test("Recents communicates empty, loading, failed and offline states without inv
       "react/jsx-runtime": jsx,
       "react-native": native,
       "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+      "../Skeleton": { SkeletonRows: "SkeletonRows" },
       "./useWorkspaceRecents": {
         useWorkspaceRecents: () => ({ rows: [], ...state }),
       },
@@ -107,7 +109,16 @@ test("Recents communicates empty, loading, failed and offline states without inv
     h.mount(() =>
       WorkspaceRecents({ visible: true, onSelect() {}, onSeeAll() {} }),
     );
-    assert.ok(elements(h.value()).some((n) => n.props.children === copy));
+    // A first load is a skeleton of rows, never "Loading…" text.
+    assert.ok(
+      elements(h.value()).some((n) =>
+        copy.startsWith("skeleton:")
+          ? n.type === "SkeletonRows" &&
+            n.props.accessibilityLabel === copy.slice("skeleton:".length)
+          : n.props.children === copy,
+      ),
+      copy,
+    );
     h.unmount();
   }
 });

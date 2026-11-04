@@ -352,6 +352,20 @@ test("Grok PTT begins before PCM and release commits once while restoring output
   await e.client.end();
 });
 
+test("loudness meter events never reach the provider or end a held Grok call", async () => {
+  const e = setup();
+  await e.open("xai_realtime");
+  e.client.hold(true);
+  const sent = e.socket.sent.length;
+  e.media.emit({ type: "level", input: 0.8, output: 0.2 });
+  assert.equal(e.socket.sent.length, sent);
+  assert.equal(e.client.isClosed, false);
+  assert.deepEqual(e.errors, []);
+  e.media.emit({ type: "pcm", bytes: new ArrayBuffer(960) });
+  assert.equal(e.socket.sent.length, sent + 1);
+  await e.client.end();
+});
+
 test("Grok automatic mode is refused before opening media or creating a paid call", async () => {
   const e = setup();
   await e.client.start(

@@ -2687,9 +2687,18 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
-            additional OAuth permissions on top of provider defaults through that hosted link; \
-            omit credential when requesting scopes."
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. \
+            For assistant chats, call immediately when asked to connect, even if connections exist. \
+            Give the hosted link immediately and mention existing_connections in one short line \
+            (ownership, label, enabled/disabled; provider account identity is unknown). Never ask \
+            whether to proceed, suggest reusing an existing connection instead, or substitute a page link. \
+            Platform-key connects create a connection in one step. Other non-hosted connects keep \
+            the one-step service connection; already_connected means there is no separate account \
+            to add: say it is already connected in one short line. Explain connect_unavailable \
+            reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot handle \
+            setup, sending a hosted link when supported, followed by a separate specialist grant. Optional scopes request additional OAuth \
+            permissions on top of provider defaults through that hosted link; omit credential \
+            when requesting scopes. Never enter credentials through assistant chat."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -5852,7 +5861,7 @@ async fn execute_tool_resolved_inner(
         }
         if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
-                admission.bind_async_submission(db, watch).await?;
+                admission.bind_async_submission(db, watch, &target).await?;
             }
             admission
                 .materialize_http(
@@ -10318,6 +10327,9 @@ mod tests {
             .unwrap();
         assert!(connect.input_schema["properties"]["service_id"].is_object());
         assert!(connect.input_schema["properties"]["service_slug"].is_object());
+        for guidance in ["already_connected", "no separate account", "one short line"] {
+            assert!(connect.description.contains(guidance), "missing {guidance}");
+        }
     }
 
     #[test]

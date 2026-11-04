@@ -1,5 +1,5 @@
 /** MCP endpoint of the hosted NyxID instance the published plugins point at. */
-export const HOSTED_MCP_URL = "https://nyx-api.chrono-ai.fun/mcp";
+export const HOSTED_MCP_URL = "https://api.nyxid.ai/mcp";
 
 /**
  * Install commands for the published plugins. Both marketplaces are read from

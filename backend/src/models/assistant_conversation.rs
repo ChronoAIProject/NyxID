@@ -225,6 +225,9 @@ pub struct TurnActivity {
     pub label: String,
     #[serde(default)]
     pub digest: Option<String>,
+    /// Additive semantic retry identity; `digest` retains the legacy exact call.
+    #[serde(default)]
+    pub retry_identity: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]

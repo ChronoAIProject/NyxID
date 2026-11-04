@@ -1,11 +1,10 @@
-import type { PropsWithChildren } from "react";
+import type { PropsWithChildren, ReactNode } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
   Pressable,
   RefreshControl,
-  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -23,6 +22,7 @@ import {
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts, radius, TOUCH_TARGET } from "../../theme/designTokens";
 import { AndroidKeyboardAvoidingView } from "./AndroidKeyboardAvoidingView";
+import { PageScrollView } from "./ScrollEdgeFades";
 
 export function WorkspacePage({
   title,
@@ -40,6 +40,7 @@ export function WorkspacePage({
   subtitle?: string;
   scroll?: boolean;
   showHeading?: boolean;
+  /** Pull-to-refresh spinner: bind to `usePullRefresh`, never a query's `isFetching`. */
   refreshing?: boolean;
   onRefresh?: () => void;
   contentStyle?: StyleProp<ViewStyle>;
@@ -82,7 +83,8 @@ export function WorkspacePage({
     </>
   );
   const body = scroll ? (
-    <ScrollView
+    <PageScrollView
+      fadeColor={colors.bg}
       keyboardShouldPersistTaps="handled"
       keyboardDismissMode="on-drag"
       contentContainerStyle={[styles.content, contentStyle]}
@@ -101,7 +103,7 @@ export function WorkspacePage({
       }
     >
       {content}
-    </ScrollView>
+    </PageScrollView>
   ) : (
     <View style={[styles.content, styles.fill, contentStyle]}>{content}</View>
   );
@@ -134,11 +136,45 @@ export function Card({
     <View
       style={[
         styles.card,
-        { backgroundColor: colors.card, borderColor: colors.border },
+        {
+          backgroundColor: colors.card,
+          borderColor: colors.border,
+          shadowColor: colors.shadowColor,
+        },
         style,
       ]}
     >
       {children}
+    </View>
+  );
+}
+
+/**
+ * iOS-style grouped section: the title sits above the card and an optional
+ * note below it, so the card holds only the section's content and controls.
+ */
+export function Section({
+  title,
+  footer,
+  children,
+}: PropsWithChildren<{ title?: string; footer?: string }>) {
+  const { colors } = useTheme();
+  return (
+    <View style={styles.section}>
+      {title ? (
+        <Text
+          accessibilityRole="header"
+          style={[styles.sectionTitle, { color: colors.textMuted }]}
+        >
+          {title.toUpperCase()}
+        </Text>
+      ) : null}
+      <Card>{children}</Card>
+      {footer ? (
+        <Text style={[styles.sectionFooter, { color: colors.textMuted }]}>
+          {footer}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -208,6 +244,7 @@ export function ActionButton({
   loading,
   compact = false,
   variant = "primary",
+  trailingIcon,
 }: {
   label: string;
   accessibilityLabel?: string;
@@ -218,6 +255,8 @@ export function ActionButton({
   loading?: boolean;
   compact?: boolean;
   variant?: "primary" | "secondary" | "danger";
+  /** Decorative icon after the label, such as the web's arrowed primary action. */
+  trailingIcon?: (color: string) => ReactNode;
 }) {
   const { colors } = useTheme();
   const blocked = disabled || loading;
@@ -241,6 +280,14 @@ export function ActionButton({
       >
         {label}
       </Text>
+      {trailingIcon && !loading ? (
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          {trailingIcon(color)}
+        </View>
+      ) : null}
     </View>
   );
   return (
@@ -281,7 +328,7 @@ export function ActionButton({
                     : compact
                       ? colors.navActive
                       : colors.card,
-              borderWidth: compact && variant === "secondary" ? 0 : 1,
+              borderWidth: 1,
               borderColor:
                 variant === "danger" ? colors.danger : colors.controlBorder,
             },
@@ -334,7 +381,18 @@ const styles = StyleSheet.create({
     letterSpacing: -0.6,
   },
   subtitle: { fontFamily: fonts.bodyRegular, fontSize: 13, lineHeight: 20 },
-  card: { padding: 16, gap: 12, borderWidth: 1, borderRadius: radius.lg },
+  // DESIGN.md: elevated cards carry shadow-sm, which separates them from the
+  // white light-mode slab where the border alone is faint.
+  card: {
+    padding: 16,
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 1,
+    shadowRadius: 3,
+    elevation: 1,
+  },
   label: { fontFamily: fonts.body, fontSize: 13, lineHeight: 20 },
   field: { gap: 8 },
   input: {
@@ -381,4 +439,17 @@ const styles = StyleSheet.create({
   },
   buttonLabel: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 20 },
   notice: { padding: 12, borderWidth: 1, borderRadius: radius.md },
+  section: { gap: 8 },
+  sectionTitle: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    letterSpacing: 0.6,
+    paddingHorizontal: 16,
+  },
+  sectionFooter: {
+    fontFamily: fonts.bodyRegular,
+    fontSize: 12,
+    lineHeight: 17,
+    paddingHorizontal: 16,
+  },
 });

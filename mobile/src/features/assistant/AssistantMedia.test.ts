@@ -8,11 +8,21 @@ import { groupMessageSchema } from "../groups/groupContracts";
 type E = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): E[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
+// Settings rows carry their text in label/detail/value/message props.
 const words = (n: any): string =>
   typeof n === "string" || typeof n === "number"
     ? String(n)
     : n?.props
-      ? [n.props.children].flat(Infinity).map(words).join(" ")
+      ? [
+          n.props.label,
+          n.props.detail,
+          n.props.value,
+          n.props.message,
+          n.props.children,
+        ]
+          .flat(Infinity)
+          .map(words)
+          .join(" ")
       : "";
 const jsx = {
   Fragment: "Fragment",
@@ -35,6 +45,7 @@ function setup(
     "../../components/workspace/WorkspaceUI": {
       Card: "Card",
       Label: "Label",
+      Notice: "Notice",
       ActionButton: "Button",
     },
     ...mocks,
@@ -57,6 +68,18 @@ function setup(
     },
   };
 }
+// The machine receipt renders Settings rows; their text lives in props.
+const toolCardMocks = {
+  "../../components/settings/SettingsList": {
+    SettingsGroup: "Group",
+    SettingsRow: "Row",
+  },
+  "../../theme/ThemeContext": {
+    useTheme: () => ({ colors: { textMuted: "#999" } }),
+  },
+  "../../theme/designTokens": { spacing: { sm: 8 } },
+  "lucide-react-native": { ChevronDown: "Down", ChevronRight: "Right" },
+};
 const at = "2026-10-28T00:00:00Z";
 const activity = activitySchema.parse({
   id: "tool",
@@ -93,6 +116,7 @@ test("real machine receipt renders correlation, metrics, screenshot and lazy exc
       onOpenDesktop: () => {},
     },
     {
+      ...toolCardMocks,
       "./MachineUI": { useMachineRuntime: () => ({ epoch: 1, active: true }) },
       "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
       "./MachineDesktopEntries": { MachineDesktopEntries: "Desktop" },
@@ -150,6 +174,7 @@ test("real excerpt is authenticated, bounded, retention aware and cancels on clo
       "CommandExcerpt",
       { endpoint: "/private/excerpt", active: true },
       {
+        ...toolCardMocks,
         "./MachineUI": {},
         "./MachineDesktopEntries": {},
         "../assistant/AssistantAttachmentView": {},

@@ -122,6 +122,7 @@ function setup(
       SafeAreaProvider: "SafeAreaProvider",
       SafeAreaView: "SafeAreaView",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": {
       ActionButton: "ActionButton",
       Card: "Card",
@@ -133,6 +134,10 @@ function setup(
       useTheme: () => ({ colors: { primaryTone: {} } }),
     },
     "./agentContracts": { grantSignature },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
   });
   const exports = harness.load(
     fileURLToPath(new URL("./AgentPermissionsField.tsx", import.meta.url)),
@@ -161,6 +166,12 @@ function setup(
       (element) =>
         element.type === "ActionButton" && element.props.label === text,
     );
+  const row = (text: string) =>
+    one(
+      (element) =>
+        element.type === "SettingsRow" &&
+        element.props.accessibilityLabel === text,
+    );
   const checkbox = (text: string) =>
     one(
       (element) =>
@@ -188,6 +199,7 @@ function setup(
     one,
     label,
     action,
+    row,
     checkbox,
     select,
     search,
@@ -212,25 +224,18 @@ test("the field shows a compact summary and opens the editor only on demand", ()
     "field",
   );
   assert.equal(state.all().filter((row) => row.type === "FlatList").length, 0);
+  const services = state.row("Edit permissions");
+  assert.equal(services.props.label, "Services");
+  assert.equal(services.props.value, "4 services selected");
+  assert.equal(services.props.detail, "GitHub, Document research +2 more");
   assert.equal(
-    state
-      .all()
-      .filter(
-        (row) =>
-          [row.props.children].flat(Infinity).join("") ===
-          "4 services selected",
-      ).length,
-    1,
+    state.one(
+      (row) =>
+        row.type === "SettingsRow" && row.props.label === "Account information",
+    ).props.value,
+    "Allowed",
   );
-  assert.equal(
-    state
-      .all()
-      .filter(
-        (row) => row.props.children === "GitHub, Document research +2 more",
-      ).length,
-    1,
-  );
-  state.action("Edit permissions").props.onPress();
+  state.row("Edit permissions").props.onPress();
   state.harness.flush();
   const sheet = state.one(
     (row) => row.type === state.exports.AgentPermissionsSheet,
@@ -483,8 +488,8 @@ test("returning from guest access preserves the service draft and selected guest
 
 test("disabled permissions stay read only and connection loading/errors preserve existing grants", () => {
   const field = setup({ disabled: true }, "field");
-  assert.equal(field.action("Edit permissions").props.disabled, true);
-  field.action("Edit permissions").props.onPress();
+  assert.equal(field.row("Edit permissions").props.disabled, true);
+  field.row("Edit permissions").props.onPress();
   field.harness.flush();
   assert.equal(
     field
@@ -501,7 +506,7 @@ test("disabled permissions stay read only and connection loading/errors preserve
   assert.equal(state.checkbox("github").props.disabled, true);
   assert.equal(state.label("Read account information").props.disabled, true);
   assert.equal(state.action().props.disabled, true);
-  assert.ok(state.label("Loading services"));
+  assert.equal(state.label("Loading services").type, "SkeletonRows");
   assert.equal(
     state
       .all()
@@ -521,8 +526,8 @@ test("disabled permissions stay read only and connection loading/errors preserve
 
 test("read-only inspection opens the full service list without exposing save or allowing direct mutation callbacks", () => {
   const field = setup({ disabled: true, readOnly: true }, "field");
-  assert.equal(field.action("View permissions").props.disabled, false);
-  field.action("View permissions").props.onPress();
+  assert.equal(field.row("View permissions").props.disabled, false);
+  field.row("View permissions").props.onPress();
   field.harness.flush();
   const presented = field.one(
     (row) => row.type === field.exports.AgentPermissionsSheet,

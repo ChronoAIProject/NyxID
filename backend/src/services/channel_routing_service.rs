@@ -618,6 +618,7 @@ mod tests {
 
     fn make_api_key(key_id: &str, user_id: &str, callback_url: Option<&str>) -> ApiKey {
         ApiKey {
+            permission_policy_id: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),
             name: "test-agent".to_string(),

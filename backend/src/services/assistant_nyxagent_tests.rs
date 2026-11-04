@@ -739,6 +739,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         created_at: Utc::now(),
         activities: (0..40)
             .map(|i| crate::models::assistant_conversation::TurnActivity {
+                retry_identity: None,
                 failure: None,
                 machine: None,
                 id: i.to_string(),
@@ -817,6 +818,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "a".into(),
@@ -884,6 +886,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "owner-action".into(),
@@ -951,6 +954,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "activity-42".into(),
@@ -7824,4 +7828,28 @@ async fn real_work_run_signal_accumulates_across_continuations_under_same_owner(
         );
     }
     db.drop().await.unwrap();
+}
+
+#[test]
+fn connect_guidance_gives_link_and_existing_facts_immediately_for_both_roles() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        let prompt = base_prompt(&row, None);
+        for guidance in [
+            "call nyx__connect_service immediately",
+            "Give its hosted link immediately",
+            "existing connections in one short line",
+            "Never ask whether to proceed",
+            "suggest reusing an existing connection instead",
+            "never guess the provider account identity",
+            "Honor one-step success",
+            "For already_connected",
+            "no separate account to add",
+            "Explain connect_unavailable reasons plainly",
+            "Specialists cannot mint links",
+        ] {
+            assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+        }
+    }
 }

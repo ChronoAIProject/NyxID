@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { NyxAgentAcknowledgementCard } from "./nyxagent-acknowledgement-card";
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
@@ -25,7 +25,7 @@ const acknowledgement: NyxAgentAcknowledgement = {
   tool_name: null,
   created_at: "2026-09-17T00:00:00Z",
   decided_at: null,
-  expires_at: "2026-09-17T00:15:00Z",
+  expires_at: "2099-09-17T00:15:00Z",
 };
 afterEach(cleanup);
 
@@ -192,4 +192,23 @@ it("keeps org controls in Full and offers hosted setup without a model-authored 
   fireEvent.click(screen.getByRole("button", { name: "Connect your own" }));
   expect(await screen.findByRole("dialog", { name: "Hosted connection" })).toHaveAttribute("data-href", "/connect/personal");
   expect(createConnect).toHaveBeenCalledWith({ serviceSlug: "github", personal: true });
+});
+
+
+it("2072 expires visibly while open and asks afresh without deciding the old request", () => {
+  vi.useFakeTimers();
+  try {
+    const decide = vi.fn();
+    const request = vi.fn();
+    const review = "/assistant?c=source&card=" + acknowledgement.id;
+    render(<NyxAgentAcknowledgementCard acknowledgement={{ ...acknowledgement, expires_at: new Date(Date.now() + 1000).toISOString(), review_path: review }} deciding={false} onDecision={decide} onRequestAgain={request} />);
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    act(() => { vi.advanceTimersByTime(1001); });
+    expect(screen.getByRole("status")).toHaveTextContent("Expired");
+    expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Open request" })).toHaveAttribute("href", review);
+    fireEvent.click(screen.getByRole("button", { name: "Ask for a new confirmation" }));
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(decide).not.toHaveBeenCalled();
+  } finally { vi.useRealTimers(); }
 });

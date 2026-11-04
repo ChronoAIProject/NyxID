@@ -157,3 +157,20 @@ describe("activity callback consent", () => {
     ).toBeEnabled();
   });
 });
+
+
+it.each(["not_addressed", "addressed_managed_role"])("shows bounded Discord admission %s independently of callback acceptance", async (disposition) => {
+  const answered = disposition === "addressed_managed_role";
+  vi.spyOn(api, "get").mockResolvedValue({ ...response, activities: [{ ...item, kind: "message", callback_status: "delivered", nyxbot_admission: {
+    disposition, bot_mentioned: answered, managed_role_mentioned: answered, broadcast_roles: answered ? 0 : 1,
+    broadcast_everyone_or_here: false, address: answered ? "mention" : "not_addressed", thread_follow_selection: answered ? "child" : "quiet",
+    resolved_thread_id: answered ? "thread-id" : null, turn_id: answered ? "turn-id" : null,
+  } }] });
+  mount(<ChannelActivities scope="bot" id="bot" descriptors={descriptors} />);
+  expect(await screen.findByText("Callback accepted")).toBeVisible();
+  const details = screen.getByLabelText("NyxBot admission");
+  expect(details).toHaveTextContent(`NyxBot admission: ${disposition.replaceAll("_", " ")}`);
+  expect(details).toHaveTextContent(answered ? "Bot mentioned: yes (own managed role)" : "Bot mentioned: no");
+  expect(details).toHaveTextContent(answered ? "Thread: thread-id" : "Thread follow: quiet");
+  expect(details).toHaveTextContent(answered ? "Turn: turn-id" : "No agent turn started.");
+});

@@ -30,10 +30,19 @@ const sample = ({ nativeEvent }: ScrollEvent): TranscriptScrollSample => ({
   targetOffset: nativeEvent.targetContentOffset?.y,
 });
 
-/** Native geometry can change while the reader's follow/reading intent stays put. */
+/** A reply that grows by more than this many screens at once is followed instantly. */
+const SMOOTH_FOLLOW_SCREENS = 1.25;
+
+/**
+ * Native geometry can change while the reader's follow/reading intent stays put.
+ * Corrections glide: jumping to latest animates, and a reply growing by up to
+ * about a screen is followed smoothly; larger jumps (opening a long chat) and
+ * layout changes stay instant, as does everything under Reduce Motion.
+ */
 export function useTranscriptScrollFollow(
   list: RefObject<ScrollableTranscript | null>,
   scopeKey: string | undefined,
+  { reducedMotion = false }: { reducedMotion?: boolean } = {},
 ) {
   const follower = useRef(createTranscriptScrollFollower()).current;
   const [following, setFollowing] = useState(true);
@@ -53,11 +62,18 @@ export function useTranscriptScrollFollow(
     setFollowing(follower.isFollowing());
     setShowJump(follower.isAwayFromEnd());
   };
-  const scrollToFollowedEnd = () => {
+  const scrollToFollowedEnd = (kind: "jump" | "grow" | "layout") => {
     if (!available()) return;
     const offset = follower.targetOffset();
-    if (offset !== null)
-      list.current?.scrollToOffset({ offset, animated: false });
+    if (offset === null) return;
+    const distance = follower.distanceToEnd();
+    const animated =
+      !reducedMotion &&
+      (kind === "jump" ||
+        (kind === "grow" &&
+          distance > 2 &&
+          distance <= follower.viewport() * SMOOTH_FOLLOW_SCREENS));
+    list.current?.scrollToOffset({ offset, animated });
   };
 
   useEffect(() => {
@@ -84,19 +100,19 @@ export function useTranscriptScrollFollow(
       if (!available()) return;
       follower.follow();
       sync();
-      scrollToFollowedEnd();
+      scrollToFollowedEnd("jump");
     },
     listProps: {
       onLayout: (event: { nativeEvent: { layout: { height: number } } }) => {
         if (!available()) return;
         follower.layout(event.nativeEvent.layout.height);
-        scrollToFollowedEnd();
+        scrollToFollowedEnd("layout");
         sync();
       },
       onContentSizeChange: (_width: number, height: number) => {
         if (!available()) return;
         follower.contentSize(height);
-        scrollToFollowedEnd();
+        scrollToFollowedEnd("grow");
         sync();
       },
       onScroll: (event: ScrollEvent) => {

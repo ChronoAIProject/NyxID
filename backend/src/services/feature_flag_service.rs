@@ -255,6 +255,12 @@ const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 pub const ORG_INSTRUCTION_FLAG_KEY: &str = "assistant:org-instruction-v1";
+pub const EXECUTION_PERMISSIONS_FLAG_KEY: &str = "permissions:execution-v1";
+const EXECUTION_PERMISSIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: EXECUTION_PERMISSIONS_FLAG_KEY,
+    description: "Stage explicit execution permissions after fleet readiness; contract readers only, no execution or authoring enabled yet",
+    default_enabled: false,
+};
 const ORG_INSTRUCTION_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ORG_INSTRUCTION_FLAG_KEY,
     description: "Require exact owner instruction for organization connections in every access mode",
@@ -302,6 +308,24 @@ const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     description: "Require an invitation code for new account registration (global only).",
     default_enabled: true,
 };
+
+/// Mobile builds that embed both production domain sets read this global flag
+/// from `/public/config` on both API hosts at launch and use the new API,
+/// frontend and legal domains while it is on. Global only: the app reads it
+/// before anyone signs in.
+pub const MOBILE_NEW_DOMAINS_FLAG_KEY: &str = "mobile:new-domains";
+const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MOBILE_NEW_DOMAINS_FLAG_KEY,
+    description: "Mobile apps built with both production domain sets switch to the new API, frontend and legal domains on their next launch (global only).",
+    default_enabled: false,
+};
+
+/// Flags read before any user or organization is known; only a global override applies.
+const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[INVITATION_CODE_FLAG_KEY, MOBILE_NEW_DOMAINS_FLAG_KEY];
+
+pub(crate) fn is_global_only(flag_key: &str) -> bool {
+    GLOBAL_ONLY_FLAG_KEYS.contains(&flag_key)
+}
 
 /// NyxBot reaches personal and org chat-app bots through the Agent Event
 /// Gateway (Telegram always does). Resolve each flag for the linking person,
@@ -370,6 +394,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
@@ -388,6 +413,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     ORG_INSTRUCTION_FLAG,
+    EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
@@ -417,6 +443,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
@@ -435,6 +462,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     ORG_INSTRUCTION_FLAG,
+    EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
@@ -954,11 +982,20 @@ pub async fn resolve_personal_features(
 
 /// Signup has no user or organization yet, so only the global override applies.
 pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &INVITATION_CODE_FLAG).await
+}
+
+/// Read by unauthenticated mobile launches, so only the global override applies.
+pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &MOBILE_NEW_DOMAINS_FLAG).await
+}
+
+async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
     let override_row = db
         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
         .find_one(doc! {
             "org_user_id": bson::Bson::Null,
-            "flag_key": INVITATION_CODE_FLAG_KEY,
+            "flag_key": flag.key,
             "definition_id": null,
             "target_kind": FlagTargetKind::Global.as_str(),
             "target_key": bson::Bson::Null,
@@ -966,7 +1003,7 @@ pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool>
         .await?;
     Ok(override_row
         .map(|row| row.enabled)
-        .unwrap_or(INVITATION_CODE_FLAG.default_enabled))
+        .unwrap_or(flag.default_enabled))
 }
 
 /// Whether the billing rollout flag is enabled for a billing owner.
@@ -1362,10 +1399,10 @@ pub async fn set_platform_override(
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
     let definition = get_definition(db, flag_key).await?;
-    if flag_key == INVITATION_CODE_FLAG_KEY && !matches!(target, FlagTarget::Global) {
-        return Err(AppError::BadRequest(
-            "invitation code flag supports only a global override".to_string(),
-        ));
+    if is_global_only(flag_key) && !matches!(target, FlagTarget::Global) {
+        return Err(AppError::BadRequest(format!(
+            "{flag_key} supports only a global override"
+        )));
     }
     if matches!(target, FlagTarget::Org | FlagTarget::Role(_)) {
         return Err(AppError::BadRequest(
@@ -1470,10 +1507,10 @@ pub async fn set_platform_org_override(
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
     get_definition(db, flag_key).await?;
-    if flag_key == INVITATION_CODE_FLAG_KEY {
-        return Err(AppError::BadRequest(
-            "invitation code flag supports only a global override".to_string(),
-        ));
+    if is_global_only(flag_key) {
+        return Err(AppError::BadRequest(format!(
+            "{flag_key} supports only a global override"
+        )));
     }
     ensure_org_exists(db, org_user_id).await?;
     if enabled {
@@ -2042,6 +2079,19 @@ mod tests {
     }
 
     #[test]
+    fn execution_permissions_are_default_off_and_readiness_gated() {
+        let flag = FEATURE_FLAGS
+            .iter()
+            .find(|flag| flag.key == EXECUTION_PERMISSIONS_FLAG_KEY)
+            .unwrap();
+        assert!(!flag.default_enabled);
+        assert!(
+            super::super::security_readiness_service::CAPABILITIES
+                .contains(&EXECUTION_PERMISSIONS_FLAG_KEY)
+        );
+    }
+
+    #[test]
     fn registry_keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for def in FEATURE_FLAGS {
@@ -2131,6 +2181,60 @@ mod tests {
         .await
         .expect("re-enable");
         assert!(invitation_code_required(&db).await.expect("enabled"));
+    }
+
+    #[tokio::test]
+    async fn mobile_new_domains_defaults_off_and_uses_only_global_override() {
+        let Some(db) = connect_test_database("mobile_new_domains_flag").await else {
+            eprintln!("skipping mobile domain flag test: no local MongoDB available");
+            return;
+        };
+
+        assert!(!mobile_new_domains_enabled(&db).await.expect("default"));
+        let user_target = FlagTarget::User(Uuid::new_v4().to_string());
+        assert!(matches!(
+            set_platform_override(
+                &db,
+                MOBILE_NEW_DOMAINS_FLAG_KEY,
+                &user_target,
+                true,
+                "actor"
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            set_platform_org_override(
+                &db,
+                &Uuid::new_v4().to_string(),
+                MOBILE_NEW_DOMAINS_FLAG_KEY,
+                true,
+                "actor",
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        set_platform_override(
+            &db,
+            MOBILE_NEW_DOMAINS_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "actor",
+        )
+        .await
+        .expect("enable");
+        assert!(mobile_new_domains_enabled(&db).await.expect("enabled"));
+        set_platform_override(
+            &db,
+            MOBILE_NEW_DOMAINS_FLAG_KEY,
+            &FlagTarget::Global,
+            false,
+            "actor",
+        )
+        .await
+        .expect("disable");
+        assert!(!mobile_new_domains_enabled(&db).await.expect("disabled"));
     }
 
     #[test]
@@ -2955,6 +3059,7 @@ mod tests {
             shipped,
             vec![
                 "auth:invitation-code",
+                "mobile:new-domains",
                 "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
@@ -2973,6 +3078,7 @@ mod tests {
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
                 "assistant:org-instruction-v1",
+                "permissions:execution-v1",
                 "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
                 "assistant:org-agents",

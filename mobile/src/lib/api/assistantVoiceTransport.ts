@@ -60,10 +60,6 @@ export function assistantVoiceStreamPath(
   return `${assistantVoiceSessionsPath(conversationId)}/${localId.parse(sessionId)}/stream`;
 }
 
-export function assistantDictationPath(conversationId: string): string {
-  return `${ROOT}/conversations/${conversationIdSchema.parse(conversationId)}/dictation`;
-}
-
 /** The human-session HTTP implementation is injected; no tokens enter media. */
 export function createAssistantVoiceApi(
   request: JsonRequest,
@@ -103,20 +99,14 @@ export function createAssistantVoiceApi(
         }),
       );
     },
-    async options(conversationId: string, signal?: AbortSignal) {
-      const id = conversationIdSchema.parse(conversationId);
+    /** Without a conversation the server answers for Settings: same options, no thread gate. */
+    async options(conversationId?: string, signal?: AbortSignal) {
+      const query =
+        conversationId === undefined
+          ? ""
+          : `?conversation_id=${conversationIdSchema.parse(conversationId)}`;
       return voiceOptionsSchema.parse(
-        await request(`${ROOT}/voice/options?conversation_id=${id}`, {
-          signal,
-        }),
-      );
-    },
-    async dictationOptions(conversationId: string, signal?: AbortSignal) {
-      const id = conversationIdSchema.parse(conversationId);
-      return voiceOptionsSchema.parse(
-        await request(`${ROOT}/dictation/options?conversation_id=${id}`, {
-          signal,
-        }),
+        await request(`${ROOT}/voice/options${query}`, { signal }),
       );
     },
     async start(

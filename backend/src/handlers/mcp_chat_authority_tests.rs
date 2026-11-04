@@ -1763,6 +1763,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
             crate::models::approval_grant::COLLECTION_NAME,
         )
         .insert_one(crate::models::approval_grant::ApprovalGrant {
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             service_id: service.clone(),
@@ -3089,6 +3090,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
                     crate::models::approval_grant::COLLECTION_NAME,
                 )
                 .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    execution: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: catalog.id.clone(),
@@ -4726,7 +4728,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
     .unwrap();
     assert!(routed_body.contains("access_request_denied"));
     assert!(routed_body.contains("connect-service"));
-    assert!(routed_body.contains("NyxBot or Plugins"));
+    assert!(routed_body.contains("NyxBot send one"));
     assert!(!routed_body.contains("/keys"));
     f.state
         .db
@@ -4752,7 +4754,7 @@ async fn specialist_connect_service_is_denied_audited_and_routed() {
         ssh["instructions"]
             .as_str()
             .unwrap()
-            .contains("Advanced setup")
+            .contains("advanced configuration")
     );
     assert_eq!(
         f.state
@@ -5340,7 +5342,7 @@ async fn missing_access_mcp_service_and_connect_results_have_absolute_instructio
         connect["instructions"]
             .as_str()
             .unwrap()
-            .contains("NyxBot or Plugins")
+            .contains("NyxBot send one")
     );
     assert!(!connect.to_string().contains("/keys"));
     f.state.db.drop().await.unwrap();
@@ -6446,6 +6448,1360 @@ async fn public_connect_catalog(
     catalog
 }
 
+async fn seeded_github(f: &Fixture) -> crate::models::downstream_service::DownstreamService {
+    crate::services::provider_service::seed_default_providers(
+        &f.state.db,
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    crate::services::provider_service::seed_default_services(&f.state.db, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .find_one(doc! {"slug":"api-github"})
+        .await
+        .unwrap()
+        .expect("seeded GitHub catalog")
+}
+
+async fn catalog_connection(
+    f: &Fixture,
+    owner: &str,
+    catalog: &str,
+    slug: &str,
+    active: bool,
+) -> String {
+    let id = connected(&f.state.db, owner, slug, "https://example.test").await;
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>("user_services")
+        .find_one(doc! {"_id": &id})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set":{"catalog_service_id":catalog,"is_active":active}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_endpoints")
+        .update_one(doc! {"_id": &row.endpoint_id}, doc! {"$set":{"label":slug}})
+        .await
+        .unwrap();
+    id
+}
+
+async fn legacy_catalog_connection(
+    f: &Fixture,
+    owner: &str,
+    catalog: &str,
+    label: &str,
+    active: bool,
+) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id":&id,"user_id":owner,"service_id":catalog,
+            "credential_label":label,"is_active":active,"created_at":now,"updated_at":now,
+            // Inventory must succeed without even deserializing these fields.
+            "credential_encrypted":{"excluded_secret":"legacy-secret-never-returned"},
+            "metadata":{"excluded_metadata":"legacy-metadata-never-returned"},
+        })
+        .await
+        .unwrap();
+    id
+}
+
+async fn connect_test_org(f: &Fixture, active: bool) -> String {
+    use crate::models::org_membership::{MemberScopeSource, OrgRole};
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut org = crate::test_utils::test_user(&id, crate::models::user::UserType::Org);
+    org.display_name = Some("Example Organization".into());
+    f.state
+        .db
+        .collection("users")
+        .insert_one(org)
+        .await
+        .unwrap();
+    crate::services::org_service::create_membership(
+        &f.state.db,
+        &id,
+        &f.owner,
+        OrgRole::Member,
+        MemberScopeSource::Inherit,
+        None,
+    )
+    .await
+    .unwrap();
+    if !active {
+        f.state
+            .db
+            .collection::<bson::Document>("users")
+            .update_one(doc! {"_id":&id}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+    }
+    id
+}
+
+#[tokio::test]
+async fn chat_hosted_connect_returns_both_personal_and_org_facts_and_skips_inactive_owners() {
+    let f = orchestrator_fixture("connect_existing_facts").await;
+    let catalog = seeded_github(&f).await;
+    let org = connect_test_org(&f, true).await;
+    let inactive = connect_test_org(&f, false).await;
+    let personal = catalog_connection(&f, &f.owner, &catalog.id, "personal-github", false).await;
+    let shared = catalog_connection(&f, &org, &catalog.id, "work-github", true).await;
+    catalog_connection(&f, &inactive, &catalog.id, "inactive-owner", true).await;
+    let other = public_connect_catalog(&f, "unrelated-service").await;
+    catalog_connection(&f, &f.owner, &other.id, "unrelated", true).await;
+    // User-owned label metadata takes precedence; secret fields never enter the response.
+    let key = crate::services::user_api_key_service::create_api_key(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.owner,
+        crate::services::user_api_key_service::CreateApiKeyParams {
+            label: "Personal PAT",
+            credential_type: "api_key",
+            credential: "must-never-appear",
+            access_token: None,
+            refresh_token: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            status: "active",
+            source: None,
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_api_keys")
+        .update_one(
+            doc! {"_id":&key.id},
+            doc! {"$set":{"metadata":{"provider_account":"do-not-infer"}}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(doc! {"_id":&personal}, doc! {"$set":{"api_key_id":&key.id}})
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":catalog.slug}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(
+        value["connect_url"]
+            .as_str()
+            .unwrap()
+            .contains("/connect/nyx_clk_")
+    );
+    let existing = value["existing_connections"].as_array().unwrap();
+    assert_eq!(existing.len(), 2, "{value}");
+    let own = existing
+        .iter()
+        .find(|v| v["connection_id"] == personal)
+        .unwrap();
+    assert_eq!(own["relation"], "self");
+    assert_eq!(own["label"], "Personal PAT");
+    assert_eq!(own["is_active"], false);
+    let org = existing
+        .iter()
+        .find(|v| v["connection_id"] == shared)
+        .unwrap();
+    assert_eq!(org["relation"], "organization");
+    assert_eq!(org["organization_name"], "Example Organization");
+    assert_eq!(org["label"], "work-github");
+    assert_eq!(org["is_active"], true);
+    for fact in existing {
+        assert_eq!(fact["account"]["status"], "unknown");
+    }
+    assert_eq!(value["existing_connections_truncated"], false);
+    assert!(!value.to_string().contains("must-never-appear"));
+    assert!(!value.to_string().contains("do-not-infer"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_connect_inventory_excludes_viewers_revoked_scopes_and_both_tombstone_shapes() {
+    use crate::models::org_membership::OrgRole;
+    let f = orchestrator_fixture("connect_inventory_visibility").await;
+    let catalog = public_connect_catalog(&f, "visible-connect").await;
+    let viewer = connect_test_org(&f, true).await;
+    let revoked = connect_test_org(&f, true).await;
+    let scoped = connect_test_org(&f, true).await;
+    catalog_connection(&f, &viewer, &catalog.id, "viewer-hidden", true).await;
+    catalog_connection(&f, &revoked, &catalog.id, "revoked-hidden", true).await;
+    catalog_connection(&f, &scoped, &catalog.id, "scope-hidden", true).await;
+    let in_scope = catalog_connection(&f, &scoped, &catalog.id, "in-scope", true).await;
+    f.state
+        .db
+        .collection::<bson::Document>("org_memberships")
+        .update_one(
+            doc! {"org_user_id":&viewer,"member_user_id":&f.owner},
+            doc! {"$set":{"role":"viewer"}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("org_memberships")
+        .update_one(
+            doc! {"org_user_id":&revoked,"member_user_id":&f.owner},
+            doc! {"$set":{"revoked_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    crate::services::org_role_scope_service::set_scope(
+        &f.state.db,
+        &scoped,
+        OrgRole::Member,
+        Some(vec![in_scope.clone()]),
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let disabled = catalog_connection(&f, &f.owner, &catalog.id, "disabled-retained", false).await;
+    let deleted = catalog_connection(&f, &f.owner, &catalog.id, "deleted-marker", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&deleted},
+            doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let tombstone =
+        catalog_connection(&f, &f.owner, &catalog.id, "deleted-without-marker", false).await;
+    let row = f
+        .state
+        .db
+        .collection::<crate::models::user_service::UserService>("user_services")
+        .find_one(doc! {"_id":&tombstone})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_endpoints")
+        .delete_one(doc! {"_id":&row.endpoint_id})
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(doc! {"_id":&tombstone}, doc! {"$unset":{"deleted_at":""}})
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    let facts = value["existing_connections"].as_array().unwrap();
+    assert_eq!(facts.len(), 2, "{value}");
+    assert!(facts.iter().any(|fact| fact["connection_id"] == in_scope));
+    assert!(
+        facts
+            .iter()
+            .any(|fact| fact["connection_id"] == disabled && fact["is_active"] == false)
+    );
+    assert_eq!(value["existing_connections_truncated"], false);
+    for hidden in [
+        "viewer-hidden",
+        "revoked-hidden",
+        "scope-hidden",
+        "deleted-marker",
+        "deleted-without-marker",
+    ] {
+        assert!(!value.to_string().contains(hidden), "{hidden}: {value}");
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_connect_facts_are_bounded_and_respect_org_scopes_and_deleted_rows() {
+    use crate::models::org_membership::{MemberScopeSource, OrgMembership};
+    let f = orchestrator_fixture("connect_bounded_facts").await;
+    let catalog = public_connect_catalog(&f, "bounded-connect").await;
+    let org = connect_test_org(&f, true).await;
+    catalog_connection(&f, &org, &catalog.id, "hidden-by-scope", true).await;
+    f.state.db.collection::<OrgMembership>("org_memberships").update_many(doc! {"org_user_id":&org}, doc! {"$set":{"scope_source":bson::to_bson(&MemberScopeSource::Override).unwrap(),"allowed_service_ids":[]}}).await.unwrap();
+    let deleted = catalog_connection(&f, &f.owner, &catalog.id, "deleted", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&deleted},
+            doc! {"$set":{"deleted_at":bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let empty = crate::services::assistant_connection_service::existing_connections(
+        &f.state.db,
+        &f.owner,
+        &catalog,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(empty.connections.is_empty());
+    for n in 0..12 {
+        catalog_connection(
+            &f,
+            &f.owner,
+            &catalog.id,
+            &format!("account-{n}"),
+            n % 2 == 0,
+        )
+        .await;
+    }
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 10);
+    assert_eq!(value["existing_connections_truncated"], true);
+    assert!(!value.to_string().contains("hidden-by-scope"));
+    assert!(!value.to_string().contains("\"deleted\""));
+    assert!(serde_json::to_string_pretty(&value).unwrap().len() < 10_000);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_legacy_inventory_filters_owner_catalog_and_activity_and_shares_the_bound() {
+    use crate::services::assistant_connection_service::existing_connections;
+    let f = orchestrator_fixture("connect_legacy_inventory_bound").await;
+    let catalog = public_connect_catalog(&f, "legacy-bound").await;
+    let other_catalog = public_connect_catalog(&f, "legacy-other-catalog").await;
+    let org = connect_test_org(&f, true).await;
+    legacy_catalog_connection(&f, &org, &catalog.id, "organization-legacy", true).await;
+    legacy_catalog_connection(
+        &f,
+        &f.owner,
+        &other_catalog.id,
+        "other-catalog-legacy",
+        true,
+    )
+    .await;
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "personal-legacy", false).await;
+    let empty = existing_connections(&f.state.db, &f.owner, &catalog, None)
+        .await
+        .unwrap();
+    assert!(empty.connections.is_empty());
+    assert!(!empty.truncated);
+
+    let timestamp = bson::DateTime::from_millis(1_700_000_000_000);
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&legacy},
+            doc! {"$set":{"is_active":true,"created_at":timestamp}},
+        )
+        .await
+        .unwrap();
+    let mut unified_ids = Vec::new();
+    for n in 0..10 {
+        unified_ids.push(
+            catalog_connection(&f, &f.owner, &catalog.id, &format!("account-{n}"), true).await,
+        );
+        if n == 8 {
+            let exact = existing_connections(&f.state.db, &f.owner, &catalog, None)
+                .await
+                .unwrap();
+            assert_eq!(exact.connections.len(), 10);
+            assert!(
+                !exact.truncated,
+                "nine unified plus one legacy fits exactly"
+            );
+            assert!(
+                exact
+                    .connections
+                    .iter()
+                    .any(|fact| fact["connection_id"] == legacy)
+            );
+        }
+    }
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":&unified_ids}},
+            doc! {"$set":{"created_at":timestamp}},
+        )
+        .await
+        .unwrap();
+    // The legacy row participates in the same timestamp/UUID ordering, whether
+    // it is newest, oldest, or tied with the unified rows at the ten-row boundary.
+    for offset in [1_000, -1_000, 0] {
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&legacy},
+                doc! {"$set":{"created_at":bson::DateTime::from_millis(timestamp.timestamp_millis()+offset)}},
+            )
+            .await
+            .unwrap();
+        let inventory = existing_connections(&f.state.db, &f.owner, &catalog, None)
+            .await
+            .unwrap();
+        let mut expected = unified_ids.clone();
+        expected.sort();
+        if offset > 0 {
+            expected.insert(0, legacy.clone());
+        } else if offset < 0 {
+            expected.push(legacy.clone());
+        } else {
+            expected.push(legacy.clone());
+            expected.sort();
+        }
+        expected.truncate(10);
+        assert_eq!(
+            inventory
+                .connections
+                .iter()
+                .map(|fact| fact["connection_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(inventory.truncated);
+        let serialized = serde_json::to_string(&inventory.connections).unwrap();
+        for excluded in [
+            "organization-legacy",
+            "other-catalog-legacy",
+            "legacy-secret-never-returned",
+            "legacy-metadata-never-returned",
+        ] {
+            assert!(!serialized.contains(excluded), "{serialized}");
+        }
+    }
+    let selected = existing_connections(&f.state.db, &f.owner, &catalog, Some(&[]))
+        .await
+        .unwrap();
+    assert!(selected.connections.is_empty());
+    assert!(!selected.truncated);
+    // Legacy and unified facts share the same active-owner check.
+    f.state
+        .db
+        .collection::<bson::Document>("users")
+        .update_one(doc! {"_id":&f.owner}, doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    assert!(
+        existing_connections(&f.state.db, &f.owner, &catalog, None)
+            .await
+            .unwrap()
+            .connections
+            .is_empty()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_inventory_lists_a_migrated_legacy_connection_once_without_hiding_independent_rows() {
+    use crate::services::assistant_connection_service::existing_connections;
+    let f = orchestrator_fixture("connect_legacy_migration_dedup").await;
+    let catalog = public_connect_catalog(&f, "legacy-migration").await;
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "Migrated credential", true).await;
+    // Give the real startup migration a valid credential-free source. The
+    // other inventory fixtures deliberately use an unreadable credential field.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::user_service_connection::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&legacy},
+            doc! {"$set":{"credential_encrypted":null}},
+        )
+        .await
+        .unwrap();
+    crate::db::migrate_service_connections(&f.state.db, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let migrated = f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .find_one(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id,"source":"migration_connection","source_id":&legacy})
+        .projection(doc! {"_id":1})
+        .await
+        .unwrap()
+        .unwrap();
+    let migrated_id = migrated.get_str("_id").unwrap();
+    for n in 0..9 {
+        catalog_connection(&f, &f.owner, &catalog.id, &format!("independent-{n}"), true).await;
+    }
+    for active in [true, false] {
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .update_one(doc! {"_id":migrated_id}, doc! {"$set":{"is_active":active}})
+            .await
+            .unwrap();
+        let inventory = existing_connections(&f.state.db, &f.owner, &catalog, None)
+            .await
+            .unwrap();
+        assert_eq!(inventory.connections.len(), 10);
+        assert!(
+            !inventory.truncated,
+            "the mirrored legacy row must not count twice"
+        );
+        assert_eq!(
+            inventory
+                .connections
+                .iter()
+                .filter(|fact| fact["connection_id"] == migrated_id)
+                .count(),
+            1
+        );
+        assert!(
+            inventory
+                .connections
+                .iter()
+                .all(|fact| fact["connection_id"] != legacy)
+        );
+        assert!(
+            inventory
+                .connections
+                .iter()
+                .all(|fact| fact["source"] != "legacy_connection")
+        );
+        let fact = inventory
+            .connections
+            .iter()
+            .find(|fact| fact["connection_id"] == migrated_id)
+            .unwrap();
+        assert_eq!(fact["label"], "Migrated credential");
+        assert_eq!(fact["is_active"], active);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn specialist_connect_refusal_inventory_follows_effective_connection_and_auto_grants() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service::{self as team, GrantChange};
+    let f = fixture("specialist_connect_inventory").await;
+    let catalog = public_connect_catalog(&f, "specialist-connect").await;
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "legacy-ungranted-account", true)
+            .await;
+    let granted = catalog_connection(&f, &f.owner, &catalog.id, "granted-account", true).await;
+    catalog_connection(&f, &f.owner, &catalog.id, "ungranted-account", true).await;
+    let auto = catalog_connection(&f, &f.owner, &catalog.id, "auto-account", true).await;
+    let platform = catalog_connection(&f, &f.owner, &catalog.id, "platform-account", true).await;
+    let disabled_auto =
+        catalog_connection(&f, &f.owner, &catalog.id, "disabled-auto-account", false).await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&auto,&disabled_auto]}},
+            doc! {"$set":{"source":crate::models::user_service::AUTO_PROVISION_SOURCE}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&platform},
+            doc! {"$set":{"credential_binding":"platform"}},
+        )
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        f.row.agent_id.as_deref().unwrap(),
+        GrantChange::Add(AgentGrants {
+            service_ids: vec![granted.clone()],
+            platform_service_ids: vec![catalog.id.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    // Managed specialists normally set this false. If a live key has the opt-in,
+    // authentication and the real execution scope include its active auto rows.
+    for allow_auto in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":&f.row.credential_api_key_id},
+                doc! {"$set":{"allow_auto_connected_services":allow_auto}},
+            )
+            .await
+            .unwrap();
+        let auth = authenticate(&f).await;
+        assert!(!auth.allow_all_services);
+        assert!(auth.allowed_service_ids.contains(&granted));
+        // Personal effective scopes also merge platform catalog IDs. Their
+        // presence must never grant inventory of all that catalog's connections.
+        assert!(auth.allowed_service_ids.contains(&catalog.id));
+        assert_eq!(auth.allowed_service_ids.contains(&auto), allow_auto);
+        assert_eq!(auth.allowed_service_ids.contains(&platform), allow_auto);
+        assert!(!auth.allowed_service_ids.contains(&disabled_auto));
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_slug":catalog.slug}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        let facts = value["existing_connections"].as_array().unwrap();
+        assert_eq!(facts.len(), if allow_auto { 3 } else { 1 }, "{value}");
+        assert!(facts.iter().all(|fact| fact["connection_id"] != catalog.id));
+        for id in auth
+            .allowed_service_ids
+            .iter()
+            .filter(|id| **id != catalog.id)
+        {
+            assert!(
+                facts.iter().any(|fact| fact["connection_id"] == *id),
+                "{id}: {value}"
+            );
+        }
+        assert!(!value.to_string().contains("ungranted-account"));
+        assert!(!value.to_string().contains("disabled-auto-account"));
+        assert!(facts.iter().all(|fact| fact["connection_id"] != legacy));
+        assert!(
+            facts
+                .iter()
+                .all(|fact| fact["source"] != "legacy_connection")
+        );
+        assert!(!value.to_string().contains("legacy-ungranted-account"));
+        assert!(value.get("connect_url").is_none());
+        assert!(
+            value["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("Specialists cannot mint connect links")
+        );
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_specialist_connect_inventory_keeps_the_member_identity_and_only_org_grants() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::{assistant_nyxagent as engine, assistant_team_service as team};
+    let f =
+        crate::services::org_agent_tests::Fixture::new("org_specialist_connect_inventory").await;
+    let (agent, _) = f.create().await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = uuid::Uuid::new_v4().to_string();
+    catalog.slug = "org-specialist-connect".into();
+    catalog.visibility = "public".into();
+    catalog.requires_user_credential = true;
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let org_service = f.service(&f.org, "org-granted").await;
+    let personal = f.service(&f.member, "member-personal").await;
+    let org_ungranted = f.service(&f.org, "org-ungranted").await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_one(
+            doc! {"_id":&personal},
+            doc! {"$set":{"source":crate::models::user_service::AUTO_PROVISION_SOURCE}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&org_service,&personal,&org_ungranted]}},
+            doc! {"$set":{"catalog_service_id":&catalog.id}},
+        )
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.admin,
+        &agent.id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![org_service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let thread = team::home_thread_for(&f.state.db, &f.state.encryption_keys, &f.member, &agent)
+        .await
+        .unwrap();
+    let thread = engine::begin_turn(
+        &f.state.db,
+        &f.member,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: Some(thread.id),
+            text: "Connect this service".into(),
+            model: None,
+            access_mode: None,
+        },
+        &f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &thread.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", key.raw_key.parse().unwrap());
+    for allow_auto in [false, true] {
+        f.state
+            .db
+            .collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":&thread.credential_api_key_id},
+                doc! {"$set":{"allow_auto_connected_services":allow_auto}},
+            )
+            .await
+            .unwrap();
+        let auth = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+        assert_eq!(auth.user_id, f.member);
+        assert_eq!(
+            auth.assistant_agent_owner_id.as_deref(),
+            Some(f.org.as_str())
+        );
+        assert_eq!(auth.allowed_service_ids, vec![org_service.clone()]);
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        let facts = value["existing_connections"].as_array().unwrap();
+        assert_eq!(facts.len(), 1, "{value}");
+        assert_eq!(facts[0]["connection_id"], org_service);
+        assert_eq!(facts[0]["relation"], "organization");
+        assert!(!value.to_string().contains("member-personal"));
+        assert!(!value.to_string().contains("org-ungranted"));
+        assert!(value.get("connect_url").is_none());
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn chat_master_and_platform_catalogs_without_platform_selection_keep_legacy_one_step() {
+    let f = orchestrator_fixture("chat_master_legacy_connect").await;
+    let auth = authenticate(&f).await;
+    for platform_enabled in [false, true] {
+        let mut catalog = public_connect_catalog(&f, &format!("master-{platform_enabled}")).await;
+        catalog.requires_user_credential = false;
+        catalog.auth_method = "bearer".into();
+        catalog.service_category = "internal".into();
+        catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            enabled: platform_enabled,
+            ..Default::default()
+        });
+        catalog.credential_encrypted = f
+            .state
+            .encryption_keys
+            .encrypt(b"internal-master")
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                "downstream_services",
+            )
+            .replace_one(doc! {"_id":&catalog.id}, &catalog)
+            .await
+            .unwrap();
+        let existing = catalog_connection(
+            &f,
+            &f.owner,
+            &catalog.id,
+            &format!("existing-{platform_enabled}"),
+            true,
+        )
+        .await;
+        for expected in ["connected", "already_connected", "already_connected"] {
+            let value = result(
+                handle_meta_connect(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"service_id":catalog.id}),
+                    None,
+                    false,
+                )
+                .await,
+                false,
+            )
+            .await;
+            assert_eq!(value["status"], expected, "{value}");
+            let facts = value["existing_connections"].as_array().unwrap();
+            assert!(facts.iter().any(|fact| fact["connection_id"] == existing));
+            assert_eq!(facts.len(), if expected == "connected" { 1 } else { 2 });
+            assert!(
+                value.get("service_id").is_none(),
+                "legacy success must not emit null IDs: {value}"
+            );
+            if expected == "already_connected" {
+                assert_eq!(value["catalog_service_id"], catalog.id);
+                assert_eq!(value["service_slug"], catalog.slug);
+                assert!(
+                    value["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .contains("no separate account to add")
+                );
+            } else {
+                assert!(value.get("service_slug").is_none());
+            }
+            assert!(value.get("connect_url").is_none());
+        }
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("user_service_connections")
+                .count_documents(doc! {"user_id":&f.owner,"service_id":&catalog.id})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("user_services")
+                .count_documents(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id})
+                .await
+                .unwrap(),
+            1,
+            "legacy connects must not create independent unified rows"
+        );
+        if !platform_enabled {
+            let value = result(
+                handle_meta_connect(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"service_id":catalog.id,"use_platform_key":true}),
+                    None,
+                    false,
+                )
+                .await,
+                true,
+            )
+            .await;
+            assert_eq!(value["error"], "connect_failed");
+            assert!(
+                value["existing_connections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|fact| fact["connection_id"] == existing)
+            );
+            assert!(value.get("connect_url").is_none());
+        }
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn requirement_only_connect_refuses_only_required_providers_without_a_catalog_credential() {
+    let f = orchestrator_fixture("requirement_only_connect").await;
+    let mut catalog = seeded_github(&f).await;
+    catalog.provider_config_id = None;
+    catalog.service_category = "internal".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    let id = catalog_connection(&f, &f.owner, &catalog.id, "existing", true).await;
+    let connection =
+        crate::services::user_service_service::find_user_service_by_id(&f.state.db, &id)
+            .await
+            .unwrap()
+            .unwrap();
+    let auth = authenticate(&f).await;
+    for required in [false, true] {
+        let updated = f
+            .state
+            .db
+            .collection::<bson::Document>("service_provider_requirements")
+            .update_many(
+                doc! {"service_id":&catalog.id},
+                doc! {"$set":{"required":required}},
+            )
+            .await
+            .unwrap();
+        assert!(updated.matched_count > 0);
+        for credentialed in [false, true] {
+            f.state
+                .db
+                .collection::<bson::Document>("downstream_services")
+                .update_one(
+                    doc! {"_id":&catalog.id},
+                    doc! {"$set":{"requires_user_credential":credentialed}},
+                )
+                .await
+                .unwrap();
+            let unavailable = required && !credentialed;
+            let value = result(
+                handle_meta_connect(
+                    &f.state,
+                    &auth,
+                    None,
+                    &json!({"service_id":catalog.id}),
+                    None,
+                    false,
+                )
+                .await,
+                unavailable,
+            )
+            .await;
+            assert!(
+                value["existing_connections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|fact| fact["connection_id"] == id)
+            );
+            let offer = crate::services::assistant_connection_service::connect_own(
+                &f.state.db,
+                &f.owner,
+                &connection,
+            )
+            .await
+            .unwrap();
+            if unavailable {
+                assert_eq!(value["error"], "connect_unavailable");
+                assert_eq!(value["reason"], "provider_requirement_only");
+                assert_eq!(offer["reason"], "provider_requirement_only");
+                assert_eq!(offer["supported"], false);
+                assert!(value.get("connect_url").is_none());
+            } else if credentialed {
+                assert_eq!(value["status"], "pending_connection");
+                assert!(
+                    value["connect_url"]
+                        .as_str()
+                        .is_some_and(|url| url.contains("/connect/"))
+                );
+                assert_eq!(offer["supported"], true);
+            } else {
+                assert_eq!(value["status"], "connected");
+                assert_eq!(offer["reason"], "no_separate_account");
+                assert!(value.get("connect_url").is_none());
+            }
+        }
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        2
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn external_connect_retains_legacy_duplicate_refusal_and_pending_contract() {
+    let f = orchestrator_fixture("external_connect_unchanged").await;
+    let catalog = seeded_github(&f).await;
+    let mut auth = authenticate(&f).await;
+    auth.chat = None;
+    auth.api_key_id = Some(ordinary_key(&f).await);
+    auth.allow_all_services = true;
+    // External callers still use the legacy one-step path for this shape.
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(
+            doc! {"_id":&catalog.id},
+            doc! {"$set":{"service_category":"internal"}},
+        )
+        .await
+        .unwrap();
+    let args = json!({"service_id":catalog.id});
+    let first = result(
+        handle_meta_connect(&f.state, &auth, None, &args, None, false).await,
+        false,
+    )
+    .await;
+    assert_eq!(first.as_object().unwrap().len(), 4, "{first}");
+    assert!(first.get("existing_connections").is_none());
+    let response = handle_meta_connect(&f.state, &auth, None, &args, None, false).await;
+    let bytes = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
+    let duplicate: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(duplicate["result"]["isError"], true);
+    assert_eq!(
+        duplicate["result"]["content"][0]["text"],
+        "Conflict: Already connected to this service"
+    );
+    let mut credentialed = public_connect_catalog(&f, "external-pending").await;
+    credentialed.auth_method = "bearer".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&credentialed.id}, &credentialed)
+        .await
+        .unwrap();
+    let pending = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":credentialed.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(pending["status"], "pending_connection");
+    assert_eq!(pending.as_object().unwrap().len(), 8, "{pending}");
+    assert!(pending.get("existing_connections").is_none());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_free_chat_connect_is_idempotent_without_unified_rows() {
+    let f = orchestrator_fixture("chat_no_auth_legacy").await;
+    let mut catalog = public_connect_catalog(&f, "credential-free").await;
+    catalog.requires_user_credential = false;
+    catalog.auth_method = "none".into();
+    catalog.service_category = "internal".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .replace_one(doc! {"_id":&catalog.id}, &catalog)
+        .await
+        .unwrap();
+    let auth = authenticate(&f).await;
+    let mut legacy_id = None;
+    let label = "界".repeat(121);
+    for expected in ["connected", "already_connected", "already_connected"] {
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_id":catalog.id}),
+                None,
+                false,
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(value["status"], expected, "{value}");
+        if expected == "connected" {
+            assert_eq!(value["existing_connections"], json!([]));
+            let row = f
+                .state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::user_service_connection::COLLECTION_NAME,
+                )
+                .find_one(doc! {"user_id":&f.owner,"service_id":&catalog.id})
+                .projection(doc! {"_id":1})
+                .await
+                .unwrap()
+                .unwrap();
+            let id = row.get_str("_id").unwrap().to_owned();
+            f.state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::user_service_connection::COLLECTION_NAME,
+                )
+                .update_one(doc! {"_id":&id}, doc! {"$set":{"credential_label":&label}})
+                .await
+                .unwrap();
+            legacy_id = Some(id);
+        } else {
+            assert_eq!(
+                value["existing_connections"],
+                json!([{
+                    "catalog_service_id":catalog.id,
+                    "catalog_service_slug":catalog.slug,
+                    "connection_id":legacy_id.as_ref().unwrap(),
+                    "connection_slug":catalog.slug,
+                    "label":"界".repeat(120),
+                    "is_active":true,
+                    "owner_type":"person",
+                    "relation":"self",
+                    "organization_name":null,
+                    "account":{"status":"unknown"},
+                    "source":"legacy_connection",
+                }]),
+                "{value}"
+            );
+        }
+        assert_eq!(value["existing_connections_truncated"], false);
+        assert!(value.get("service_id").is_none());
+        assert!(value.get("connect_url").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_service_connections")
+            .count_documents(doc! {"user_id":&f.owner,"service_id":&catalog.id})
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .count_documents(doc! {"user_id":&f.owner,"catalog_service_id":&catalog.id})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_connect_uses_hosted_link_for_provider_oauth_even_when_already_connected() {
+    // Production case: the seeded GitHub catalog gets its credential from an
+    // OAuth provider (requires_user_credential=false) and the owner already
+    // has a legacy GitHub connection. The legacy connector refused with
+    // "Already connected"; a chat must receive a hosted link instead.
+    let f = orchestrator_fixture("assistant_provider_connect").await;
+    let catalog = seeded_github(&f).await;
+    assert!(!catalog.requires_user_credential && catalog.provider_config_id.is_some());
+    let legacy =
+        legacy_catalog_connection(&f, &f.owner, &catalog.id, "Legacy GitHub credential", true)
+            .await;
+    let auth = authenticate(&f).await;
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_slug":"api-github"}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(
+        value["connect_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/connect/"))
+    );
+    let facts = value["existing_connections"].as_array().unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0]["connection_id"], legacy);
+    assert_eq!(facts[0]["source"], "legacy_connection");
+    assert_eq!(facts[0]["relation"], "self");
+    assert_eq!(facts[0]["label"], "Legacy GitHub credential");
+    assert_eq!(facts[0]["account"], json!({"status":"unknown"}));
+    assert!(!value.to_string().contains("legacy-secret-never-returned"));
+    assert!(!value.to_string().contains("legacy-metadata-never-returned"));
+    assert_eq!(value["existing_connections_truncated"], false);
+    let stored = f
+        .state
+        .db
+        .collection::<crate::models::connect_link::ConnectLink>("connect_links")
+        .find_one(doc! {"_id":value["connect_link_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.use_platform_key, Some(false));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_connect_reports_unavailable_providers_and_accepts_configured_device_clients() {
+    let f = orchestrator_fixture("assistant_provider_inactive").await;
+    let catalog = seeded_github(&f).await;
+    catalog_connection(&f, &f.owner, &catalog.id, "existing-offline", true).await;
+    let auth = authenticate(&f).await;
+    for (active, kind, reason) in [
+        (false, "oauth2", "provider_unavailable"),
+        (true, "oauth2", "provider_not_configured"),
+        (true, "device_code", "provider_not_configured"),
+    ] {
+        f.state
+            .db
+            .collection::<bson::Document>("provider_configs")
+            .update_one(
+                doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+                doc! {"$set":{"is_active":active,"provider_type":kind,"credential_mode":"admin",
+                "client_id_encrypted":bson::Bson::Null,"client_secret_encrypted":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        let value = result(
+            handle_meta_connect(
+                &f.state,
+                &auth,
+                None,
+                &json!({"service_slug":"api-github"}),
+                None,
+                false,
+            )
+            .await,
+            true,
+        )
+        .await;
+        assert_eq!(value["error"], "connect_unavailable", "{value}");
+        assert_eq!(value["reason"], reason, "{kind}: {value}");
+        assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+        assert!(value.get("connect_url").is_none());
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>("connect_links")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    // Public device-code clients need an ID, but no client secret.
+    let client_id = f
+        .state
+        .encryption_keys
+        .encrypt(b"public-device-client")
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>("provider_configs")
+        .update_one(
+            doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
+            doc! {"$set":{"client_id_encrypted":bson::Binary {
+            subtype:bson::spec::BinarySubtype::Generic, bytes:client_id}}},
+        )
+        .await
+        .unwrap();
+    let value = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(value["status"], "pending_connection", "{value}");
+    assert!(value["connect_url"].as_str().is_some());
+    assert_eq!(value["existing_connections"].as_array().unwrap().len(), 1);
+    f.state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_keeps_platform_one_step()
  {
@@ -6561,6 +7917,22 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
             .unwrap(),
         1
     );
+    let second = result(
+        handle_meta_connect(
+            &f.state,
+            &auth,
+            None,
+            &json!({"service_id":catalog.id,"use_platform_key":true}),
+            None,
+            false,
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(second["status"], "connected");
+    assert_ne!(second["service_id"], platform["service_id"]);
+    assert_eq!(second["existing_connections"].as_array().unwrap().len(), 1);
     let response = handle_meta_connect(
         &f.state,
         &auth,
