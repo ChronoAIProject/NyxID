@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 // @ts-expect-error The lint guard is deliberately a standalone Node script.
 import { checkTypography, typographyViolations } from "../scripts/check-typography.mjs";
 import { readFileSync, readdirSync } from "node:fs";
@@ -7,6 +7,14 @@ import { resolve } from "node:path";
 import { TEXT_STYLES } from "../src/lib/typography";
 
 describe("typography policy", () => {
+  let sourceViolations: string[];
+
+  // This one-time static analysis reads and parses the repository. Coverage and
+  // shared CI CPU can exceed a test's 5s budget; only the scan setup gets 30s.
+  beforeAll(() => {
+    sourceViolations = checkTypography(resolve("src"));
+  }, 30_000);
+
   it("never scopes shared treatment to the assistant shell", () => {
     for (const file of readdirSync("src", { recursive: true }).filter(file => String(file).endsWith(".css"))) {
       postcss.parse(readFileSync(resolve("src", String(file)), "utf8")).walkRules(rule => {
@@ -19,7 +27,7 @@ describe("typography policy", () => {
     expect(readFileSync(resolve("src/hooks/use-theme.ts"), "utf8")).not.toContain("--assistant-density");
   });
   it("keeps source tokens canonical and role consumers scalable", () => {
-    expect(checkTypography(resolve("src"))).toEqual([]);
+    expect(sourceViolations).toEqual([]);
   });
   it("every role owns size, weight and its line box in one shared utility", () => {
     const roles = postcss.parse(readFileSync("src/typography.css", "utf8"));
