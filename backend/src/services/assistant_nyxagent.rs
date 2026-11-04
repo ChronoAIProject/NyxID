@@ -5932,6 +5932,7 @@ pub(crate) async fn delete_in_session(
             crate::models::generated_artifact::SERIES,
             crate::models::assistant_model_control::COLLECTION_NAME,
             "assistant_model_denial_notices",
+            crate::models::cma_session_origin::COLLECTION_NAME,
             crate::models::assistant_voice::REQUESTS,
             crate::models::assistant_voice_session::COLLECTION_NAME,
             crate::models::assistant_acknowledgement::COLLECTION_NAME,

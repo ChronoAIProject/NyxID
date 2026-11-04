@@ -5944,7 +5944,7 @@ async fn execute_tool_resolved_inner(
         }
         if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
-                admission.bind_async_submission(db, watch).await?;
+                admission.bind_async_submission(db, watch, &target).await?;
             }
             admission
                 .materialize_http(

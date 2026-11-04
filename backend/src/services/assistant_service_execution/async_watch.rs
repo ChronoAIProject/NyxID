@@ -408,20 +408,58 @@ impl AsyncContinuation {
 impl Admission {
     /// Persist exactly the authority that passed submission consent, never a
     /// second read that could bless a replacement credential/configuration.
-    pub(crate) async fn bind_async_submission(&self, db: &Database, watch: &str) -> AppResult<()> {
+    pub(crate) async fn bind_async_submission(
+        &self,
+        db: &Database,
+        watch: &str,
+        target: &crate::services::proxy_service::ProxyTarget,
+    ) -> AppResult<()> {
         let shared = self.shared_execution()?;
         if let Some(binding) = &shared {
             crate::services::shared_agent_transport::revalidate(db, binding).await?;
+        }
+        // Only an unchanged, personal default connection can be observed through
+        // the owner's REST proxy. Override/shared credentials must never be relabelled.
+        let is_cma = db
+            .collection::<Document>(WATCHES)
+            .find_one(doc! {"_id":watch,"cma":{"$ne":null}})
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some();
+        let observer_binding =
+            if !is_cma || target.target_id.is_some() || self.chat.guest || shared.is_some() {
+                None
+            } else {
+                let binding = crate::services::cma_session_origin::personal_binding(
+                    db,
+                    &self.chat.user_id,
+                    &self.connection,
+                    Some(&self.api_key_id),
+                )
+                .await?;
+                if binding.is_some()
+                    && connection_binding(db, &self.connection, &self.api_key_id).await?
+                        != self.binding
+                {
+                    return Err(denied());
+                }
+                binding
+            };
+        let mut fields = doc! {
+            "execution_binding": &self.binding,
+            "instruction_receipt_version": if self.owner_instruction_receipt { 1 } else { 0 },
+            "shared_execution": bson::to_bson(&shared).map_err(|_| denied())?,
+            "contract_binding": self.operation_identity["async_contract"].as_str().ok_or_else(denied)?,
+        };
+        if is_cma {
+            fields.insert("cma.observer_binding", observer_binding);
         }
         let updated = db.collection::<Document>(WATCHES).update_one(doc! {
             "_id":watch,"user_id":&self.chat.user_id,"conversation_id":&self.chat.conversation_id,
             "api_key_id":&self.api_key_id,"turn_id":&self.chat.turn_id,"service_id":&self.connection,
             "state":{"$in":["submitting","cancelling"]},"deadline":{"$gt":bson::DateTime::now()},
             "$or":[{"execution_binding":null},{"execution_binding":&self.binding}],
-        }, doc! {"$set":{"execution_binding":&self.binding,
-            "instruction_receipt_version": if self.owner_instruction_receipt { 1 } else { 0 },
-            "shared_execution": bson::to_bson(&shared).map_err(|_| denied())?,
-            "contract_binding":self.operation_identity["async_contract"].as_str().ok_or_else(denied)?}}).await?;
+        }, doc! {"$set":fields}).await?;
         if updated.matched_count != 1 {
             return Err(denied());
         }

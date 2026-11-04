@@ -246,3 +246,5 @@ pub mod discord_gateway;
 pub mod generated_artifact;
 
 pub mod assistant_delegated_image;
+
+pub mod cma_session_origin;

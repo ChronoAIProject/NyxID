@@ -35,6 +35,9 @@ pub enum CmaOperationKind {
 /// Bounded identifiers and observed lifecycle metadata, never task input/output.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CmaOperation {
+    /// Server-captured personal connection identity; absent legacy rows are unattributed.
+    #[serde(default)]
+    pub observer_binding: Option<String>,
     /// Internal deduplication for idempotent input receipts without an operation ID.
     #[serde(default)]
     pub receipt_id: Option<String>,
