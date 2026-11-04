@@ -355,7 +355,7 @@ pub fn schema(name: &str) -> Value {
                     "path_template":string(2048)},"required":["method","path_template"],"additionalProperties":false}},
                 // Value limits keyed by endpoint ID (validated server-side), and
                 // the reviewed contract a card's retry_arguments carry back.
-                "inputs":{"type":"object","additionalProperties":{"type":"object"}},
+                "inputs":{"type":"object","additionalProperties":input_rules_schema()},
                 "contract_digest":string(64)
             },"required":["expected_revision"],"additionalProperties":false},
             "acknowledgement_id":string(64)}),
@@ -926,6 +926,38 @@ fn skill_reference_schema() -> Value {
     json!({"type":"object","properties":properties,"required":["source","skill_id","name","version","sha256"],"additionalProperties":false})
 }
 
+fn any_value_schema() -> Value {
+    // An empty schema is the JSON-Schema "anything" schema.  The matcher
+    // handles it explicitly below; this is used only for exact/one_of values.
+    json!({})
+}
+
+fn input_value_rule_schema() -> Value {
+    json!({"oneOf":[
+        {"type":"object","properties":{"type":{"const":"exact"},"value":any_value_schema()},"required":["type","value"],"additionalProperties":false},
+        {"type":"object","properties":{"type":{"const":"one_of"},"values":{"type":"array","maxItems":100,"items":any_value_schema()}},"required":["type","values"],"additionalProperties":false}
+    ]})
+}
+
+fn input_query_parameter_schema() -> Value {
+    json!({"type":"object","properties":{"required":{"type":"boolean"},"rule":input_value_rule_schema()},"required":["rule"],"additionalProperties":false})
+}
+
+fn json_shape_schema() -> Value {
+    // JsonShape is a bounded, tagged vocabulary. Its recursive details are
+    // checked by serde below so this advertised object remains small enough
+    // for MCP clients to consume without duplicating the recursive tree.
+    json!({"type":"object","additionalProperties":true})
+}
+
+fn input_rules_schema() -> Value {
+    json!({"type":"object","properties":{
+        "path":{"type":"object","additionalProperties":input_value_rule_schema()},
+        "query":{"type":"object","additionalProperties":input_query_parameter_schema()},
+        "body":json_shape_schema()
+    },"additionalProperties":false})
+}
+
 /// Strict validation mirroring the schemas: unknown keys, wrong types and
 /// out-of-range values are rejected before any state is read.
 pub fn validate(name: &str, args: &Value) -> AppResult<()> {
@@ -938,6 +970,7 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
             return Err(invalid());
         }
     }
+    validate_input_rules(name, object, &schema)?;
     for (key, value) in object {
         let spec = properties.get(key).ok_or_else(invalid)?;
         if !matches_spec(value, spec) {
@@ -945,6 +978,112 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+/// Validate the shape of the advertised per-operation input dictionary before
+/// dispatch.  Keeping this separate from the general tool validator lets us
+/// return a bounded field path for malformed rules without exposing any of the
+/// rule values (which may contain service identifiers or other sensitive data).
+fn validate_input_rules(
+    name: &str,
+    args: &serde_json::Map<String, Value>,
+    schema: &Value,
+) -> AppResult<()> {
+    if !matches!(name, "set_agent_operations" | "request_agent_operations") {
+        return Ok(());
+    }
+    let Some(selection) = args.get("selection").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(inputs) = selection.get("inputs") else {
+        return Ok(());
+    };
+    let Some(inputs) = inputs.as_object() else {
+        return Err(AppError::ValidationError(
+            "selection.inputs: expected an object keyed by operation ID".into(),
+        ));
+    };
+    let rules_schema =
+        &schema["properties"]["selection"]["properties"]["inputs"]["additionalProperties"];
+    for (operation, rules) in inputs {
+        let operation = field_segment(operation, "operation");
+        let prefix = format!("selection.inputs.{operation}");
+        let Some(rules) = rules.as_object() else {
+            return Err(AppError::ValidationError(format!(
+                "{prefix}: expected path/query/body rules"
+            )));
+        };
+        for (part, value) in rules {
+            let part_path = match part.as_str() {
+                "path" | "query" | "body" => format!("{prefix}.{part}"),
+                _ => {
+                    return Err(AppError::ValidationError(format!(
+                        "{prefix}.{}: expected path/query/body rules",
+                        field_segment(part, "field")
+                    )));
+                }
+            };
+            let spec = &rules_schema["properties"][part];
+            if !matches_spec(value, spec) {
+                return Err(AppError::ValidationError(format!(
+                    "{part_path}: expected path/query/body rules"
+                )));
+            }
+        }
+        let invalid_part = rules
+            .get("path")
+            .filter(|value| {
+                serde_json::from_value::<
+                    std::collections::BTreeMap<String, nyxid_permissions::ValueRule>,
+                >((*value).clone())
+                .is_err()
+            })
+            .map(|_| "path")
+            .or_else(|| {
+                rules
+                    .get("query")
+                    .filter(|value| {
+                        serde_json::from_value::<
+                            std::collections::BTreeMap<
+                                String,
+                                nyxid_permissions::google::QueryParameter,
+                            >,
+                        >((*value).clone())
+                        .is_err()
+                    })
+                    .map(|_| "query")
+            })
+            .or_else(|| {
+                rules
+                    .get("body")
+                    .filter(|value| {
+                        serde_json::from_value::<nyxid_permissions::google::JsonShape>(
+                            (*value).clone(),
+                        )
+                        .is_err()
+                    })
+                    .map(|_| "body")
+            });
+        if let Some(offending) = invalid_part {
+            return Err(AppError::ValidationError(format!(
+                "{prefix}.{offending}: expected path/query/body rules"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn field_segment(value: &str, fallback: &str) -> String {
+    if value.len() <= 128
+        && !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+    {
+        value.to_owned()
+    } else {
+        format!("<{fallback}>")
+    }
 }
 
 pub(crate) fn schedule_schema() -> Value {
@@ -981,6 +1120,9 @@ pub(crate) fn delivery_schema() -> Value {
 }
 
 fn matches_spec(value: &Value, spec: &Value) -> bool {
+    if spec.as_object().is_some_and(|object| object.is_empty()) {
+        return true;
+    }
     if let Some(options) = spec["oneOf"].as_array() {
         return options.iter().any(|option| matches_spec(value, option));
     }
@@ -1100,6 +1242,107 @@ mod tests {
             "role": "user"
         }]);
         assert!(validate("set_agent_sharing", &email_args).is_ok());
+    }
+
+    #[test]
+    fn dictionary_schemas_validate_values_without_properties_and_keep_closed_objects_closed() {
+        let dictionary = json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+        });
+        assert!(matches_spec(
+            &json!({"one": "value", "two": "value"}),
+            &dictionary
+        ));
+        assert!(!matches_spec(&json!({"one": 7}), &dictionary));
+
+        let mixed = json!({
+            "type": "object",
+            "properties": {"known": {"type": "integer"}},
+            "additionalProperties": {"type": "string"}
+        });
+        assert!(matches_spec(&json!({"known": 7, "extra": "value"}), &mixed));
+        assert!(!matches_spec(&json!({"known": 7, "extra": 9}), &mixed));
+
+        let closed = json!({
+            "type": "object",
+            "properties": {"known": {"type": "integer"}},
+            "additionalProperties": false
+        });
+        assert!(matches_spec(&json!({"known": 7}), &closed));
+        assert!(!matches_spec(
+            &json!({"known": 7, "extra": "value"}),
+            &closed
+        ));
+    }
+
+    #[test]
+    fn set_agent_operations_accepts_receipt_input_rules() {
+        let args = json!({
+            "subagent": "receipt-bot",
+            "service_id": "lark-service",
+            "selection": {
+                "expected_revision": 3,
+                "all_operations": false,
+                "endpoint_ids": ["fields-endpoint", "create-endpoint"],
+                "inputs": {
+                    "fields-endpoint": {
+                        "path": {
+                            "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+                            "table_id": {"type": "exact", "value": "tblReceipts"}
+                        }
+                    },
+                    "create-endpoint": {
+                        "path": {
+                            "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+                            "table_id": {"type": "exact", "value": "tblReceipts"}
+                        },
+                        "body": {
+                            "type": "object",
+                            "required": ["fields"],
+                            "properties": {
+                                "fields": {
+                                    "type": "object",
+                                    "required": ["Type", "Date", "Amount", "Card Number"],
+                                    "properties": {
+                                        "Type": {"type": "one_of", "values": ["Expense", "Refund"]},
+                                        "Date": {"type": "integer", "minimum": 1767225600000i64, "maximum": 1798761599999i64},
+                                        "Amount": {"type": "number", "minimum": 0, "maximum": 1000000, "max_fraction_digits": 2},
+                                        "Card Number": {"type": "one_of", "values": ["1234", "5678"]}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert!(validate("set_agent_operations", &args).is_ok());
+    }
+
+    #[test]
+    fn set_agent_operations_rejects_json_schema_body_with_a_bounded_field_path() {
+        let args = json!({
+            "subagent": "receipt-bot",
+            "service_id": "lark-service",
+            "selection": {
+                "expected_revision": 3,
+                "inputs": {
+                    "create-endpoint": {
+                        "body": {
+                            "type": "object",
+                            "properties": {"fields": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        });
+        let error = validate("set_agent_operations", &args)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("selection.inputs.create-endpoint.body"));
+        assert!(error.contains("expected path/query/body rules"));
+        assert!(!error.contains("fields"));
     }
 
     #[test]
