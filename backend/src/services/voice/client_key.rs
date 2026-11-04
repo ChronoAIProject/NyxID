@@ -39,23 +39,6 @@ fn ordinary(key: &ApiKey) -> AppResult<()> {
     Ok(())
 }
 
-/// Test probe for the existing connection grant. Production discovery resolves
-/// its connection set once instead of rebuilding caller authority per Bot.
-#[cfg(test)]
-pub async fn covers(
-    db: &Database,
-    key: &ApiKey,
-    agent: &crate::models::assistant_agent::AssistantAgent,
-) -> AppResult<()> {
-    ordinary(key)?;
-    if agent.user_id != key.user_id || agent.destroyed_at.is_some() {
-        return Err(refused());
-    }
-    let auth = crate::mw::auth::api_key_auth_user(db, key, None, None, None).await?;
-    super::access::authorize(db, &auth, agent).await?;
-    Ok(())
-}
-
 pub struct Caller {
     pub auth: AuthUser,
     pub key: Option<ApiKey>,
@@ -132,6 +115,7 @@ async fn child(db: &Database, key: &ApiKey, id: Option<&str>) -> AppResult<()> {
     }
     Ok(())
 }
+#[cfg(test)]
 pub async fn resolve(
     db: &Database,
     auth: &AuthUser,
@@ -139,20 +123,20 @@ pub async fn resolve(
 ) -> AppResult<Option<ClientKey>> {
     Ok(resolve_authority(db, auth, conversation)
         .await?
-        .map(|(binding, _, _)| binding))
+        .map(|authority| authority.binding))
+}
+
+struct Authority {
+    binding: ClientKey,
+    auth: AuthUser,
+    service: crate::models::user_service::UserService,
 }
 
 async fn resolve_authority(
     db: &Database,
     auth: &AuthUser,
     conversation: &str,
-) -> AppResult<
-    Option<(
-        ClientKey,
-        AuthUser,
-        crate::models::user_service::UserService,
-    )>,
-> {
+) -> AppResult<Option<Authority>> {
     let caller = caller(db, auth).await?;
     resolve_for_caller(db, &caller, conversation).await
 }
@@ -161,13 +145,7 @@ async fn resolve_for_caller(
     db: &Database,
     caller: &Caller,
     conversation: &str,
-) -> AppResult<
-    Option<(
-        ClientKey,
-        AuthUser,
-        crate::models::user_service::UserService,
-    )>,
-> {
+) -> AppResult<Option<Authority>> {
     let Some(key) = &caller.key else {
         return Ok(None);
     };
@@ -184,19 +162,19 @@ async fn resolve_for_caller(
     let agent = team::agent_for_conversation(db, &thread).await?;
     let fresh = caller.auth.clone();
     let service = super::access::authorize(db, &fresh, &agent).await?;
-    Ok(Some((
-        ClientKey {
+    Ok(Some(Authority {
+        binding: ClientKey {
             key_id: key.id.clone(),
             credential_id: auth.api_key_credential_id.clone(),
-
             agent_id: agent.id,
             service_id: service.id.clone(),
         },
-        fresh,
+        auth: fresh,
         service,
-    )))
+    }))
 }
 /// Start admission composes the exact Key grant with the Bot Voice path.
+#[cfg(test)]
 pub async fn authorize(
     db: &Database,
     auth: &AuthUser,
@@ -211,7 +189,11 @@ pub(crate) async fn authorize_for_caller(
     caller: &Caller,
     conversation: &str,
 ) -> AppResult<Option<ClientKey>> {
-    let Some((binding, fresh, service)) = resolve_for_caller(db, caller, conversation).await?
+    let Some(Authority {
+        binding,
+        auth: fresh,
+        service,
+    }) = resolve_for_caller(db, caller, conversation).await?
     else {
         return Ok(None);
     };
@@ -241,7 +223,12 @@ pub(crate) async fn operation_binding(
     path: &str,
     websocket: bool,
 ) -> AppResult<Option<ClientKey>> {
-    let Some((binding, fresh, service)) = resolve_authority(db, auth, conversation).await? else {
+    let Some(Authority {
+        binding,
+        auth: fresh,
+        service,
+    }) = resolve_authority(db, auth, conversation).await?
+    else {
         return Ok(None);
     };
     super::access::policy(db, &fresh, &service, method, path, websocket).await?;
@@ -256,8 +243,11 @@ pub(crate) async fn access_call(
     path: &str,
     websocket: bool,
 ) -> AppResult<()> {
-    let Some((binding, fresh, service)) =
-        resolve_authority(db, auth, &call.conversation_id).await?
+    let Some(Authority {
+        binding,
+        auth: fresh,
+        service,
+    }) = resolve_authority(db, auth, &call.conversation_id).await?
     else {
         return Ok(());
     };
@@ -363,19 +353,9 @@ async fn revalidate_binding(
     }
     Ok(Some(binding.clone()))
 }
+#[cfg(test)]
 pub async fn own_call(db: &Database, auth: &AuthUser, call: &VoiceSession) -> AppResult<()> {
-    if let Some(proof) = resolve(db, auth, &call.conversation_id).await? {
-        if !call.client_key.as_ref().is_some_and(|bound| {
-            bound.key_id == proof.key_id
-                && bound.credential_id == proof.credential_id
-                && bound.agent_id == proof.agent_id
-                && bound.service_id == proof.service_id
-        }) {
-            return Err(refused());
-        }
-        Box::pin(revalidate(db, call)).await?;
-    }
-    Ok(())
+    access_call(db, auth, call, "POST", "/voice/sessions", true).await
 }
 /// Join any authenticated call mutation to the same Key/child/service fences.
 pub async fn fence_call(

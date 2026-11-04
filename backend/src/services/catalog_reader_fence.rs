@@ -90,7 +90,11 @@ mod tests {
     };
     async fn begin(db: &Database) -> ClientSession {
         let mut tx = db.client().start_session().await.unwrap();
-        tx.start_transaction().await.unwrap();
+        tx.start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await
+            .unwrap();
         tx
     }
     async fn register(db: &Database, id: &str, owner: &str) {
