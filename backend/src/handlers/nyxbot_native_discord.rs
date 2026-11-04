@@ -7,8 +7,9 @@ pub(super) struct Evidence {
     pub source_message: Option<String>,
 }
 
-/// A maximum of three authenticated, capped Discord reads: original message,
-/// its channel, and (only when absent) its exact same-channel reply reference.
+/// A maximum of four authenticated, capped Discord reads: original message,
+/// its channel, (only when absent) its exact same-channel reply reference, and
+/// guild roles only for a role mention on a bounded role-cache miss.
 /// Errors confer no reply/follow authority. Display names never participate.
 pub(super) async fn evidence(
     state: &AppState,
@@ -72,6 +73,7 @@ pub(super) async fn evidence(
         {
             message["referenced_message"] = parent;
         }
+        crate::services::discord_gateway::roles::ensure(&bot, &token, &message).await;
         let Some(facts) = crate::services::discord_gateway::facts::authenticated_facts(
             &bot,
             &json!({"d":message}),
@@ -101,9 +103,7 @@ pub(super) async fn evidence(
     );
     // Native thread/reply-chain metadata reuses the existing follow selector,
     // including members, reply_mode, limits, stop, expiry and turn-time fences.
-    if !matches!(facts.kind, ThreadKind::Native | ThreadKind::ReplyChain) {
-        return Ok(result);
-    }
+    let follow_supported = matches!(facts.kind, ThreadKind::Native | ThreadKind::ReplyChain);
     let Some(response) = Box::pin(async {
         state
             .db
@@ -128,11 +128,12 @@ pub(super) async fn evidence(
         state
             .db
             .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
-            .update_one(doc! {"_id":&source_id}, doc! {"$setOnInsert":source})
+            .update_one(doc! {"_id":&source_id}, doc! {"$set":source})
             .upsert(true)
             .await
     })
     .await?;
-    result.source_message = Some(source_id);
+    crate::services::nyxbot_admission_service::begin(&state.db, row, &source_id, event).await?;
+    result.source_message = follow_supported.then_some(source_id);
     Ok(result)
 }

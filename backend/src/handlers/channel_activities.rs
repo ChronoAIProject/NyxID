@@ -27,7 +27,37 @@ pub struct ActivityQuery {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AdmissionItem {
+    pub disposition: String,
+    pub bot_mentioned: Option<bool>,
+    pub managed_role_mentioned: bool,
+    pub broadcast_roles: Option<u16>,
+    pub broadcast_everyone_or_here: bool,
+    pub address: crate::models::channel_thread::ThreadAddress,
+    pub thread_follow_selection: Option<String>,
+    pub resolved_thread_id: Option<String>,
+    pub turn_id: Option<String>,
+}
+impl From<crate::models::channel_message::NyxbotAdmission> for AdmissionItem {
+    fn from(a: crate::models::channel_message::NyxbotAdmission) -> Self {
+        Self {
+            disposition: a.disposition,
+            bot_mentioned: a.bot_mentioned,
+            managed_role_mentioned: a.managed_role_mentioned,
+            broadcast_roles: a.broadcast_roles,
+            broadcast_everyone_or_here: a.broadcast_everyone_or_here,
+            address: a.address,
+            thread_follow_selection: a.thread_follow_selection,
+            resolved_thread_id: a.resolved_thread_id,
+            turn_id: a.turn_id,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct ActivityItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_admission: Option<AdmissionItem>,
     pub id: String,
     pub conversation_id: String,
     pub platform_conversation_id: Option<String>,
@@ -46,6 +76,7 @@ impl From<ChannelMessage> for ActivityItem {
     fn from(message: ChannelMessage) -> Self {
         let activity = message.activity;
         Self {
+            nyxbot_admission: message.nyxbot_admission.map(Into::into),
             id: message.id,
             conversation_id: message.conversation_id,
             platform_conversation_id: message.platform_conversation_id,

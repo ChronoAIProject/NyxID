@@ -1091,6 +1091,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "connect_channel_bot" => "Connect a channel bot",
         "link_channel_bot" => "Change which agent a channel bot reaches",
         "disconnect_channel_bot" => "Disconnect a channel bot",
+        "retry_channel_gateway" => "Retry native Discord gateway activation",
         "update_channel_chat" => "Change who may talk in a channel chat",
         "update_channel_access" => "Change private chat access and posting defaults",
         "stop_following_thread" => "Stop following a channel thread",
@@ -1504,6 +1505,7 @@ fn dispatch<'a>(
         "channel_setup_guide"
         | "channel_bot_setup_link"
         | "connect_channel_bot"
+        | "retry_channel_gateway"
         | "link_channel_bot"
         | "list_channel_agents"
         | "list_channel_chats"
@@ -2931,6 +2933,15 @@ async fn dispatch_channels(
         }
         "disconnect_channel_bot" => (
             super::nyxbot::disconnect(state, owner, text_arg(args, "channel_agent_id")).await?,
+            false,
+        ),
+        "retry_channel_gateway" => (
+            Box::pin(super::nyxbot::gateway_retry::retry(
+                state,
+                owner,
+                text_arg(args, "channel_agent_id"),
+            ))
+            .await?,
             false,
         ),
         _ => return Err(AppError::NotFound("NyxBot tool not found".into())),

@@ -679,6 +679,13 @@ export const nyxAgentChannelAgentSchema = z.object({
   bot_label: z.string(),
   bot_username: z.string().nullable().default(null),
   transport: z.string(),
+  gateway_source: z.object({ type: z.string() }).optional(),
+  gateway_native_phase: z.string().optional(),
+  gateway_native_activation: z.string().optional(),
+  gateway_native_activation_detail: z.string().optional(),
+  gateway_native_delivery: z.string().optional(),
+  gateway_next_retry_at: z.string().optional(),
+  gateway_retry_available_at: z.string().optional(),
   /** `pending`, `active` or `failed`. */
   status: z.string(),
   last_error: z.string().nullable().default(null),

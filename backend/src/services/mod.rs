@@ -540,6 +540,7 @@ pub mod domain_alias_service;
 #[cfg(test)]
 mod shared_agent_tests;
 
+pub(crate) mod nyxbot_admission_service;
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
 
