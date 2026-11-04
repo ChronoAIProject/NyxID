@@ -25,7 +25,7 @@ response id (from `response.created` once the stream started), continuation
 count, turn id, and timestamp. The original upstream response, prompts,
 credentials, and tool arguments are never stored. Stages name where the turn
 failed: `prepare` (before any egress), `connect` (proxy or billing refusal),
-`first_byte` (no headers or no body bytes within 30 s), `upstream_response`
+`first_byte` (no headers or no body bytes within the bounded startup wait), `upstream_response`
 (non-2xx or non-SSE), `stream` (malformed stream or `response.failed`),
 `idle` (no transport bytes for 120 s), `no_progress` (keepalives only, no data
 event, for 610 s), `continuation`, `recovery`, `stop`, `permit`,
@@ -35,6 +35,25 @@ first-byte bound; any data event, including MCP tool-progress events the
 decoder otherwise ignores, resets the no-progress bound. A reclaimed orphan
 turn carries its activity and attachment checkpoint forward; running
 activities become `error`.
+
+Failed replies add `action_outcome` for web and mobile clients: fixed server copy,
+`complete`, and a list keyed by activity ID with the tool label, `completed` or
+`uncertain` status, a summary, and `retry_warning`. It is derived from the settled
+activities, not the model's answer. Only an explicit complete zero activity count
+permits “No actions were taken.” An upstream `outcome_unknown` remains uncertain
+even with an empty local list. Empty legacy lists omit the field. Missing or
+truncated evidence and interrupted/error calls never imply that a write was
+rolled back. Completed schedule creation is shown as “Created a scheduled
+automation”; other calls retain metadata-only labels. Existing activity details
+and permission/machine receipts remain available. Permission receipts authorize
+an effect; they alone do not prove completion.
+
+A first-byte failure is not proof of no execution. NyxAgent sends lifecycle events
+before tools and keepalives every 15 seconds, but buffering or transport delays can
+hide them. Dropping its stream signals cancellation; completed remote effects are
+not undone, and an already dispatched MCP call can finish after disconnect.
+NyxID records activity before dispatch and settlement preserves uncertain calls;
+callbacks without a live turn fail the existing live-turn fence.
 
 Every settled owner turn writes a durable checkpoint (`assistant_checkpoints`,
 `_id` = conversation id) in its settlement transaction: the goal (the owner
@@ -114,6 +133,18 @@ same canonical tool and arguments is refused as `retry_duplicate_action` before
 execution. This is a fence for known completed calls, not an exactly-once
 guarantee for unknown outcomes. Ordinary turns are unaffected. Pending
 acknowledgement cards keep their own expiry and are not re-presented by Retry.
+The web client displays `retry_warning` and requires confirmation before retrying
+when actions are recorded or their outcomes are uncertain. Schedule creation uses
+`nyxid__create_schedule`; its UUID is generated server-side, outside the canonical
+tool arguments, so identical create calls are fenced even if no reply arrived.
+An additive activity `retry_identity` also ignores the one-use acknowledgement
+handle and direct/universal wrapper for schedule creation; the original `digest`
+is retained and checked for old replies/readers. All other arguments still bind.
+Older replicas retain exact-call protection; normalization requires upgraded
+writers and readers and cannot be reconstructed from legacy hashes.
+This does not deduplicate intentionally changed arguments. Refused duplicates
+retain their completed digest for ancestry and additive `retry_duplicate_action`
+activity metadata, so the outcome does not claim a second creation.
 
 Normative NyxID 0.24.0 contract, verified against the read-only NxyAgent clone
 at commit `58f647e4`. The retained design records are
@@ -1500,7 +1531,13 @@ operation resolved immediately before dispatch; stale-turn writes are no-ops.
 At a continuation boundary, the held tail is flushed with the same two-newline
 separator used in persisted text, preventing a contiguous cross-response secret.
 
-First-byte deadline is 30 seconds including request setup. Idle timeout is
+First-byte deadline is 30 seconds including request setup. At expiry only, NyxID
+checks the same live turn/key for tool activity started since this upstream
+request. If present, the same pending request/body gets up to 610 seconds from
+request dispatch (the existing no-progress bound), without replay or a new
+attempt. Prior-continuation activity does not extend a later request. No activity
+or an unavailable evidence read retains the short timeout. The whole-turn cap
+and Stop watcher still apply; ordinary streaming adds no reads. Idle timeout is
 120 seconds (upstream keepalive is 15 seconds). Turn execution is capped at
 610 seconds per possible upstream turn, bounded by the continuation hard cap
 (32 continuations); each stream is capped at 8 MiB and total output text at 2 MiB. Incremental decoding

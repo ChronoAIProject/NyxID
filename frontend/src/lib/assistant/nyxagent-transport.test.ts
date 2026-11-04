@@ -2510,3 +2510,18 @@ it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "h
 it.each(["model_route_unavailable", "model_connection_unavailable", "credits_unavailable", "setup_timeout", "setup_capacity"])("renders setup failure wording for %s", (reason) => {
   expect(storedError("guest_model_route_required", undefined, reason)).toBe("Visitor setup could not finish. The owner has been notified. Please try again later.");
 });
+
+
+it("carries the server action outcome from failed history to the message view", async () => {
+  const page = history();
+  const outcome = {
+    summary: "These actions completed before the reply failed.", complete: true,
+    actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+    retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+  };
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "first_byte_timeout", action_outcome: outcome };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.actionOutcome).toEqual(outcome);
+});

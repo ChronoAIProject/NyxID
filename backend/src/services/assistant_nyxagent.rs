@@ -4912,6 +4912,7 @@ pub async fn activity_started_for_turn(
     activity_started_with_digest(db, user_id, conversation_id, turn_id, label, None).await
 }
 
+#[cfg(test)]
 pub async fn activity_started_with_digest(
     db: &Database,
     user_id: &str,
@@ -4919,6 +4920,18 @@ pub async fn activity_started_with_digest(
     turn_id: &str,
     label: &str,
     digest: Option<&str>,
+) -> AppResult<Option<String>> {
+    activity_started_with_identity(db, user_id, conversation_id, turn_id, label, digest, None).await
+}
+
+pub async fn activity_started_with_identity(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    label: &str,
+    digest: Option<&str>,
+    retry_identity: Option<&str>,
 ) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label = if label
@@ -4934,6 +4947,7 @@ pub async fn activity_started_with_digest(
         "id": &id,
         "label": label,
         "digest": digest,
+        "retry_identity": retry_identity,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -4980,6 +4994,8 @@ pub struct RecoveryPreview {
 struct RetryActivityEvidence {
     label: String,
     digest: Option<String>,
+    #[serde(default)]
+    retry_identity: Option<String>,
     status: String,
 }
 
@@ -5019,6 +5035,7 @@ impl From<&AssistantMessage> for RetryEvidence {
                 .map(|a| RetryActivityEvidence {
                     label: a.label.clone(),
                     digest: a.digest.clone(),
+                    retry_identity: a.retry_identity.clone(),
                     status: a.status.clone(),
                 })
                 .collect(),
@@ -5031,7 +5048,7 @@ fn retry_evidence_projection() -> bson::Document {
         "turn_id": 1, "seq": 1, "role": 1, "status": 1, "error_code": 1,
         "origin": 1, "retry_of": 1, "retry_claimed_by": 1,
         "activity_count": 1, "activities.label": 1,
-        "activities.digest": 1, "activities.status": 1,
+        "activities.digest": 1, "activities.retry_identity": 1, "activities.status": 1,
     }
 }
 
@@ -5103,6 +5120,11 @@ fn retry_evidence(
                 .ok_or("activity_evidence_incomplete")?;
             if !digests.iter().any(|seen| seen == digest) {
                 digests.push(digest.to_owned());
+            }
+            if let Some(identity) = activity.retry_identity.as_deref().filter(|d| !d.is_empty())
+                && !digests.iter().any(|seen| seen == identity)
+            {
+                digests.push(identity.to_owned());
             }
             if completed_keys.insert(digest) {
                 completed_labels.push(activity.label.clone());
@@ -5403,6 +5425,7 @@ pub async fn retry_context_in_session(
 
 /// Whether a chat-key call repeats a completed call of the failed turn the
 /// live turn retries. One point read of the conversation.
+#[cfg(test)]
 pub async fn retry_duplicate(
     db: &Database,
     user_id: &str,
@@ -5410,12 +5433,22 @@ pub async fn retry_duplicate(
     turn_id: &str,
     digest: &str,
 ) -> AppResult<bool> {
+    retry_duplicate_any(db, user_id, conversation_id, turn_id, &[digest]).await
+}
+
+pub async fn retry_duplicate_any(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    digests: &[&str],
+) -> AppResult<bool> {
     Ok(db
         .collection::<bson::Document>(CONVERSATIONS)
         .find_one(doc! {
             "_id": conversation_id, "user_id": user_id,
             "active_turn.turn_id": turn_id,
-            "active_turn.retry_digests": digest,
+            "active_turn.retry_digests": {"$in": digests},
         })
         .projection(doc! {"_id": 1})
         .await?
@@ -5440,6 +5473,9 @@ pub async fn record_retry_duplicate(
         "label": label,
         "digest": digest,
         "status": "completed",
+        // Retain the completed digest for retry ancestry, but make clear this
+        // turn did not execute the action again. Additive metadata for readers.
+        "failure": {"kind": RETRY_DUPLICATE_ACTION},
         "started_at": now,
         "ended_at": now,
     };

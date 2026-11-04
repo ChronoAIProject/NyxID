@@ -1,4 +1,6 @@
 use super::*;
+#[path = "assistant_first_byte_outcome_tests.rs"]
+mod first_byte_outcome_tests;
 #[path = "assistant_guest_turn_tests.rs"]
 mod guest_turn_tests;
 use crate::services::assistant_engine_policy as engine_policy;
@@ -580,6 +582,12 @@ async fn delayed_headers_fail_as_first_byte_with_internal_stage() {
         reply.upstream_error_code, None,
         "a NyxID timeout is not an upstream code"
     );
+    let outcome = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();
+    assert_eq!(
+        outcome["action_outcome"]["summary"],
+        "No actions were taken."
+    );
+    assert_eq!(outcome["action_outcome"]["retry_warning"], Value::Null);
     let detail = reply.error_detail.unwrap();
     assert_eq!(detail.stage, "first_byte");
     assert_eq!(detail.response_id, None);
@@ -4513,6 +4521,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            retry_identity: None,
             digest: None,
             machine: None,
             id: "activity".into(),

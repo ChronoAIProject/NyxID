@@ -2393,6 +2393,29 @@ fn chat_activity_digest(params: &serde_json::Value) -> String {
     )
 }
 
+/// Schedule creation has no client-generated object ID. Approval handles and
+/// the universal-tool wrapper are transport, not a different creation. Keep the
+/// old digest as a lookup candidate for replies written by older replicas.
+fn chat_retry_digest(params: &serde_json::Value) -> String {
+    let (name, mut arguments) = if params["name"] == "nyx__call_tool" {
+        let arguments = params["arguments"]["arguments_json"]
+            .as_str()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        (params["arguments"]["tool_name"].as_str(), arguments)
+    } else {
+        (params["name"].as_str(), params.get("arguments").cloned())
+    };
+    if name == Some("nyxid__create_schedule")
+        && let Some(arguments) = arguments
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        arguments.remove("acknowledgement_id");
+        return chat_activity_digest(&serde_json::json!({"name":name,"arguments":arguments}));
+    }
+    chat_activity_digest(params)
+}
+
 /// Refuse a retried turn's repeat of a completed call: an MCP `isError`
 /// result the model can act on, recorded on the live turn (so a retry of this
 /// retry stays fenced) and audited with metadata only.
@@ -2504,19 +2527,20 @@ async fn handle_tools_call(
     if let Some(chat) = &auth.chat
         && let Some(params) = request.params.as_ref()
     {
-        let digest = chat_activity_digest(params);
-        match crate::services::assistant_nyxagent::retry_duplicate(
+        let digest = chat_retry_digest(params);
+        let legacy = chat_activity_digest(params);
+        match crate::services::assistant_nyxagent::retry_duplicate_any(
             &state.db,
             &chat.user_id,
             &chat.conversation_id,
             chat.turn_id.as_deref().unwrap_or_default(),
-            &digest,
+            &[digest.as_str(), legacy.as_str()],
         )
         .await
         {
             Ok(false) => {}
             Ok(true) => {
-                return refuse_retry_duplicate(state, auth, chat, request, params, &digest).await;
+                return refuse_retry_duplicate(state, auth, chat, request, params, &legacy).await;
             }
             Err(_) => {
                 return rpc_error(request.id.clone(), -32603, ACTIVITY_RECORDING_RETRY);
@@ -2541,13 +2565,14 @@ async fn handle_tools_call(
     };
     let activity = match (auth.chat.as_ref(), request.params.as_ref()) {
         (Some(chat), Some(params)) => {
-            match crate::services::assistant_nyxagent::activity_started_with_digest(
+            match crate::services::assistant_nyxagent::activity_started_with_identity(
                 &state.db,
                 &chat.user_id,
                 &chat.conversation_id,
                 chat.turn_id.as_deref().unwrap_or_default(),
                 &chat_activity_label(params),
                 Some(&chat_activity_digest(params)),
+                Some(&chat_retry_digest(params)),
             )
             .await
             {
@@ -11114,3 +11139,30 @@ mod lark_base_tests;
 #[cfg(test)]
 #[path = "mcp_lark_im_tests.rs"]
 mod lark_im_tests;
+
+#[cfg(test)]
+mod schedule_retry_identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn schedule_retry_identity_ignores_approval_handle_and_wrapper_only() {
+        let args = json!({"label":"QA", "instruction":"Say hello", "schedule":{"kind":"at","at":"2099-12-31T15:00:00Z"}});
+        let direct = json!({"name":"nyxid__create_schedule","arguments":args});
+        let mut approved = direct.clone();
+        approved["arguments"]["acknowledgement_id"] = json!("one-use-card");
+        let wrapped = json!({"name":"nyx__call_tool", "arguments":{
+            "tool_name":"nyxid__create_schedule", "arguments_json":approved["arguments"].to_string()}});
+        assert_eq!(chat_retry_digest(&direct), chat_retry_digest(&approved));
+        assert_eq!(chat_retry_digest(&direct), chat_retry_digest(&wrapped));
+        assert_ne!(
+            chat_activity_digest(&direct),
+            chat_activity_digest(&approved)
+        );
+        approved["arguments"]["label"] = json!("Different automation");
+        assert_ne!(chat_retry_digest(&direct), chat_retry_digest(&approved));
+        let other =
+            json!({"name":"service__write", "arguments":{"acknowledgement_id":"provider-field"}});
+        assert_eq!(chat_retry_digest(&other), chat_activity_digest(&other));
+    }
+}
