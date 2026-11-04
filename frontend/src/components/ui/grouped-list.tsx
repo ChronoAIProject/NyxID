@@ -1,5 +1,7 @@
 import {
   createContext,
+  cloneElement,
+  isValidElement,
   useContext,
   useId,
   useState,
@@ -51,18 +53,20 @@ export function GroupedList({
             {title}
           </h3>
         )}
-        <div
-          data-grouped-list=""
-          className="overflow-hidden rounded-xl border border-border/50 bg-card"
-        >
-          {children}
-        </div>
+        {children != null && (
+          <div
+            data-grouped-list=""
+            className="overflow-hidden rounded-xl border border-border/50 bg-card empty:hidden"
+          >
+            {children}
+          </div>
+        )}
         <div
           ref={setFooterContainer}
           data-grouped-footer=""
           className="space-y-1 break-words px-4 text-11 font-normal leading-relaxed text-text-tertiary empty:hidden"
         >
-          {footer}
+          {typeof footer === "string" || typeof footer === "number" ? <p>{footer}</p> : footer}
         </div>
       </section>
     </FooterContext.Provider>
@@ -89,6 +93,7 @@ export function GroupedRow({
   readonly accessory?: ReactNode;
 }) {
   const Component = asChild ? Slot : "div";
+  const child = asChild && isValidElement<{ className?: string }>(children) ? children : null;
   return (
     <Component
       data-grouped-row=""
@@ -98,11 +103,12 @@ export function GroupedRow({
         interactive &&
           "cursor-pointer transition-colors hover:bg-overlay active:bg-overlay-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:text-text-tertiary disabled:hover:bg-transparent",
         className,
+        child?.props.className,
       )}
       {...props}
     >
       {asChild
-        ? children
+        ? child ? cloneElement(child, { className: undefined }) : children
         : (children ?? (
             <>
               {leading && (

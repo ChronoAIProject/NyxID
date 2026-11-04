@@ -70,6 +70,7 @@ const fixture = vi.hoisted(() => ({
   retryPending: false,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({
     to,
     params,
@@ -333,8 +334,9 @@ it("requires reviewed irreversible data loss acknowledgement before deletion", a
   );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   const dialog = within(screen.getByRole("dialog"));
-  const submit = screen.getByRole("button", { name: "Delete permanently" });
-  expect(submit).toBeDisabled();
+  expect(
+    screen.queryByRole("button", { name: "Delete permanently" }),
+  ).not.toBeInTheDocument();
   expect(
     dialog.getByText(/permanently removes the workspace/),
   ).toBeInTheDocument();
@@ -354,7 +356,9 @@ it("requires reviewed irreversible data loss acknowledgement before deletion", a
     dialog.getByText(/temporary runtime data.*HOME.*\/tmp/),
   ).toBeInTheDocument();
   await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
-  await userEvent.click(submit);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Delete permanently" }),
+  );
   await waitFor(() => expect(fixture.action).toHaveBeenCalled());
   expect(fixture.action.mock.calls[0]?.[0]).toMatchObject({
     machineId: fixture.machine.node_id,

@@ -14,8 +14,10 @@ export function MachineGrantPicker({
   onChange,
   disabled,
   org,
+  footer,
 }: {
   readonly org?: string;
+  readonly footer?: React.ReactNode;
   readonly kind: "machines" | "logins";
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
@@ -57,11 +59,14 @@ export function MachineGrantPicker({
       <GroupedList
         title={kind === "machines" ? "Machines" : "Saved logins"}
         footer={
-          error ? (
-            <span role="alert" className="text-destructive">
-              {error.message}
-            </span>
-          ) : undefined
+          <>
+            {footer}
+            {error ? (
+              <span role="alert" className="text-destructive">
+                {error.message}
+              </span>
+            ) : null}
+          </>
         }
       >
         {allRows.length > 8 ? (

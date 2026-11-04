@@ -115,7 +115,11 @@ export function GroupedFormActions({
   save,
   discard,
   saveLabel = "Save changes",
-}: GroupedFormEntry & { readonly saveLabel?: string }) {
+  saveVariant = "primary",
+}: GroupedFormEntry & {
+  readonly saveLabel?: string;
+  readonly saveVariant?: "primary" | "destructive";
+}) {
   const coordinated = useGroupedForm({
     label,
     dirty,
@@ -140,7 +144,7 @@ export function GroupedFormActions({
       </Button>
       <Button
         type="button"
-        variant="primary"
+        variant={saveVariant}
         disabled={disabled || pending}
         onClick={() => void save()}
       >

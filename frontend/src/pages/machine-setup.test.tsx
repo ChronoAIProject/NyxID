@@ -27,6 +27,7 @@ const mock = vi.hoisted(() => ({
   search: {} as Record<string, string>,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   useSearch: () => mock.search,
   useNavigate: () => mock.navigate,
   Link: ({ children }: { children: React.ReactNode }) => <a href="/assistant/machines">{children}</a>,
@@ -338,6 +339,33 @@ it("shows actionable separation selection when the node reports no owner choice"
   expect(screen.getByText(/machine access requires an owner separation choice/)).toBeInTheDocument();
   expect(screen.getByText("Upgrade the old node or explicitly choose legacy.")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Review machine separation" })).toBeInTheDocument();
+});
+
+it("guards switching to hosted setup and retains the self-hosted draft after Keep editing", async () => {
+  useAuthStore.setState({
+    user: {
+      ...useAuthStore.getState().user!,
+      id: "owner",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    },
+    isAuthenticated: true,
+    isLoading: false,
+  });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={new QueryClient()}><MachineSetupPage /></QueryClientProvider>);
+  const name = screen.getByRole("textbox", { name: "Machine name" });
+  await user.clear(name);
+  await user.type(name, "draft-machine");
+  await user.click(screen.getByRole("tab", { name: "NyxID hosted" }));
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(name).toHaveValue("draft-machine");
+  expect(screen.getByRole("tab", { name: "Remote VM" })).toHaveAttribute("data-state", "active");
+  await user.click(screen.getByRole("tab", { name: "NyxID hosted" }));
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(screen.getByRole("tab", { name: "NyxID hosted" })).toHaveAttribute("data-state", "active"));
+  expect(mock.issue).not.toHaveBeenCalled();
+  expect(mock.createRemote).not.toHaveBeenCalled();
 });
 
 it.each((["vm", "docker"] as const).flatMap(where => [

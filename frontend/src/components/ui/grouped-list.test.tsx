@@ -84,3 +84,10 @@ it("places portaled form descriptions and validation outside the card with linke
   expect(error.closest("[data-grouped-list]")).toBeNull();
   expect(error.closest("[data-grouped-footer]")).toBeInTheDocument();
 });
+
+it("merges native child classes so destructive action rows override the default text color", () => {
+  render(<GroupedList><GroupedRow asChild interactive><button className="text-destructive">Disconnect account</button></GroupedRow></GroupedList>);
+  const action = screen.getByRole("button", { name: "Disconnect account" });
+  expect(action).toHaveClass("text-destructive");
+  expect(action).not.toHaveClass("text-foreground");
+});

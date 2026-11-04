@@ -108,7 +108,9 @@ it("explains configured shared access on a headless machine without a browser to
   } }} canManage />);
   expect(screen.getByText(/Agents configured for Shared legacy can run granted commands/)).toBeInTheDocument();
   expect(screen.getByText(/Browser permissions are not required/)).toBeInTheDocument();
-  expect(screen.getByText("separated_requires_managed_browser").closest("details")).not.toHaveAttribute("open");
+  expect(
+    screen.queryByText("separated_requires_managed_browser"),
+  ).not.toBeInTheDocument();
   expect(screen.queryByText("Live desktop")).not.toBeInTheDocument();
 });
 
@@ -160,4 +162,36 @@ it("makes missing selection recoverable from the machine settings link", () => {
   expect(screen.getByRole("link", { name: "Review Coder separation" })).toHaveAttribute("href", "/assistant?agent=specialist&details=grants");
   expect(screen.getByText(/New assignments need a recorded choice and confirmed support/)).toBeInTheDocument();
   expect(screen.getByText(/may read node tokens, signing secrets and stored credentials/)).toBeInTheDocument();
+});
+
+it("keeps a failed grant dirty after settings save, and retries only that grant", async () => {
+  save.mockResolvedValue(undefined);
+  grant.mockRejectedValueOnce(new Error("Grant revision changed"));
+  render(<MachineSettings node={node} canManage />);
+  fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "Allow saved-login typing on this machine",
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("checkbox", {
+      name: "I understand the shared-user risk and allow typing.",
+    }),
+  );
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save machine settings" }),
+  );
+  expect(await screen.findByRole("alert")).toHaveTextContent("Grant revision changed");
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(grant).toHaveBeenCalledTimes(1);
+  expect(save.mock.invocationCallOrder[0]).toBeLessThan(grant.mock.invocationCallOrder[0]!);
+  expect(screen.getByRole("checkbox", { name: "Coder" })).not.toBeChecked();
+  grant.mockResolvedValueOnce(undefined);
+  fireEvent.click(
+    screen.getByRole("button", { name: "Save machine settings" }),
+  );
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
+  expect(save).toHaveBeenCalledTimes(1);
+  expect(grant).toHaveBeenCalledTimes(2);
 });

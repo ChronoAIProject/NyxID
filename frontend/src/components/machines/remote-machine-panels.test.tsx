@@ -22,6 +22,7 @@ vi.mock("@/lib/api-client", async (load) => ({
   apiClient: http.read,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),

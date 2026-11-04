@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   older: vi.fn(),
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   useSearch: () => mocks.search(),
   Link: ({
     to,
@@ -119,6 +120,63 @@ function chooseOption(label: string, name: string) {
   fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowDown" });
   fireEvent.keyDown(screen.getByRole("option", { name }), { key: "Enter" });
 }
+
+it("preserves schedule drafts across segments and guards dismissal until discarded", async () => {
+  const user = userEvent.setup();
+  const close = vi.fn();
+  render(<AutomationEditor onClose={close} onSecrets={vi.fn()} />);
+  expect(
+    screen.queryByRole("region", { name: "Unsaved changes" }),
+  ).not.toBeInTheDocument();
+  screen.getByRole("tab", { name: "Calendar" }).focus();
+  await user.keyboard("{ArrowRight}");
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Every" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    ),
+  );
+  await user.clear(screen.getByRole("spinbutton", { name: "Interval amount" }));
+  await user.type(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+    "3",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Start, end and run limits" }),
+  );
+  await user.type(screen.getByLabelText("Maximum occurrences"), "7");
+  await user.click(screen.getByRole("tab", { name: "Once" }));
+  expect(screen.getByLabelText("Run at time")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Webhook" }));
+  expect(screen.getByLabelText("Inbound verification")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Schedule" }));
+  await user.click(screen.getByRole("tab", { name: "Every" }));
+  expect(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+  ).toHaveValue(3);
+  expect(screen.getByLabelText("Maximum occurrences")).toHaveValue(7);
+  expect(
+    screen.getAllByRole("region", { name: "Unsaved changes" }),
+  ).toHaveLength(1);
+  await user.keyboard("{Escape}");
+  const guard = await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  });
+  await user.click(within(guard).getByRole("button", { name: "Keep editing" }));
+  expect(close).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+  ).toHaveValue(3);
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  expect(
+    screen.queryByRole("region", { name: "Unsaved changes" }),
+  ).not.toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Calendar" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  expect(mocks.create).not.toHaveBeenCalled();
+});
 
 it("previews calendar times after the debounce and cancels stale previews", async () => {
   vi.useFakeTimers();
@@ -299,7 +357,8 @@ it("edits a schedule without changing its source", async () => {
   render(
     <AutomationEditor row={trigger} onClose={vi.fn()} onSecrets={vi.fn()} />,
   );
-  expect(screen.getByLabelText("Source")).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Schedule" })).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Webhook" })).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Instruction"), {
     target: { value: "Summarise unread notifications" },
   });
@@ -440,8 +499,15 @@ it("shows preference validation errors and keeps invalid timezones unsaved", asy
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
   );
 
+  await user.clear(screen.getByRole("spinbutton", { name: "Runs per hour" }));
+  await user.type(
+    screen.getByRole("spinbutton", { name: "Runs per hour" }),
+    "4",
+  );
   await user.click(screen.getByRole("button", { name: "Save preferences" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("IANA timezone");
+  expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAccessibleDescription(/IANA timezone/);
   expect(mocks.saveSettings).not.toHaveBeenCalled();
 });
 

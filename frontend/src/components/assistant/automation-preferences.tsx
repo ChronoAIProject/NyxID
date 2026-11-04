@@ -1,5 +1,11 @@
 import { ChevronRight } from "lucide-react";
-import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedDisclosure,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
 import { Link } from "@tanstack/react-router";
 import { TimezoneSelect } from "@/components/shared/timezone-select";
 import { browserTimezone, formatAutomationTime } from "@/lib/automation-time";
@@ -11,7 +17,7 @@ import {
   DEFAULT_TRIGGER_RUNS_PER_DAY,
   TRIGGER_RUNS_PER_DAY_LIMIT,
 } from "@/lib/automation-limits";
-import { useState } from "react";
+import { useId, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useTriggers } from "@/hooks/use-triggers";
 import {
@@ -20,8 +26,11 @@ import {
 } from "@/hooks/use-nyxbot-agents";
 import { automationPreferencesSchema } from "@/schemas/automations";
 import { useAppForm } from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import {
+  GroupedDraftOwnerContext,
+  useGroupedDraftGuard,
+} from "@/lib/grouped-drafts";
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "Could not save preferences";
 export function AgentAutomations({ agentId }: { readonly agentId: string }) {
@@ -65,29 +74,44 @@ export function AutomationPreferences() {
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [open, setOpen] = useState(false);
+  const guard = useGroupedDraftGuard();
   return (
-    <div className="text-12">
-      <button className="text-primary-text underline" onClick={() => setOpen(!open)}>
-        Timezone and automation budgets
-      </button>
-      {open && settings.data && (
-        <AutomationPreferencesForm
-          timezone={settings.data.timezone ?? browserTimezone()}
-          minimum={
-            settings.data.schedule_minimum_minutes ??
-            DEFAULT_SCHEDULE_MINIMUM_MINUTES
-          }
-          hourly={
-            settings.data.trigger_runs_per_hour ?? DEFAULT_TRIGGER_RUNS_PER_HOUR
-          }
-          daily={
-            settings.data.trigger_runs_per_day ?? DEFAULT_TRIGGER_RUNS_PER_DAY
-          }
-          save={async (v) => {
-            await update.mutateAsync(v);
-            setOpen(false);
+    <div className="max-w-2xl space-y-6 text-12">
+      <GroupedList title="Automations">
+        <GroupedDisclosure
+          aria-expanded={open}
+          onClick={async () => {
+            if (
+              !open ||
+              !guard ||
+              (await guard.confirmDiscard("automation-preferences"))
+            )
+              setOpen(!open);
           }}
-        />
+        >
+          Timezone and automation budgets
+        </GroupedDisclosure>
+      </GroupedList>
+      {open && settings.data && (
+        <GroupedDraftOwnerContext value="automation-preferences">
+          <AutomationPreferencesForm
+            timezone={settings.data.timezone ?? browserTimezone()}
+            minimum={
+              settings.data.schedule_minimum_minutes ??
+              DEFAULT_SCHEDULE_MINIMUM_MINUTES
+            }
+            hourly={
+              settings.data.trigger_runs_per_hour ?? DEFAULT_TRIGGER_RUNS_PER_HOUR
+            }
+            daily={
+              settings.data.trigger_runs_per_day ?? DEFAULT_TRIGGER_RUNS_PER_DAY
+            }
+            save={async (v) => {
+              await update.mutateAsync(v);
+              setOpen(false);
+            }}
+          />
+        </GroupedDraftOwnerContext>
       )}
     </div>
   );
@@ -110,6 +134,7 @@ function AutomationPreferencesForm({
     trigger_runs_per_day: number;
   }) => Promise<void>;
 }) {
+  const id = useId();
   const form = useAppForm({
     resolver: zodResolver(automationPreferencesSchema),
     defaultValues: {
@@ -120,71 +145,90 @@ function AutomationPreferencesForm({
     },
   });
   const [error, setError] = useState<string>();
+  const submit = form.handleSubmit(async (v) => {
+    setError(undefined);
+    try {
+      await save(v);
+      form.reset(v);
+    } catch (e) {
+      setError(message(e));
+    }
+  });
   return (
-    <form
-      className="mt-3 grid gap-3 rounded-xl border border-border p-4 sm:grid-cols-2"
-      onSubmit={form.handleSubmit(async (v) => {
-        setError(undefined);
-        try {
-          await save(v);
-        } catch (e) {
-          setError(message(e));
+    <form className="space-y-6" onSubmit={submit}>
+      <GroupedList
+        title="Timezone and automation budgets"
+        footer={
+          error && (
+            <p role="alert" className="text-destructive">
+              {error}
+            </p>
+          )
         }
-      })}
-    >
-      <TimezoneSelect
-        value={form.watch("timezone")}
-        onChange={(value) => form.setValue("timezone", value)}
-      />
-      {(
-        [
-          [
-            "schedule_minimum_minutes",
-            "Minimum interval (minutes)",
-            DEFAULT_SCHEDULE_MINIMUM_MINUTES,
-            SCHEDULE_MINIMUM_MINUTES_LIMIT,
-          ],
-          [
-            "trigger_runs_per_hour",
-            "Runs per hour",
-            1,
-            TRIGGER_RUNS_PER_HOUR_LIMIT,
-          ],
-          [
-            "trigger_runs_per_day",
-            "Runs per day",
-            1,
-            TRIGGER_RUNS_PER_DAY_LIMIT,
-          ],
-        ] as const
-      ).map(([key, label, min, max]) => (
-        <label key={key}>
-          {label}
-          <Input
-            type="number"
-            min={min}
-            max={max}
-            {...form.register(key, { valueAsNumber: true, min, max })}
-          />
-        </label>
-      ))}
-      {Object.entries(form.formState.errors).map(([field, validation]) => (
-        <p key={field} role="alert" className="text-destructive">
-          {validation.message}
-        </p>
-      ))}
-      {error && (
-        <p role="alert" className="text-destructive">
-          {error}
-        </p>
-      )}
-      <Button
-        type="submit"
-        variant="primary"
-        disabled={form.formState.isSubmitting}
       >
-        Save preferences
-      </Button>
+        <TimezoneSelect
+          grouped
+          describedBy={`${id}-timezone-error`}
+          invalid={Boolean(form.formState.errors.timezone)}
+          value={form.watch("timezone")}
+          onChange={(value) => form.setValue("timezone", value)}
+        />
+        {(
+          [
+            [
+              "schedule_minimum_minutes",
+              "Minimum interval (minutes)",
+              DEFAULT_SCHEDULE_MINIMUM_MINUTES,
+              SCHEDULE_MINIMUM_MINUTES_LIMIT,
+            ],
+            [
+              "trigger_runs_per_hour",
+              "Runs per hour",
+              1,
+              TRIGGER_RUNS_PER_HOUR_LIMIT,
+            ],
+            [
+              "trigger_runs_per_day",
+              "Runs per day",
+              1,
+              TRIGGER_RUNS_PER_DAY_LIMIT,
+            ],
+          ] as const
+        ).map(([key, label, min, max]) => (
+          <GroupedRow key={key} asChild>
+            <label>
+              <span className="flex-1">{label}</span>
+              <GroupedInput
+                className="w-20 text-right"
+                type="number"
+                min={min}
+                max={max}
+                aria-describedby={`${id}-${key}-error`}
+                aria-invalid={Boolean(form.formState.errors[key])}
+                {...form.register(key, { valueAsNumber: true, min, max })}
+              />
+            </label>
+          </GroupedRow>
+        ))}
+        <GroupedFooter>
+          {Object.entries(form.formState.errors).map(([field, validation]) => (
+            <p key={field} id={`${id}-${field}-error`} role="alert" className="text-destructive">
+              {validation.message}
+            </p>
+          ))}
+        </GroupedFooter>
+      </GroupedList>
+      <GroupedFormActions
+        label="automation preferences"
+        dirty={form.formState.isDirty}
+        pending={form.formState.isSubmitting}
+        save={submit}
+        discard={() => {
+          form.reset();
+          setError(undefined);
+        }}
+        saveLabel="Save preferences"
+      />
     </form>
   );
 }

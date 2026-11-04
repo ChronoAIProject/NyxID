@@ -115,11 +115,12 @@ it("preselects NyxBot, offers live agents only, and creates the group", async ()
   const dialog = screen.getByRole("dialog", { name: "New crew" });
   expect(within(dialog).getByRole("checkbox", { name: /NyxBot/ })).toBeChecked();
   expect(within(dialog).queryByRole("checkbox", { name: /old/ })).not.toBeInTheDocument();
-  const create = within(dialog).getByRole("button", { name: "Create crew" });
-  expect(create).toBeDisabled();
+  expect(
+    within(dialog).queryByRole("button", { name: "Create crew" }),
+  ).not.toBeInTheDocument();
   await user.type(within(dialog).getByRole("textbox", { name: "Name" }), "Launch crew");
   await user.click(within(dialog).getByRole("checkbox", { name: /researcher/ }));
-  await user.click(create);
+  await user.click(within(dialog).getByRole("button", { name: "Create crew" }));
   await waitFor(() => expect(onCreated).toHaveBeenCalledWith(GROUP));
   expect(requests).toContainEqual({
     method: "POST",
@@ -158,12 +159,13 @@ it("saves only what changed", async () => {
     </QueryClientProvider>,
   );
   const dialog = screen.getByRole("dialog", { name: "Group settings" });
-  const save = within(dialog).getByRole("button", { name: "Save" });
-  expect(save).toBeDisabled();
+  expect(
+    within(dialog).queryByRole("button", { name: "Save" }),
+  ).not.toBeInTheDocument();
   const name = within(dialog).getByRole("textbox", { name: "Name" });
   await user.clear(name);
   await user.type(name, "Release crew");
-  await user.click(save);
+  await user.click(within(dialog).getByRole("button", { name: "Save" }));
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   expect(requests).toContainEqual({
     method: "PATCH",
@@ -192,7 +194,9 @@ it("shows a destroyed member unchecked and drops it on save (the server refuses 
   expect(old).toBeDisabled();
   expect(dialog).toHaveTextContent("Destroyed — removed when you save");
   // Nothing else changed, but saving removes the destroyed member.
-  const save = within(dialog).getByRole("button", { name: "Save" });
+  const save = within(dialog).getByRole("button", {
+    name: "Remove unavailable agents",
+  });
   expect(save).toBeEnabled();
   await user.click(save);
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
@@ -212,9 +216,12 @@ it("deletes only after confirmation", async () => {
     </QueryClientProvider>,
   );
   await user.click(
-    within(screen.getByRole("region", { name: "Danger zone" })).getByRole("button", {
-      name: "Delete",
-    }),
+    within(screen.getByRole("region", { name: "Group actions" })).getByRole(
+      "button",
+      {
+        name: "Delete",
+      },
+    ),
   );
   expect(requests.some((request) => request.method === "DELETE")).toBe(false);
   const confirm = screen.getByRole("dialog", { name: "Delete Launch crew?" });
@@ -226,7 +233,6 @@ it("deletes only after confirmation", async () => {
     body: undefined,
   });
 });
-
 
 it("creates an organization group with only its agents and eligible participants", async () => {
   orgs = [{ id: "org-a", display_name: "Research Org", your_role: "member" }];
@@ -257,7 +263,9 @@ it("lets a participant leave but never edit or delete the organization group", a
   const group = { ...GROUP, owner: { type: "org" as const, id: "org-a", name: "Research Org" }, participants: [{ id: "owner", display_name: "Owner" }], your_role: "participant" as const };
   render(<QueryClientProvider client={client}><GroupSettingsDialog group={group} agents={AGENTS} open onOpenChange={vi.fn()} onDeleted={onDeleted} /></QueryClientProvider>);
   expect(screen.getByLabelText("Name")).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(
+    screen.queryByRole("button", { name: "Save" }),
+  ).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
   expect(screen.getByText(/The creator or a participating Admin must remain/)).toHaveTextContent("Leaving as the last participant deletes the group.");
   expect(screen.getByText(/Wait for your running turns/)).toBeInTheDocument();
@@ -273,7 +281,6 @@ it("keeps org creation disabled until the rollout flag is enabled", async () => 
   await userEvent.click(screen.getByRole("combobox", { name: "Ownership" }));
   expect(screen.getByRole("option", { name: "Research Org" })).toHaveAttribute("aria-disabled", "true");
 });
-
 
 it("preserves organization agents as choices in personal groups", () => {
   const orgAgent = agent({ id: "org-agent", name: "Org specialist", kind: "specialist", owner_id: "org-a", owner_kind: "org" });

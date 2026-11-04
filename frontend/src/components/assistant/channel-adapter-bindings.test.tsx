@@ -314,8 +314,8 @@ it("only offers the owner's active specialists and blocks unsupported platform v
 it("submits the selected specialist and connection only after valid setup", async () => {
   const user = await openForm();
   expect(
-    screen.getByRole("button", { name: "Verify and connect" }),
-  ).toBeDisabled();
+    screen.queryByRole("button", { name: "Verify and connect" }),
+  ).not.toBeInTheDocument();
   await fillTelnyx(user);
   await waitFor(() =>
     expect(

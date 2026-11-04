@@ -268,6 +268,17 @@ operation editor's revision fence. Covered save bars leave interaction and
 accessibility navigation. Immediate controls remain immediate only where their
 existing behavior requires it.
 
+`grouped-fields.tsx` retains the shared Form field IDs while placing labels,
+inputs and linked errors in row and footer slots. `GroupedDialog`, `GroupedSheet`
+and `GroupedPage` register dirty drafts for X, Escape, overlay, route navigation
+and browser unload. Each dialog isolates its save scope from a settings form
+behind it. Immediate reviewed decisions retain their existing buttons and register
+only their acknowledgment draft. Persisted request retries and generating a setup
+command from reviewed defaults are action rows, available without a new draft;
+they preserve the existing acceptance, idempotency and revision checks.
+Light-theme destructive text uses the darker semantic red so field errors in
+footers meet 4.5:1 contrast against the page background as well as cards.
+
 `components/ui/segmented-control.tsx` wraps Radix Tabs: a `bg-muted` track,
 raised `bg-card shadow-sm` selected segment, `text-12` labels, arrow-key
 navigation and associated tab panels. Segments size to their labels and wrap
@@ -584,6 +595,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and dirty-only primary submit bars. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |
 | 2026-11-04 | Workspace page family and equal-size plugin cards | Shared headers and segmented status views align workspace pages. Connectors and skill results share a text-scaled card size with native full-card actions and contained secondary controls; attached skills remain grouped rows. |
 | 2026-11-04 | NyxBot inset grouped forms and segmented navigation | One neutral card per group, inset hairlines, borderless controls and external helper text replace nested boxes. Mounted tabs preserve drafts; detail navigation keeps independent revision-fenced saves. The subtle `border-border/50` edge preserves light-theme contrast. |
 | 2026-04-01 | Initial design system created | Created by /design-consultation + /design-shotgun. User reviewed 7 directions and chose refined purple with warm neutrals. |

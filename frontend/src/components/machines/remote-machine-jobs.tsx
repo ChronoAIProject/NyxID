@@ -18,21 +18,23 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-  useAppForm,
-} from "@/components/ui/form";
+  GroupedInput as Input,
+  GroupedSelectTrigger as SelectTrigger,
+  GroupedList,
+  GroupedRow,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField as FormItem,
+  GroupedLabel as FormLabel,
+  GroupedMessage as FormMessage,
+} from "@/components/ui/grouped-fields";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { Form, FormControl, FormField, useAppForm } from "@/components/ui/form";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import {
@@ -132,6 +134,7 @@ export function RemoteMachineJobs({
     });
     setCursors([]);
     setSelectedId(null);
+    form.reset(value);
   });
   return (
     <div className="space-y-4">
@@ -141,75 +144,79 @@ export function RemoteMachineJobs({
         values and full output are not stored in this history.
       </p>
       <Form {...form}>
-        <form onSubmit={apply} className="grid gap-3 sm:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="status"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Status</FormLabel>
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {[
-                      "all",
-                      "running",
-                      "finished",
-                      "cancelled",
-                      "interrupted",
-                      "revoked",
-                      "expired",
-                    ].map((status) => (
-                      <SelectItem key={status} value={status}>
-                        {status === "all"
-                          ? "All statuses"
-                          : status.replaceAll("_", " ")}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          {(["from", "to"] as const).map((name) => (
+        <form onSubmit={apply} className="space-y-6">
+          <GroupedList
+            title="Filter jobs"
+            footer="Date filters use your local timezone and are sent as absolute timestamps. Finished includes all recorded exit results, including nonzero exit codes. A cancelled record alone does not confirm a physical stop."
+          >
             <FormField
-              key={name}
               control={form.control}
-              name={name}
+              name="status"
               render={({ field }) => (
-                <FormItem>
-                  <FormLabel>
-                    {name === "from" ? "Created from" : "Created to"}
-                  </FormLabel>
-                  <FormControl>
-                    <Input type="datetime-local" {...field} />
-                  </FormControl>
+                <FormItem inline>
+                  <FormLabel>Status</FormLabel>
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {[
+                        "all",
+                        "running",
+                        "finished",
+                        "cancelled",
+                        "interrupted",
+                        "revoked",
+                        "expired",
+                      ].map((status) => (
+                        <SelectItem key={status} value={status}>
+                          {status === "all"
+                            ? "All statuses"
+                            : status.replaceAll("_", " ")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <FormMessage />
                 </FormItem>
               )}
             />
-          ))}
-          <div className="flex items-end gap-2">
-            <Button type="submit" disabled={!form.formState.isDirty}>
-              Apply filters
-            </Button>
-            <Button type="button" onClick={() => void query.refetch()}>
-              Refresh
-            </Button>
-          </div>
+            {(["from", "to"] as const).map((name) => (
+              <FormField
+                key={name}
+                control={form.control}
+                name={name}
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {name === "from" ? "Created from" : "Created to"}
+                    </FormLabel>
+                    <FormControl>
+                      <Input type="datetime-local" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            ))}
+            <GroupedRow asChild interactive>
+              <button type="button" onClick={() => void query.refetch()}>
+                Refresh
+              </button>
+            </GroupedRow>
+          </GroupedList>
+          <GroupedFormActions
+            label="job filters"
+            dirty={form.formState.isDirty}
+            pending={query.isFetching}
+            save={apply}
+            discard={() => form.reset()}
+            saveLabel="Apply filters"
+          />
         </form>
       </Form>
-      <p className="text-12 text-muted-foreground">
-        Date filters use your local timezone and are sent as absolute
-        timestamps. Finished includes all recorded exit results, including
-        nonzero exit codes. A cancelled record alone does not confirm a physical
-        stop.
-      </p>
       {cancelNotice && (
         <p role="status" className="text-12 text-muted-foreground">
           {cancelNotice}

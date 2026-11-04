@@ -123,9 +123,7 @@ it("updates specialist membership through existing grants while preserving servi
     name: "Specialist machine membership",
   });
   await userEvent.click(within(form).getByRole("checkbox"));
-  await userEvent.click(
-    within(form).getByRole("button", { name: "Save assignment" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setGrants).toHaveBeenCalledWith({
       id: "agent-1",
@@ -146,9 +144,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
     name: "Specialist machine membership",
   });
   await userEvent.click(within(membership).getByRole("checkbox"));
-  await userEvent.click(
-    within(membership).getByRole("button", { name: "Save assignment" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.setGrants).toHaveBeenCalled());
   // The real grants mutation invalidates and refreshes the Agent list.
   state.assigned = true;
@@ -161,9 +157,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
   await userEvent.click(
     within(capabilities).getByRole("checkbox", { name: "Shell commands" }),
   );
-  await userEvent.click(
-    within(capabilities).getByRole("button", { name: /^Save capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   expect(
     await screen.findByText(
       /Assignment succeeded, but capability changes failed/,
@@ -230,9 +224,7 @@ it("uses the observed revision and live capability ceiling for shell/file edits"
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Shell commands" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -255,7 +247,7 @@ it("does not enable editing when the existing capability feature is unavailable"
   state.feature = false;
   await show();
   expect(
-    screen.queryByRole("button", { name: /^Save (agent )?capabilities$/ }),
+    screen.queryByRole("button", { name: "Save changes" }),
   ).not.toBeInTheDocument();
   expect(
     screen.getByRole("checkbox", { name: "Shell commands" }),
@@ -280,9 +272,7 @@ it("preserves existing Browser, Computer, developer browser and saved-login gran
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Shell commands" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -313,9 +303,7 @@ it("lets the owner explicitly grant Browser then Computer within the Node ceilin
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Full computer control" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -347,9 +335,7 @@ it("removes Computer explicitly without revoking Browser or developer browser", 
   await userEvent.click(
     within(form).getByRole("checkbox", { name: "Full computer control" }),
   );
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -393,9 +379,7 @@ it("removes only Browser-dependent capability grants when Browser is unchecked",
   expect(
     within(form).getByRole("checkbox", { name: "Developer browser" }),
   ).not.toBeChecked();
-  await userEvent.click(
-    within(form).getByRole("button", { name: /^Save (agent )?capabilities$/ }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -428,7 +412,7 @@ it.each(["can_edit", "protocol_v2"] as const)(
       expect(checkbox).toBeDisabled();
     expect(
       within(form).queryByRole("button", {
-        name: /^Save (agent )?capabilities$/,
+        name: "Save changes",
       }),
     ).not.toBeInTheDocument();
     expect(state.setCapabilities).not.toHaveBeenCalled();

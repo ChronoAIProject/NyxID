@@ -1,3 +1,7 @@
+import {
+  GroupedDialog,
+  GroupedDialogContent,
+} from "@/components/ui/grouped-dialog";
 import { DialogFocusReturnContext } from "@/components/ui/dialog-focus-return";
 import { lazy, Suspense, useEffect, useState } from "react";
 import {
@@ -40,12 +44,22 @@ export function AssistantAccountPanel() {
   }, [ready, current.panel, allowed, close]);
   if (!render || !current.panel) return null;
   const panel = panels[current.panel];
+  const PanelDialog = current.panel === "nyxbot" ? GroupedDialog : Dialog;
+  const PanelContent =
+    current.panel === "nyxbot" ? GroupedDialogContent : DialogContent;
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) void close(); }}>
-      <DialogContent scrollMode="body" className={panel.width} onCloseAutoFocus={(event) => {
-        event.preventDefault();
-        restorePanelFocus(opener());
-      }}>
+    <PanelDialog
+      open
+      onOpenChange={(open) => { if (!open) void close(); }}
+    >
+      <PanelContent
+        scrollMode="body"
+        className={panel.width}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          restorePanelFocus(opener());
+        }}
+      >
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>{panel.title}</DialogTitle>
           <DialogDescription>{panel.description}</DialogDescription>
@@ -58,7 +72,7 @@ export function AssistantAccountPanel() {
           </Suspense>
           </DialogFocusReturnContext>
         </DialogBody>
-      </DialogContent>
-    </Dialog>
+      </PanelContent>
+    </PanelDialog>
   );
 }

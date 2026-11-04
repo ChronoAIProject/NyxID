@@ -47,9 +47,12 @@ function parseDate(value: string): Date | null {
 }
 
 interface CommonDatePickerProps {
+  readonly grouped?: boolean;
   readonly minDate?: string;
   readonly placeholder?: string;
   readonly ariaLabel?: string;
+  readonly describedBy?: string;
+  readonly invalid?: boolean;
   readonly disabled?: boolean;
 }
 
@@ -74,6 +77,7 @@ export function DatePicker(props: DatePickerProps) {
     placeholder = "Select date",
     ariaLabel,
     disabled = false,
+    grouped = false,
   } = props;
   const multiple = props.mode === "multiple";
   const values = multiple ? props.values : props.value ? [props.value] : [];
@@ -202,11 +206,15 @@ export function DatePicker(props: DatePickerProps) {
           type="button"
           disabled={disabled}
           aria-label={ariaLabel}
+          aria-describedby={props.describedBy}
+          aria-invalid={props.invalid}
           className={cn(
             "flex h-8 w-full items-center justify-between rounded-lg border border-input bg-transparent px-3 text-12 transition-colors",
             "hover:border-hairline-strong focus-visible:outline-none focus-visible:border-input-focus",
             "disabled:cursor-not-allowed disabled:opacity-50",
             displayValue ? "text-foreground" : "text-text-tertiary",
+            grouped &&
+              "h-auto min-h-8 w-auto max-w-full gap-2 border-0 px-0 text-left focus-visible:ring-2 focus-visible:ring-ring",
           )}
         >
           <span>{displayValue ?? placeholder}</span>

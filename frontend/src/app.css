@@ -201,7 +201,7 @@ html.theme-light {
   --color-muted-foreground: #3F3F46;
 
   /* Destructive */
-  --color-destructive: #DC2626;
+  --color-destructive: #B91C1C;
 
   /* Borders & input — dividers clearly visible on both tones; control edges
      meet the 3:1 non-text contrast minimum on white */

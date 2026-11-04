@@ -4,7 +4,13 @@ import { GroupedDraftContext, useGroupedDraftGuard, type GroupedDraft } from "@/
 import { Button } from "./button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./dialog";
 
-export function GroupedDraftBoundary({ children }: { readonly children: ReactNode }) {
+export function GroupedDraftBoundary({
+  children,
+  navigation = false,
+}: {
+  readonly children: ReactNode;
+  readonly navigation?: boolean;
+}) {
   const [entries, setEntries] = useState<ReadonlyMap<string, GroupedDraft>>(new Map());
   const current = useRef(entries);
   const [pending, setPending] = useState(false);
@@ -51,7 +57,14 @@ export function GroupedDraftBoundary({ children }: { readonly children: ReactNod
     request.current?.resolve(false);
     request.current = null;
   }, []);
-  return <GroupedDraftContext.Provider value={{ entries, register, remove, confirmDiscard, pending, finish }}>{children}</GroupedDraftContext.Provider>;
+  return (
+    <GroupedDraftContext.Provider
+      value={{ entries, register, remove, confirmDiscard, pending, finish }}
+    >
+      {navigation && <GroupedDraftNavigation active />}
+      {children}
+    </GroupedDraftContext.Provider>
+  );
 }
 
 /** Render inside the sheet so the confirmation inherits its overlay layer. */
@@ -79,7 +92,7 @@ export function GroupedDraftNavigation({ active }: { readonly active: boolean })
   const confirm = guard?.confirmDiscard;
   const dirty = [...(guard?.entries.values() ?? [])].some((entry) => entry.dirty);
   useEffect(() => {
-    if (!active || !router || !confirm) return;
+    if (!active || !dirty || !router || !confirm) return;
     return router.history.block({
       blockerFn: async ({ action, currentLocation, nextLocation }) => {
         const current = new URLSearchParams(currentLocation.search);

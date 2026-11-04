@@ -249,16 +249,18 @@ it("displays the exact reviewed authority and expiry inside the decision dialog"
   await openReview();
   const dialog = within(screen.getByRole("dialog"));
   expect(
-    dialog.getByText("Grant / assignment revision").nextElementSibling,
+    dialog
+      .getByText("Grant / assignment revision")
+      .closest("[data-grouped-row]"),
   ).toHaveTextContent("7 / 3");
   expect(
-    dialog.getByText("Runtime generation").nextElementSibling,
+    dialog.getByText("Runtime generation").closest("[data-grouped-row]"),
   ).toHaveTextContent("2");
   expect(
-    dialog.getByText("Parameter digest").nextElementSibling,
+    dialog.getByText("Parameter digest").closest("[data-grouped-row]"),
   ).toHaveTextContent("parameter-digest");
   expect(
-    dialog.getByText("Waiting approval expires").nextElementSibling,
+    dialog.getByText("Waiting approval expires").closest("[data-grouped-row]"),
   ).toHaveTextContent(new Date(payload().expires_at).toLocaleString());
   expect(
     dialog.getByText(/Full request content is unavailable/),

@@ -1,3 +1,8 @@
+import {
+  GroupedPage,
+  GroupedSheet as Sheet,
+  GroupedSheetContent as SheetContent,
+} from "@/components/ui/grouped-dialog";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import {
   MachineIsolationBadge,
@@ -32,8 +37,6 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Sheet,
-  SheetContent,
   SheetHeader,
   SheetTitle,
   SheetDescription,
@@ -115,6 +118,14 @@ function MachineCard({
 }
 
 export function MachinesPage() {
+  return (
+    <GroupedPage>
+      <MachinesContent />
+    </GroupedPage>
+  );
+}
+
+function MachinesContent() {
   const remoteAdmission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
