@@ -12,7 +12,8 @@ Source chat, supplied CMA link, pin, and minimise controls share the header.
 Each icon has a state-aware tooltip available on hover and keyboard focus.
 The compact action list and Session details use spacing without internal
 horizontal dividers.
-The pressed pin control and its tooltip identify global monitoring. **Pin CMA session** makes that card
+The solid **Pinned** control, filled pin icon, and unpin tooltip identify global
+monitoring. **Pin CMA session** makes that card
 available in other chats and on every other page. Assistant pages reuse the
 shared preview column; other pages use a bounded floating stack. **Unpin CMA
 session** immediately restores source-only visibility. Pins and minimise

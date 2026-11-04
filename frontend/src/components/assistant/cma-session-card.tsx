@@ -15,7 +15,6 @@ import {
   Minimize2,
   RefreshCw,
   Pin,
-  PinOff,
   ExternalLink,
   MessageSquare,
   X,
@@ -188,19 +187,19 @@ function CmaSessionCard({
       data-ph-no-capture
       className="flex max-h-[min(440px,40dvh)] min-h-0 w-full max-w-[500px] shrink-0 flex-col self-start gap-2 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-12 lg:max-h-[480px] lg:rounded-2xl lg:border-0 lg:shadow-sm"
     >
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1">
         <CmaGlyph
           aria-hidden="true"
           className="h-4 w-4 shrink-0 text-muted-foreground"
         />
         <h2
-          className="min-w-0 flex-1 line-clamp-2 break-words font-medium leading-snug"
+          className="min-w-0 flex-1 basis-32 line-clamp-2 break-words font-medium leading-snug"
           title={state.title}
         >
           {state.title}
         </h2>
         <div
-          className="flex shrink-0 items-center"
+          className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1"
           role="group"
           aria-label="CMA session controls"
         >
@@ -214,7 +213,7 @@ function CmaSessionCard({
                     agent: session.origin.specialist_id,
                   }}
                   aria-label="Open source chat"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                  className="assistant-icon-button inline-flex h-8 w-8 items-center justify-center rounded-md text-foreground hover:bg-overlay-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
                 >
                   <MessageSquare aria-hidden="true" className="h-3.5 w-3.5" />
                 </Link>
@@ -230,7 +229,7 @@ function CmaSessionCard({
                   target="_blank"
                   rel="noopener noreferrer"
                   aria-label="View in CMA"
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring"
+                  className="assistant-icon-button inline-flex h-8 w-8 items-center justify-center rounded-md text-foreground hover:bg-overlay-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground"
                 >
                   <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
                 </a>
@@ -242,20 +241,26 @@ function CmaSessionCard({
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
-                size="sm"
-                aria-label={pinned ? "Unpin CMA session" : "Pin CMA session"}
+                size={pinned ? "sm" : "icon"}
+                aria-label={
+                  pinned ? "Unpin CMA session (Pinned)" : "Pin CMA session"
+                }
                 aria-pressed={pinned}
                 onClick={() => setPinned(ownerId, key, !pinned)}
                 className={cn(
-                  "h-8 w-8 shrink-0 px-0",
-                  pinned && "bg-overlay text-primary",
+                  "h-8 shrink-0 text-11 transition-shadow focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card",
+                  pinned
+                    ? "bg-foreground px-2 text-background hover:bg-foreground hover:text-background"
+                    : "text-foreground hover:bg-overlay-strong",
                 )}
               >
+                <Pin
+                  aria-hidden="true"
+                  className={pinned ? "fill-current" : undefined}
+                />
                 {pinned ? (
-                  <PinOff aria-hidden="true" />
-                ) : (
-                  <Pin aria-hidden="true" />
-                )}
+                  <span className="whitespace-nowrap">Pinned</span>
+                ) : null}
               </Button>
             </TooltipTrigger>
             <TooltipContent>
@@ -268,14 +273,14 @@ function CmaSessionCard({
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
-                size="sm"
+                size="icon"
                 aria-label={
                   collapsed ? "Maximise CMA session" : "Minimise CMA session"
                 }
                 aria-expanded={!collapsed}
                 aria-controls={detailsId}
                 onClick={() => setMinimised(ownerId, key, !collapsed)}
-                className="h-8 w-8 shrink-0 px-0"
+                className="shrink-0 text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
               >
                 {collapsed ? <Maximize2 /> : <Minimize2 />}
               </Button>
@@ -415,10 +420,10 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
       <span
         role="status"
-        className="flex items-center gap-1.5 text-11 text-muted-foreground"
+        className="flex items-center gap-1.5 text-11 text-foreground"
       >
         {state.status === "working" || state.status === "starting" ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary" />
+          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text" />
         ) : (
           <Circle
             className={cn(
@@ -435,7 +440,7 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
         ·
       </span>
       <span
-        className="flex items-center gap-1.5 text-10 text-text-tertiary"
+        className="flex items-center gap-1.5 text-10 text-muted-foreground"
         aria-label={`Status stream ${state.connection}`}
       >
         <span
@@ -503,7 +508,7 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
               >
                 <span className="mt-0.5 shrink-0" aria-label={action.status}>
                   {action.status === "running" ? (
-                    <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary" />
+                    <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary-text" />
                   ) : action.status === "completed" ? (
                     <Check className="h-3 w-3 text-success" />
                   ) : action.status === "failed" ? (

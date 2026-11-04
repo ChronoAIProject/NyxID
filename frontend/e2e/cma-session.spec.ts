@@ -625,7 +625,7 @@ test("keeps unpinned work in its verified source and pins across every route, re
   await panel.getByRole("button", { name: "Pin CMA session" }).click();
   await page.getByRole("button", { name: /^New chat with/ }).click();
   await expect(
-    panel.getByRole("button", { name: "Unpin CMA session" }),
+    panel.getByRole("button", { name: "Unpin CMA session (Pinned)" }),
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
     page.getByLabel("CMA is working in this session", { exact: true }),
@@ -634,15 +634,26 @@ test("keeps unpinned work in its verified source and pins across every route, re
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
   await page.reload();
   await expect(
-    panel.getByRole("button", { name: "Unpin CMA session" }),
+    panel.getByRole("button", { name: "Unpin CMA session (Pinned)" }),
+  ).toBeVisible();
+  await expect(
+    panel
+      .getByRole("button", { name: "Unpin CMA session (Pinned)" })
+      .getByText("Pinned", { exact: true }),
   ).toBeVisible();
   await expect(sessions(page)).toHaveCount(1);
-  await panel.getByRole("button", { name: "Unpin CMA session" }).click();
+  await panel
+    .getByRole("button", { name: "Unpin CMA session (Pinned)" })
+    .click();
   await expect(sessions(page)).toHaveCount(0);
   await page.goto(
     `/assistant?mock=1&c=${source.conversation}&agent=${source.specialist}`,
   );
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: "Pin CMA session" }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await expect(panel.getByText("Pinned", { exact: true })).toHaveCount(0);
   // This click exercises the specialist routing, not just its href serialization.
   await panel.getByRole("button", { name: "Pin CMA session" }).click();
   await page.goto("/keys?mock=1");
@@ -692,7 +703,7 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
     await page.goto(`${path}?mock=1`);
     await expect(sessions(page)).toHaveCount(1);
     await expect(
-      card(page).getByRole("button", { name: "Unpin CMA session" }),
+      card(page).getByRole("button", { name: "Unpin CMA session (Pinned)" }),
     ).toBeVisible();
   }
   await page.reload();
@@ -797,7 +808,7 @@ for (const cache of ["none", "empty", "error", "transient"] as const) {
     await card(page).getByRole("button", { name: "Pin CMA session" }).click();
     await page.getByRole("button", { name: /^New chat with/ }).click();
     await expect(
-      card(page).getByRole("button", { name: "Unpin CMA session" }),
+      card(page).getByRole("button", { name: "Unpin CMA session (Pinned)" }),
     ).toBeVisible();
     await page.waitForTimeout(5500);
     await expect(sessions(page)).toHaveCount(1);
@@ -811,7 +822,9 @@ for (const cache of ["none", "empty", "error", "transient"] as const) {
       return track.cmaPinGaps;
     });
     expect(gaps).toBe(0);
-    await card(page).getByRole("button", { name: "Unpin CMA session" }).click();
+    await card(page)
+      .getByRole("button", { name: "Unpin CMA session (Pinned)" })
+      .click();
     await expect(sessions(page)).toHaveCount(0);
   });
 }
@@ -928,7 +941,7 @@ test("describes CMA header controls on hover and focus without internal dividers
     0,
   );
   await panel
-    .getByRole("button", { name: "Unpin CMA session", exact: true })
+    .getByRole("button", { name: "Unpin CMA session (Pinned)", exact: true })
     .hover();
   await expect(
     page.getByRole("tooltip", {
