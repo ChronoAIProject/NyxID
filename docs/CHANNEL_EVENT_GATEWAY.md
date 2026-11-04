@@ -460,6 +460,56 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## Moving the gateway host
+
+Update the administrator-managed `cmaeg` catalog row to the new gateway API
+base (for example `https://cma.nyxid.ai/event-gateway/v1`) and the `cma` row to
+the corresponding application base. **Never rely on redirects for signed
+callbacks:** a 301 can turn the relay's POST into a body-less GET.
+Preserve CMA's channel records and token keys so the existing channel IDs
+remain valid on the new host.
+
+NyxID reconciles stored gateway destinations in the background immediately
+after startup and on the existing 30-second release sweep. A completed pass is
+remembered per process; another full pass runs when the catalog base changes or
+after one hour. Reads use batches of 64, paginated on the built-in `_id` index.
+No gateway HTTP request is needed for this repair. The catalog is the only source
+of the new destination; the stored HTTPS URL contributes only its validated
+`/callbacks/<channel-id>` suffix. Userinfo, queries, fragments, dot segments,
+encoded path spellings and non-CMA callbacks are refused.
+The channel suffix follows CMA's actual `cmaeg-core/src/seal.rs` format:
+`cmaeg1.ch.<canonical u8 key ID>.<unpadded base64url>`, at most 4,096 characters.
+Existing sealed IDs exceed 200 characters. Validation checks the envelope's
+syntax and minimum nonce/tag size; the reference remains opaque to NyxID.
+
+Only keys referenced by non-deleted NyxBot gateway links or active/prepared
+platform-entry gateways are eligible. Personal and org-owned route keys retain
+their owners. NyxBot updates compare the exact old callback and live route
+reference; platform-entry row and key changes commit together under their
+existing identity, revision and key fences. Every change also fences the exact
+catalog base. Mixed replicas can use the new callback without understanding the
+reconciler. Audit records contain local row kind/ID and old/new hosts only;
+logs contain aggregate counts, never opaque gateway IDs or full URLs.
+
+Pending releases move only when their captured catalog service ID is unchanged
+and their creator issuer is still accepted. Remote identity/version and active
+lease fences remain enforced. A review caused solely by
+`gateway_destination_changed` becomes due again; other review reasons remain
+in place. There is no persisted callback URL on release records to rewrite.
+
+Native WhatsApp webhooks registered at Meta need separate attention. The pass
+reports an aggregate `whatsapp_manual` count for retained native callbacks that
+differ from the new base; it does not rewrite Meta or claim verification. The
+activation helper requires relay state and can roll back on failure, so it
+cannot safely repair a live native channel. For affected dedicated BYO bots,
+turn off `nyxbot:gateway-whatsapp` for the linking person, wait for **verified
+relay restoration**, then enable it again after the catalog move. This uses
+the supported rollback/enrollment flow to register and verify the new CMA
+endpoint at Meta. If doing a manual Meta subscription repair instead, retain
+the exact channel ID and native Verify Token and verify the phone's effective
+webhook precedence (phone override, WABA override, then application); do not
+merely edit local verification metadata or leave an old override in place.
+
 ## NyxBot gateway creator authorization and recovery
 
 Gateway management uses a **creator credential** distinct from the channel's
@@ -741,7 +791,13 @@ as replacement original messages. Incoming media receives explicit unavailable
 feedback; tool images cannot use old relay anchors and report unavailable.
 
 Status exposes `gateway_native_phase`, `gateway_native_activation` and
-`gateway_native_delivery`. Intake refusals/unavailability and response failures
+`gateway_native_delivery`. A rejected native setup also exposes the optional
+`gateway_native_activation_detail`: CMA's problem `code`, restricted to
+`[a-z0-9_.-]{1,64}`, beside the existing NyxID activation code. It is retained
+through relay fallback and included in connect/transport audit metadata and an
+info log with the channel agent ID. Upstream prose, URLs and credentials are
+never retained; a new preparation or successful activation clears the detail.
+Intake refusals/unavailability and response failures
 use stable codes. Activation reflects CMA's bounded activation codes;
 `response_ready` means the provider answer is available, **not** a confirmed
 Discord send. The CMA owner owns native connection/runtime and final delivery

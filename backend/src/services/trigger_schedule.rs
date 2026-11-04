@@ -217,6 +217,7 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         continuation_count: 0,
         continuation_limit: 0,
         continuation_protocol_version: 0,
+        work: None,
         trigger_generation: None,
         dispatch_at: None,
         terminal_result_recorded: false,

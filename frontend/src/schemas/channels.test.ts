@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { channelBotGatewaySchema } from "./channel-bot-health";
 import {
   channelTestMessageSchema,
   buildCreateChannelBotSchema,
@@ -13,6 +14,14 @@ import { platformFixtures } from "@/test/fixtures/channel-platforms";
 const createChannelBotSchema = buildCreateChannelBotSchema(platformFixtures);
 
 const UUID = "123e4567-e89b-12d3-a456-426614174000";
+
+it("accepts optional Gateway metadata and future stored state names", () => {
+  expect(channelBotGatewaySchema.parse({})).toEqual({});
+  for (const gateway_state of ["connected", "connecting", "disconnected", "waiting_capacity"]) {
+    expect(channelBotGatewaySchema.parse({ gateway_state })).toEqual({ gateway_state });
+  }
+  expect(channelBotGatewaySchema.safeParse({ gateway_state: 1 }).success).toBe(false);
+});
 
 describe("createChannelBotSchema base validation", () => {
   it("accepts a minimal Telegram bot (no extra console fields required)", () => {

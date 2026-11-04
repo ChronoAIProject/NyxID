@@ -196,6 +196,42 @@ async fn raw(
 }
 
 #[tokio::test]
+async fn voice_2083_allowed_personal_github_identity_read_never_creates_confirmation() {
+    Box::pin(async {
+        let f = orchestrator_fixture("voice_2083_allowed_read").await;
+        let id = connection(&f, &f.owner, "api-github-pat", None).await;
+        for setting in [
+            AccessMode::Nyxmode,
+            AccessMode::AskEveryTime,
+            AccessMode::Autopilot,
+        ] {
+            mode(&f, setting).await;
+            let decision = gate(
+                &f,
+                &id,
+                &f.owner,
+                &json!({"kind":"http","method":"GET","path":"/user"}),
+                None,
+            )
+            .await;
+            assert!(decision.refusal.is_none());
+            assert!(decision.admission.is_some());
+        }
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+                .count_documents(doc! {"conversation_id":&f.row.id,"status":"pending"})
+                .await
+                .unwrap(),
+            0
+        );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn legacy_org_reads_confirm_in_auto_and_ask_but_never_full_access() {
     let f = orchestrator_fixture("execution_mode_matrix").await;
     let owner = org(&f).await;

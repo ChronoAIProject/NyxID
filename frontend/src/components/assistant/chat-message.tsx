@@ -591,6 +591,7 @@ export function ChatMessageBubble({
   const streaming = message.status === "streaming";
   const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
+  const [retryConfirmed, setRetryConfirmed] = useState(false);
   const [retryError, setRetryError] = useState<string>();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [copyState, setCopyState] = useState<"copied" | "failed">();
@@ -598,6 +599,10 @@ export function ChatMessageBubble({
   const [checkError, setCheckError] = useState<string>();
   const retry = async () => {
     if (!onRetry) return;
+    if (message.actionOutcome?.retry_warning && !retryConfirmed) {
+      setRetryConfirmed(true);
+      return;
+    }
     setRetrying(true);
     setRetryError(undefined);
     try {
@@ -742,8 +747,24 @@ export function ChatMessageBubble({
         {message.status === "error" && message.errorDetail ? (
           <ErrorDetails detail={message.errorDetail} />
         ) : null}
+        {message.status === "error" && message.actionOutcome ? (
+          <div role="note" className="mt-2 space-y-1 text-12 text-muted-foreground">
+            <p>{message.actionOutcome.summary}</p>
+            {message.actionOutcome.actions.length > 0 ? (
+              <ul className="list-disc space-y-1 pl-5">
+                {message.actionOutcome.actions.map((action) => (
+                  <li key={action.activity_id}>{action.summary}</li>
+                ))}
+              </ul>
+            ) : null}
+            {!message.actionOutcome.complete ? <p>The action record may be incomplete.</p> : null}
+          </div>
+        ) : null}
         {message.status === "error" && onRetry ? (
           <div className="mt-2">
+            {message.actionOutcome?.retry_warning ? (
+              <p role="note" className="mb-1 text-12 text-muted-foreground">{message.actionOutcome.retry_warning}</p>
+            ) : null}
             <button
               type="button"
               className="inline-flex items-center gap-1 text-11 underline disabled:opacity-50"
@@ -751,7 +772,7 @@ export function ChatMessageBubble({
               onClick={() => void retry()}
             >
               <RotateCcw className="size-3" aria-hidden />
-              {retrying ? "Retrying…" : "Retry"}
+              {retrying ? "Retrying…" : retryConfirmed ? "Retry anyway" : "Retry"}
             </button>
             {retryError ? (
               <p role="alert" className="mt-1 text-11 text-destructive">

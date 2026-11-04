@@ -234,6 +234,7 @@ async fn accept(
             // Contend with transport changes, binding revocation and erasure.
             let fenced=db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"transport":"gateway","status":"active",
                 "binding_id":&row.binding_id,"agent_api_key_id":&row.agent_api_key_id,"gateway_native_phase":"ready",
+                "gateway_channel_id":&row.gateway_channel_id,"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|AppError::OAuthAuthorityUnavailable)?,
                 "gateway_setup_release_id":bson::Bson::Null,"pending_agent_api_key_id":bson::Bson::Null},
                 doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
             if fenced.matched_count!=1 {return Err(AppError::OAuthAuthorityUnavailable);}
@@ -241,10 +242,23 @@ async fn accept(
                 doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
                 doc! {"$inc":{"channel_metadata_admission_revision":1_i64}}).session(&mut *session).await?;
             if owner.matched_count!=1 {return Err(AppError::Forbidden("Owner unavailable".into()));}
+            let mut bot_filter = doc! {"_id":&row.channel_bot_id,"user_id":bot_owner(row),"is_active":true,"status":{"$ne":"suspended"}};
+            if let Some(crate::models::nyxbot_channel::GatewaySource::Discord { bot_id }) = &row.gateway_source {
+                bot_filter.extend(doc! {"platform":"discord","platform_bot_id":bot_id,"status":{"$in":["active","pending_webhook"]}});
+            }
             let bot=db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
-                doc! {"_id":&row.channel_bot_id,"user_id":bot_owner(row),"is_active":true,"status":{"$ne":"suspended"}},
+                bot_filter.clone(),
                 doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
             if bot.matched_count!=1 {return Err(AppError::Forbidden("Bot unavailable".into()));}
+            if matches!(&row.gateway_source, Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. })) {
+                // The current provider key/binding, closed source identity and
+                // command metadata were verified before this admission transaction.
+                bot_filter.insert("status", "pending_webhook");
+                db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
+                    bot_filter, doc! {"$set":{"status":"active","updated_at":bson::DateTime::now(),
+                    "diagnostics.last_inbound_at":bson::DateTime::now(),"diagnostics.last_inbound_source":"native_discord_gateway"}})
+                    .session(&mut *session).await?;
+            }
             let partition=db.collection::<NyxbotThread>(THREADS).update_one(doc! {"channel_id":&row.id,"partition":&inserted.partition},
                 doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
             if partition.matched_count!=1 {return Err(AppError::NotFound("Conversation not found".into()));}

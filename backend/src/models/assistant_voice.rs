@@ -57,6 +57,11 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    #[serde(default)]
+    pub progress: Option<VoiceTaskProgress>,
+    /// First observed offsets from the call start, never transcript or tool content.
+    #[serde(default)]
+    pub timing: std::collections::BTreeMap<String, i64>,
     /// Already written by claim; legacy requests may not have a start time.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub started_at: Option<DateTime<Utc>>,
@@ -99,6 +104,17 @@ pub struct VoiceRequest {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceTaskProgress {
+    pub stage: String,
+    /// Closed server-authored presentation labels, never raw activity labels.
+    pub detail: String,
+    pub last_completed_step: Option<String>,
+    pub completed_steps: usize,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
 }
 impl std::fmt::Debug for VoiceRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

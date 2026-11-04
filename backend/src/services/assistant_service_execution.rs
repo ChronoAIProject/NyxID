@@ -232,6 +232,7 @@ async fn check_job_http_inner(
         refusal: None,
         automatic: None,
         admission: Some(Admission {
+            bound_skill_read: false,
             owner_instruction_receipt: false,
             shared_detached: None,
             shared_permit: None,
@@ -472,6 +473,7 @@ async fn check_inner(
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
                 model_control: None,
+                bound_skill_read: false,
                 owner_instruction_receipt: instruction_covered,
                 shared_detached: None,
                 shared_permit: permit,
@@ -817,6 +819,7 @@ async fn check_inner(
         return Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                bound_skill_read: false,
                 owner_instruction_receipt: false,
                 shared_detached: None,
                 shared_permit: None,
@@ -907,6 +910,7 @@ async fn check_inner(
         Ok(Decision {
             refusal: None,
             admission: Some(Admission {
+                bound_skill_read: false,
                 owner_instruction_receipt: instruction_covered,
                 shared_detached: None,
                 shared_permit: None,

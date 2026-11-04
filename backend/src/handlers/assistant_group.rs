@@ -31,6 +31,8 @@ use super::assistant_team::{Pool, Started, start_server_turn, team_pool_limit};
 pub struct GroupMemberResponse {
     pub(crate) id: String,
     pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mention_handle: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) kind: AgentKind,
     pub(crate) destroyed: bool,
@@ -88,6 +90,7 @@ pub struct GroupMessageResponse {
     agent: Option<GroupAgentRef>,
     text: String,
     recipient_agent_ids: Vec<String>,
+    mentioned_participant_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
@@ -120,6 +123,7 @@ pub(crate) fn message_response(
         agent,
         text: row.text,
         recipient_agent_ids: row.recipient_agent_ids,
+        mentioned_participant_ids: row.mentioned_participant_ids,
         created_at: row.created_at,
     }
 }
@@ -145,6 +149,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
         members: members
             .iter()
             .map(|agent| GroupMemberResponse {
+                mention_handle: None,
                 unavailable_reason: None,
                 id: agent.id.clone(),
                 name: agent.name.clone(),
@@ -477,6 +482,18 @@ pub(crate) async fn member_settled(
     }
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
+        // A completed worker may race roster removal and even re-addition.
+        // Only the current member thread may publish or hand off its result.
+        let Some(agent_id) = row.agent_id.as_deref() else {
+            return Ok(());
+        };
+        if !group.member_agent_ids.iter().any(|id| id == agent_id)
+            || groups::member_thread(&state.db, owner, group_id, agent_id)
+                .await?
+                .is_none_or(|current| current.id != row.id)
+        {
+            return Ok(());
+        }
         let agent = team::agent_for_conversation(&state.db, row).await?;
         match error_code {
             None if !text.trim().is_empty() => {
@@ -487,16 +504,9 @@ pub(crate) async fn member_settled(
                     }
                     None => Vec::new(),
                 };
-                let message = groups::append(
-                    &state.db,
-                    owner,
-                    group_id,
-                    "agent",
-                    Some(&agent),
-                    text,
-                    attachments,
-                )
-                .await?;
+                let message =
+                    groups::append_member_reply(&state.db, row, "agent", &agent, text, attachments)
+                        .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
                     &state.db, row, &message,
                 ))
@@ -518,12 +528,11 @@ pub(crate) async fn member_settled(
             }
             None => {}
             Some("cancelled") => {
-                let message = groups::append(
+                let message = groups::append_member_reply(
                     &state.db,
-                    owner,
-                    group_id,
+                    row,
                     "notice",
-                    Some(&agent),
+                    &agent,
                     &format!("{} stopped.", identifier(&agent.name)),
                     Vec::new(),
                 )
@@ -534,12 +543,11 @@ pub(crate) async fn member_settled(
                 .await?;
             }
             Some(code) => {
-                let message = groups::append(
+                let message = groups::append_member_reply(
                     &state.db,
-                    owner,
-                    group_id,
+                    row,
                     "notice",
-                    Some(&agent),
+                    &agent,
                     &format!("{} could not reply ({code}).", identifier(&agent.name)),
                     Vec::new(),
                 )

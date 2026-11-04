@@ -69,6 +69,7 @@ pub(crate) struct McpBillingRouteContextBuilder {
     user_service_id: Option<String>,
     is_user_service: bool,
     credential_class_override: Option<CredentialClass>,
+    auto_connected: bool,
     credential_source: Option<String>,
 }
 
@@ -90,6 +91,7 @@ impl McpBillingRouteContextBuilder {
                 .master_credential
                 .then_some(CredentialClass::NyxidManagedMaster),
             credential_source: resolution.credential_source.clone(),
+            auto_connected: resolution.is_auto_connected,
         }
     }
 
@@ -99,6 +101,7 @@ impl McpBillingRouteContextBuilder {
             user_service_id: None,
             is_user_service: false,
             credential_class_override: None,
+            auto_connected: false,
             credential_source: None,
         }
     }
@@ -2686,9 +2689,18 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
-            additional OAuth permissions on top of provider defaults through that hosted link; \
-            omit credential when requesting scopes."
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. \
+            For assistant chats, call immediately when asked to connect, even if connections exist. \
+            Give the hosted link immediately and mention existing_connections in one short line \
+            (ownership, label, enabled/disabled; provider account identity is unknown). Never ask \
+            whether to proceed, suggest reusing an existing connection instead, or substitute a page link. \
+            Platform-key connects create a connection in one step. Other non-hosted connects keep \
+            the one-step service connection; already_connected means there is no separate account \
+            to add: say it is already connected in one short line. Explain connect_unavailable \
+            reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot handle \
+            setup, sending a hosted link when supported, followed by a separate specialist grant. Optional scopes request additional OAuth \
+            permissions on top of provider defaults through that hosted link; omit credential \
+            when requesting scopes. Never enter credentials through assistant chat."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -6190,6 +6202,7 @@ async fn execute_tool_resolved_inner(
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
         }
+        let auto_connected = billing_context_builder.auto_connected;
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
@@ -6241,6 +6254,7 @@ async fn execute_tool_resolved_inner(
             billing_ctx.credential_class,
         );
         request_audit.assistant(assistant_chat.as_ref());
+        request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
             if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
                 return Err(AppError::BadRequest(
@@ -6281,7 +6295,7 @@ async fn execute_tool_resolved_inner(
                 }
             };
             destination_audit.complete(managed.status);
-            request_audit.response(managed.status);
+            request_audit.response(managed.status).await;
             if let (Some(chat), Some(admission)) =
                 (assistant_chat.as_ref(), assistant_admission.as_ref())
             {
@@ -6329,7 +6343,7 @@ async fn execute_tool_resolved_inner(
             };
             billing.settle(&metered,mcp_platform_usage_for_path(text.as_bytes(),request_len,&target.service,&path,status),None,None).await?;
             destination_audit.complete(status);
-            request_audit.response(status);
+            request_audit.response(status).await;
             if let Some(chat)=assistant_chat.as_ref() {
                 if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
                 else {admission.receipt(db,chat,assistant_auto).await;}
@@ -6474,7 +6488,7 @@ async fn execute_tool_resolved_inner(
                             ))
                             .await?;
                         destination_audit.complete(resp.status);
-                        request_audit.response(resp.status);
+                        request_audit.response(resp.status).await;
                         if (200..300).contains(&resp.status)
                             && let (Some(chat), Some(admission)) =
                                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6517,7 +6531,7 @@ async fn execute_tool_resolved_inner(
                             ))
                             .await?;
                         destination_audit.complete(status);
-                        request_audit.response(status);
+                        request_audit.response(status).await;
                         if (200..300).contains(&status)
                             && let (Some(chat), Some(admission)) =
                                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6755,7 +6769,7 @@ async fn execute_tool_resolved_inner(
             .await?;
 
         destination_audit.complete(status);
-        request_audit.response(status);
+        request_audit.response(status).await;
         if (200..300).contains(&status)
             && let (Some(chat), Some(admission)) =
                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -9845,6 +9859,7 @@ mod tests {
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
             trigger_run_id: None,
+            business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
@@ -10601,6 +10616,9 @@ mod tests {
             .unwrap();
         assert!(connect.input_schema["properties"]["service_id"].is_object());
         assert!(connect.input_schema["properties"]["service_slug"].is_object());
+        for guidance in ["already_connected", "no separate account", "one short line"] {
+            assert!(connect.description.contains(guidance), "missing {guidance}");
+        }
     }
 
     #[test]

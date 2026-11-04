@@ -796,6 +796,28 @@ curl "https://auth.example.com/api/v1/admin/audit-log?page=1&per_page=50" \
   -H "Authorization: Bearer <admin_token>"
 ```
 
+The Audit Log page uses `include_total=false` to display filtered rows before
+their exact count completes. This mode returns `has_more` and fetches at most
+one extra row to determine whether another page exists. `total` is omitted
+when it would require a separate filtered count. Unfiltered totals still use
+collection metadata, and a complete first page can supply its total directly.
+The UI then requests `GET /api/v1/admin/audit-log/count` with the same filters;
+this endpoint returns `{ "total": 123 }` and requires the same admin/operator
+access. It performs no display-enrichment lookups. Omitting `include_total`
+preserves the existing listing response with its total.
+
+Frontend and backend can be upgraded independently. Existing clients keep their
+numeric `total` unless they explicitly opt into `include_total=false`; `has_more`
+is additive. The updated UI accepts older responses without `has_more` and uses
+their total without requesting the count endpoint. During a mixed-replica
+rollout, an unavailable count endpoint leaves the page usable with a retry for
+the total. Counts may be cached for 60 seconds; the current page's `has_more`
+controls forward pagination.
+
+For an indexed identity lookup, use the `user_id` or `api_key_id` query parameter,
+or select **User ID (exact)** / **API key ID (exact)** in the page's search field
+selector. Text searches retain substring matching and may scan many audit rows.
+
 New audit rows are HMAC hash-chained with a monotonically increasing `seq`. Verify the chain on demand:
 
 ```bash

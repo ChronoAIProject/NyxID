@@ -281,11 +281,23 @@ async fn turn_settled(db: &Database, row: &Document, now: DateTime<Utc>) -> AppR
         conversation = first.get_str("conversation_id").unwrap_or_default().into();
         turn = first.get_str("turn_id").unwrap_or_default().into();
     }
+    let mut thread_filter = doc! {"_id":&conversation,"user_id":owner};
+    if user_upload(row)
+        && let Ok(group) = row.get_str("group_id")
+    {
+        // A collaboration guest executes on the agent owner's key, while the
+        // public upload and its retention lifetime belong to the requester.
+        thread_filter.remove("user_id");
+        thread_filter.insert("$or", bson::bson!([
+            {"user_id":owner},
+            {"collaboration.version":1,"collaboration.group_id":group,"collaboration.original_requester_id":owner},
+        ]));
+    }
     let thread = db
         .collection::<crate::models::assistant_conversation::AssistantConversation>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&conversation,"user_id":owner})
+        .find_one(thread_filter)
         .await?;
     Ok(thread
         .as_ref()

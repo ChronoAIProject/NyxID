@@ -976,7 +976,7 @@ function ChecklistItem({ row }: { readonly row: ChecklistRow }) {
  *
  * Wave B item B.1.
  */
-function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
+export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
   const { getPlatform } = useChannelPlatformViews();
   const { data: runtimeConfig } = useRuntimeConfig();
   // `runtimeConfig.api_base_url` is the authoritative public base for the
@@ -987,6 +987,7 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
   const apiBase = runtimeConfig?.api_base_url ?? window.location.origin;
   const webhookUrl = bot.webhook_url ?? `${apiBase}/api/v1/webhooks/channel/${bot.platform}/${bot.id}`;
   const isLark = bot.platform === "lark" || bot.platform === "feishu";
+  const isDiscord = bot.platform === "discord";
 
   const rows: ChecklistRow[] = [];
 
@@ -1039,19 +1040,19 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
     <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6">
       <div className="space-y-1">
         <p className="text-13 font-medium text-foreground">
-          Finish webhook setup
+          {isDiscord ? "Finish Discord setup" : "Finish webhook setup"}
         </p>
         <p className="text-12 text-muted-foreground">
-          Register the URL below in {getPlatform(bot.platform).label} and complete
+          {isDiscord ? "Ordinary chat arrives through the Gateway connection. Send the bot a DM or @mention it; the first authenticated message activates the bot. The Interactions Endpoint URL is optional and only needed for slash commands/components." : <>Register the URL below in {getPlatform(bot.platform).label} and complete
           the checklist. The bot moves to Active automatically once{" "}
-          {getPlatform(bot.platform).label} delivers a verified inbound message.
+          {getPlatform(bot.platform).label} delivers a verified inbound message.</>}
         </p>
       </div>
 
       <CopyableUrlCallout
-        label="Webhook URL"
+        label={isDiscord ? "Interactions Endpoint URL (optional)" : "Webhook URL"}
         url={webhookUrl}
-        description={`Paste this into ${getPlatform(bot.platform).label}'s Event Subscriptions / webhook settings.`}
+        description={isDiscord ? "For slash commands/components, paste this into Discord Developer Portal > General Information > Interactions Endpoint URL. Do not use Event Webhooks." : `Paste this into ${getPlatform(bot.platform).label}'s Event Subscriptions / webhook settings.`}
         docsHref={getPlatform(bot.platform).webhookDocs}
       />
 

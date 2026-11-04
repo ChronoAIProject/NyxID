@@ -58,6 +58,8 @@ pub struct TriggerRun {
     pub continuation_limit: u32,
     #[serde(default)]
     pub continuation_protocol_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<super::assistant_message::WorkEvidence>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub trigger_generation: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

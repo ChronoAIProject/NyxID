@@ -5,7 +5,9 @@ pub mod cleanup;
 pub mod guest_requests;
 pub mod identity;
 pub mod membership;
+pub mod notifications;
 pub mod participant_posts;
+pub(crate) mod people;
 pub mod requests;
 pub mod runtime;
 #[cfg(test)]
@@ -209,6 +211,17 @@ pub async fn messages(
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
     for (collection, keys, unique) in [
+        (model::READ_STATES, doc! {"group_id":1,"user_id":1}, true),
+        (
+            model::MENTION_NOTIFICATIONS,
+            doc! {"group_id":1,"message_id":1,"user_id":1},
+            true,
+        ),
+        (
+            model::MENTION_NOTIFICATIONS,
+            doc! {"claimed":1,"created_at":1},
+            false,
+        ),
         (model::INVITES, doc! {"token_hash":1}, true),
         (
             model::INVITES,
@@ -261,6 +274,18 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
+    db.collection::<bson::Document>(model::MENTION_NOTIFICATIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"created_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     for collection in [model::INVITES, model::TRANSFERS, model::PROPOSALS] {
         db.collection::<bson::Document>(collection)
             .create_index(
@@ -441,18 +466,7 @@ pub async fn participants(
         .await?
         .try_collect()
         .await?;
-    Ok(group
-        .participant_user_ids
-        .iter()
-        .map(|id| super::org_group_service::Participant {
-            id: id.clone(),
-            display_name: users
-                .iter()
-                .find(|u| u.id == *id)
-                .and_then(|u| u.display_name.clone())
-                .unwrap_or_else(|| "Member".into()),
-        })
-        .collect())
+    Ok(people::project(group, &users))
 }
 
 pub async fn threads(

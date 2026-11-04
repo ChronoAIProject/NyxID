@@ -164,6 +164,9 @@ pub struct Steering {
 pub struct TurnMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_delivery: Option<super::generated_artifact::SavedOutcome>,
+    /// Server-observed business-system success; missing legacy rows are not evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<WorkEvidence>,
     #[serde(default)]
     pub timing: Option<TurnTiming>,
     /// Closed metadata from a failed model callback, or the upstream code alone.
@@ -205,4 +208,17 @@ pub struct TurnTiming {
     pub model_calls: u64,
     pub tool_calls: u64,
     pub total_ms: u64,
+}
+
+/// Analytics evidence only; no connection identifiers, arguments or message text.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct WorkEvidence {
+    /// Shared by all copies of a settled turn, including delayed voice delivery.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub settled_at: Option<DateTime<Utc>>,
+    pub owner_id: String,
+    pub source: String,
+    pub business_system_success: bool,
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
 }

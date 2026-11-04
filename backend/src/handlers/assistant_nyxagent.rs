@@ -18,10 +18,11 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     convert::Infallible,
-    sync::LazyLock,
     time::{Duration, Instant},
 };
-use tokio::sync::{Mutex, broadcast};
+#[cfg(test)]
+use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -142,6 +143,8 @@ pub struct AttachmentResponse {
     expires_at: Option<DateTime<Utc>>,
     expired: bool,
     image_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_input_reason: Option<String>,
     origin: String,
     pages: Option<usize>,
     id: String,
@@ -159,6 +162,7 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
             expires_at: row.artifact.expires_at,
             expired: false,
             image_input: row.image_input,
+            image_input_reason: row.image_input_reason,
             origin: row.origin,
             pages: row.pages,
             id: row.id,
@@ -547,9 +551,105 @@ pub struct TurnFailureReasonResponse {
     nyxid_error_code: Option<u32>,
 }
 
+/// Presentation derived only from durable activity evidence, never model text.
+/// A completed call is not a promise about all of its downstream effects.
+#[derive(Serialize)]
+pub struct ActionOutcomeResponse {
+    summary: String,
+    complete: bool,
+    actions: Vec<ActionOutcomeItem>,
+    retry_warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ActionOutcomeItem {
+    activity_id: String,
+    label: String,
+    status: &'static str,
+    summary: String,
+}
+
+impl ActionOutcomeResponse {
+    fn from_message(row: &AssistantMessage) -> Option<Self> {
+        if row.role != "assistant" || row.status != "failed" {
+            return None;
+        }
+        // Old writers did not retain a completeness counter. An empty legacy
+        // list proves nothing; preserve the old UI rather than claiming no work.
+        if row.activity_count.is_none() && row.activities.is_empty() {
+            return None;
+        }
+        let complete = row.error_code.as_deref() != Some("outcome_unknown")
+            && row.activity_count == Some(row.activities.len() as i64)
+            && row.activity_total <= row.activities.len() as i64;
+        let actions: Vec<_> = row
+            .activities
+            .iter()
+            .map(|activity| {
+                let completed = activity.status == "completed";
+                let duplicate = activity
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.kind == engine::RETRY_DUPLICATE_ACTION);
+                let summary = if duplicate {
+                    format!("Previously completed; not repeated: {}", activity.label)
+                } else if completed && activity.label == "nyxid__create_schedule" {
+                    "Created a scheduled automation".into()
+                } else if completed {
+                    format!("Completed tool call: {}", activity.label)
+                } else {
+                    format!("Outcome uncertain: {}", activity.label)
+                };
+                ActionOutcomeItem {
+                    activity_id: activity.id.clone(),
+                    label: activity.label.clone(),
+                    status: if completed { "completed" } else { "uncertain" },
+                    summary,
+                }
+            })
+            .collect();
+        let none = complete && actions.is_empty();
+        let uncertain = !complete || actions.iter().any(|a| a.status == "uncertain");
+        let summary = if none {
+            "No actions were taken."
+        } else if uncertain {
+            "Some actions may have taken effect. Review their results before trying again."
+        } else {
+            "These actions completed before the reply failed."
+        }
+        .into();
+        let retry_warning = if none {
+            None
+        } else if uncertain {
+            Some("Some actions may already have taken effect. Retrying may repeat them.".into())
+        } else {
+            let mut completed = actions
+                .iter()
+                .take(3)
+                .map(|a| a.summary.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if actions.len() > 3 {
+                completed.push_str("; and other recorded calls");
+            }
+            Some(format!(
+                "This request already did the following: {completed}. Retrying may repeat it."
+            ))
+        };
+        Some(Self {
+            summary,
+            complete,
+            actions,
+            retry_warning,
+        })
+    }
+}
+
 #[derive(Serialize)]
 pub struct MessageResponse {
     artifact_delivery: Option<ArtifactDeliveryResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_outcome: Option<ActionOutcomeResponse>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
@@ -590,6 +690,7 @@ impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
             artifact_delivery: None,
+            action_outcome: ActionOutcomeResponse::from_message(&row),
             platform_origin: row
                 .platform_origin
                 .as_ref()
@@ -868,6 +969,8 @@ pub struct HistoryResponse {
     /// Pending proxy approvals raised by this chat's key; decided through
     /// `POST /approvals/requests/{id}/decide`.
     approvals: Vec<ChatApprovalResponse>,
+    /// Additive history; old clients keep receiving pending-only `approvals`.
+    approval_history: Vec<ChatApprovalResponse>,
     /// Things outside the chat this thread is waiting for (a bot being
     /// created, a service being connected, the owner verifying a chat app).
     /// NyxID resumes the thread by itself when each happens.
@@ -892,8 +995,10 @@ pub struct CmaOperationResponse {
     checked_at: Option<DateTime<Utc>>,
     cma_url: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ChatApprovalResponse {
+    status: String,
+    review_path: String,
     id: String,
     service_slug: String,
     service_name: String,
@@ -906,6 +1011,8 @@ pub struct ChatApprovalResponse {
 impl From<engine::ChatApproval> for ChatApprovalResponse {
     fn from(row: engine::ChatApproval) -> Self {
         Self {
+            status: row.status,
+            review_path: row.review_path,
             id: row.id,
             service_slug: row.service_slug,
             service_name: row.service_name,
@@ -958,7 +1065,7 @@ pub async fn history(
         .await?;
     }
     let approvals =
-        engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
+        engine::approval_history(&state.db, &user_id, &conversation.credential_api_key_id).await?;
     // Best effort: the transcript never fails because of the waiting list.
     let waiting = super::nyxbot::waiting(&state, &user_id, &conversation.id)
         .await
@@ -1096,11 +1203,18 @@ pub async fn history(
         attachments.extend(turn.attachments.iter_mut());
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
+    let approval_history: Vec<ChatApprovalResponse> =
+        approvals.into_iter().map(Into::into).collect();
     Ok(Json(HistoryResponse {
         cma_operations,
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
-        approvals: approvals.into_iter().map(Into::into).collect(),
+        approvals: approval_history
+            .iter()
+            .filter(|row| row.status == "pending")
+            .cloned()
+            .collect(),
+        approval_history,
         waiting,
         messages,
         before_seq,
@@ -1278,6 +1392,7 @@ pub async fn artifact_delivery(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    review_path: String,
     connect_own: Option<serde_json::Value>,
     creation_turn_id: Option<String>,
     /// The tool call (turn activity ID) this card or receipt belongs to.
@@ -1310,7 +1425,9 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
     for AcknowledgementResponse
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
+        let status = acknowledgements::presentation_status(&row).to_owned();
         Self {
+            review_path: crate::services::assistant_links::AssistantPage::ReviewCard { conversation: &row.conversation_id, card: &row.id }.path(),
             creation_turn_id: row.creation_turn_id,
             activity_id: row.activity_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
@@ -1318,7 +1435,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
             kind: row.kind,
-            status: row.status,
+            status,
             summary: row.summary,
             link: row.link,
             trigger_run_id: row.trigger_run_id,
@@ -1604,9 +1721,32 @@ pub struct ModelResponse {
     available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_modalities: Option<Vec<String>>,
 }
-type ModelCache = HashMap<String, (Instant, Vec<ModelResponse>)>;
-static MODELS: LazyLock<Mutex<ModelCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+use crate::services::assistant_nyxagent_model_cache::{MODELS, ModelInfo};
+impl From<ModelInfo> for ModelResponse {
+    fn from(row: ModelInfo) -> Self {
+        Self {
+            id: row.id,
+            label: row.label,
+            available: row.available,
+            description: row.description,
+            input_modalities: row.input_modalities,
+        }
+    }
+}
+impl From<ModelResponse> for ModelInfo {
+    fn from(row: ModelResponse) -> Self {
+        Self {
+            id: row.id,
+            label: row.label,
+            available: row.available,
+            description: row.description,
+            input_modalities: row.input_modalities,
+        }
+    }
+}
 
 /// Keep upstream display metadata; the routing alias is not a model name.
 fn model_response(row: &Value) -> Option<ModelResponse> {
@@ -1629,11 +1769,35 @@ fn model_response(row: &Value) -> Option<ModelResponse> {
             .into(),
         available: row["available"].as_bool() != Some(false),
         description: row["description"].as_str().map(str::to_owned),
+        input_modalities: input_modalities(row),
     })
 }
 
+// Malformed optional metadata is unknown, never proof that images are unsupported.
+fn input_modalities(row: &Value) -> Option<Vec<String>> {
+    let values = row["input_modalities"]
+        .as_array()
+        .filter(|values| values.len() <= 16)?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= 32
+                        && value
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                })
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// The models NyxAgent currently offers this owner, or `None` when its list
-/// cannot be read. Cached per owner for a minute: availability follows the
+/// cannot be read. Successes and failures are cached per owner for a minute:
+/// repeated UI polls must not hammer an unavailable upstream. Availability follows the
 /// owner's assistant credential, so owners never share an entry.
 pub(crate) async fn live_models(
     state: &AppState,
@@ -1645,7 +1809,9 @@ pub(crate) async fn live_models(
     if let Some((time, models)) = MODELS.lock().await.get(&cache_key)
         && time.elapsed() < Duration::from_secs(60)
     {
-        return Some(models.clone());
+        return models
+            .clone()
+            .map(|rows| rows.into_iter().map(ModelResponse::from).collect());
     }
     let loaded: AppResult<Vec<ModelResponse>> = async {
         let credential = credentials::load_existing(&state.db, &state.encryption_keys, &user_id)
@@ -1658,7 +1824,7 @@ pub(crate) async fn live_models(
                 auth,
                 &credential,
                 "GET",
-                "v1/models",
+                "v1/models?include_capabilities=true",
                 None,
                 None,
                 policy,
@@ -1691,13 +1857,28 @@ pub(crate) async fn live_models(
         Ok(rows)
     }
     .await;
-    let rows = loaded.ok()?;
+    let rows = loaded.ok();
     let mut cache = MODELS.lock().await;
     if cache.len() >= 64 {
         cache.retain(|_, (time, _)| time.elapsed() < Duration::from_secs(60));
+        if cache.len() >= 64
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (time, _))| *time)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
     }
-    cache.insert(cache_key, (Instant::now(), rows.clone()));
-    Some(rows)
+    cache.insert(
+        cache_key,
+        (
+            Instant::now(),
+            rows.clone()
+                .map(|rows| rows.into_iter().map(ModelInfo::from).collect()),
+        ),
+    );
+    rows
 }
 
 /// Validate a model selection against the live list. When NyxAgent's list is
@@ -1735,6 +1916,7 @@ pub async fn models(
                 label: "Default model".into(),
                 available: true,
                 description: None,
+                input_modalities: None,
             }]
         }),
     ))
@@ -1791,9 +1973,17 @@ async fn proxy_raw(
         .transpose()
         .map_err(|_| AppError::Internal("Assistant request encoding failed".into()))?
         .unwrap_or_default();
+    // Both parts are server-authored. Never forward the caller's URI or query.
+    let (path, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
+    let uri = query.map_or_else(
+        || "/api/v1/assistant/nyxagent/turns".to_owned(),
+        |query| format!("/api/v1/assistant/nyxagent/turns?{query}"),
+    );
     let mut request = Request::builder()
         .method(method)
-        .uri("/api/v1/assistant/nyxagent/turns")
+        .uri(uri)
         .header("content-type", "application/json")
         .header(
             "accept",
@@ -1852,6 +2042,31 @@ pub(crate) fn http_egress(
 
 #[async_trait::async_trait]
 impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    async fn model_image_input(
+        &self,
+        authority: &crate::services::platform_manager_contract::NyxAgentExecutionContext,
+        model: &str,
+        policy: Option<BillingRoutePolicy>,
+    ) -> Option<bool> {
+        let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+            user_id,
+            ..
+        } = authority
+        else {
+            return None;
+        };
+        if user_id != &self.auth.user_id.to_string() {
+            return None;
+        }
+        live_models(&self.state, &self.auth, policy)
+            .await?
+            .iter()
+            .find(|row| row.id == model)?
+            .input_modalities
+            .as_ref()
+            .map(|modalities| modalities.iter().any(|value| value == "image"))
+    }
+
     async fn preload_skills(
         &self,
         row: &AssistantConversation,

@@ -93,6 +93,9 @@ pub struct GroupMessage {
     pub text: String,
     #[serde(default)]
     pub recipient_agent_ids: Vec<String>,
+    /// Live collaboration participants mentioned when this message was published.
+    #[serde(default)]
+    pub mentioned_participant_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }

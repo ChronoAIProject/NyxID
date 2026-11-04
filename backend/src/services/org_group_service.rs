@@ -272,6 +272,8 @@ pub async fn find(
 pub struct Participant {
     pub id: String,
     pub display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
 }
 pub async fn participants(db: &Database, group: &AssistantGroup) -> AppResult<Vec<Participant>> {
     if !is_org(group) {
@@ -287,6 +289,7 @@ pub async fn participants(db: &Database, group: &AssistantGroup) -> AppResult<Ve
         .participant_user_ids
         .iter()
         .map(|id| Participant {
+            handle: None,
             id: id.clone(),
             display_name: users
                 .iter()
@@ -922,6 +925,7 @@ pub(crate) async fn append_with_hook(
                     agent_name: agent.as_ref().map(|a| a.name.clone()),
                     text: text.clone(),
                     recipient_agent_ids: recipients.to_vec(),
+                    mentioned_participant_ids: vec![],
                     created_at: now,
                     attachments,
                 };
@@ -996,6 +1000,7 @@ async fn dropped_notice(
         role: "notice".into(),
         text: DROPPED_NOTICE.into(),
         recipient_agent_ids: Vec::new(),
+        mentioned_participant_ids: vec![],
         created_at: Utc::now(),
         author_user_id: None,
         author_display_name: None,

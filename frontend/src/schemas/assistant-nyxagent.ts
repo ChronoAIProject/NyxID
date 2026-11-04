@@ -34,6 +34,7 @@ export const nyxAgentAttachmentSchema = z.object({
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
+  image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported"]).nullish().catch(undefined),
   size: z.number().int().nonnegative(),
   label: z.string(),
 });
@@ -163,8 +164,17 @@ const turnMetadataSchema = z.object({
   failure_reason: nyxAgentFailureReasonSchema.nullish(),
   channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
 });
+export const nyxAgentActionOutcomeSchema = z.object({
+  summary: z.string(),
+  complete: z.boolean(),
+  actions: z.array(z.object({
+    activity_id: z.string(), label: z.string(), status: z.string(), summary: z.string(),
+  })),
+  retry_warning: z.string().nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
   artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean(),rejected: z.array(z.object({index: z.number().int().nonnegative().max(7), filename: z.string(), reason: z.enum(["invalid", "too_large", "unavailable", "missing"])})).max(8).default([])}).nullable().optional(),
+  action_outcome: nyxAgentActionOutcomeSchema.nullish(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
@@ -220,10 +230,12 @@ export const nyxAgentModelSchema = z.object({
   label: z.string(),
   available: z.boolean(),
   description: z.string().nullish(),
+  input_modalities: z.array(z.string()).nullish().catch(undefined),
 });
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  review_path: z.string().optional(),
   connect_own: z.object({
     supported: z.boolean(), catalog_service_id: z.string().optional(), service_slug: z.string().optional(),
     reason: z.string().optional(), instructions: z.string().optional(),
@@ -257,6 +269,8 @@ export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSche
 /// A pending proxy approval raised by the chat's key; decided through the
 /// ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
+  review_path: z.string().optional(),
   id: z.string(),
   service_slug: z.string(),
   service_name: z.string(),
@@ -287,6 +301,7 @@ export const nyxAgentHistorySchema = z.object({
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
   approvals: z.array(nyxAgentApprovalSchema).default([]),
+  approval_history: z.array(nyxAgentApprovalSchema).optional(),
   waiting: z.array(nyxAgentWaitingSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
@@ -435,6 +450,9 @@ export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFor
 
 /** A specialist's permission request awaiting NyxBot (or the user). */
 export const assistantAgentRequestSchema = z.object({
+  status: z.string().optional(),
+  code: z.string().optional(),
+  review_path: z.string().optional(),
   request_id: z.string(),
   /** The requesting agent's name. */
   agent: z.string(),
@@ -790,6 +808,7 @@ export const ASSISTANT_GROUP_NAME_MAX = 60;
 
 export const assistantGroupMemberSchema = z.object({
   id: z.string(),
+  mention_handle: z.string().optional(),
   name: z.string(),
   display_name: z.string().nullable().optional(),
   kind: assistantAgentKindSchema,
@@ -803,7 +822,7 @@ export const assistantGroupMemberSchema = z.object({
 });
 export type AssistantGroupMember = z.infer<typeof assistantGroupMemberSchema>;
 
-export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string() });
+export const groupPersonSchema = z.object({ id: z.string(), display_name: z.string(), handle: z.string().optional() });
 
 export const assistantGroupSchema = z.object({
   collaboration: collaborationGroupSchema.optional(),
@@ -843,6 +862,7 @@ export const assistantGroupMessageSchema = z.object({
     .default(null),
   text: z.string(),
   recipient_agent_ids: z.array(z.string()).optional(),
+  mentioned_participant_ids: z.array(z.string()).optional(),
   created_at: z.string(),
 });
 export type AssistantGroupMessage = z.infer<typeof assistantGroupMessageSchema>;

@@ -1210,6 +1210,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route("/audit-log/count", get(handlers::admin::count_audit_log))
         .route(
             "/telegram-managers/clear",
             post(handlers::telegram_managers::clear),
@@ -1305,6 +1306,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/assistant/model-usage",
             get(handlers::admin_assistant::model_usage),
+        )
+        .route(
+            "/assistant/analytics/internal-owners",
+            get(handlers::admin_assistant::internal_owners)
+                .put(handlers::admin_assistant::set_internal_owners),
         )
         .route(
             "/assistant/analytics",
@@ -2802,6 +2808,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::update_settings),
         )
         .route(
+            "/nyxagent/onboarding",
+            get(handlers::assistant_onboarding::get_onboarding)
+                .put(handlers::assistant_onboarding::save_onboarding),
+        )
+        .route(
+            "/nyxagent/onboarding/suggestions/hide",
+            post(handlers::assistant_onboarding::hide_suggestions),
+        )
+        .route(
             "/nyxagent/channels",
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
@@ -2870,6 +2885,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/groups/{id}/agents/{agent}/guest-access",
             put(handlers::collaboration_group::guest_access),
+        )
+        .route(
+            "/nyxagent/groups/{id}/read",
+            post(handlers::collaboration_group::mark_read),
         )
         .route(
             "/nyxagent/groups/{id}/membership",

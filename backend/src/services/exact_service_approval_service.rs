@@ -2180,6 +2180,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: Vec::new(),
             created_at: Utc::now(),

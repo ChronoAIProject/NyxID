@@ -1,7 +1,7 @@
 import { GroupAgentAccessRequest } from "./group-agent-access";
 import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
-import { collaborationApi } from "@/hooks/use-collaboration-groups";
+import { collaborationApi, useCollaborationRead } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -51,6 +51,8 @@ import {
   withDisplayName,
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
+import { groupMentionProjection, type InlineMention } from "@/lib/assistant/group-mentions";
+import { peopleMentions, personAlias, type MentionPerson } from "@/lib/assistant/collaboration-mentions";
 import { mentionSegments, mentionTokens } from "@/lib/assistant/nyxbot-mentions";
 import { SharedConsentCards } from "./shared-agent-controls";
 import {
@@ -80,6 +82,8 @@ import { useAuthStore } from "@/stores/auth-store";
 
 export const GROUP_COMPOSER_PLACEHOLDER =
   "Message the group — @mention an agent";
+export const COLLABORATION_COMPOSER_PLACEHOLDER =
+  "Message the group — @mention a person or agent";
 
 function WorkingDots() {
   return (
@@ -95,29 +99,19 @@ function WorkingDots() {
   );
 }
 
-function UserText({
-  text,
-  names,
-}: {
+function UserText({ text, names, mentions = [] }: {
   readonly text: string;
   readonly names: readonly string[];
+  readonly mentions?: readonly InlineMention[];
 }) {
-  return (
-    <>
-      {mentionSegments(text, names).map((segment, index) =>
-        segment.mention ? (
-          <span key={index} className="font-semibold">
-            {segment.text}
-          </span>
-        ) : (
-          <Fragment key={index}>{segment.text}</Fragment>
-        ),
-      )}
-    </>
-  );
+  return <>{mentionSegments(text, [...names, ...mentions.map((m) => m.handle)]).map((segment, index) => {
+    const mention = segment.mention ? mentions.find((m) => m.handle.toLowerCase() === segment.text.slice(1).toLowerCase()) : undefined;
+    return mention
+      ? <span key={index} data-group-mention title={`@${mention.handle}`} className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-11">@{mention.label}</span>
+      : segment.mention ? <span key={index} className="font-semibold">{segment.text}</span> : <Fragment key={index}>{segment.text}</Fragment>;
+  })}</>;
 }
 
-/** "to Luna, researcher": the agents a sent message was addressed to. */
 function recipientLine(
   ids: readonly string[],
   members: readonly AssistantGroupMember[],
@@ -142,7 +136,7 @@ export function GroupMessageRow({
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
   readonly members?: readonly AssistantGroupMember[];
-  readonly participants?: readonly { id: string; display_name: string }[];
+  readonly participants?: readonly MentionPerson[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useReplyFeedback({
@@ -152,6 +146,7 @@ export function GroupMessageRow({
     initialVote: message.feedback?.vote,
     initialComment: message.feedback?.comment,
   });
+  const projection = groupMentionProjection(message.text, members, participants);
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
@@ -165,7 +160,7 @@ export function GroupMessageRow({
           {message.agent && !message.text.startsWith(message.agent.name)
             ? `${agentTitle(message.agent)}: `
             : ""}
-          {message.text}
+          <UserText text={projection.text} names={names} mentions={projection.mentions} />
         </p>
         {message.activities
           ?.filter((activity) => activity.machine)
@@ -185,7 +180,7 @@ export function GroupMessageRow({
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
-          <UserText text={message.text} names={names} />
+          <UserText text={projection.text} names={names} mentions={projection.mentions} />
           {message.attachments?.map((item) => (
             <ToolImage
               key={item.id}
@@ -196,13 +191,14 @@ export function GroupMessageRow({
                 origin: item.origin === "tool" || item.origin === "user_upload" || item.origin === "generated_artifact"
                   ? item.origin : undefined,
                 imageInput: item.image_input ?? undefined,
+                imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}
             />
           ))}
         </UserMessageBubble>
-        <div className="flex max-w-full flex-wrap items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
+        <div className="flex max-w-full flex-wrap items-center gap-1"><MessageCopyAction text={projection.copyText} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
   }
@@ -255,14 +251,15 @@ export function GroupMessageRow({
                 origin: item.origin === "tool" || item.origin === "user_upload" || item.origin === "generated_artifact"
                   ? item.origin : undefined,
                 imageInput: item.image_input ?? undefined,
+                imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}
             />
           ))}
-          <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
+          <TextBlock text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} />
           <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
-            <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
+            <MessageCopyAction text={sanitizeAssistantMessageContent(projection.copyText)} />
             <ReplyFeedbackVotes feedback={feedback} />
           </div>
           <ReplyFeedbackFollowUp feedback={feedback} />
@@ -757,6 +754,7 @@ export function NyxAgentGroupPage({
   const [composerHeight, setComposerHeight] = useState(0);
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftText, setDraftText] = useState("");
   const [recipientSelection, setRecipientSelection] =
     useState<RecipientSelection>(NO_RECIPIENT_EDITS);
   // Server names are authoritative; the inventory only fills older payloads.
@@ -774,15 +772,20 @@ export function NyxAgentGroupPage({
         }
       : message,
   );
+  useCollaborationRead(groupId, messages.at(-1)?.seq ?? 0, Boolean(group?.collaboration));
+  const people = group?.collaboration ? (group.participants ?? []).filter((p) => p.handle) : [];
+  const draftPeople = peopleMentions(draftText, people, group?.members ?? [], Boolean(group?.collaboration));
   const recipients = resolveRecipients(
     recipientSelection,
-    group?.default_recipient_ids ?? [],
+    draftPeople.hasPeople ? [] : (group?.default_recipient_ids ?? []),
     group?.members ?? [],
   );
   const onComposerContentChange = (content: string) => {
+    setDraftText(content);
     if (!group) return;
+    const draft = peopleMentions(content, people, group.members, Boolean(group.collaboration));
     setRecipientSelection((current) =>
-      withDraft(current, content, group.members),
+      withDraft(current, draft.agentText, group.members),
     );
   };
 
@@ -805,16 +808,16 @@ export function NyxAgentGroupPage({
     );
   }
 
-  const mentions = (group?.members ?? [])
+  const mentions = [...(group?.members ?? [])
     .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => ({
       id: member.id,
-      name: memberMention(member, group?.members ?? []),
+      name: member.mention_handle ?? (people.some((p) => personAlias(p) === member.name.toLowerCase() || p.handle === member.name.toLowerCase()) ? member.id : memberMention(member, group?.members ?? [])),
       kind: member.kind,
       display_name: withDisplayName(member, agents.data?.agents).display_name || member.name,
       shared: member.shared,
       owner_name: member.owner_name,
-    }));
+    })), ...people.map((person) => ({ id: person.id, name: person.handle!, display_name: person.display_name, kind: "person" as const }))];
 
   return (
     <AssistantShell
@@ -945,7 +948,7 @@ export function NyxAgentGroupPage({
             }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
-            placeholder={GROUP_COMPOSER_PLACEHOLDER}
+            placeholder={group?.collaboration ? COLLABORATION_COMPOSER_PLACEHOLDER : GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
             onSend={async (text, uploads) => {
               setRequestError(undefined);
@@ -956,7 +959,9 @@ export function NyxAgentGroupPage({
               }
               try {
                 const members = group?.members ?? [];
-                const tokens = mentionTokens(text);
+                const personMentions = peopleMentions(text, people, members, Boolean(group?.collaboration));
+                if (personMentions.ambiguous) throw new Error("More than one group member has that name; choose an exact @handle from the mention picker.");
+                const tokens = mentionTokens(personMentions.agentText);
                 const ambiguous = tokens.some(({ name }) =>
                   !members.some((member) => member.id.toLowerCase() === name.toLowerCase())
                   && members.filter((member) => member.name.toLowerCase() === name.toLowerCase()).length > 1,
@@ -964,7 +969,7 @@ export function NyxAgentGroupPage({
                 // Bind the displayed selection (including sticky defaults) to
                 // exact IDs. Preserve stale mentions for the server's refusal;
                 // never replace an unavailable target with the lead.
-                const exactRecipients = mentionedIds(text, members.map((member) => ({
+                const exactRecipients = mentionedIds(personMentions.agentText, members.map((member) => ({
                   ...member, destroyed: false, unavailable: false,
                 })));
                 await transcript.post.mutateAsync({
@@ -973,10 +978,11 @@ export function NyxAgentGroupPage({
                   ...(recipients.edited
                     ? { recipientAgentIds: recipients.ids }
                     : !ambiguous
-                      ? { recipientAgentIds: exactRecipients.length ? exactRecipients : recipients.ids }
+                      ? { recipientAgentIds: exactRecipients.length ? exactRecipients : personMentions.hasPeople ? [] : recipients.ids }
                       : {}),
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
+                setDraftText("");
               } catch (error) {
                 reportError(error, "The message was not delivered.");
                 throw error;

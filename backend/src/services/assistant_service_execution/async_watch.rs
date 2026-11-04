@@ -375,6 +375,7 @@ impl AsyncContinuation {
             refusal: None,
             automatic: None,
             admission: Some(Admission {
+                bound_skill_read: false,
                 owner_instruction_receipt: false,
                 shared_detached: None,
                 shared_permit: self

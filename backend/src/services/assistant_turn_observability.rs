@@ -47,6 +47,7 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
         });
     TurnMetadata {
         artifact_delivery: None,
+        work: None,
         timing: Some(timing),
         failure_reason: None,
         channel_delivery: None,
@@ -173,6 +174,12 @@ pub async fn run_metadata_in_session(
             .update_one(
                 doc! {"_id": run_id, "user_id": &row.user_id, "turn_id": &turn.turn_id},
                 vec![doc! {"$set": {
+                    "work": {
+                        "owner_id": {"$literal":row.agent_owner_id.as_deref().unwrap_or(&row.user_id)},
+                        "trigger_run_id": {"$literal":run_id},
+                        "source": {"$cond":[{"$ne":[{"$ifNull":["$confirmation_policy",null]},null]},"event","scheduled"]},
+                        "business_system_success": {"$or":[{"$ifNull":["$work.business_system_success",false]},turn.business_system_success]},
+                    },
                     "attempts": {"$add": [{"$ifNull": ["$attempts", 0]}, i64::from(turn.engine_attempts)]},
                     "capacity_wait_ms": {"$add": [{"$ifNull": ["$capacity_wait_ms", 0]}, data.capacity_wait_ms.unwrap_or(0) as i64]},
                     "failure_reason": {"$literal": bson::to_bson(&data.failure_reason)

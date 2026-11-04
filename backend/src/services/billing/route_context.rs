@@ -441,6 +441,7 @@ mod tests {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let mut chat = ChatAuthority {
             trigger_run_id: None,
+            business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
@@ -512,6 +513,7 @@ mod tests {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let chat = ChatAuthority {
             trigger_run_id: None,
+            business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,

@@ -383,6 +383,7 @@ async fn attach(j: &Journey, saved: &mut AssistantMessage, mime: &str, bytes: &[
             label: "generated file".into(),
             chat_delivery: Some(true),
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
             pages: None,
         });

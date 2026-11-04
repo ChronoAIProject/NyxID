@@ -19,6 +19,7 @@ fn image(id: &str) -> TurnAttachment {
         artifact: Default::default(),
         chat_delivery: Some(true),
         image_input: None,
+        image_input_reason: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,

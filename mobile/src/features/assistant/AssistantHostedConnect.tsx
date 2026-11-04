@@ -29,6 +29,7 @@ export function AssistantHostedConnect({
 }) {
   const flow = useHostedConnect(token, active, onComplete);
   const [credential, setCredential] = useState("");
+  const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const [endpoint, setEndpoint] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -40,14 +41,29 @@ export function AssistantHostedConnect({
   useEffect(() => {
     if (!active) {
       setCredential("");
+      setFieldValues({});
       setClientSecret("");
     }
   }, [active]);
   async function approve() {
     if (!p || flow.disabled) return;
     try {
+      let composed = credential;
+      if (
+        !flow.usePlatformKey &&
+        p.connect_method === "api_key" &&
+        flow.credentialFields.length
+      ) {
+        const fields: Record<string, string> = {};
+        for (const field of flow.credentialFields) {
+          const value = fieldValues[field.name]?.trim();
+          if (!value) throw new Error(`Enter ${field.label}.`);
+          fields[field.name] = value;
+        }
+        composed = JSON.stringify(fields);
+      }
       const values = connectFormValues(p, flow.usePlatformKey, {
-        credential,
+        credential: composed,
         endpoint_url: endpoint,
         oauth_client_id: clientId,
         oauth_client_secret: clientSecret,
@@ -61,6 +77,7 @@ export function AssistantHostedConnect({
       );
     } finally {
       setCredential("");
+      setFieldValues({});
       setClientSecret("");
     }
   }
@@ -162,7 +179,24 @@ export function AssistantHostedConnect({
       ) : null}
       {!flow.device && !flow.oauth ? (
         <>
-          {!flow.usePlatformKey && p.connect_method === "api_key" ? (
+          {!flow.usePlatformKey &&
+          p.connect_method === "api_key" &&
+          flow.credentialFields.length ? (
+            flow.credentialFields.map((field) => (
+              <Field
+                key={field.name}
+                label={field.label}
+                value={fieldValues[field.name] ?? ""}
+                onChangeText={(value) =>
+                  setFieldValues((current) => ({ ...current, [field.name]: value }))
+                }
+                secureTextEntry={field.secret}
+                autoCorrect={false}
+                maxLength={16384}
+                editable={!flow.disabled}
+              />
+            ))
+          ) : !flow.usePlatformKey && p.connect_method === "api_key" ? (
             <Field
               label={
                 p.auth_key_name.trim() ||

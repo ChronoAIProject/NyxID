@@ -711,6 +711,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 pages: None,
                 chat_delivery: None,
                 image_input: None,
+                image_input_reason: None,
                 image_inspection: None,
             });
         }

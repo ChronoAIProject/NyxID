@@ -116,6 +116,7 @@ pub(crate) async fn settled(
     let Some(binding) = &row.collaboration else {
         return;
     };
+    notify_mentions(state, Some(&binding.group_id));
     if error.is_none() && !text.trim().is_empty() {
         let result: AppResult<()> = async {
             let admission = groups::requests::settled_admission(&state.db, binding).await?;
@@ -123,7 +124,13 @@ pub(crate) async fn settled(
                 groups::roster(&state.db, &binding.original_requester_id, &binding.group_id)
                     .await?;
             // UUIDs are authoritative; ambiguous textual names are never guessed.
-            for target in crate::services::assistant_group_service::mentions(text, &roster) {
+            let group =
+                groups::get(&state.db, &binding.original_requester_id, &binding.group_id).await?;
+            let participants = groups::participants(&state.db, &group).await?;
+            let mentions = groups::people::resolve(text, &participants, &roster, false)?;
+            for target in
+                crate::services::assistant_group_service::mentions(&mentions.agent_text, &roster)
+            {
                 groups::requests::handoff(&state.db, &admission, &target).await?;
             }
             Ok(())
@@ -142,6 +149,7 @@ pub(crate) async fn settled(
 }
 
 pub(crate) async fn sweep(state: &AppState) {
+    notify_mentions(state, None);
     if groups::cleanup::sweep(&state.db).await.is_err() {
         tracing::debug!("Collaboration cleanup deferred");
     }
@@ -293,10 +301,12 @@ pub(crate) async fn response(
         })
         .cloned()
         .collect();
+    let unread = groups::notifications::counts(&state.db, actor, &group.id).await?;
     Ok(GroupResponse {
         collaboration: Some(
             json!({"version":1,"creator_user_id":group.user_id,"membership_revision":group.collaboration.as_ref().expect("validated").membership_revision,
             "history_disclosure":groups::HISTORY_DISCLOSURE,"guest_access":guest_settings,"your_request_ids":active_requests,
+            "unread_count":unread.unread_count,"mention_count":unread.mention_count,"last_seen_seq":unread.last_seen_seq,
             "can_manage":creator,"transfer_to_user_id":transfers.map(|t|t.to_user_id),
             "proposals":proposals.iter().map(|p|json!({"id":p.id,"agent_id":p.agent_id,"proposed_by":p.proposed_by})).collect::<Vec<_>>(),
             "invites":invites.iter().map(|i|json!({"id":i.id,"expires_at":i.expires_at})).collect::<Vec<_>>()}),
@@ -310,6 +320,7 @@ pub(crate) async fn response(
             .map(|id| {
                 let agent = agents.iter().find(|a| &a.id == id);
                 GroupMemberResponse {
+                    mention_handle: Some(groups::people::agent_handle(id)),
                     id: id.clone(),
                     name: agent
                         .map(|a| a.name.clone())
@@ -392,11 +403,14 @@ pub(crate) async fn messages(
     let mut messages: Vec<_> = rows
         .into_iter()
         .map(|mut r| {
+            r.text = groups::people::public_text(&r.text, &participants, &agents);
             if let Some(author) = r.author_user_id.as_deref() {
-                r.author_display_name = participants
-                    .iter()
-                    .find(|p| p.id == author)
-                    .map(|p| p.display_name.clone());
+                r.author_display_name = r.author_display_name.or_else(|| {
+                    participants
+                        .iter()
+                        .find(|p| p.id == author)
+                        .map(|p| p.display_name.clone())
+                });
             }
             super::assistant_group::message_response(r, &agents)
         })
@@ -421,9 +435,10 @@ pub(crate) async fn post(
     if let Some(message) =
         groups::participant_posts::try_post(&state.db, actor, id, text, recipients, uploads).await?
     {
+        notify_mentions(state, Some(id));
         let agents = groups::roster(&state.db, actor, id).await?;
         return Ok(
-            json!({"message":super::assistant_group::message_response(message,&agents),
+            json!({"message":public_message_response(state,actor,id,message,&agents).await?,
             "addressed_agent_ids":[],"request_id":null}),
         );
     }
@@ -436,11 +451,25 @@ pub(crate) async fn post(
         .find(|m| m.seq == request.message_seq)
         .ok_or_else(|| AppError::NotFound("Group message not found".into()))?;
     let agents = groups::roster(&state.db, actor, id).await?;
+    notify_mentions(state, Some(id));
     let selected = message.recipient_agent_ids.clone();
     Box::pin(advance(state, Some(id))).await?;
     Ok(
-        json!({"message":super::assistant_group::message_response(message,&agents),"addressed_agent_ids":selected,"request_id":request.id}),
+        json!({"message":public_message_response(state,actor,id,message,&agents).await?,"addressed_agent_ids":selected,"request_id":request.id}),
     )
+}
+
+async fn public_message_response(
+    state: &AppState,
+    actor: &str,
+    group_id: &str,
+    mut message: crate::models::assistant_group::GroupMessage,
+    agents: &[crate::models::assistant_agent::AssistantAgent],
+) -> AppResult<super::assistant_group::GroupMessageResponse> {
+    let group = groups::get(&state.db, actor, group_id).await?;
+    let participants = groups::participants(&state.db, &group).await?;
+    message.text = groups::people::public_text(&message.text, &participants, agents);
+    Ok(super::assistant_group::message_response(message, agents))
 }
 
 #[derive(Clone, Deserialize)]
@@ -1052,5 +1081,32 @@ pub async fn cancel_guest_request(
 ) -> AppResult<StatusCode> {
     let actor = human(&state, &auth).await?;
     groups::guest_requests::cancel(&state.db, &actor, &group, &agent, &request).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn notify_mentions(state: &AppState, group: Option<&str>) {
+    let state = state.clone();
+    let group = group.map(str::to_owned);
+    tokio::spawn(async move {
+        if groups::notifications::deliver(&state, group.as_deref())
+            .await
+            .is_err()
+        {
+            tracing::debug!("Group mention delivery deferred");
+        }
+    });
+}
+#[derive(Deserialize)]
+pub struct ReadRequest {
+    pub last_seen_seq: i64,
+}
+pub async fn mark_read(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<ReadRequest>,
+) -> AppResult<StatusCode> {
+    let actor = human(&state, &auth).await?;
+    groups::notifications::mark_read(&state.db, &actor, &id, body.last_seen_seq).await?;
     Ok(StatusCode::NO_CONTENT)
 }

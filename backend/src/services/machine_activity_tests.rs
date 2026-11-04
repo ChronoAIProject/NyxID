@@ -125,6 +125,7 @@ async fn machine_receipt_jobs_finish_cancel_and_do_not_resurrect_late_outcomes()
         ["finished", "error", "cancelled", "unknown"]
     );
     let mut activity = TurnActivity {
+        retry_identity: None,
         id: Uuid::new_v4().to_string(),
         digest: None,
         label: "nyx__machine_exec".into(),
@@ -675,6 +676,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
     receipt.preview_enabled = true;
     row.active_turn.as_mut().unwrap().activities.push(
         crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             machine: Some(Box::new(receipt)),
             id: Uuid::new_v4().to_string(),
             digest: None,
@@ -702,6 +704,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
         agent_name: None,
         text: "done".into(),
         recipient_agent_ids: Vec::new(),
+        mentioned_participant_ids: vec![],
         created_at: Utc::now(),
     };
     f.state
