@@ -377,6 +377,7 @@ struct Coordinator {
     delegations: VecDeque<PendingDelegation>,
     admitted: HashSet<String>,
     readback: Option<Readback>,
+    owner_review_notices: HashSet<String>,
     announced: HashSet<String>,
     progress: super::progress::Coalescer,
     pending_audio: VecDeque<(VoiceRequest, String, Option<i64>)>,
@@ -412,6 +413,7 @@ impl Coordinator {
             delegations: VecDeque::new(),
             admitted: HashSet::new(),
             readback: None,
+            owner_review_notices: HashSet::new(),
             announced: HashSet::new(),
             progress: Default::default(),
             pending_audio: VecDeque::new(),
@@ -1271,6 +1273,28 @@ async fn task_updates(
                 continue;
             };
             let summary = confirmation::spoken_summary(&state.db, &card).await?;
+            if call.client_key.is_some() || card.authored_skill.is_some() {
+                // Device service authority is not a human owner's decision.
+                // Skill publication also requires reviewing the complete draft.
+                // Keep the existing card/continuation; never arm a read-back.
+                if !c.transcripts.has_unsealed_user_input()
+                    && c.owner_review_notices.insert(card.id.clone())
+                {
+                    let guidance = "Review and confirm this pending action on its NyxID owner card. Spoken replies cannot approve this action.";
+                    let notice = format!("{summary}. {guidance}");
+                    announce(
+                        socket,
+                        None,
+                        if notice.len() <= COMMENTARY_MAX_BYTES {
+                            &notice
+                        } else {
+                            guidance
+                        },
+                    )
+                    .await?;
+                }
+                continue;
+            }
             if let Some(progress) = &mut request.progress {
                 progress.detail = format!("Waiting for your approval: {summary}");
                 state
@@ -1434,14 +1458,26 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
             continue;
         }
 
-        // An explicit End always wins a restart. Best-effort provider closure
-        // is followed by uncertain settlement so the durable call can never
-        // strand the user's live-slot admission.
+        if call.protocol == Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime) {
+            // Grok's relay socket is process-local and cannot be resumed.
+            settle_windows(state, &call, false).await?;
+            call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
+            session::close(&state.db, &call, "server_update", true).await?;
+            continue;
+        }
+
+        // Native Responses state cannot be resumed or replayed after lease loss.
+        // End this call, retaining its provider identity and reported usage until
+        // closure succeeds or the bounded reconciliation deadline is reached.
         if call.end_requested || call.responses_model.is_some() {
+            call = session::write(
+                &state.db,
+                &call,
+                doc! {"state":"closing","end_requested":true},
+            )
+            .await?;
             let mut closed = false;
             if let Some(id) = call.provider_session_id.clone()
-                && call.protocol
-                    != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
                 && let Ok(resolved) = super::credentials::resolve(
                     state,
                     &call.user_id,
@@ -1457,9 +1493,14 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
             if !closed {
                 super::diagnostics::close_unconfirmed(&state.db, &call).await;
             }
-            super::responses::settle(state, &mut call).await?;
-            settle_windows(state, &call, !closed).await?;
-            call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
+            if closed
+                || Utc::now() >= call.reconcile_deadline
+                || (call.provider_session_id.is_none() && Utc::now() >= call.deadline)
+            {
+                super::responses::settle(state, &mut call).await?;
+                settle_windows(state, &call, !closed).await?;
+                call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
+            }
             session::close(
                 &state.db,
                 &call,
@@ -1468,17 +1509,9 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
                 } else {
                     "close_unconfirmed"
                 },
-                true,
+                closed,
             )
             .await?;
-            continue;
-        }
-
-        if call.protocol == Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime) {
-            // Grok's relay socket is process-local and cannot be resumed.
-            settle_windows(state, &call, false).await?;
-            call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
-            session::close(&state.db, &call, "server_update", true).await?;
             continue;
         }
 
@@ -1529,10 +1562,19 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
                 )));
             }
             Err(_) => {
+                call = session::write(
+                    &state.db,
+                    &call,
+                    doc! {"state":"closing","end_requested":true},
+                )
+                .await?;
                 super::diagnostics::close_unconfirmed(&state.db, &call).await;
-                settle_windows(state, &call, true).await?;
-                call = session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
-                session::close(&state.db, &call, "server_update", true).await?;
+                if Utc::now() >= call.reconcile_deadline {
+                    settle_windows(state, &call, true).await?;
+                    call =
+                        session::write(&state.db, &call, doc! {"billing_finalized":true}).await?;
+                }
+                session::close(&state.db, &call, "close_unconfirmed", false).await?;
             }
         }
     }

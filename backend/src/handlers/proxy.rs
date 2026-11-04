@@ -3116,25 +3116,22 @@ async fn preflight_proxy_deny_before_resolution(
         }
     }
 
-    // This metadata comes from the existing server-owned Bot binding. Exact
-    // Key/service/Bot/operation checks still run before internal execution.
-    // Voice forwarding never enters the generic service-approval evaluator.
-    if !hint.is_internal_voice {
-        let operation = operation_descriptor::build_http_descriptor(method, path, None);
-        let denied = approval_service::evaluate_deny_only(
-            &state.db,
-            &approval_owner_user_id,
-            &hint.service_owner_id,
-            &hint.service_id,
-            &operation,
-            hint.is_auto_connected,
-        )
-        .await?;
-        if denied {
-            return Err(AppError::Forbidden(
-                "Operation denied by approval policy".to_string(),
-            ));
-        }
+    // Explicit Deny is an access restriction, including for internal Voice.
+    // This read never creates a service-operation approval request.
+    let operation = operation_descriptor::build_http_descriptor(method, path, None);
+    let denied = approval_service::evaluate_deny_only(
+        &state.db,
+        &approval_owner_user_id,
+        &hint.service_owner_id,
+        &hint.service_id,
+        &operation,
+        hint.is_auto_connected,
+    )
+    .await?;
+    if denied {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".to_string(),
+        ));
     }
 
     crate::services::tool_publication_service::gate_unconfigured_public_tool(
@@ -4739,8 +4736,21 @@ async fn execute_resolved_proxy_inner<'a>(
     // service-operation approval gate; other services retain their evaluator.
     let (approval_outcome, approval_auto) =
         if target.service.slug == crate::services::voice::access::SERVICE_SLUG {
+            let denied = approval_service::evaluate_deny_only(
+                &state.db,
+                &approval_owner_user_id,
+                service_owner_for_approval,
+                service_id,
+                &operation,
+                is_auto_connected_for_approval,
+            )
+            .await?;
             (
-                approval_service::ApprovalOutcome::Allowed { required: false },
+                if denied {
+                    approval_service::ApprovalOutcome::Denied
+                } else {
+                    approval_service::ApprovalOutcome::Allowed { required: false }
+                },
                 None,
             )
         } else {

@@ -50,7 +50,7 @@ pub(super) async fn agents_for(
             let service =
                 crate::services::voice::access::authorize(&state.db, &auth, &agent).await?;
             service_id = Some(service.id.clone());
-            crate::services::voice::access::policy(
+            match crate::services::voice::access::policy(
                 &state.db,
                 &auth,
                 &service,
@@ -58,7 +58,12 @@ pub(super) async fn agents_for(
                 "/voice/agents",
                 false,
             )
-            .await?;
+            .await
+            {
+                Ok(()) => {}
+                Err(error) if keys::permanent_authority_failure(&error) => continue,
+                Err(error) => return Err(error),
+            }
         }
         let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
         rows.push(json!({"agent_id":agent.id,"name":agent.name,

@@ -40,12 +40,21 @@ catalog operation policy and Key operation scope. Existing B1 operation scopes
 still prohibit WebSockets. Discovery checks its own read operation and does not
 require the start operation.
 
+Voice forwarding honors existing explicit service Deny rules, including after
+admission and before queued notification dispatch. This deny-only check creates
+no approval request. Require-approval policies add no Voice access gate.
 Voice forwarding adds no service-operation approval gate, pending request,
 decision, resume or expiry proof. The exact Agent Key grant permits access to the
 selected Bot's existing realtime Voice path; the Bot retains its own tools,
 confirmations, permission checks and billing. Service-operation approvals for
 unrelated catalog services keep their existing behavior. Neither Voice access nor
 a remote speech notification can approve a Bot tool action.
+
+A device Key does not authenticate the person speaking. Device calls never
+decide owner action cards from speech. The call identifies the pending action
+and asks the owner to review its existing NyxID card; the usual owner decision
+resumes the same task. First-party human Voice retains its existing read-back
+confirmation. Skill publication always requires reviewing the full draft card.
 
 ## Lifecycle
 
@@ -63,9 +72,17 @@ access. Voice-caused delegated turns and async operations retain their source
 while using their own Bot's tool grants. Confirmed source loss stops pending
 descendants, removes their pending report/decision events, and permits only bounded cleanup of already accepted async effects.
 Temporary storage/readiness failures pause effects and preserve bounded retry.
-Delayed report and decision event turns retain one exact Voice source; events
-from unrelated owner work wait independently. This does not undo already
+Delayed report and decision event turns retain one exact Voice source; unrelated
+owner/user/assignment turns leave those reports queued. Events from unrelated
+owner work wait independently. This does not undo already
 completed effects or stop unrelated owner work.
+
+Native Responses calls are closed after worker recovery, never replayed. A
+failed provider close remains unconfirmed, preserving provider identity and
+observed usage for bounded reconciliation. It cannot mark final usage confirmed
+or freeze response-token settlement. The live slot ends at the provider deadline;
+reconciliation continues until its existing finalization deadline. Only reported
+usage is charged when that deadline expires.
 
 The service connection and its endpoint have a fixed binding and route. Owners
 can disable/enable the same service without changing identity or selected-service

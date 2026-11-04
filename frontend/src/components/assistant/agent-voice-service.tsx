@@ -78,7 +78,8 @@ function VoiceConnection({
       <p className="text-12 text-muted-foreground">
         Create a voice connection for {agentTitle(agent)}, then allow this
         connection on your device’s Agent Key. It permits conversations with
-        this Bot using its existing access, history, confirmations and billing.
+        this Bot using its existing access, history and billing. Actions requiring
+        owner confirmation are reviewed on their NyxID cards.
         {agent.kind === "nyxbot"
           ? " This NyxBot has full account and service access."
           : " Other Bots require their own connections."}

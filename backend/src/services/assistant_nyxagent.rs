@@ -2468,6 +2468,14 @@ pub(crate) async fn begin_owner_turn_in_session(
             .partition(|event| event.voice_source_request_id == voice_source_request_id);
         events = selected;
         row.pending_events.extend(deferred);
+    } else {
+        // An unrelated turn has its own principal. Leave Voice reports queued
+        // for an event turn retaining their exact source and revocation fence.
+        let (selected, deferred): (Vec<_>, Vec<_>) = events
+            .into_iter()
+            .partition(|event| event.voice_source_request_id.is_none());
+        events = selected;
+        row.pending_events.extend(deferred);
     }
     if had_queued_media
         && let Some(fresh) = collection

@@ -428,7 +428,10 @@ available without merging execution histories.
    channel and automation work from starving.
 
 At `awaiting_confirmation`, retain the existing card and pending acknowledgement
-IDs on the request. Phase 3 performs §11's literal read-back, playback/input
+IDs on the request. Agent Key device calls require the owner's existing NyxID
+card; the credential does not authenticate the person speaking and cannot decide
+that card. Skill drafts also require full card review. First-party human Voice
+performs §11's literal read-back, playback/input
 gates and bounded classification. First `unclear` opens one new read-back;
 second `unclear` or silence keeps this state without deciding. Approve/deny
 creates one server continuation through ordinary admission. Audio end does not
@@ -473,7 +476,9 @@ with a three-second timeout and at most 160 characters, bounded by the existing
 concrete findings/failure and necessary detail directly, without mentioning saved
 answers, another chat, backend conversations or internal handoffs. If
 summarization is unavailable, use complete safe findings within that same budget,
-or explain that a reliable spoken explanation could not be produced. Unicode sentence/clause boundaries
+or explain that a reliable spoken explanation could not be produced. Complete
+Markdown list items remain findings even without terminal punctuation; remove
+their list/bold formatting without dropping their values. Unicode sentence/clause boundaries
 replace the old 64-byte fragments; never read a truncated clause. Admission-only
 and async-submit acknowledgements remain distinct from settled results.
 

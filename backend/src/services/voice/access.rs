@@ -92,6 +92,22 @@ pub async fn policy(
     let catalog = db.collection::<DownstreamService>(CATALOG)
         .find_one(doc! {"_id":service.catalog_service_id.as_deref().unwrap_or_default(),"slug":SERVICE_SLUG,"is_active":true})
         .await?.ok_or_else(|| AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()))?;
+    let operation =
+        crate::services::operation_descriptor::build_http_descriptor(method, path, None);
+    if crate::services::approval_service::evaluate_deny_only(
+        db,
+        &auth.user_id.to_string(),
+        &service.user_id,
+        &catalog.id,
+        &operation,
+        false,
+    )
+    .await?
+    {
+        return Err(AppError::Forbidden(
+            "Operation denied by approval policy".into(),
+        ));
+    }
     let canonical = crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(path)?;
     crate::services::proxy_authorization::authorize_proxy_operation(&catalog, method, &canonical)?;
     crate::services::agent_operation_scope_service::authorize(

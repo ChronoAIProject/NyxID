@@ -67,12 +67,41 @@ pub(super) async fn result(state: &AppState, user: &str, message: &AssistantMess
 }
 
 fn fallback(text: &str) -> String {
+    // Markdown findings often use one complete item per line without a final
+    // punctuation. Preserve those item boundaries before sentence selection;
+    // otherwise only a trailing disclaimer can survive the fallback.
+    let text = text
+        .lines()
+        .map(|line| {
+            let line = line.trim();
+            let item = ["- ", "* ", "+ ", "• "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(*prefix))
+                .or_else(|| {
+                    let (number, item) = line.split_once(". ")?;
+                    (!number.is_empty() && number.bytes().all(|c| c.is_ascii_digit()))
+                        .then_some(item)
+                });
+            match item {
+                Some(item) => {
+                    let item = item.replace("**", "");
+                    if complete(&item) || item.trim().is_empty() {
+                        item
+                    } else {
+                        format!("{item};")
+                    }
+                }
+                None => line.to_owned(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     // Keep complete findings, favoring the final answer when the source exceeds
     // the speech budget. Internal navigation notices never become a fallback.
     let mut result = Vec::new();
     let mut chars = 0;
     let mut bytes = 0;
-    for part in parts(text, 80).into_iter().rev() {
+    for part in parts(&text, 80).into_iter().rev() {
         let len = part.chars().count();
         if safe(&part)
             && complete(&part)
@@ -139,6 +168,38 @@ fn safe(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fallback_keeps_unpunctuated_markdown_findings_before_a_trailing_disclaimer() {
+        let answer = "查询结果：\n\n- **固件版本：** 0.6.15\n- **屏幕亮度：** 80%\n- **摄像头状态：** 空闲，未开启连续视频流，无报错\n\n本次仅查询状态，没有修改任何设置。";
+        let spoken = fallback(answer);
+        for detail in [
+            "固件版本： 0.6.15",
+            "屏幕亮度： 80%",
+            "摄像头状态： 空闲",
+            "未开启连续视频流",
+            "没有修改任何设置",
+        ] {
+            assert!(
+                spoken.contains(detail),
+                "Missing finding: {detail}: {spoken}"
+            );
+        }
+        assert!(!spoken.contains("**"));
+        assert!(spoken.chars().count() <= MAX_RESULT_CHARS);
+        assert!(spoken.len() <= super::super::runtime::COMMENTARY_MAX_BYTES);
+        let english = fallback(
+            "1. **Firmware:** 0.6.15\n2. **Brightness:** 80%\n3. **Camera:** idle\n- `POST /admin/reset`",
+        );
+        for finding in ["Firmware: 0.6.15", "Brightness: 80%", "Camera: idle"] {
+            assert!(english.contains(finding));
+        }
+        assert!(!english.contains("POST"));
+        assert_eq!(
+            fallback(&format!("- {}", "unfinished".repeat(200))),
+            UNREADABLE_RESULT
+        );
+    }
+
     #[test]
     fn fallback_preserves_findings_without_redirecting_to_another_conversation() {
         let findings = "照片偏暗，画面中是一面绿色墙壁。亮度已设为百分之七十五。";

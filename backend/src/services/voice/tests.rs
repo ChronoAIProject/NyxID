@@ -746,7 +746,7 @@ async fn unknown_initialization_is_reconciled_after_its_live_slot_expires() {
     .await;
 }
 
-async fn pending_card(
+pub(super) async fn pending_card(
     state: &crate::AppState,
     thread: &crate::models::assistant_conversation::AssistantConversation,
     call: &VoiceSession,

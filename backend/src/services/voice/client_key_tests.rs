@@ -855,7 +855,7 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
         crate::services::approval_service::set_service_approval_config(
             &f.state.db, &f.owner, identity.service.catalog_service_id.as_deref().unwrap(),
             "Voice", None, None, None,
-            Some(&crate::models::service_approval_config::ApprovalEffect::Deny),
+            Some(&crate::models::service_approval_config::ApprovalEffect::RequireApproval),
         ).await.unwrap();
         let (_, private) = crate::routes::build_router_with_state(f.state.clone());
         let app = private.with_state(f.state.clone());
@@ -986,9 +986,10 @@ async fn voice_notification_dispatch_rechecks_its_own_catalog_operation_without_
             Some(&[ApprovalRule { methods:vec!["POST".into()], resource_pattern:"/voice/sessions/*/announcements".into(),
                 verbs:vec![],effect:ApprovalEffect::Deny,mode:ApprovalMode::PerRequest }]),Some(&ApprovalEffect::AutoAllow)).await.unwrap();
         keys::revalidate(&f.state.db,&call).await.unwrap();
-        let claimed = super::announcements::claim(&f.state.db,&call).await.unwrap().unwrap();
-        assert_eq!(claimed.id, notice.id);
-        assert_eq!(claimed.state, "dispatched");
+        assert!(super::announcements::claim(&f.state.db,&call).await.unwrap().is_none());
+        let stored = f.state.db.collection::<super::announcements::Announcement>(super::announcements::COLLECTION)
+            .find_one(doc! {"_id":notice.id}).await.unwrap().unwrap();
+        assert_eq!(stored.state, "cancelled");
         assert_eq!(f.state.db.collection::<bson::Document>("approval_requests")
             .count_documents(doc! {}).await.unwrap(), 0);
         f.state.db.drop().await.unwrap();
@@ -1586,3 +1587,6 @@ async fn voice_delayed_reports_inherit_source_and_revocation_preserves_unrelated
     })
     .await;
 }
+
+#[path = "deep_audit_tests.rs"]
+mod deep_audit_tests;

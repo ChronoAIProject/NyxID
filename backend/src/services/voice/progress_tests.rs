@@ -919,7 +919,8 @@ async fn native_voice_shutdown_checkpoints_usage_without_admitting_work_and_reco
         }
         assert_eq!(call.responses_usage.len(),1);
         assert_eq!(call.responses_usage["native-response"].tokens,100);
-        state.db.collection::<Document>(COLLECTION_NAME).update_one(doc!{"_id":&call.id},doc!{"$set":{"lease_until":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(20))}}).await.unwrap();
+        state.db.collection::<Document>(COLLECTION_NAME).update_one(doc!{"_id":&call.id},doc!{"$set":{"lease_until":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(20)),
+            "deadline":bson::DateTime::from_millis(0)}}).await.unwrap();
         recover(&state).await.unwrap();
         let closed=state.db.collection::<VoiceSession>(COLLECTION_NAME).find_one(doc!{"_id":&call.id}).await.unwrap().unwrap();
         assert!(!closed.live_slot);
@@ -1008,4 +1009,42 @@ async fn native_voice_token_hold_and_reported_checkpoint_settle_once_after_reloa
         assert!(recovered.responses_finalized);
     })
     .await;
+}
+
+#[tokio::test]
+async fn device_and_skill_cards_request_owner_review_without_arming_speech() {
+    Box::pin(async {
+        for device in [true,false] {
+        let (state, thread, mut call) = super::super::tests::setup("voice_device_card_presentation").await;
+        let card = super::super::tests::pending_card(&state,&thread,&call).await;
+        // Presentation cannot promote a device's credential into an owner.
+        // This fixture tests the coordinator separately from live-key admission.
+        if device {
+            call.client_key = Some(super::super::client_key::ClientKey {
+            key_id: "device".into(), credential_id: Some("child".into()), key_version: 1,
+            agent_id:"agent".into(), service_id:"service".into(), service_version:1,
+            });
+        } else {
+            state.db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).update_one(doc!{"_id":&card.id},
+                doc!{"$set":{"authored_skill":{"agent_id":"agent","proposal_id":"proposal","revision":1_i64,"skills_revision":1_i64}}}).await.unwrap();
+        }
+        let (mut socket, server, received) = fixture_socket().await;
+        let mut coordinator=Coordinator::new();
+        for _ in 0..2 {
+            assert!(task_updates(&state,&call,&mut socket,&mut coordinator).await.unwrap());
+            assert!(coordinator.readback.is_none());
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3),async {
+            while received.lock().await.is_empty() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        let messages=received.lock().await;
+        assert_eq!(messages.len(),1,"The same pending card is announced once");
+        assert!(messages[0]["content"].as_str().unwrap().contains("NyxID owner card"));
+        assert!(!messages[0]["content"].as_str().unwrap().contains("should I go ahead"));
+        drop(messages);
+        assert!(coordinator.owner_review_notices.contains(&card.id));
+        server.abort();
+        state.db.drop().await.unwrap();
+        }
+    }).await;
 }
