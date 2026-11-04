@@ -48,6 +48,11 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Server-derived automation identity; never accepted from client/tool JSON.
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
+    #[serde(default)]
+    pub continuation_protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -508,6 +513,10 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Exact live automation runs, maintained transactionally. Avoids any trigger
+    /// reads on ordinary Stop paths and serializes Stop against wake admission.
+    #[serde(default)]
+    pub coordinator_run_ids: Vec<String>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     /// Server-created, tool-free visitor model initialization. Never client input.

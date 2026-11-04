@@ -162,6 +162,8 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_delivery: Option<super::generated_artifact::SavedOutcome>,
     #[serde(default)]
     pub timing: Option<TurnTiming>,
     /// Closed metadata from a failed model callback, or the upstream code alone.

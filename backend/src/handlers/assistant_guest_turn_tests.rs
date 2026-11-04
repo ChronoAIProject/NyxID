@@ -292,6 +292,11 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                 let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
                 observations.push(json!({"stage":method,"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
             }
+            if scenario == "owner_no_attempt" {
+                db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
+                    "conversation_id":&conversation,"kind":"model_attempt"
+                }).await.unwrap();
+            }
             if !setup && scenario == "missing_input" {
                 db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
                     "conversation_id":&conversation,"kind":"input_admission"
@@ -761,7 +766,10 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
                 .unwrap()
                 .get("owner_model_route")
                 .cloned();
-            if setups_before == setup_calls.load(std::sync::atomic::Ordering::SeqCst) {
+            if scenario == "stale_route" {
+                assert!(route_before.is_some());
+                assert!(route_after.is_none());
+            } else if setups_before == setup_calls.load(std::sync::atomic::Ordering::SeqCst) {
                 assert_eq!(
                     route_before, route_after,
                     "guest may not establish or replace a model route"
@@ -875,6 +883,19 @@ async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permi
         let expected = match scenario {
             "approval" => Some((403, "api_key_scope_forbidden", 9000)),
             "stateful" | "missing_input" => Some((403, "guest_model_route_required", 9000)),
+            "unbound"
+            | "catalog_unbound"
+            | "bootstrap_byok"
+            | "metadata_stateful"
+            | "metadata_hosted"
+            | "metadata_unknown"
+            | "metadata_unknown_effect"
+            | "metadata_replacement"
+            | "semantic_header"
+                if !initialized =>
+            {
+                Some((403, "guest_model_route_required", 9000))
+            }
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
         };

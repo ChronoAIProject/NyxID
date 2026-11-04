@@ -85,6 +85,18 @@ fn answer_routing_parts(
     reply_channel: Option<&ChannelOrigin>,
     turn: &ActiveTurn,
 ) -> AnswerRouting {
+    if turn
+        .events
+        .iter()
+        .any(super::assistant_model_denial_notice::is_notice)
+    {
+        // App replies stay in the app. Captured platform notices use the
+        // separate saved-personal-reply path, never today's legacy home/chat.
+        return AnswerRouting {
+            primary: PrimaryDestination::App,
+            also: Vec::new(),
+        };
+    }
     // Active-turn attribution also covers partial projections used by image delivery.
     let group_id = turn
         .collaboration
@@ -2173,6 +2185,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            coordinator_run_ids: Vec::new(),
             collaboration: None,
             owner_model_route: None,
             invocation_controlled: false,

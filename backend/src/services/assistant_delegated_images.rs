@@ -482,7 +482,10 @@ pub async fn consume_wait(
         let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
         let Some(mut row) = rows.find_one(doc! {"_id":conversation,"user_id":owner,"active_turn.turn_id":turn,"active_turn.stop_requested":false}).session(&mut *tx).await? else { return Err(AppError::AssistantTurnRequired) };
         if row.guest_turn || row.is_subagent() || engine::live_turn(&row, Utc::now()).is_none() { return Err(AppError::AssistantTurnRequired) }
-        let events: Vec<_> = row.pending_events.iter().filter(|e| e.kind == "subagent_settled" && e.agent_id.as_ref().is_some_and(|id| agents.contains(id))).cloned().collect();
+        // Only consume results for this live coordinator's server-derived run.
+        // Ordinary owner waits must preserve unrelated queued automation replies.
+        let run_id = row.active_turn.as_ref().and_then(|t| t.trigger_run_id.as_deref());
+        let events: Vec<_> = row.pending_events.iter().filter(|e| e.kind == "subagent_settled" && e.trigger_run_id.as_deref() == run_id && e.agent_id.as_ref().is_some_and(|id| agents.contains(id))).cloned().collect();
         adopt_in_session(db, tx, &mut row, &events).await?;
         let mut results = Vec::new();
         for event in &events {

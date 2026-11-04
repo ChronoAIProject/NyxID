@@ -233,7 +233,9 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation { instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let artifact_mode = (artifact_catalog_service_id.is_some() && turn.origin == TurnOrigin::User && super::generated_artifacts::web_delivery(&delivery)).then(|| super::generated_artifacts::sandbox::MODE.to_owned());
+            let admitted_catalog = artifact_mode.as_ref().and(artifact_catalog_service_id.clone());
+            let watch=AsyncServiceOperation{instruction_receipt_version:0,shared_execution:None,artifact_catalog_service_id:admitted_catalog,artifact_event_turn_id:None,artifact_mode,artifact_result:None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
@@ -545,6 +547,8 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             let event = AgentEvent {
+                trigger_run_id: None,
+                continuation_protocol_version: 0,
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,

@@ -1653,6 +1653,14 @@ async fn execute_turn_inner(
     let mut guidance = guidance.to_owned();
     if !row.guest_model_setup
         && !row.guest_turn
+        && crate::services::generated_artifacts::enabled(&state.db, &row.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        guidance.push_str(crate::services::generated_artifacts::GUIDANCE);
+    }
+    if !row.guest_model_setup
+        && !row.guest_turn
         && crate::services::assistant_service_execution::instruction::prompt_applies(
             &state.db,
             &row.user_id,

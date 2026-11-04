@@ -471,6 +471,7 @@ async fn check_inner(
             refusal: None,
             automatic: gate.auto_allowed(),
             admission: Some(Admission {
+                model_control: None,
                 owner_instruction_receipt: instruction_covered,
                 shared_detached: None,
                 shared_permit: permit,
@@ -862,7 +863,16 @@ async fn check_inner(
         } else {
             summary.to_owned()
         };
-        let gate = if resource_replay && acknowledgement.is_some() {
+        let gate = if let Some(control) = &model_control {
+            // All selection, grant, owner, credential and semantic-input checks
+            // above still apply. This private gate replaces only its OWN new
+            // explicit Write card. Generic approval policy remains separate.
+            if control.callback.prepared().is_none() {
+                return Ok(Decision {refusal:Some(super::assistant_model_control::observe(control.state,chat,control.callback).await?),
+                    admission:None,automatic:None});
+            }
+            acks::Gate::Proceed
+        } else if resource_replay && acknowledgement.is_some() {
             acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed_with_org(db, chat, facts,
             org && !model_consent && !instruction_covered,
@@ -919,6 +929,11 @@ async fn check_inner(
         })
     })
     .await
+}
+
+struct ModelControlConfirmation<'a> {
+    state: &'a crate::AppState,
+    callback: &'a super::assistant_model_control::Callback,
 }
 
 /// Card arguments, card records and card-derived selections for an org

@@ -1236,6 +1236,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        coordinator_run_ids: Vec::new(),
         collaboration: None,
         owner_model_route: None,
         invocation_controlled: false,
@@ -5761,6 +5762,10 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        artifact_catalog_service_id: None,
+        artifact_mode: None,
+        artifact_result: None,
+        artifact_event_turn_id: None,
         instruction_receipt_version: 0,
         shared_execution: None,
         secret_context_versions: Default::default(),

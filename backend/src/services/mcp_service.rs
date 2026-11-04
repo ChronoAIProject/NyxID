@@ -9844,6 +9844,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            trigger_run_id: None,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,

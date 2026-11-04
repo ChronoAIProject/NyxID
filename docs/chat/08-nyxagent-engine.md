@@ -1815,7 +1815,27 @@ run history. The optional `failure_reason` copies the settled turn's sanitized
 source, stage, code and HTTP/NyxID status metadata into the run in the same
 transaction. Owner run history displays the model-proxy denial instead of only
 `assistant_unavailable`; no request content or provider error prose is exposed.
-Confirmation requests copy this identity and the active turn ID;
+The server also derives this identity in `ChatAuthority`, group
+followers, direct specialist assignments and their queued result events. A child
+specialist retains separate execution authority from its parent coordinator.
+Group-post registration and the completion barrier transaction fence the
+thread/run handoff versions, so settlement cannot
+complete from a stale snapshot while a follower is registered. Notification keeps
+the follower under a reclaimable, fenced lease; deterministic run-qualified event
+IDs deduplicate replay, and queue acceptance commits with follower removal.
+Trigger-bound followers and events are protected from ordinary capacity eviction.
+Stop of the automation coordinator and terminal cleanup fence late notification
+and continuation admission. An unrelated active-turn Stop on the same home
+thread must leave waiting runs intact; automation cleanup cannot block Stop.
+
+A settled coordinator with an attributable follower, direct assignment or event
+stays `waiting(coordinator)` until its exact thread consumes the replies and reaches a
+final result. Each admitted coordinator event continuation atomically consumes
+the run's independent snapshotted allowance (32 for new or migrated runs) and the persisted owner trigger
+hourly/daily budget; `max_auto_continuations=0` does not disable these handoffs.
+Ordinary event-hour and streak guards retain their separate budgets and
+admission path. The run's continuation count, limit and protocol version persist
+across restart. Confirmation requests copy the run identity and active turn ID;
 automation settlement keeps the run waiting until cards are decided, scheduling
 its fallback at the earliest card expiry. The decision transaction wakes the
 work item; settlement reads card state transactionally to avoid lost wakeups. The
@@ -2449,6 +2469,48 @@ confirmed assistant records without execution evidence have separate excluded
 costs. See [Billing analytics](../BILLING_ANALYTICS.md#nyxbot-model-usage) for the
 precise population, ranking, and coverage contract.
 
+## Generated Sandbox attachments
+
+The default-off personal flag `assistant:generated-artifacts` admits files only
+when a declared Sandbox submission is made in an owner Web user turn. Admission
+saves `artifact_mode: generated_artifact_v1`, the trusted resolved Sandbox catalog
+ID, the original user turn, and Web-only delivery provenance on the async watch.
+Workers revalidate that immutable catalog snapshot and the exact operation
+contract before source access; endpoint names alone confer no artifact authority.
+Channel, group, scheduled/event, trigger, invocation and voice destinations cannot
+opt into this mode. An old watch without the marker continues through the existing
+16 KiB text path.
+Disabling the flag stops new admission; it does not prevent upgraded workers
+from draining an already admitted watch.
+
+Only the server-created completion Event whose event ID is that watch can
+materialize its files. The transaction checks owner, conversation, original
+user turn, saved completion turn, operation ID and verified source identity.
+It reads and fences the retention policy in the same transaction. Eight turn
+attachment slots remain the limit. Materialization inserts encrypted private
+attachments, appends their metadata to the active turn, and clears pending
+ciphertext atomically. Settlement copies the metadata to the assistant message
+and idempotently writes its exact recovery association before consuming the
+watch. Materialized files use ordinary attachment retention independently of the
+source acquisition deadline. The association and shared watch lineage survive
+through the maximum saved attachment expiry; recovery checks each file's current
+retention, source message state and attachment lineage in the same transaction,
+without extending or recreating expired peers. Parsed file refusals and genuinely
+missing settlement files leave explicit saved outcomes while valid peers remain
+deliverable; contradictory lineage still fails. Async execution completion and
+attachment delivery are separate facts; only a materialized, currently readable
+attachment permits an attached/download claim. The bounded result context
+includes the server delivery state and count.
+
+History adds optional safe attachment filename, source, local `result_version`,
+preview kind and expiry, plus a message `artifact_delivery` state. Content revisions
+belong to an owner/conversation/trusted-catalog/canonical-path series: successful
+changed bytes advance the label, while replay, unchanged bytes and failed
+modification never relabel a saved file. Internal watch, operation and content-digest
+identifiers are never exposed as retrieval URLs.
+Legacy tool-image delivery and the live AG-UI media path retain their contracts.
+See [uploads](10-uploads.md#generated-result-storage-and-owner-delivery) for
+limits, encryption, recovery, retention and rollout.
 ## Protected org connections and hosted personal setup
 
 After readiness activation of `assistant:org-instruction-v1`, NyxBot and personal specialists need trusted owner selection of the exact org connection this turn or an approved exact single-use card in every access mode, including Full access. Org-owned specialists are excluded by actual owner UserType; model bootstrap/compaction and auto-connected/platform services retain their contract. Positive provenance comes only from first-party owner UI or verified private owner-channel ingress, bound to actor/key/conversation/live turn/expiry. Legacy selectors, API/delegated/automation/group/guest/model text and `_nyxid_via` are insufficient. Independent sensitive/destructive policies remain.
