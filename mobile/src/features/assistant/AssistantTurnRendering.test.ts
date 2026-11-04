@@ -43,6 +43,7 @@ function setup(file: string, name: string, props: Record<string, any>) {
       ChevronDown: "ChevronDown",
       ChevronRight: "ChevronRight",
     },
+    "../../components/workspace/FirstLineIcon": { FirstLineIcon: "FirstLineIcon" },
     "../../components/workspace/WorkspaceUI": {
       Label: "Label",
       Notice: "Notice",
@@ -244,8 +245,17 @@ test("real failure UI discloses metadata and original request without retrying u
   });
   assert.match(x.text(), /A tool may have taken effect/);
   assert.doesNotMatch(x.text(), /Original request/);
+  const closed = x.nodes().find((node) => node.props.label === "Details")!;
+  assert.equal(closed.props.expanded, false, "Details is a disclosure for an in-chat panel");
   x.press("Details");
   assert.match(x.text(), /stage: stream/);
+  const open = x.nodes().find((node) => node.props.label === "Hide details")!;
+  assert.equal(open.props.expanded, true, "it says it can be closed again");
+  assert.ok(
+    x.nodes().some((node) => node.props.label === "Usage & credits" && node.props.opens) ||
+      !x.nodes().some((node) => node.props.label === "Usage & credits"),
+    "Usage & credits, when shown, is marked as leaving the chat",
+  );
   x.press("Copy diagnostic ID");
   await x.h.settle();
   assert.equal(x.copies[0], "turn t / request req");

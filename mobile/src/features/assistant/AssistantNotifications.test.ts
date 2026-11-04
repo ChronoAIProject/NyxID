@@ -62,6 +62,7 @@ function render(
     "../../lib/accessibility/useReducedMotion": {
       useReducedMotion: () => false,
     },
+    "../../components/workspace/FirstLineIcon": { FirstLineIcon: "FirstLineIcon" },
     "../../components/workspace/WorkspaceUI": {
       Card: "Card",
       Label: "Label",

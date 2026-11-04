@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
-import { CircleAlert } from "lucide-react-native";
+import { ArrowUpRight, ChevronDown, ChevronUp, CircleAlert } from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
+import { FirstLineIcon } from "../../components/workspace/FirstLineIcon";
 import { useTheme } from "../../theme/ThemeContext";
 import { TOUCH_TARGET, fonts } from "../../theme/designTokens";
 import type { AssistantMessage } from "./assistantTypes";
@@ -13,6 +14,8 @@ import {
   steeringNotice,
   storedError,
 } from "./assistantTurnPresentation";
+
+const ERROR_LINE = 19;
 
 export function AssistantMessageNotices({
   message,
@@ -67,7 +70,9 @@ export function AssistantMessageNotices({
           accessibilityRole="alert"
           style={[styles.error, { backgroundColor: colors.dangerSoftBg }]}
         >
-          <CircleAlert size={15} color={colors.danger} />
+          <FirstLineIcon lineHeight={ERROR_LINE} maxFontScale={1.4}>
+            <CircleAlert size={15} color={colors.danger} />
+          </FirstLineIcon>
           <Label
             maxFontSizeMultiplier={1.4}
             style={[styles.errorText, { color: colors.danger }]}
@@ -80,11 +85,11 @@ export function AssistantMessageNotices({
       (billingCodes.includes(message.error_code ?? "") || detail) ? (
         <View style={styles.actions}>
           {billingCodes.includes(message.error_code ?? "") ? (
-            <QuietButton label="Usage & credits" onPress={onOpenBilling} />
+            <QuietButton label="Usage & credits" opens onPress={onOpenBilling} />
           ) : null}
           {detail ? (
             <QuietButton
-              label="Details"
+              label={details ? "Hide details" : "Details"}
               expanded={details}
               onPress={() => setDetails((value) => !value)}
             />
@@ -178,16 +183,23 @@ export function AssistantMessageNotices({
   );
 }
 /** A compact secondary button for in-chat follow-ups; rows of them wrap. */
+/**
+ * A compact secondary button. With `expanded` it is a disclosure for an
+ * in-chat panel and shows a chevron that turns as it opens; with `opens` it
+ * leaves the chat (a page or sheet) and shows an arrow.
+ */
 export function QuietButton({
   label,
   onPress,
   expanded,
+  opens,
   disabled,
   icon,
 }: {
   label: string;
   onPress: () => void;
   expanded?: boolean;
+  opens?: boolean;
   disabled?: boolean;
   icon?: ReactNode;
 }) {
@@ -222,6 +234,15 @@ export function QuietButton({
       >
         {label}
       </Label>
+      {expanded === undefined ? (
+        opens ? (
+          <ArrowUpRight size={14} color={colors.textSecondary} />
+        ) : null
+      ) : expanded ? (
+        <ChevronUp size={14} color={colors.textSecondary} />
+      ) : (
+        <ChevronDown size={14} color={colors.textSecondary} />
+      )}
     </Pressable>
   );
 }
@@ -235,7 +256,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 8,
   },
-  errorText: { flex: 1, fontSize: 14, lineHeight: 19 },
+  errorText: { flex: 1, fontSize: 14, lineHeight: ERROR_LINE },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   details: { padding: 10, borderRadius: 8, borderWidth: 1, gap: 4 },
   // A compact secondary button: white surface, control edge, soft lift.

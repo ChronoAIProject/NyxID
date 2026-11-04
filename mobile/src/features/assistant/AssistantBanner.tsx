@@ -12,6 +12,7 @@ import { useIsFocused } from "@react-navigation/native";
 import { useTheme } from "../../theme/ThemeContext";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { Label } from "../../components/workspace/WorkspaceUI";
+import { FirstLineIcon } from "../../components/workspace/FirstLineIcon";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { assistantConnection } from "../../lib/api/connectionState";
 
@@ -39,19 +40,23 @@ export function AssistantBanner({
           tone === "error" ? colors.dangerTone.bg : colors.cardSoft,
         borderRadius: 8,
         flexDirection: "row",
-        alignItems: "center",
+        // The icon sits on the first line of a wrapped message.
+        alignItems: "flex-start",
         minHeight: 32,
         paddingHorizontal: 12,
-        paddingVertical: 6,
+        // One 17pt line plus this padding fills the 32pt minimum exactly.
+        paddingVertical: 7.5,
         gap: 8,
       }}
     >
-      {icon ??
-        (tone === "error" ? (
-          <TriangleAlert size={14} color={colors.dangerTone.text} />
-        ) : (
-          <Info size={14} color={colors.textMuted} />
-        ))}
+      <FirstLineIcon lineHeight={17}>
+        {icon ??
+          (tone === "error" ? (
+            <TriangleAlert size={14} color={colors.dangerTone.text} />
+          ) : (
+            <Info size={14} color={colors.textMuted} />
+          ))}
+      </FirstLineIcon>
       <View style={{ flex: 1, minWidth: 0 }}>
         {typeof children === "string" ? (
           <Label
@@ -77,6 +82,7 @@ export function AssistantBanner({
           style={{
             width: 44,
             minHeight: 44,
+            alignSelf: "center",
             alignItems: "center",
             justifyContent: "center",
           }}
