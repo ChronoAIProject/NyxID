@@ -160,7 +160,9 @@ native label wrappers and typography overrides on shared labels, including
 local class constants, template fragments and important (`!`) utilities. Sonner uses important shared toast roles so vendor
 styles cannot replace their weights or line boxes. Imported label aliases, inline
 style assignments and nested caption overrides are checked too. Complete roles
-cannot be combined with partial size assignments in JSX or CSS. Selected shell
+cannot be combined with partial size assignments in JSX or CSS. JSX prop spreads
+resolve inline and local object literals, including nested spreads, for both
+`className` and `style`; numeric-size consumers also reject inline typography overrides. Selected shell
 navigation declares its shared active role through `aria-current="page"`.
 Test fixtures
 and never-themed protocol/landing/blog pages are the documented source exclusions.

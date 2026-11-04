@@ -50,6 +50,19 @@ describe("typography policy", () => {
     '<Label style={{fontSize:"var(--text-13)"}}>Name</Label>',
     'const OVERRIDE={fontWeight:400}; <Label style={OVERRIDE}>Name</Label>',
     '<Label {...{style:{fontWeight:400}}}>Name</Label>',
+    '<Label {...{className:"type-secondary"}}>Name</Label>',
+    'const props = {className:"type-secondary"}; <Label {...props}>Name</Label>',
+    '<Label><span {...{className:"type-secondary"}}>Name</span><Input /></Label>',
+    'const captionProps = {className:"type-secondary"}; <Label><span {...captionProps}>Name</span><Input /></Label>',
+    'const caption = {className:"type-secondary"}; const props = {...caption}; <Label><span {...{...props}}>Name</span><Input /></Label>',
+    'const className = "type-secondary"; const props = {className}; <Label><span {...props}>Name</span><Input /></Label>',
+    'const weight = {fontWeight:600}; const style = {...weight}; const props = {style}; <Label><span {...{...props}}>Name</span></Label>',
+    '<span className="text-14" style={{fontWeight:600}}>Value</span>',
+    '<span className="text-[length:var(--text-14)]" style={{fontWeight:600}}>Value</span>',
+    'const props = {className:"text-14", style:{fontWeight:600}}; <span {...props}>Value</span>',
+    'const caption = {className:"text-14"}; const weight = {fontWeight:600}; const props = {...caption, style:{...weight}}; <span {...props}>Value</span>',
+    'const props = {className:"type-body", style:{fontWeight:600}}; <span {...props}>Value</span>',
+    'const style = active ? {fontWeight:600} : {}; const props = {style}; <span className="text-14" {...props}>Value</span>',
     'const fontWeight=400; <Label style={{fontWeight}}>Name</Label>',
     '<Label className="font-light">Name</Label>',
     '<Label className="font-[450]">Name</Label>',
@@ -93,6 +106,8 @@ describe("typography policy", () => {
     expect(typographyViolations("components/custom-form.tsx", '<Label>Name<FieldHelp>Shared explanatory text</FieldHelp><NativeSelect /></Label>')).toEqual([]);
     expect(typographyViolations("components/custom-form.tsx", '<span className={title ? "type-card-title" : "text-14"} />')).toEqual([]);
     expect(typographyViolations("components/custom-form.tsx", '<span className="type-body text-[#fff] [&_code]:text-14" />')).toEqual([]);
+    expect(typographyViolations("components/custom-form.tsx", 'const layout = {className:"flex-1 text-foreground", style:{display:"flex", color:"var(--foreground)"}}; const props = {...layout}; <Label {...props}><span {...{...props}}>Name</span><Input /></Label>')).toEqual([]);
+    expect(typographyViolations("components/custom-form.tsx", 'const props = {className:"type-secondary"}; <Label {...props} className="flex-1 text-foreground">Name</Label>')).toEqual([]);
     expect(typographyViolations("components/label.css", '.label {line-height:1.2}')).not.toEqual([]);
     expect(typographyViolations("components/label.css", '.label {@apply type-field-label;line-height:var(--line-body)}')).toEqual([]);
   });

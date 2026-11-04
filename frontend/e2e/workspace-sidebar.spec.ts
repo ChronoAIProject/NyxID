@@ -6,9 +6,9 @@ import { openAssistant } from "./helpers";
 async function revealNavigation(page: Page, assistant: boolean) {
   // URL commitment precedes onResolved, which dismisses the mobile drawer.
   // Reopen only after that event rather than racing it with a second click.
-  await expect.poll(() => page.evaluate(async () => {
-    const { router } = await import("/src/router.tsx");
-    return router.state.status === "idle" && router.state.resolvedLocation?.href === router.state.location.href;
+  await expect.poll(() => page.evaluate(() => {
+    const app = (window as { __nyxApp?: { router: { state: { status: string; resolvedLocation?: { href: string }; location: { href: string } } } } }).__nyxApp;
+    return !!app && app.router.state.status === "idle" && app.router.state.resolvedLocation?.href === app.router.state.location.href;
   })).toBe(true);
   const toggle = page.getByRole("button", { name: assistant ? "Open chats" : "Open menu", exact: true });
   if (page.viewportSize()!.width < 768) await toggle.click();
@@ -21,10 +21,10 @@ async function installWorkspaceFixtures(page: Page) {
   await page.route("**/api/v1/service-preferences", route => route.fulfill({ status: 404, json: { message: "No saved ordering" } }));
 }
 async function enablePreviews(page: Page) {
-  await page.evaluate(async () => {
-    const { useAuthStore } = await import("/src/stores/auth-store.ts");
-    const user = useAuthStore.getState().user!;
-    useAuthStore.setState({ user: { ...user, capabilities: { ...user.capabilities, enabled_features: [...(user.capabilities?.enabled_features ?? []), "assistant:workspace-preview"] } } });
+  await page.evaluate(() => {
+    const { authStore } = (window as unknown as { __nyxApp: { authStore: typeof import("../src/stores/auth-store").useAuthStore } }).__nyxApp;
+    const user = authStore.getState().user!;
+    authStore.setState({ user: { ...user, capabilities: { ...user.capabilities, enabled_features: [...(user.capabilities?.enabled_features ?? []), "assistant:workspace-preview"] } } });
   });
 }
 async function alignment(rows: Locator) {

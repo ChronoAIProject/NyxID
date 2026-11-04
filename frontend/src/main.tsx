@@ -55,6 +55,9 @@ subscribeAssistantIdentity(() => {
 // Stripped from production builds with the rest of the DEV branch.
 if (import.meta.env.DEV) {
   (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
+  // Use the instances mounted below, not a fresh module import: Vite's HMR
+  // timestamps can otherwise give browser drivers a second, idle router/store.
+  (window as { __nyxApp?: { router: typeof router; authStore: typeof useAuthStore } }).__nyxApp = { router, authStore: useAuthStore };
 }
 
 function isLoginApprovalPage() {

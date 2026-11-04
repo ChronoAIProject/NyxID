@@ -123,9 +123,43 @@ export function typographyViolations(file, source) {
     const isOpening = node => ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node);
     const isLabel = node => isOpening(node) && labelNames.has(node.tagName.getText(ast));
     const typography = /(?:type-[\w-]+|text-(?:\d+|\[(?:length:|[^\]]*--text-))|font-(?:thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[)|leading-)/;
+    const propertyName = node => ts.isComputedPropertyName(node)
+      ? ts.isStringLiteral(node.expression) ? node.expression.text : undefined
+      : ts.isIdentifier(node) || ts.isStringLiteral(node) ? node.text : undefined;
+    // Bounded static resolution, with JavaScript's last-property-wins order.
+    // Resolve both className and style rather than searching all prop values.
+    function objectProperties(node, seen = new Set()) {
+      if (!node || seen.has(node)) return new Map();
+      seen = new Set([...seen, node]);
+      if (ts.isIdentifier(node)) return objectProperties(constants.get(node.text), seen);
+      if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isTypeAssertionExpression(node)) return objectProperties(node.expression, seen);
+      const properties = new Map();
+      if (ts.isObjectLiteralExpression(node)) for (const property of node.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          for (const [name, value] of objectProperties(property.expression, seen)) properties.set(name, value);
+        } else if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+          const name = propertyName(property.name);
+          if (name) properties.set(name, ts.isPropertyAssignment(property) ? property.initializer : property.name);
+        }
+      }
+      return properties;
+    }
+    function jsxProperties(node) {
+      const properties = new Map();
+      for (const property of node.attributes.properties) {
+        if (ts.isJsxSpreadAttribute(property)) {
+          for (const [name, value] of objectProperties(property.expression)) properties.set(name, value);
+        } else if (property.initializer) {
+          properties.set(property.name.getText(ast), ts.isJsxExpression(property.initializer) ? property.initializer.expression : property.initializer);
+        }
+      }
+      return properties;
+    }
     function styleOverrides(node, seen = new Set()) {
-      if (ts.isIdentifier(node) && constants.has(node.text) && !seen.has(node.text)) return styleOverrides(constants.get(node.text), new Set([...seen, node.text]));
-      if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && /^(?:font|fontSize|fontWeight|lineHeight)$/.test(node.name.getText(ast).replace(/["']/g, ''))) return true;
+      if (!node || seen.has(node)) return false;
+      seen = new Set([...seen, node]);
+      if (ts.isIdentifier(node)) return styleOverrides(constants.get(node.text), seen);
+      if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && /^(?:font|fontSize|fontWeight|lineHeight)$/.test(propertyName(node.name))) return true;
       let found = false;
       ts.forEachChild(node, child => { if (styleOverrides(child, seen)) found = true; });
       return found;
@@ -145,16 +179,15 @@ export function typographyViolations(file, source) {
       if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(ast) === 'label') fail(node.getStart(ast), 'form labels must use the shared Label/FormLabel/GroupedLabel implementation');
       if (ts.isJsxOpeningElement(node) && node.tagName.getText(ast) === 'legend' && !(ts.isJsxElement(node.parent.parent) && node.parent.parent.openingElement.tagName.getText(ast) === 'Label')) fail(node.getStart(ast), 'fieldset captions must use Label asChild to retain native legend semantics');
       if (isOpening(node)) {
-        const attribute = node.attributes.properties.find(property => ts.isJsxAttribute(property) && property.name.getText(ast) === 'className');
-        const style = node.attributes.properties.find(property => ts.isJsxAttribute(property) && property.name.getText(ast) === 'style');
-        const spreadOverride = node.attributes.properties.some(property => ts.isJsxSpreadAttribute(property) && styleOverrides(property.expression));
-        const fragments = attribute ? classFragments(attribute).join(' ').replace(/unthemed:[\w-]+/g, '') : '';
+        const properties = jsxProperties(node);
+        const className = properties.get('className');
+        const variants = className ? classVariants(className) : [];
+        const fragments = variants.join(' ').replace(/unthemed:[\w-]+/g, '');
+        const styleOverride = styleOverrides(properties.get('style'));
         const caption = isLabel(node) || (!/^(?:GroupedInput|GroupedTextarea|Input|Textarea|NativeSelect|Select\w*|Button|Badge|FormControl|FormDescription|GroupedDescription|FieldHelp|input|textarea|select|button)$/.test(node.tagName.getText(ast)) && insideLabelCaption(node));
-        if (caption && ((attribute && typography.test(fragments)) || (style && styleOverrides(style)) || spreadOverride)) fail(node.getStart(ast), 'field labels and their captions own their typography; consumers may only customize layout and color');
-        else if (/\btype-[\w-]+/.test(fragments) && ((style && styleOverrides(style)) || spreadOverride)) fail(node.getStart(ast), 'complete typography roles cannot be overridden by inline typography');
-      }
-      if (ts.isJsxAttribute(node) && node.name.getText(ast) === 'className' && node.initializer && ts.isJsxExpression(node.initializer)) {
-        for (const variant of classVariants(node.initializer.expression ?? node.initializer)) classes(variant, node.getStart(ast));
+        if (caption && (typography.test(fragments) || styleOverride)) fail(node.getStart(ast), 'field labels and their captions own their typography; consumers may only customize layout and color');
+        else if (/(?:\btype-[\w-]+|\btext-(?:\d+\b|\[(?:length:|[^\]]*--text-)))/.test(fragments) && styleOverride) fail(node.getStart(ast), 'typography role and numeric-token consumers cannot be overridden by inline typography');
+        for (const variant of variants) classes(variant, node.getStart(ast));
       }
       if (ts.isTemplateExpression(node) && node.getText(ast).includes('TEXT_STYLES.')) {
         classes(node.head.text + node.templateSpans.map(span => `${span.expression.getText(ast).startsWith('TEXT_STYLES.') ? ' type-shared-role ' : ' '}${span.literal.text}`).join(''), node.getStart(ast));
