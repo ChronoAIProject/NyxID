@@ -316,7 +316,7 @@ export function OrgDetailPage() {
                 {org.avatar_url && (
                   <button
                     type="button"
-                    className="flex items-center gap-1 text-13 text-destructive hover:underline"
+                    className="flex items-center gap-1 text-14 font-medium text-destructive hover:underline"
                     onClick={async () => {
                       try {
                         await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: "" } });

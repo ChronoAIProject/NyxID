@@ -211,7 +211,7 @@ export function DocsLayout({
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-14 text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
+              className="flex items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-14 font-medium text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
             >
               <Search className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Search</span>
@@ -231,7 +231,7 @@ export function DocsLayout({
             </a>
             <a
               href={isAuthed ? "/dashboard" : "/login"}
-              className="rounded-lg bg-primary px-4 py-1.5 text-14 font-semibold text-white transition-colors hover:bg-nyx-600"
+              className="rounded-lg bg-primary px-4 py-1.5 text-14 font-medium text-white transition-colors hover:bg-nyx-600"
             >
               {isAuthed ? "Dashboard" : "Log in"}
             </a>

@@ -122,11 +122,17 @@ Do not use Tailwind size aliases, arbitrary font sizes, fixed CSS `font-size` or
 `font:` shorthands. CSS consumers read `var(--text-N)`; SVG charts use the same
 variables. Canvas consumers read `computedTextSize(N)` and refresh when Display
 changes. Sonner actions/cancel explicitly set the button role to override vendor
-fixed sizing. The source guard runs with lint; compiled-CSS and real-component
+fixed sizing. Toast content keeps its readable width; actions wrap below it and
+within the toast at enlarged text settings. Inline analytics filters and chips wrap;
+chart label selection uses the current scaled font measurement, refreshed after
+Display changes, and skips categories when they cannot fit without overlap. The source guard runs with lint; compiled-CSS and real-component
 browser tests cover both shells, portals, all five audit scales, and touch targets.
 
-Shared controls reserve their line height and at least a 24px pointer target,
-including dialog/sheet close and icon buttons at the smallest Display setting.
+Shared controls and custom button, disclosure and summary targets reserve at least 24px,
+including Studio, dialog/sheet close and body portals at the smallest Display setting.
+This hit-area floor does not enlarge the visible glyph. Role assignments include both
+size and weight; custom onboarding actions use the same button role as Button,
+and analytics totals use the prominent-metric role.
 On coarse pointers, editable inputs use `max(16px, var(--text-14))` to prevent iOS
 focus zoom without changing their semantic role above that floor. Controls and
 label/value rows wrap with available space; essential monetary values stay complete.
@@ -136,6 +142,10 @@ Assistant-only icon, density and control-layout rules do not remap typography.
 Mobile Activity cards lead with the service name in `text-15 font-semibold`; the action uses `text-14 font-medium` and the URL uses secondary `text-13`. Service names may wrap to two lines.
 
 ## Components
+
+All component and page recipes use the semantic roles in the Scale table,
+including their weights. Numeric class snippets name those roles; the number
+is the token's canonical size before the Display base and multiplier apply.
 
 ### Service pool and routing icons
 
@@ -162,10 +172,13 @@ shapes retain their meaning.
 - **Variants:** default (ghost border), primary (gradient — used as the dominant dialog/CTA submit), destructive, outline, secondary, ghost, link
 - **Loading:** `isLoading` prop shows `Loader2` spinner + children, disables button. Some legacy pages still use a label-swap (`{mutation.isPending ? "Creating..." : "Add"}`) — prefer `isLoading` for new code.
 - **Rule:** Edit Save buttons are disabled while pristine, invalid or pending. Create actions are disabled only while invalid or pending; valid prefilled defaults can be submitted.
-- **`AddCtaButton`** (shared) — the standard "create" trigger on every list page header. `h-8`, `rounded-lg`, `border-hairline` idle / `border-hairline-strong` hover, `text-14 text-text-tertiary`, with a 22×22 inset icon container (`rounded-[6px]`, `border-hairline`, `bg-overlay`, 12px Plus icon). Distinct from `variant="primary"` — used when the button is the page-level "add" affordance.
+- **`AddCtaButton`** (shared) — the standard "create" trigger on every list page header. `h-8`, `rounded-lg`, `border-hairline` idle / `border-hairline-strong` hover, button-role `text-14 font-medium text-text-tertiary`, with a 22×22 inset icon container (`rounded-[6px]`, `border-hairline`, `bg-overlay`, 12px Plus icon). Distinct from `variant="primary"` — used when the button is the page-level "add" affordance.
 
 ### Composer toolbar
-NyxAgent permission/model controls use a wrapping `h-7 text-13` toolbar inside the composer border below its full-width textarea, with send/stop/mic on the right; composers without a toolbar keep the existing inline layout.
+NyxAgent permission/model controls use a wrapping `h-7` toolbar with the
+input/menu-value role (`text-14 font-normal`) inside the composer border below
+its full-width textarea, with send/stop/mic on the right; composers without a
+toolbar keep the existing inline layout.
 
 ### Inputs
 - **Height:** `h-8`
@@ -257,10 +270,11 @@ NyxAgent permission/model controls use a wrapping `h-7 text-13` toolbar inside t
 
 NyxBot forms use iOS inset grouped lists from
 `components/ui/grouped-list.tsx`. Stack sibling groups with `space-y-6` on the
-`bg-background` canvas. Each group has an optional sentence-case `text-14
-text-text-tertiary` heading above, one `rounded-xl bg-card border
-border-border/50` surface, and an optional `text-13 text-text-tertiary` footer
-below. The subtle border provides contrast in light mode and also works with
+`bg-background` canvas. Each group has an optional sentence-case heading in the
+group-label role (`text-12 font-medium text-text-tertiary`) above, one
+`rounded-xl bg-card border border-border/50` surface, and an optional footer in
+the helper role (`text-13 font-normal text-text-tertiary`) below. The subtle
+border provides contrast in light mode and also works with
 custom theme tokens. Headings and footers use `px-4`.
 
 `GroupedRow` provides a `min-h-11` touch target, `px-4 py-2.5`, wrapping titles
@@ -580,7 +594,7 @@ The shell tokens above are necessary but not sufficient — almost every page in
 Every content page starts with `<PageHeader title description? actions? leading? />`.
 
 - Layout: flex column on mobile, `sm:flex-row sm:items-start sm:justify-between sm:gap-4`
-- Title: `text-22 sm:text-28 font-bold leading-none tracking-tight`, inline `letterSpacing: -0.03em`. The mobile downshift to 22px is intentional — never override.
+- Title: `text-22 sm:text-28 font-bold leading-none tracking-tight`, inline `letterSpacing: -0.03em`. The mobile page-title role is intentional — never override.
 - `leading` slot: 32–48px avatar/icon to the left of the title (`OrgAvatar`, status dot, color chip)
 - `description`: `text-14 text-muted-foreground` directly below the title group
 - `actions` slot: right-aligned, `flex items-center gap-2 shrink-0`. Most pages put their `AddCtaButton` here; filter pages put a `Select` here; multi-action pages may stack a couple of icon buttons.
@@ -694,13 +708,13 @@ Used at the bottom of any paginated list. `flex items-center justify-between` ro
 - Right: prev / "Page X of Y" / next group, prev/next as `h-8 w-8` outline icon buttons with `ChevronLeft`/`ChevronRight`
 
 ### Stat cards / mini-grid
-For a row of small KPIs inside a card or section: `grid gap-3 grid-cols-2 sm:grid-cols-4` of `rounded-xl border border-border/50 bg-overlay p-4 text-center` tiles. Value is the dominant element (snap to a defined scale step — 28px or, where space is tight, 22px), label below in `text-13`. The standalone `StatCard` used on `developer-apps` is a related but slightly different pattern that should be reconciled.
+For a row of small KPIs inside a card or section: `grid gap-3 grid-cols-2 sm:grid-cols-4` of `rounded-xl border border-border/50 bg-overlay p-4 text-center` tiles. Value is the dominant element (use the prominent-metric role, `text-28 font-semibold`), label below in the secondary-caption role (`text-13 font-normal`). The standalone `StatCard` used on `developer-apps` is a related but slightly different pattern that should be reconciled.
 
 ### Ambient status line
 A 2px gradient bar pinned to the very top of the viewport (`fixed top-0 left-0 right-0 z-[60]`), driven by `useNodes()`. Healthy = success-green gradient; draining = amber; offline nodes present = destructive red, animated pulse. Defaults to **healthy green** when the user has no nodes at all — the bar is always present and never empty. Every page sees it; pages should not draw their own equivalent.
 
 ### Onboarding (first-run + dashboard checklist)
-- **Takeover:** while `useShouldShowOnboarding()` reports the user hasn't completed AI-services onboarding, `DashboardLayout` renders `OnboardingTakeover` *in place of* the normal chrome (no separate route). Centered `max-w-md` column at `pt-[12vh]`, brand mark in a `rounded-2xl` purple-tinted tile, 28px welcome heading, 14px supporting copy, primary CTA, Skip link below. Both actions stamp the server-side flag before unmounting.
+- **Takeover:** while `useShouldShowOnboarding()` reports the user hasn't completed AI-services onboarding, `DashboardLayout` renders `OnboardingTakeover` *in place of* the normal chrome (no separate route). Centered `max-w-md` column at `pt-[12vh]`, brand mark in a `rounded-2xl` purple-tinted tile, responsive page-title role for the welcome heading, body role for supporting copy, primary CTA, Skip link below. Both actions stamp the server-side flag before unmounting.
 - **Checklist:** when activeKeys === 0, the dashboard renders `OnboardingChecklist` ("Getting started", N of 3 complete) above the greeting. Mobile = vertical timeline with connector line between icon tiles; desktop = three horizontal cards with a connector line through the icon row. Done states: green check + completed copy; in-progress: purple `nyx-secondary-400` icon + colored connector. Dismissible via a top-right X (persisted to `nyxid:onboarding-dismissed`).
 
 ---
@@ -711,15 +725,15 @@ The dashboard (after onboarding completes) follows this composition top-to-botto
 1. **Optional `OnboardingChecklist`** — only when no API keys exist; see Onboarding above.
 2. **Greeting** — `text-22 sm:text-28 font-bold leading-[1.1]` inline `letterSpacing: -0.03em`, "Welcome back, {name}". Email below at `text-14 text-muted-foreground`.
 3. **Status grid + Security Posture row** — `flex flex-col md:flex-row gap-4`:
-   - Left: `flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3` of 6 `StatusCell`s (Email, MFA, Services, API Keys, Nodes, Approvals). Each cell is its own `rounded-xl border border-border/50 bg-card px-4 py-3` link with a 32×32 icon tile, 10px uppercase label, 13px value.
+   - Left: `flex-1 grid grid-cols-1 sm:grid-cols-2 gap-3` of 6 `StatusCell`s (Email, MFA, Services, API Keys, Nodes, Approvals). Each cell is its own `rounded-xl border border-border/50 bg-card px-4 py-3` link with a 32×32 icon tile, group-label role (`text-12 font-medium`, uppercase), body-role value (`text-14 font-normal`).
    - Right: `AccountPostureCard` — `w-[280px] rounded-xl border border-border/50 bg-card`, header (icon + "Security Posture" + colored status label), 4-item checklist with semantic icon coloring, footer with `0 of 4` counter and a `h-1.5` progress bar filled with `nyx-gradient-vivid`.
-4. **Shortcuts** — `text-15 font-semibold` heading "Shortcuts", followed by a `grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3` of 5 `QuickActionCard`s (Services, API Keys, Nodes, Organizations, Channel Bots). Each card: `rounded-xl border border-border/50 bg-card px-3 py-4 text-center`, 32×32 icon tile, 12px title, 10px description.
+4. **Shortcuts** — `text-15 font-semibold` heading "Shortcuts", followed by a `grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3` of 5 `QuickActionCard`s (Services, API Keys, Nodes, Organizations, Channel Bots). Each card: `rounded-xl border border-border/50 bg-card px-3 py-4 text-center`, 32×32 icon tile, card-title role (`text-15 font-semibold`), secondary-caption role (`text-13 font-normal`).
 5. **Right panel (registered via `setRightPanel`)** — `AiSetupCard` (dismissible, gradient/glow, "NEW" badge, primary CTA), `ApprovalsCard` (Telegram + mobile app), Quick Links card (Documentation, AI Setup Guide, Integration Guide). On `lg-`, this content is rendered inline at the bottom of the main column instead.
 
 ### Right Panel Cards (dashboard)
 - **AI Setup Card:** `rounded-xl border border-nyx-500/30`, gradient background (`bg-gradient-to-b from-nyx-500/15 …` + radial top glow), "NEW" pill badge, dismissible (X top-right), `variant="primary"` CTA "Set up". Persists dismissal to `nyxid:ai-setup-dismissed`.
 - **Approvals Card:** plain card, "Connect Telegram" (default button) + "Get App" (`variant="primary"`) stacked.
-- **Quick Links:** plain card with a 10px uppercase header, list of `QuickLink` rows (12px label + `ArrowUpRight` icon, ghost hover).
+- **Quick Links:** plain card with an uppercase group-label heading (`text-12 font-medium`), list of `QuickLink` rows (action-link role, `text-14 font-medium`, plus `ArrowUpRight` icon and ghost hover).
 
 ### Get Started vs Quick Links
 Get Started / Shortcuts = actionable setup steps inside the product. Quick Links = reference material (docs/guides). They must not overlap.
@@ -737,6 +751,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Custom role and enlarged-text guarantees | Custom onboarding actions are text-14/500 and prominent analytics values are text-28/600. The shared 24px hit-area floor covers custom Studio actions as well as primitives. Toast actions and analytics filters reflow; chart axes refresh cached font measurement after Display changes. Active recipes reference the semantic role table. |
 | 2026-11-04 | Canonical text numbers and shared semantic roles | Every text-N is N/16rem, defined once. A simultaneous markup/CSS migration preserves the current reading sizes; a separate change corrects semantic roles using the table above. Studio, NyxBot, auth/docs, charts, Billing, onboarding and portals use the same roles and weights. Root 0.85 rebase and spacing preferences are unchanged. Touch fields floor the input role at 16px; shared targets floor at 24px. |
 | 2026-11-04 | One reading scale across Studio and NyxBot | The themed root owns the reading tokens and 1.5 body line height, so route changes and portals cannot change a token’s rendered size. Control sizing and density stay scoped to the assistant; shared navigation icons follow their labels in both shells. Never-themed landing/blog defaults remain separate. |
 | 2026-11-04 | Rebase default text size to the previous 0.85×; restore dense rail and compact save chrome | The root baseline applies consistently in Studio and the assistant. Versioned migration preserves custom rendered sizes within bounds without changing spacing. Explicit rail geometry prevents general control scaling from stretching tick slots; compact bars and single-line reviews keep editing chrome small. |

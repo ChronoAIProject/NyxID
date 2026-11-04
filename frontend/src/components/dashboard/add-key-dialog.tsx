@@ -570,7 +570,7 @@ function RoutingStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back to catalog
@@ -750,7 +750,7 @@ function KeyForm({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -773,7 +773,7 @@ function KeyForm({
           href={catalogEntry.api_key_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 text-14 font-medium text-primary-text hover:underline"
         >
           Get API key
           <ExternalLink className="h-3 w-3" />
@@ -1162,7 +1162,7 @@ function NodeSetupStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -1391,7 +1391,7 @@ function NodeSetupStep({
                 href={catalogEntry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
+                className="inline-flex items-center gap-1 text-14 font-medium text-primary-text hover:underline"
               >
                 Get API key
                 <ExternalLink className="h-3 w-3" />
@@ -1929,7 +1929,7 @@ function OAuthStep({
           href={authorizationUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-15 font-medium text-primary-foreground transition-opacity hover:opacity-90"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-14 font-medium text-primary-foreground transition-opacity hover:opacity-90"
         >
           <ExternalLink className="h-4 w-4" />
           Open {catalogEntry.name}
@@ -2018,7 +2018,7 @@ function OAuthStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2464,7 +2464,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2512,7 +2512,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2564,7 +2564,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2599,7 +2599,7 @@ function DeviceCodeStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2725,7 +2725,7 @@ function OAuthCredentialsStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2743,7 +2743,7 @@ function OAuthCredentialsStep({
           href={catalogEntry.documentation_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-13 text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 text-14 font-medium text-primary-text hover:underline"
         >
           How to create an OAuth app
           <ExternalLink className="h-3 w-3" />

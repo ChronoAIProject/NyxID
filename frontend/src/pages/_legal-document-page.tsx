@@ -139,7 +139,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
         <div className="flex justify-center">
           <Link
             to="/"
-            className="flex items-center gap-1.5 text-13 text-violet-400 transition-colors hover:text-violet-300"
+            className="flex items-center gap-1.5 text-14 font-medium text-violet-400 transition-colors hover:text-violet-300"
           >
             <ArrowLeft className="h-3 w-3" />
             Back to NyxID

@@ -2596,7 +2596,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">Back to services</Link>
         </div>
       )}
-      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-13 text-muted-foreground hover:text-foreground">
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-14 font-medium text-muted-foreground hover:text-foreground">
         ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
       </Link>
       <div className="flex flex-col gap-2">

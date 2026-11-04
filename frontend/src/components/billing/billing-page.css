@@ -737,8 +737,8 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
+    width: max(24px, 1.5rem);
+    height: max(24px, 1.5rem);
     margin: -4px 0;
     color: var(--color-muted-foreground);
     cursor: pointer;

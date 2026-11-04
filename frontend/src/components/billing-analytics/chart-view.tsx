@@ -1,5 +1,6 @@
 import { analyticsAmount, plotAmount } from "@/lib/usage-analytics";
 import { useId } from "react";
+import { useTextSize } from "@/hooks/use-text-size";
 import {
   Area,
   AreaChart,
@@ -79,6 +80,7 @@ export function ChartView({
   compact?: boolean;
 }) {
   const chartId = useId().replace(/:/g, "");
+  const tokenSize = useTextSize(13);
   const seriesData = data.points.map((point, index) => ({
     ...point,
     value: plotAmount(point),
@@ -111,7 +113,9 @@ export function ChartView({
     (slice) => slice.value !== null && slice.value > 0,
   );
   const noUsage = data.totals.events === 0;
-  const tick = chartTick;
+  // Recharts measures labels in JS. A CSS var alone leaves its measurement
+  // cache unchanged when Display changes the root font size.
+  const tick = { ...chartTick, fontSize: tokenSize };
   const seriesColors = data.series.map((series, index) =>
     color(index, series.is_other),
   );
@@ -146,7 +150,7 @@ export function ChartView({
         minWidth={1}
         initialDimension={{ width: 640, height: 280 }}
       >
-        <PieChart accessibilityLayer>
+        <PieChart key={tokenSize} accessibilityLayer>
           <Pie
             data={pieData}
             dataKey="value"
@@ -192,6 +196,7 @@ export function ChartView({
       initialDimension={{ width: 640, height: 280 }}
     >
       <BarChart
+        key={tokenSize}
         accessibilityLayer
         data={plotSlices}
         layout="vertical"
@@ -222,7 +227,7 @@ export function ChartView({
         <YAxis
           type="category"
           dataKey="label"
-          width={105}
+          width={tokenSize * 9.5}
           tick={tick}
           tickLine={false}
           axisLine={false}
@@ -266,6 +271,7 @@ export function ChartView({
     >
       {panel.chart === "combo" ? (
         <ComposedChart
+          key={tokenSize}
           accessibilityLayer
           data={seriesData}
           margin={{ top: 10, right: 8, bottom: 4, left: 0 }}
@@ -283,7 +289,8 @@ export function ChartView({
             tick={tick}
             tickLine={false}
             axisLine={false}
-            minTickGap={35}
+            minTickGap={tokenSize * 2}
+            height={tokenSize * 2.5}
             interval="preserveStartEnd"
             tickFormatter={(s: string) =>
               `${bucketLabel(s, data.granularity)}${partialBucket(s, data) ? "*" : ""}`
@@ -292,7 +299,7 @@ export function ChartView({
           <YAxis
             yAxisId="value"
             tick={tick}
-            width={55}
+            width={tokenSize * 5}
             tickLine={false}
             axisLine={false}
             tickFormatter={(n: number) => format(n, true)}
@@ -301,7 +308,7 @@ export function ChartView({
             yAxisId="requests"
             orientation="right"
             tick={tick}
-            width={45}
+            width={tokenSize * 4}
             tickLine={false}
             axisLine={false}
             tickFormatter={(n: number) =>
@@ -357,6 +364,7 @@ export function ChartView({
         </ComposedChart>
       ) : (
         <AreaChart
+          key={tokenSize}
           accessibilityLayer
           data={seriesData}
           margin={{ top: 10, right: 20, bottom: 4, left: 0 }}
@@ -374,7 +382,8 @@ export function ChartView({
             tick={tick}
             tickLine={false}
             axisLine={false}
-            minTickGap={35}
+            minTickGap={tokenSize * 2}
+            height={tokenSize * 2.5}
             interval="preserveStartEnd"
             tickFormatter={(s: string) =>
               `${bucketLabel(s, data.granularity)}${partialBucket(s, data) ? "*" : ""}`
@@ -382,7 +391,7 @@ export function ChartView({
           />
           <YAxis
             tick={tick}
-            width={55}
+            width={tokenSize * 5}
             tickLine={false}
             axisLine={false}
             tickFormatter={(n: number) => format(n, true)}
@@ -449,10 +458,7 @@ export function ChartView({
       <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <span
-            className={cn(
-              "font-display font-medium tracking-tight tabular-nums",
-              compact ? "text-22" : "text-28",
-            )}
+            className="font-display text-28 font-semibold tracking-tight tabular-nums"
           >
             {format(
               data.exact_total === undefined ? data.total : data.exact_total,

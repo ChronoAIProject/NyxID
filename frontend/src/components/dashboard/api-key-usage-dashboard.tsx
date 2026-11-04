@@ -183,7 +183,7 @@ export function ApiKeyUsageDashboard({
                   </div>
 
                   <div className="flex items-baseline gap-1.5">
-                    <span className="text-24 font-bold leading-none text-foreground">
+                    <span className="break-all text-28 font-semibold leading-none text-foreground">
                       {usage.request_count}
                     </span>
                     <span className="text-13 text-muted-foreground">requests</span>

@@ -213,7 +213,7 @@ function Summary({
   if (filterError(view.filters)) return null;
   if (query.isPending)
     return (
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-3">
         {[0, 1, 2, 3].map((i) => (
           <Skeleton key={i} className="h-28" />
         ))}
@@ -260,7 +260,7 @@ function Summary({
   return (
     <div
       className={cn(
-        "grid grid-cols-2 gap-3 lg:grid-cols-4",
+        "grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-3",
         view.layout === "operations" && "analytics-summary",
       )}
     >
@@ -282,7 +282,7 @@ function Summary({
             {stat.tokenControl ? (
               <TokenUsageValue usage={data.totals} selected={tokenTypes} />
             ) : (
-              <span className="font-display text-28 font-medium leading-none tracking-tight tabular-nums">
+              <span className="font-display text-28 font-semibold leading-none tracking-tight tabular-nums">
                 {stat.value}
               </span>
             )}
@@ -404,7 +404,7 @@ export function AnalyticsCanvas({
       </span>
       <Summary view={view} sample={sample} />
       {operations && (
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-12 font-semibold uppercase tracking-[1.5px] text-muted-foreground">
             Usage monitors{" "}
             <span className="ml-2 font-mono font-normal">

@@ -1,4 +1,4 @@
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { useState } from "react";
 import {
   createMemoryHistory,
@@ -103,7 +103,9 @@ const router = createRouter({
   routeTree: createRootRoute({ component: Fixture }),
   history: createMemoryHistory({ initialEntries: ["/"] }),
 });
-createRoot(document.getElementById("root")!).render(
+const container = document.getElementById("root")! as HTMLElement & { fixtureRoot?: Root };
+const root = container.fixtureRoot ??= createRoot(container);
+root.render(
   <QueryClientProvider client={client}>
     <RouterProvider router={router} />
   </QueryClientProvider>,

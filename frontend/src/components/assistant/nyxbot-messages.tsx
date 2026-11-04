@@ -120,7 +120,7 @@ function AutomationNotice({ message }: { readonly message: ChatMessage }) {
         action={
           <Link
             to="/assistant/automations"
-            className="mt-2 inline-block text-13 text-muted-foreground underline hover:text-foreground"
+            className="mt-2 inline-block text-14 font-medium text-muted-foreground underline hover:text-foreground"
           >
             Open Automations
           </Link>

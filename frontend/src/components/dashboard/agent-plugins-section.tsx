@@ -27,7 +27,7 @@ export function AgentPluginsSection() {
         <Link
           to="/settings"
           search={{ tab: "mcp" }}
-          className="text-13 text-text-tertiary hover:text-foreground"
+          className="text-14 font-medium text-text-tertiary hover:text-foreground"
         >
           MCP setup{" "}
           <ArrowUpRight className="inline h-3 w-3" aria-hidden="true" />

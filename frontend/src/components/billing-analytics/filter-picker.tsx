@@ -245,13 +245,13 @@ export function AnalyticsSelect({
   return (
     <div
       className={cn(
-        "min-w-0",
-        inline ? "flex items-center gap-2" : "space-y-1.5",
+        "min-w-0 max-w-full",
+        inline ? "flex flex-wrap items-center gap-2" : "space-y-1.5",
       )}
     >
       <label
         htmlFor={id}
-        className="whitespace-nowrap text-14 font-medium text-muted-foreground"
+        className="min-w-0 break-words text-14 font-medium text-muted-foreground"
       >
         {label}
       </label>
@@ -259,7 +259,7 @@ export function AnalyticsSelect({
         <SelectTrigger
           id={id}
           aria-label={ariaLabel ?? label}
-          className={inline ? "w-40" : "w-full"}
+          className={inline ? "w-40 max-w-full" : "w-full"}
           style={inline ? { marginTop: 0 } : undefined}
         >
           <SelectValue />

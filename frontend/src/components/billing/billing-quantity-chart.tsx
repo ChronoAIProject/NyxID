@@ -176,6 +176,9 @@ function QuantityPanel({
             className="h-[200px] w-full aspect-auto"
           >
             <LineChart
+              // Recharts caches measured tick fonts; refresh the chart's axis
+              // registry together when Display changes the root size.
+              key={tokenSize}
               data={visiblePoints}
               margin={{ top: 12, right: 14, left: 0, bottom: 0 }}
             >
@@ -186,7 +189,8 @@ function QuantityPanel({
                 tickLine={false}
                 axisLine={false}
                 tick={{ fontSize: tokenSize, fill: "var(--color-muted-foreground)" }}
-                minTickGap={16}
+                interval="preserveStartEnd"
+                minTickGap={tokenSize * 1.5}
                 tickFormatter={(value) => {
                   const text =
                     visiblePoints.find((point) => point.key === value)?.tick ??

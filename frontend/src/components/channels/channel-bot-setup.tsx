@@ -464,7 +464,7 @@ export function ChannelBotSetup({
                           label: label || undefined,
                           target_org_id: targetOrgId ?? undefined,
                         }}
-                        className="inline-flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+                        className="inline-flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
                       >
                         <ExternalLink className="size-3" aria-hidden="true" />
                         Open full setup page

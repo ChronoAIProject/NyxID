@@ -832,6 +832,19 @@ describe("live grouped services", () => {
   });
   it("keeps scroll height stable when compacting at the bottom of a short filtered view", () => {
     const callbacks: ResizeObserverCallback[] = [];
+    const frames = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      const id = ++frameId;
+      frames.set(id, callback);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => frames.delete(id));
+    const flushFrame = () => act(() => {
+      const pending = [...frames.values()];
+      frames.clear();
+      pending.forEach((callback) => callback(0));
+    });
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -865,6 +878,9 @@ describe("live grouped services", () => {
       act(() =>
         callbacks.forEach((callback) => callback([], {} as ResizeObserver)),
       );
+      expect(container.style.getPropertyValue("--service-filters-height")).not.toBe("240px");
+      flushFrame();
+      expect(container.style.getPropertyValue("--service-filters-height")).toBe("240px");
       main.scrollTop = 100;
       fireEvent.scroll(main);
       for (let frame = 0; frame < 4; frame++) {
@@ -879,6 +895,7 @@ describe("live grouped services", () => {
         act(() =>
           callbacks.forEach((callback) => callback([], {} as ResizeObserver)),
         );
+        flushFrame();
         fireEvent.scroll(main);
         expect(main.scrollTop).toBe(100);
         expect(filters).toHaveAttribute("data-stuck", "true");

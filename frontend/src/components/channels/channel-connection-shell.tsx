@@ -49,7 +49,7 @@ export function ChannelConnectionShell({
                   href={guideUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
+                  className="inline-flex items-center gap-1.5 text-14 font-medium text-muted-foreground hover:text-foreground"
                 >
                   Channel setup guide
                   <ExternalLink className="size-3" aria-hidden="true" />
@@ -78,7 +78,7 @@ export function ChannelConnectionShell({
               </div>
             </div>
             <div className="mb-7 space-y-2 text-center">
-              <h1 className="font-display text-22 font-medium leading-tight tracking-tight sm:text-28">
+              <h1 className="font-display text-22 font-bold leading-tight tracking-tight sm:text-28">
                 {platform === "telegram"
                   ? complete
                     ? "Your Telegram bot is connected"

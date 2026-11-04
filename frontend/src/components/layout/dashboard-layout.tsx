@@ -259,7 +259,7 @@ function TopBar({
         <button
           type="button"
           onClick={onSearch}
-          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-14 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-14 font-medium text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <Search className="h-[14px] w-[14px]" />
           <span>Search...</span>
@@ -302,7 +302,7 @@ function TopBar({
           href="https://github.com/ChronoAIProject"
           target="_blank"
           rel="noopener noreferrer"
-          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-14 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-14 font-medium text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
         >
           <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
             <Github className="h-3 w-3" />

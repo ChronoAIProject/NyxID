@@ -414,10 +414,10 @@ export function NodeDetailPage() {
       <DetailSection title="Metrics">
         {node.metrics && node.metrics.total_requests > 0 ? (
           <>
-            <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-3 p-4">
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words text-28 font-semibold text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {String(node.metrics.total_requests)}
@@ -428,7 +428,7 @@ export function NodeDetailPage() {
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words text-28 font-semibold text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {(node.metrics.success_rate * 100).toFixed(1)}%
@@ -439,7 +439,7 @@ export function NodeDetailPage() {
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words text-28 font-semibold text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {node.metrics.avg_latency_ms.toFixed(0)}ms
@@ -450,7 +450,7 @@ export function NodeDetailPage() {
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words text-28 font-semibold text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {String(node.metrics.error_count)}

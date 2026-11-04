@@ -238,7 +238,7 @@ function ConnectorCard({
           <button
             type="button"
             disabled={busy}
-            className="min-h-8 text-13 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="min-h-8 text-14 font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             onClick={() => onConnect(item.connectOwnSlug!, true)}
           >
             Connect your own

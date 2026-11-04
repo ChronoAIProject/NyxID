@@ -772,7 +772,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                   <button
                     key={date}
                     type="button"
-                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-13 text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                    className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-14 font-medium text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
                     aria-label={`Remove selected date ${date}`}
                     onClick={() =>
                       onValuesChange([

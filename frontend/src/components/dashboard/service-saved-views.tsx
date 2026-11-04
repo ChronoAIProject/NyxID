@@ -79,7 +79,7 @@ export function ServiceSavedViews({
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    className="min-w-0 flex-1 rounded p-1 text-left text-13 font-medium hover:bg-accent"
+                    className="min-w-0 flex-1 rounded p-1 text-left text-14 font-medium hover:bg-accent"
                     onClick={() => {
                       onRestore(saved.filters, saved.id);
                       setOpen(false);

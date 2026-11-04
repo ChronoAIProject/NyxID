@@ -575,7 +575,7 @@ export function ProposalDraftEditor({
         <Link
           to="/assistant"
           search={{ c: proposal.card_conversation_id }}
-          className="text-13 text-primary hover:underline"
+          className="text-14 font-medium text-primary hover:underline"
         >
           Open the confirmation card
         </Link>

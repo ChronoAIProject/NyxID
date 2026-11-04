@@ -57,7 +57,7 @@ function Stat({
       <p className="text-12 font-medium uppercase tracking-[1.5px] text-muted-foreground">
         {label}
       </p>
-      <p className="mt-3 font-display text-28 font-medium leading-none tracking-tight tabular-nums">
+      <p className="mt-3 font-display text-28 font-semibold leading-none tracking-tight tabular-nums">
         {value}
       </p>
       <p className="mt-2 text-12 leading-relaxed text-muted-foreground">

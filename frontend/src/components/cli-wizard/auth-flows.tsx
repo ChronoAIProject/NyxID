@@ -1127,7 +1127,7 @@ export function OAuthFlow({
               href={documentationUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-13 text-muted-foreground underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-1 text-14 font-medium text-muted-foreground underline-offset-2 hover:underline"
             >
               How to create an OAuth app
               <ExternalLink className="h-3 w-3" />
@@ -1265,7 +1265,7 @@ export function OAuthFlow({
           href={authUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-14 hover:bg-muted"
+          className="inline-flex items-center justify-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-14 font-medium hover:bg-muted"
         >
           Reopen provider sign-in
           <ExternalLink className="h-4 w-4" />
@@ -1741,7 +1741,7 @@ export function DeviceCodeFlow({
               href={verifyUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-14 underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-1.5 text-14 font-medium underline-offset-2 hover:underline"
             >
               {verifyUrl}
               <ExternalLink className="h-3.5 w-3.5" />

@@ -276,7 +276,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                     <p className="text-12 uppercase tracking-wide text-muted-foreground">
                       {label}
                     </p>
-                    <p className="mt-2 break-words font-display text-22 tabular-nums">
+                    <p className="mt-2 break-words font-display text-28 font-semibold tabular-nums">
                       {modelCost(data.totals, field)}
                     </p>
                     <p className="mt-1 text-12 text-text-tertiary">credits</p>

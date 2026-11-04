@@ -708,7 +708,7 @@ function AccountPostureCard({
         {nextStep && !loading && (
           <Link
             to={nextStep.href}
-            className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 text-13 transition-colors duration-200 hover:bg-overlay"
+            className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 text-14 font-medium transition-colors duration-200 hover:bg-overlay"
           >
             <span className="text-muted-foreground">
               Next: <span className="text-foreground">{nextStep.label}</span>
@@ -831,7 +831,7 @@ function QuickLink({
   return (
     <Link
       to={to}
-      className="flex items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-14 text-muted-foreground transition-colors duration-300 hover:bg-overlay hover:text-foreground"
+      className="flex items-center justify-between rounded-lg px-2 py-1.5 -mx-2 text-14 font-medium text-muted-foreground transition-colors duration-300 hover:bg-overlay hover:text-foreground"
     >
       {label}
       <ArrowUpRight className="h-3 w-3 text-text-tertiary" />

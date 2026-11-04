@@ -74,7 +74,7 @@ export function BillingMultiSelect({
               variant="outline"
               aria-label={`Filter ${label.toLowerCase()}`}
               disabled={disabled}
-              className="min-w-40 justify-between gap-6"
+              className="min-w-0 max-w-full flex-wrap justify-between gap-2 whitespace-normal text-left"
             >
               <span>{label}</span>
               <span className="ml-auto text-muted-foreground">
@@ -186,7 +186,7 @@ export function BillingMultiSelect({
             >
               <button
                 type="button"
-                className="min-w-0 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="min-w-0 break-words rounded text-left text-14 font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label={`Edit ${itemLabel.toLowerCase()} filter: ${nameOf(value)}`}
                 onClick={() => setOpen(true)}
               >
@@ -196,6 +196,7 @@ export function BillingMultiSelect({
                 </span>
               </button>
               <button
+                data-icon-button=""
                 type="button"
                 className="shrink-0 rounded p-1 text-muted-foreground hover:bg-overlay-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label={`Remove ${itemLabel.toLowerCase()}: ${nameOf(value)}`}

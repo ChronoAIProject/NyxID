@@ -1,4 +1,4 @@
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { useEffect, useState } from "react";
 import { useApplyTheme } from "../../src/hooks/use-theme";
 import { useThemeStore } from "../../src/stores/theme-store";
@@ -39,7 +39,7 @@ export function Fixture() {
     portal: (next) => {
       setKind(next);
       toast.dismiss();
-      if (next === "toast") toast("Toast title", { description: "Toast description", duration: Infinity, action: { label: "Action", onClick() {} }, cancel: { label: "Cancel", onClick() {} } });
+      if (next === "toast") toast("Review completed", { description: "Review the changes before continuing.", duration: Infinity, action: { label: "Review changes", onClick() {} }, cancel: { label: "Dismiss", onClick() {} } });
     },
   }; }, []);
   return <main className="space-y-4 p-4">
@@ -59,4 +59,6 @@ export function Fixture() {
     <TooltipProvider><Tooltip open={kind === "tooltip"}><TooltipTrigger asChild><Button>Help</Button></TooltipTrigger><TooltipContent data-fixture-portal="tooltip">Tooltip text</TooltipContent></Tooltip></TooltipProvider>
   </main>;
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+const container = document.getElementById("root")! as HTMLElement & { fixtureRoot?: Root };
+const root = container.fixtureRoot ??= createRoot(container);
+root.render(<Fixture />);

@@ -215,7 +215,7 @@ export function TelegramNew({
     <div className={fullPage ? "space-y-4 break-words" : "space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5"}>
       {error && <ErrorBanner message={error.message} />}
       {link && begin.error && (
-        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-14 underline underline-offset-4">
+        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-14 font-medium underline underline-offset-4">
           Open existing Telegram setup
         </a>
       )}

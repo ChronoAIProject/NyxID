@@ -168,7 +168,11 @@ function GroupCard({
       );
     };
     update();
-    const observer = new ResizeObserver(update);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    });
     observer.observe(card);
     observer.observe(header);
     observer.observe(scroller);
@@ -178,6 +182,7 @@ function GroupCard({
     scroller.addEventListener("scroll", update, { passive: true });
     return () => {
       observer.disconnect();
+      cancelAnimationFrame(frame);
       scroller.removeEventListener("scroll", update);
       headerOffset.current = 0;
       header.style.translate = "";
@@ -769,12 +774,20 @@ export function GroupedServiceCards({
       updateShadow();
     };
     measure();
-    const observer = new ResizeObserver(measure);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      // Updating the sticky filter height can resize the observed main. Commit
+      // those CSS variables after delivery, rather than resizing its ancestor
+      // during the same ResizeObserver notification cycle.
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    });
     observer.observe(surface);
     if (scroller) observer.observe(scroller);
     scroller?.addEventListener("scroll", updateShadow, { passive: true });
     return () => {
       observer.disconnect();
+      cancelAnimationFrame(frame);
       scroller?.removeEventListener("scroll", updateShadow);
     };
   }, [view.accountId]);

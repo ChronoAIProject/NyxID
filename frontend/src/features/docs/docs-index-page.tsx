@@ -65,7 +65,7 @@ export function DocsIndexPage() {
                 key={p.slug}
                 to="/docs/$"
                 params={{ _splat: p.slug }}
-                className="rounded-lg border border-border px-4 py-2.5 text-14 text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
+                className="rounded-lg border border-border px-4 py-2.5 text-14 font-medium text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
               >
                 {p.title}
               </Link>

@@ -152,7 +152,7 @@ export function BillingWalletCard({
               type="button"
               aria-expanded={showBreakdown}
               aria-controls="wallet-breakdown"
-              className="mt-2 flex items-center gap-1 text-13 text-muted-foreground transition-colors hover:text-foreground"
+              className="mt-2 flex items-center gap-1 text-14 font-medium text-muted-foreground transition-colors hover:text-foreground"
               onClick={() => setShowBreakdown((current) => !current)}
             >
               {showBreakdown ? "Hide breakdown" : "View breakdown"}

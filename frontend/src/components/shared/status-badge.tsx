@@ -68,7 +68,7 @@ export function StatusBadge({ domain, statusKey, className }: StatusBadgeProps) 
           {meta.remediation ? (
             <Link
               to={meta.remediation.href}
-              className="inline-block text-13 text-primary-text underline"
+              className="inline-block text-14 font-medium text-primary-text underline"
             >
               {meta.remediation.label} →
             </Link>

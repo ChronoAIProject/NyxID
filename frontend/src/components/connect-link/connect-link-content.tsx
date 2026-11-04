@@ -1064,7 +1064,7 @@ export function RequestDetails({
       </div>
       {preview.api_key_url ? (
         <a
-          className="inline-flex items-center gap-1.5 px-4 text-13 text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1.5 px-4 text-14 font-medium text-muted-foreground hover:text-foreground"
           href={preview.api_key_url}
           target="_blank"
           rel="noreferrer"

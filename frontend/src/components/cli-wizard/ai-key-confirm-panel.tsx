@@ -1403,7 +1403,7 @@ function CatalogConfirmForm({
                 href={entry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-13 text-muted-foreground underline-offset-2 hover:underline"
+                className="mt-1 inline-flex items-center gap-1 text-14 font-medium text-muted-foreground underline-offset-2 hover:underline"
               >
                 Get an API key
                 <ExternalLink className="h-3 w-3" />

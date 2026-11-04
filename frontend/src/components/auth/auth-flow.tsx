@@ -365,7 +365,7 @@ export function AuthFlow({
                         <FormLabel>Password</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
-                          className="text-13 font-medium text-nyx-secondary-400 hover:text-nyx-300"
+                          className="text-14 font-medium text-nyx-secondary-400 hover:text-nyx-300"
                         >
                           Forgot password?
                         </Link>

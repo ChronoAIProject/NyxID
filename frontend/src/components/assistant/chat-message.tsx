@@ -446,7 +446,7 @@ function BillingRemedyWithRouter() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const panel = useAccountPanel();
   if (!isAssistantShellRoute(pathname)) return null;
-  return <button type="button" className="mt-2 block text-13 underline"
+  return <button type="button" className="mt-2 block text-14 font-medium underline"
     onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
 }
 

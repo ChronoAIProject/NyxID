@@ -283,6 +283,13 @@ html.assistant-display {
   --assistant-density: 1;
 }
 
+/* Custom actions share the same hit-area floor as Button, including Studio
+   and body portals. Keep switches and checkboxes on their own primitives. */
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], summary) {
+  min-width: max(24px, 1.5rem);
+  min-height: max(24px, 1.5rem);
+}
+
 /* Compact spacing must still leave room for enlarged labels and usable
    pointer targets. The tab strip must contain the same padding as its tabs. */
 html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {

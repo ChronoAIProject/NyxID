@@ -21,6 +21,9 @@ export function typographyViolations(file, source) {
   const errors = [];
   const fail = (offset, message) => errors.push(`line ${source.slice(0, offset).split('\n').length}: ${message}`);
   const classes = (text, offset) => {
+    if (/\bfont-display\b/.test(text) && /\btext-28\b/.test(text) && !/\bfont-(semibold|bold)\b/.test(text)) {
+      fail(offset, 'prominent metrics use text-28 font-semibold (page titles use font-bold)');
+    }
     for (const match of text.matchAll(/(?<![\w-])(?:[^\s"'`]*:)?text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl)(?![\w-])|text-\[(?:[.\d]+(?:px|rem|em))\]/g)) {
       if (match[0].includes('unthemed:')) continue;
       fail(offset + match.index, `${match[0]} must use a numeric semantic role (minimum text-12)`);
@@ -28,6 +31,13 @@ export function typographyViolations(file, source) {
   };
   if (file.endsWith('.css')) {
     const css = postcss.parse(source);
+    css.walkRules(rule => {
+      if (!/\.nb-(primary|secondary|provider)\b|\.nb-device-login\s*>\s*button/.test(rule.selector)) return;
+      const declarations = Object.fromEntries(rule.nodes.filter(node => node.type === 'decl').map(node => [node.prop, node.value]));
+      if ('font-size' in declarations && (declarations['font-size'] !== 'var(--text-14)' || declarations['font-weight'] !== '500')) {
+        errors.push(`${rule.selector}: custom onboarding actions must use the button role, text-14 / 500`);
+      }
+    });
     css.walkDecls(decl => {
       if (/^--text-\d+$/.test(decl.prop)) {
         const expected = `${Number(decl.prop.slice(7)) / 16}rem`;
@@ -38,9 +48,18 @@ export function typographyViolations(file, source) {
       if (!excluded(file) && /var\(--text-(9|10|11)\)/.test(decl.value)) errors.push(`${decl.value} is below the readable role minimum`);
     });
     css.walkAtRules('apply', rule => classes(rule.params, rule.source.start.offset));
-  } else if (!excluded(file) && /fontSize|(?<![\w-])font\s*:|text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl|\[)/.test(source)) {
+  } else if (!excluded(file) && /fontSize|font-display|(?<![\w-])font\s*:|text-(?:9|10|11|xs|sm|base|lg|xl|[2-9]xl|\[)/.test(source)) {
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, file.endsWith('tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
     function visit(node) {
+      if (ts.isJsxAttribute(node) && node.name.getText(ast) === 'className' && node.initializer && ts.isJsxExpression(node.initializer)) {
+        const fragments = [];
+        function collect(child) {
+          if (ts.isStringLiteral(child) || ts.isNoSubstitutionTemplateLiteral(child)) fragments.push(child.text);
+          ts.forEachChild(child, collect);
+        }
+        collect(node.initializer);
+        classes(fragments.join(' '), node.getStart(ast));
+      }
       if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) classes(node.text, node.getStart(ast));
       if ((ts.isPropertyAssignment(node) && /^(fontSize|font)$/.test(node.name.getText(ast))) || (ts.isJsxAttribute(node) && node.name.getText(ast) === 'fontSize')) {
         const value = (node.initializer?.getText(ast) ?? '');

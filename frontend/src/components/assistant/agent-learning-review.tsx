@@ -282,7 +282,7 @@ export function AgentLearningReview({
                       c: proposal.card_conversation_id,
                       card: proposal.acknowledgement_id ?? undefined,
                     }}
-                    className="text-13 text-primary hover:underline"
+                    className="text-14 font-medium text-primary hover:underline"
                   >
                     Open the confirmation card
                   </Link>

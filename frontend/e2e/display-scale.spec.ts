@@ -86,11 +86,21 @@ for (const theme of ["light", "dark"] as const) for (const width of [1440, 390])
             expect(box?.width).toBeGreaterThanOrEqual(23.99);
             expect(box?.height).toBeGreaterThanOrEqual(23.99);
           }
-          if (kind === "toast") for (const action of ["Action", "Cancel"]) {
+          if (kind === "toast") for (const action of ["Review changes", "Dismiss"]) {
             const button = page.locator('[data-sonner-toast]').getByRole("button", { name: action, exact: true });
             const style = await button.evaluate(e => ({ size: parseFloat(getComputedStyle(e).fontSize), weight: getComputedStyle(e).fontWeight }));
             expect(style.size).toBeCloseTo(14 * 0.85 * scale, 2);
             expect(style.weight).toBe("500");
+          }
+          if (kind === "toast") {
+            const toast = page.locator('[data-sonner-toast]');
+            const bounds = await toast.boundingBox();
+            for (const child of await toast.locator('[data-content], [data-title], [data-description], [data-button]').all()) {
+              const box = (await child.boundingBox())!;
+              expect(box.x).toBeGreaterThanOrEqual(bounds!.x);
+              expect(box.x + box.width).toBeLessThanOrEqual(Math.min(width, bounds!.x + bounds!.width) + 1);
+              expect(await child.evaluate(e => e.scrollWidth <= e.clientWidth + 1)).toBe(true);
+            }
           }
         }
         await page.evaluate(() => window.displayFixture.portal(""));

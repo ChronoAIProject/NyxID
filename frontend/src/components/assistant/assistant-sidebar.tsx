@@ -781,7 +781,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 type="button"
                 onClick={model.onNewGroup}
                 data-keep-drawer-open=""
-                className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+                className="w-full rounded-lg px-3 py-1.5 text-left text-14 font-medium text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
               >
                 Chat with several agents at once
               </button>
@@ -1475,7 +1475,7 @@ function RailAgentChats({
         <button
           type="button"
           onClick={onNewChat}
-          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-14 font-medium text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           <Plus aria-hidden="true" className="h-3 w-3" />
           New chat
@@ -1508,7 +1508,7 @@ function RailAgentChats({
         <button
           type="button"
           onClick={onAll}
-          className="w-full rounded-md px-2 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="w-full rounded-md px-2 py-1.5 text-left text-14 font-medium text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           All chats ({chats.length})
         </button>

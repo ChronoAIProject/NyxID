@@ -32,7 +32,7 @@ export function CodexConnectionSection() {
             disabled={query.isFetching || verification.isPending} onClick={() => { verification.reset(); void query.refetch(); }}>
             <RefreshCw className="size-3" />
           </Button>
-          {connection?.service_id && <Link to="/keys/$keyId" params={{ keyId: connection.service_id }} className="text-13 text-primary-text hover:underline">Manage service</Link>}
+          {connection?.service_id && <Link to="/keys/$keyId" params={{ keyId: connection.service_id }} className="text-14 font-medium text-primary-text hover:underline">Manage service</Link>}
         </div>
         {query.isPending && <p role="status" className="text-13 text-muted-foreground">Checking connection...</p>}
         {(query.isError || verification.isError) && <p role="alert" className="text-13 text-destructive">Connection verification is unavailable. Retry or use separate authorization.</p>}
@@ -41,7 +41,7 @@ export function CodexConnectionSection() {
         <div className="flex flex-wrap gap-2">
           <Button size="sm" disabled={!connection?.connection || verification.isPending || query.isFetching}
             onClick={() => setReviewed(connection ?? null)} isLoading={verification.isPending}><TestTube2 className="size-3" />Verify connection</Button>
-          <Link to="/keys" search={{ slug: "llm-openai-codex" }} className="inline-flex h-7 items-center px-2 text-13 text-primary-text hover:underline">Authorize Codex separately</Link>
+          <Link to="/keys" search={{ slug: "llm-openai-codex" }} className="inline-flex h-7 items-center px-2 text-14 font-medium text-primary-text hover:underline">Authorize Codex separately</Link>
         </div>
         <p className="text-13 text-text-tertiary">Disable pauses the service. Delete removes its NyxID credential and endpoint; it does not revoke the upstream API key or change local Codex.</p>
       </div>}
