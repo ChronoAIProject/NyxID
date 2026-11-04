@@ -7825,3 +7825,27 @@ async fn real_work_run_signal_accumulates_across_continuations_under_same_owner(
     }
     db.drop().await.unwrap();
 }
+
+#[test]
+fn connect_guidance_gives_link_and_existing_facts_immediately_for_both_roles() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        let prompt = base_prompt(&row, None);
+        for guidance in [
+            "call nyx__connect_service immediately",
+            "Give its hosted link immediately",
+            "existing connections in one short line",
+            "Never ask whether to proceed",
+            "suggest reusing an existing connection instead",
+            "never guess the provider account identity",
+            "Honor one-step success",
+            "For already_connected",
+            "no separate account to add",
+            "Explain connect_unavailable reasons plainly",
+            "Specialists cannot mint links",
+        ] {
+            assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+        }
+    }
+}

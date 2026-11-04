@@ -27,6 +27,16 @@ export const connectLinkPreviewSchema = z.object({
   status: connectLinkStatusSchema,
   connect_method: connectMethodSchema,
   auth_key_name: z.string(),
+  token_exchange_credential_fields: z
+    .array(
+      z.object({
+        name: z.string(),
+        label: z.string(),
+        placeholder: z.string().optional(),
+        secret: z.boolean(),
+      }),
+    )
+    .nullish(),
   endpoint_url: z.string().url().nullable().optional(),
   credential_mode: z.string().nullable(),
   has_platform_oauth_credentials: z.boolean(),

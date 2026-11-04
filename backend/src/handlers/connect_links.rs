@@ -71,6 +71,8 @@ pub struct PreviewConnectLinkResponse {
     pub status: String,
     pub connect_method: String,
     pub auth_key_name: String,
+    pub token_exchange_credential_fields:
+        Option<Vec<crate::models::downstream_service::CredentialFieldSpec>>,
     pub endpoint_url: Option<String>,
     pub credential_mode: Option<String>,
     pub has_platform_oauth_credentials: bool,
@@ -393,6 +395,7 @@ pub async fn preview_connect_link(
         status: status_name(view.link.status).to_string(),
         connect_method,
         auth_key_name: view.service.auth_key_name,
+        token_exchange_credential_fields: view.service.token_exchange_credential_fields,
         endpoint_url: view.link.endpoint_url,
         credential_mode: view.service.credential_mode,
         has_platform_oauth_credentials: view.service.has_platform_oauth_credentials,
@@ -905,6 +908,8 @@ mod tests {
         service.slug = format!("connect-handler-{}", uuid::Uuid::new_v4());
         service.name = "Handler Test Service".to_string();
         service.requires_user_credential = true;
+        service.token_exchange_config =
+            Some(crate::services::channel_adapters::lark::lark_family_token_exchange_config());
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
@@ -944,6 +949,16 @@ mod tests {
         )
         .await
         .expect("preview response");
+        let fields = preview.token_exchange_credential_fields.as_ref().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["app_id", "app_secret"]
+        );
+        assert!(!fields[0].secret);
+        assert!(fields[1].secret);
         assert_eq!(preview.service_slug, service.slug);
         assert_eq!(preview.requested_by.as_deref(), Some("handler-test"));
         assert_eq!(
