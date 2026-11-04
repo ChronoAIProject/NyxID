@@ -39,7 +39,7 @@
       </dict>
     </array>
     <key>CFBundleVersion</key>
-    <string>41</string>
+    <string>42</string>
     <key>EXDefaultScreenOrientationMask</key>
     <string>UIInterfaceOrientationMaskPortrait</string>
     <key>ITSAppUsesNonExemptEncryption</key>
@@ -67,6 +67,8 @@
     <string>Expo Dev Launcher uses the local network to discover and connect to development servers running on your computer.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Allow NyxID to use your microphone for dictation and voice conversations.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Allow NyxID to attach photos you choose from your library to chats.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Allow NyxID to turn your speech into text for messages. Recognition runs on your iPhone when available.</string>
     <key>RCTNewArchEnabled</key>

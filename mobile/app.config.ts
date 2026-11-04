@@ -81,7 +81,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       [
         "expo-image-picker",
         {
-          photosPermission: false,
+          photosPermission:
+            "Allow NyxID to attach photos you choose from your library to chats.",
           cameraPermission: "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
           microphonePermission:
             "Allow NyxID to use your microphone for dictation and voice conversations.",
