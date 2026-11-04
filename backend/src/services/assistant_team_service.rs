@@ -131,6 +131,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        execution_task: None,
         delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,

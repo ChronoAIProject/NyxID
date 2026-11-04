@@ -185,6 +185,12 @@ pub async fn mutate(
                 "{key} supports only a global override"
             )));
         }
+        if key == flags::EXECUTION_PERMISSIONS_FLAG_KEY && *enabled == Some(true) {
+            if *kind != FlagTargetKind::User {
+                return Err(AppError::ValidationError("permissions:execution-v1 supports per-user enables only: global and organization enrollment require a separately reviewed rollout".into()));
+            }
+            security_readiness_service::require(db, "permissions:execution-dispatch-v1").await?;
+        }
         if *kind != FlagTargetKind::Global {
             let id = target_id
                 .as_deref()
@@ -345,6 +351,31 @@ async fn mutate_in_session(
                 .find_one(filter.clone())
                 .session(&mut *session)
                 .await?;
+            if key == flags::EXECUTION_PERMISSIONS_FLAG_KEY && *kind == FlagTargetKind::User {
+                let person = target_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::BadRequest("target_key is required".into()))?;
+                let update = if *enabled == Some(true) {
+                    doc! {"$set":{"execution_permission_enrollment":1_i32}}
+                } else {
+                    doc! {"$unset":{"execution_permission_enrollment":""}}
+                };
+                let person_filter = if *enabled == Some(true) {
+                    doc! {"_id":person,"is_active":true,"user_type":"person"}
+                } else {
+                    doc! {"_id":person}
+                };
+                let result = db
+                    .collection::<User>(USERS)
+                    .update_one(person_filter, update)
+                    .session(&mut *session)
+                    .await?;
+                if *enabled == Some(true) && result.matched_count != 1 {
+                    return Err(AppError::ValidationError(
+                        "Execution permissions require an active person account".into(),
+                    ));
+                }
+            }
             if before.as_ref().map(|row| row.enabled) == *enabled {
                 output.override_row = before;
                 return Ok(output);
@@ -1014,5 +1045,83 @@ mod tests {
             page.entries[0].event_data.as_ref().unwrap()["enabled"],
             false
         );
+    }
+    #[tokio::test]
+    async fn execution_enrollment_is_person_only_atomic_and_requires_both_capabilities() {
+        let (db, actor) = setup("execution_enrollment").await;
+        let key = flags::EXECUTION_PERMISSIONS_FLAG_KEY;
+        for kind in [FlagTargetKind::Global, FlagTargetKind::Org] {
+            let error = mutate(
+                &db,
+                key,
+                Mutation::Override {
+                    kind,
+                    target_id: Some("nonexistent".into()),
+                    enabled: Some(true),
+                },
+                &actor,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                matches!(error,AppError::ValidationError(ref message) if message.contains("per-user enables only"))
+            );
+        }
+        let change = |enabled| Mutation::Override {
+            kind: FlagTargetKind::User,
+            target_id: Some(actor.user_id.clone()),
+            enabled,
+        };
+        assert!(mutate(&db, key, change(Some(true)), &actor).await.is_err());
+        assert!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&actor.user_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_permission_enrollment
+                .is_none()
+        );
+        security_readiness_service::ready_test_replica(&db).await;
+        mutate(&db, key, change(Some(true)), &actor).await.unwrap();
+        assert_eq!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&actor.user_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_permission_enrollment,
+            Some(1)
+        );
+        for enabled in [Some(false), None] {
+            mutate(&db, key, change(Some(true)), &actor).await.unwrap();
+            mutate(&db, key, change(enabled), &actor).await.unwrap();
+            assert!(
+                db.collection::<User>(USERS)
+                    .find_one(doc! {"_id":&actor.user_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .execution_permission_enrollment
+                    .is_none()
+            );
+        }
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id":&actor.user_id},
+                doc! {"$set":{"is_active":false}},
+            )
+            .await
+            .unwrap();
+        assert!(mutate(&db, key, change(Some(true)), &actor).await.is_err());
+        assert_eq!(
+            db.collection::<Document>("feature_flag_overrides")
+                .count_documents(doc! {"flag_key":key,"enabled":true})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 }

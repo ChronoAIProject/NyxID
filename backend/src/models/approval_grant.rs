@@ -5,6 +5,9 @@ pub const COLLECTION_NAME: &str = "approval_grants";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalGrant {
+    /// Mutable one-operation claim, separate from immutable permission scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_use: Option<super::execution_permission::ExecutionUse>,
     /// Reader-first explicit permission contract. Never inferred from legacy scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<super::execution_permission::ExecutionPermission>,
@@ -85,6 +88,7 @@ mod tests {
 
     fn make_approval_grant() -> ApprovalGrant {
         ApprovalGrant {
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

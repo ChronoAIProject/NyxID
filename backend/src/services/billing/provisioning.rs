@@ -940,6 +940,7 @@ mod tests {
         let now = chrono::Utc::now();
         let id = Uuid::new_v4().to_string();
         let user = User {
+            execution_permission_enrollment: None,
             id: id.clone(),
             email: email.to_string(),
             password_hash: None,

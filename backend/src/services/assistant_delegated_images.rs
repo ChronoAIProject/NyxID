@@ -148,6 +148,7 @@ pub async fn publish_in_session(
         "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent (agent ID {}).",
         engine::identifier(&agent.name), engine::excerpt(&message.text, 1200).replace('"', "'"), agent.id),
         Some(&edge.source_agent)).for_invocation(turn.invocation_id.as_deref());
+    event.execution_task = turn.execution_task.clone();
     event.id = edge.id.clone();
     event.delegated_result = Some(edge.clone());
     // Preserve exact followed-thread destinations through the event routing reducer.

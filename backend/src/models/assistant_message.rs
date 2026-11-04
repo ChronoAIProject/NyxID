@@ -12,6 +12,8 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,
     #[serde(default, skip_serializing_if = "Option::is_none")]

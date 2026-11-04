@@ -2131,6 +2131,7 @@ mod tests {
     fn to_approval_grant_item_stamps_org_fields_when_org_scoped() {
         use crate::models::approval_grant::ApprovalGrant;
         let grant = ApprovalGrant {
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "org_abc".to_string(),
@@ -2158,6 +2159,7 @@ mod tests {
     fn to_approval_grant_item_omits_org_fields_for_personal_grants() {
         use crate::models::approval_grant::ApprovalGrant;
         let grant = ApprovalGrant {
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "user_1".to_string(),

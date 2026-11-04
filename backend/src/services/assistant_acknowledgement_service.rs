@@ -711,6 +711,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id,
         invocation_id: None,
@@ -1009,6 +1010,10 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_task: None,
+            execution_permission: None,
             business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
@@ -1043,6 +1048,11 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) execution_group_id: Option<String>,
+    pub(crate) execution_unsupported: bool,
+    pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
+    pub(crate) execution_permission:
+        Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
     pub business_system_success: bool,
     /// Explicitly bound collaboration thread; never a private memory/account lane.
     pub collaboration_thread: bool,
@@ -1298,6 +1308,7 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+                    execution_task: None,
                     delegated_images: Default::default(),
                     media_event_ids: Vec::new(),
                     media_queue_notice_id: None,
@@ -1573,6 +1584,23 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        execution_group_id: conversation
+            .collaboration
+            .as_ref()
+            .map(|b| b.group_id.clone())
+            .or_else(|| conversation.group_id.clone()),
+        execution_unsupported: conversation.automation_thread
+            || conversation.platform_thread.is_some()
+            || conversation.active_turn.as_ref().is_some_and(|t| {
+                t.voice_request_id.is_some()
+                    || t.trigger_run_id.is_some()
+                    || t.channel_adapter_origin.is_some()
+            }),
+        execution_task: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.execution_task.clone()),
+        execution_permission: None,
         business_system_success: live.is_some_and(|turn| turn.business_system_success),
         collaboration_thread: conversation.collaboration.is_some(),
         channel_adapter_origin: conversation
@@ -1658,6 +1686,9 @@ pub(crate) async fn fence(
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
     super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
+    if let Some(task) = &chat.execution_task {
+        super::execution_permission_dispatch::tasks::fence(db, session, task).await?;
+    }
     if !super::assistant_invocation_service::fence_in_session(
         db,
         session,
@@ -2186,6 +2217,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id: super::machine_activity_service::activity_id(),
         invocation_id: None,
@@ -3093,6 +3125,14 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        execution_group_id: target
+            .collaboration
+            .as_ref()
+            .map(|b| b.group_id.clone())
+            .or_else(|| target.group_id.clone()),
+        execution_unsupported: false,
+        execution_task: row.execution_task.clone(),
+        execution_permission: None,
         business_system_success: false,
         collaboration_thread: target.collaboration.is_some(),
         channel_adapter_origin: None,

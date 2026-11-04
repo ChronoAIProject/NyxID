@@ -127,6 +127,8 @@ impl GroupFollower {
 /// when an agent hands work to another member.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::RequestBinding>,
     #[serde(rename = "_id")]

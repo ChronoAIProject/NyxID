@@ -1,6 +1,6 @@
-//! Pure contract evaluator. Deliberately not called by any execution dispatcher.
+//! Pure contract evaluator used by the opt-in Phase A execution dispatcher.
 //! Inputs must be server-resolved snapshots, never model/caller assertions.
-#![allow(dead_code)] // Reader-first contract; dispatch integration is #2194.
+#![allow(dead_code)] // Closed vocabulary also covers deferred Phase B adapters.
 
 use chrono::{DateTime, TimeDelta, Utc};
 
