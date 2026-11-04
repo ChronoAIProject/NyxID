@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "nyx-panel",
+        include_str!("../../specs/catalog/nyx-panel.openapi.json"),
+    ),
+    (
         "stripe",
         include_str!("../../specs/catalog/stripe.openapi.json"),
     ),
@@ -422,6 +426,41 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panel_instance_contract_exposes_camera_images_without_management() {
+        let spec = spec_for_key("nyx-panel").unwrap();
+        let endpoints =
+            super::super::openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
+        let camera = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "take_camera_photo")
+            .unwrap();
+        assert_eq!(camera.method, "GET");
+        assert_eq!(camera.path, "/camera/snapshot.jpg");
+        assert_eq!(camera.response.content_types, vec!["image/jpeg"]);
+        for endpoint in &endpoints {
+            assert!(matches!(
+                endpoint.path.as_str(),
+                "/status"
+                    | "/camera"
+                    | "/camera/snapshot.jpg"
+                    | "/lcd/snapshot.jpg"
+                    | "/lcd/text"
+                    | "/lcd/clear"
+                    | "/voice"
+                    | "/voice/open"
+                    | "/voice/say"
+                    | "/voice/microphone"
+                    | "/voice/stop"
+            ));
+            assert!(
+                endpoint.origin.is_none(),
+                "Device routing belongs to the connection"
+            );
+        }
+        assert!(spec_for_slug("nyx-panel").is_none());
+    }
 
     /// Guests' default access follows what overlays say about an operation:
     /// Aevatar's destructive marker and NyxID's own changes-existing marker,

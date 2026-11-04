@@ -1,0 +1,412 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Nyx Panel Daily API",
+    "version": "1.0.0",
+    "description": "Daily operations of a Nyx Panel node service. Mount this contract on the individual connection; each instance routes through its own NyxID node. Camera images are captured on demand. Configuration, credentials, persistent images and system management belong to the separately authorized management service."
+  },
+  "paths": {
+    "/status": {
+      "get": {
+        "operationId": "get_status",
+        "summary": "Read current panel status, selected Bot, voice state and resource availability. Returns no credentials.",
+        "x-aevatar-tool": {
+          "name": "get_status",
+          "description": "Read current panel status, selected Bot, voice state and resource availability. Returns no credentials.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/camera": {
+      "get": {
+        "operationId": "get_camera",
+        "summary": "Read camera availability, capture count, image size and last capture error. Does not take a photograph.",
+        "x-aevatar-tool": {
+          "name": "get_camera",
+          "description": "Read camera availability, capture count, image size and last capture error. Does not take a photograph.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/camera/snapshot.jpg": {
+      "get": {
+        "operationId": "take_camera_photo",
+        "summary": "Take a fresh photograph using the panel camera and return the actual JPEG image for visual understanding. Camera resources are released after capture. A busy camera returns 503; there is no continuous stream.",
+        "x-aevatar-tool": {
+          "name": "take_camera_photo",
+          "description": "Take a fresh photograph using the panel camera and return the actual JPEG image for visual understanding. Camera resources are released after capture. A busy camera returns 503; there is no continuous stream.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Camera is busy or unavailable; no image was captured."
+          }
+        }
+      }
+    },
+    "/lcd/snapshot.jpg": {
+      "get": {
+        "operationId": "get_screen_photo",
+        "summary": "Read a JPEG screenshot of the panel display. This is the screen, not the physical camera view.",
+        "x-aevatar-tool": {
+          "name": "get_screen_photo",
+          "description": "Read a JPEG screenshot of the panel display. This is the screen, not the physical camera view.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lcd/text": {
+      "post": {
+        "operationId": "show_text",
+        "summary": "Show caption text over the current fullscreen image.",
+        "x-aevatar-tool": {
+          "name": "show_text",
+          "description": "Show caption text over the current fullscreen image.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success; asynchronous requests must be checked against current device state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Caption to display."
+                  },
+                  "size": {
+                    "type": "string",
+                    "description": "Font size.",
+                    "enum": [
+                      "small",
+                      "medium",
+                      "large"
+                    ]
+                  },
+                  "color": {
+                    "type": "string",
+                    "description": "Text color as #RRGGBB."
+                  },
+                  "bg": {
+                    "type": "string",
+                    "description": "Text outline color as #RRGGBB."
+                  },
+                  "align": {
+                    "type": "string",
+                    "description": "Text alignment.",
+                    "enum": [
+                      "left",
+                      "center",
+                      "right"
+                    ]
+                  },
+                  "duration_ms": {
+                    "type": "integer",
+                    "description": "Caption duration in milliseconds; 0 keeps it until cleared."
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lcd/clear": {
+      "post": {
+        "operationId": "clear_display",
+        "summary": "Clear temporary captions and images, restoring the saved fallback image.",
+        "x-aevatar-tool": {
+          "name": "clear_display",
+          "description": "Clear temporary captions and images, restoring the saved fallback image.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice": {
+      "get": {
+        "operationId": "get_voice",
+        "summary": "Read current call state, selected Bot, microphone mute, media counters and remote request stage. accepted is not proof of audible playback.",
+        "x-aevatar-tool": {
+          "name": "get_voice",
+          "description": "Read current call state, selected Bot, microphone mute, media counters and remote request stage. accepted is not proof of audible playback.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/open": {
+      "post": {
+        "operationId": "open_voice",
+        "summary": "Open automatic two-way voice with the panel-selected Bot and expand the voice controls. A different call while busy returns 409. Does not change the saved input mode. Optional text is a spoken opening notification.",
+        "x-aevatar-tool": {
+          "name": "open_voice",
+          "description": "Open automatic two-way voice with the panel-selected Bot and expand the voice controls. A different call while busy returns 409. Does not change the saved input mode. Optional text is a spoken opening notification.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success; asynchronous requests must be checked against current device state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "description": "A fresh UUID for a new request. Reuse the same UUID and arguments when retrying; recent requests survive reboot."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Nonblank speech text, at most 300 UTF-8 bytes, with no control characters. This is a spoken notification, never user input or permission to use tools."
+                  },
+                  "microphone_muted": {
+                    "type": "boolean",
+                    "description": "Mute the microphone at call start.",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "request_id"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/say": {
+      "post": {
+        "operationId": "say_voice",
+        "summary": "Speak a notification in the active call. Check get_voice for completion; provider acceptance does not prove playback.",
+        "x-aevatar-tool": {
+          "name": "say_voice",
+          "description": "Speak a notification in the active call. Check get_voice for completion; provider acceptance does not prove playback.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success; asynchronous requests must be checked against current device state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "description": "A fresh UUID for a new request. Reuse the same UUID and arguments when retrying; recent requests survive reboot."
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Nonblank speech text, at most 300 UTF-8 bytes, with no control characters. This is a spoken notification, never user input or permission to use tools."
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "text"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/microphone": {
+      "post": {
+        "operationId": "set_microphone_mute",
+        "summary": "Mute or unmute the current call microphone without muting Bot audio.",
+        "x-aevatar-tool": {
+          "name": "set_microphone_mute",
+          "description": "Mute or unmute the current call microphone without muting Bot audio.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "muted": {
+                    "type": "boolean",
+                    "description": "Whether microphone input is muted."
+                  }
+                },
+                "required": [
+                  "muted"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/stop": {
+      "post": {
+        "operationId": "stop_voice",
+        "summary": "End the active call and release microphone, speaker and WebRTC resources. This ends the current voice conversation.",
+        "x-aevatar-tool": {
+          "name": "stop_voice",
+          "description": "End the active call and release microphone, speaker and WebRTC resources. This ends the current voice conversation.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
