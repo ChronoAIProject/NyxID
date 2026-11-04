@@ -478,7 +478,7 @@ export function VoicePanel({
     <ul className="mt-3 space-y-2" aria-label="Voice tasks">
       {voice.snapshot?.tasks.map((t, i) => (
         <li key={t.id} className="flex items-center justify-between gap-2">
-          <span className="min-w-0 truncate">
+          <span className="min-w-0 break-words">
             {t.title?.trim() || `Request ${i + 1}`} ·{" "}
             {(
               {
@@ -490,6 +490,14 @@ export function VoicePanel({
                 failed: "Failed",
               } as Record<string, string>
             )[t.outcome ?? t.state] ?? t.state}
+            {t.progress && (
+              <span className="mt-1 block text-13 text-text-secondary">
+                {t.progress.detail}
+                {t.progress.last_completed_step && (
+                  <span className="block">Last finished step: {t.progress.last_completed_step}</span>
+                )}
+              </span>
+            )}
             {t.result_message_id ? (
               <a
                 className="ml-1 text-nyx-secondary-400 underline"

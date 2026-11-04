@@ -761,6 +761,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={3} ring="ring-sidebar group-hover:ring-sidebar-hover" />
                   <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                  <GroupUnread group={group} />
                   {working ? (
                     <span
                       aria-hidden="true"
@@ -1317,6 +1318,7 @@ function SidebarRail({
                   className={linkClass(selected)}
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={2} ring="ring-sidebar" />
+                  <GroupUnread group={group} compact />
                 </button>
               </RailItem>
             );
@@ -1506,5 +1508,30 @@ function RailAgentChats({
         </button>
       ) : null}
     </div>
+  );
+}
+function GroupUnread({ group, compact = false }: {
+  readonly group: AssistantGroup;
+  readonly compact?: boolean;
+}) {
+  const unread = group.collaboration?.unread_count ?? 0;
+  const mentions = group.collaboration?.mention_count ?? 0;
+  return (
+    <>
+      {unread > 0 ? (
+        <span
+          aria-label="Unread messages"
+          className={cn("h-1.5 w-1.5 shrink-0 rounded-full bg-primary", compact && "absolute top-0.5 right-0.5")}
+        />
+      ) : null}
+      {mentions > 0 ? (
+        <span
+          aria-label={`${mentions} mentions`}
+          className={cn("rounded-full bg-primary/10 px-1.5 text-12 font-medium text-primary", compact && "absolute -bottom-0.5 right-0 bg-primary px-1 text-primary-foreground")}
+        >
+          @{mentions > 99 ? "99+" : mentions}
+        </span>
+      ) : null}
+    </>
   );
 }

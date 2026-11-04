@@ -330,6 +330,14 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::assistant_group_collaboration::READ_STATES,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_group_collaboration::MENTION_NOTIFICATIONS,
+            doc! {"user_id":owner},
+        ),
+        (
             m::node_registration_token::COLLECTION_NAME,
             doc! {"$or":[{"user_id":owner},{"issuer_user_id":owner}]},
         ),

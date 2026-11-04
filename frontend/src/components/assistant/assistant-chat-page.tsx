@@ -1,3 +1,4 @@
+import { NyxAgentRequestLinks } from "./nyxagent-request-links";
 import { useConnectionDown } from "@/hooks/use-connection-down";
 import { SharedConsentCards } from "./shared-agent-controls";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
@@ -645,6 +646,12 @@ function NyxAgentThreadPage() {
   const onChatRoute = useRouterState({
     select: (state) => state.location.pathname.replace(/\/+$/, "") === "/assistant",
   });
+  function requestConfirmationAgain(id: string, kind: string) {
+    setRequestError(undefined);
+    void chat.send(`Please request a new ${kind} for expired request ${id}. Recheck the current state and permissions first; do not reuse the expired confirmation.`).catch((error: unknown) => {
+      setRequestError({ scope: errorScope, message: error instanceof Error ? error.message : "Could not request a new confirmation." });
+    });
+  }
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
   const [focusRequest, setFocusRequest] = useState(0);
@@ -946,6 +953,10 @@ function NyxAgentThreadPage() {
       {conversation && !chat.isStreaming ? (
         <PendingEventsNote count={conversation.pending_events} agentName={agentName} />
       ) : null}
+      {headerAgent?.kind === "nyxbot" ? <NyxAgentRequestLinks
+        conversationId={selectedId}
+        requests={(agents.data?.agents ?? []).flatMap((agent) => agent.pending_requests ?? [])}
+      /> : null}
       {selectedId && !chat.isStreaming ? (
         <WaitingNote items={chat.waiting} agentName={agentName} />
       ) : null}
@@ -1135,9 +1146,11 @@ function NyxAgentThreadPage() {
                         approval_mode: approval.approval_mode,
                         grant_duration_sec: null,
                         expires_at: approval.expires_at,
-                        decision: null,
+                        decision: approval.status === "approved" ? "approved" : approval.status === "rejected" ? "denied" : approval.status === "expired" ? "expired" : null,
                         decision_channel: null,
                       }}
+                      reviewPath={approval.review_path}
+                      onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(approval.id, "proxy approval") : undefined}
                       onDecide={(approved) =>
                         chat.decideApproval(approval.id, approved)
                       }
@@ -1156,6 +1169,7 @@ function NyxAgentThreadPage() {
                       acknowledgement={acknowledgement}
                       accessMode={accessMode}
                       deciding={Boolean(chat.decidingAcknowledgement)}
+                      onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(acknowledgement.id, "confirmation") : undefined}
                       onDecision={async (choice, acceptReducedScope) => {
                         await chat.decideAcknowledgement({
                           id: acknowledgement.id,

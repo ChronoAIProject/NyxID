@@ -139,13 +139,34 @@ it("reveals and focuses keyboard destinations outside the rendered window", asyn
 });
 
 it("follows transcript changes without fading the newly active tick", async () => {
+  const frames = new Map<number, FrameRequestCallback>();
+  let frameId = 0;
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    frames.set(++frameId, callback);
+    return frameId;
+  });
+  vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => { frames.delete(id); });
+  async function nextFrame() {
+    // Callbacks queued by this frame run in the next one. Async act also
+    // delivers the DOM mutations that schedule the coalesced fade refresh.
+    const pending = [...frames.values()];
+    frames.clear();
+    await act(async () => { pending.forEach((callback) => callback(0)); });
+  }
   geometry();
   const { nav, scroll } = harness(100);
+  await nextFrame();
+  expect(nav).toHaveAttribute("data-scroll-edges", "bottom");
   scroll.current!.scrollTop = 5000;
   fireEvent.scroll(scroll.current!);
-  await waitFor(() => expect(nav.querySelector('[data-chat-index-target="50"]')).toHaveAttribute("aria-current", "location"));
+  await nextFrame();
+  expect(nav.querySelector('[data-chat-index-target="50"]')).toHaveAttribute("aria-current", "location");
   expect(nav.scrollTop).toBe(297);
-  await waitFor(() => expect(nav).toHaveAttribute("data-scroll-edges", "top bottom"));
+  // Browsers emit scroll after reveal writes scrollTop; happy-dom does not.
+  // Deliver it explicitly instead of relying on incidental mutation delivery.
+  fireEvent.scroll(nav);
+  await nextFrame();
+  expect(nav).toHaveAttribute("data-scroll-edges", "top bottom");
 });
 
 it("keeps pointer selection on the dense tick slots during a drag", () => {

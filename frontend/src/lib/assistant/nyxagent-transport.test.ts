@@ -2510,3 +2510,43 @@ it.each([undefined, "no_admission", "shared_chat", "method_override", "pool", "h
 it.each(["model_route_unavailable", "model_connection_unavailable", "credits_unavailable", "setup_timeout", "setup_capacity"])("renders setup failure wording for %s", (reason) => {
   expect(storedError("guest_model_route_required", undefined, reason)).toBe("Visitor setup could not finish. The owner has been notified. Please try again later.");
 });
+
+
+it("carries the server action outcome from failed history to the message view", async () => {
+  const page = history();
+  const outcome = {
+    summary: "These actions completed before the reply failed.", complete: true,
+    actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+    retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+  };
+  page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "first_byte_timeout", action_outcome: outcome };
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages[1]?.actionOutcome).toEqual(outcome);
+});
+it("2072 restores a pending card on reload and keeps its expired terminal card visible after polling", async () => {
+  const page = history();
+  const card = { ...creationReceipt(page.messages[1]!.turn_id), status: "pending" as const };
+  page.acknowledgements = [card];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const initial = new NyxAgentTransport();
+  await initial.history(id);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  const rowId = `nyxagent-acknowledgement:${card.id}`;
+  expect(reloaded.session(id).messages.map((m) => m.id)).toContain(rowId);
+  page.acknowledgements = [{ ...card, status: "expired" }];
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages.filter((m) => m.id === rowId)).toHaveLength(1);
+  expect(reloaded.session(id).messages.find((m) => m.id === page.messages[1]!.id)?.decisions).toBeUndefined();
+});
+it("2072 restores terminal proxy approvals without presenting them as a pending turn", async () => {
+  const page = history();
+  page.approval_history = [{ id: "proxy", status: "expired", review_path: "/assistant/approvals", service_slug: "google-sheets", service_name: "Google Sheets", summary: "Update ledger", approval_mode: "per_request", agent_key_prefix: "", created_at: start, expires_at: afterReset }];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.map((m) => m.id)).toContain("nyxagent-approval:proxy");
+  expect(transport.isRunning(id)).toBe(false);
+});

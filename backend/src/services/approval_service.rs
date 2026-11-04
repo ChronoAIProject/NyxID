@@ -1561,6 +1561,9 @@ pub async fn wait_for_decision(
                 return Err(AppError::Forbidden("Approval request expired".to_string()));
             }
             "pending" => {
+                if Utc::now() >= request.expires_at {
+                    return Err(AppError::Forbidden("Approval request expired".into()));
+                }
                 if Utc::now() >= deadline {
                     return Err(AppError::Forbidden(
                         "Approval request timed out".to_string(),
@@ -1587,11 +1590,41 @@ pub fn map_wait_for_decision_error(
     match error {
         AppError::Forbidden(reason) => AppError::ApprovalFailed {
             request_id: request_id.to_string(),
-            approve_url: format!("{}/approvals/history", frontend_url.trim_end_matches('/')),
+            approve_url: super::assistant_links::AssistantPage::Approvals.url(frontend_url),
             reason,
         },
         other => other,
     }
+}
+
+/// Model-facing outcome of a proxy approval wait. A returned identifier is
+/// not evidence of a still-pending card or a dispatched operation.
+pub fn wait_failure_result(error: AppError, request_id: &str, frontend: &str) -> serde_json::Value {
+    let (code, status, message) = match &error {
+        AppError::Forbidden(reason) if reason == "Approval request expired" => (
+            "approval_expired",
+            "expired",
+            "The approval request expired. Nothing was sent by this call. Ask the owner before requesting approval again.",
+        ),
+        AppError::Forbidden(reason) if reason == "Approval request timed out" => (
+            "approval_wait_timed_out",
+            "unavailable",
+            "This call stopped waiting for approval and sent nothing. Check the request in Approvals before requesting another; do not claim a card is still waiting.",
+        ),
+        AppError::Forbidden(reason) if reason == "Approval request was rejected" => (
+            "approval_denied",
+            "rejected",
+            "The approval request was denied. Nothing was sent by this call. Do not request it again unless the owner asks.",
+        ),
+        _ => (
+            "approval_unavailable",
+            "unavailable",
+            "The approval state could not be verified. Nothing was sent by this call; check Approvals before retrying.",
+        ),
+    };
+    serde_json::json!({"error":code,"code":code,"status":status,"request_id":request_id,
+        "message":message,"instructions":message,
+        "review_url":super::assistant_links::AssistantPage::Approvals.url(frontend)})
 }
 
 /// Listing-scope descriptor for one admin org branch on the
@@ -3170,6 +3203,99 @@ mod tests {
     }
 
     #[test]
+    fn invisible_card_2072_proxy_wait_failure_states_are_not_pending() {
+        for (reason, code, status) in [
+            ("Approval request expired", "approval_expired", "expired"),
+            (
+                "Approval request timed out",
+                "approval_wait_timed_out",
+                "unavailable",
+            ),
+            (
+                "Approval request was rejected",
+                "approval_denied",
+                "rejected",
+            ),
+            ("private diagnostic", "approval_unavailable", "unavailable"),
+        ] {
+            let result = wait_failure_result(
+                AppError::Forbidden(reason.into()),
+                "request",
+                "https://app.example/",
+            );
+            assert_eq!(result["code"], code);
+            assert_eq!(result["status"], status);
+            assert_eq!(
+                result["review_url"],
+                "https://app.example/assistant/approvals"
+            );
+            assert!(!result.to_string().contains("private diagnostic"));
+        }
+    }
+
+    #[tokio::test]
+    async fn invisible_card_2072_proxy_history_retains_expiry_and_uses_same_scope() {
+        let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "card2072_proxy_history",
+        )
+        .await;
+        let key =
+            crate::services::key_service::get_api_key(&f.state.db, &f.owner, &f.chat.api_key_id)
+                .await
+                .unwrap();
+        let mut rows = Vec::new();
+        for (id, status, past) in [
+            ("pending", "pending", false),
+            ("lazy-expired", "pending", true),
+            ("denied", "rejected", false),
+            ("allowed", "approved", false),
+        ] {
+            let mut row = make_request(id, status);
+            row.user_id = f.owner.clone();
+            row.requester_id = f.owner.clone();
+            row.requester_type = "user".into();
+            row.requester_label = Some(key.name.clone());
+            row.expires_at = Utc::now() + Duration::seconds(if past { -1 } else { 60 });
+            rows.push(row);
+        }
+        let mut foreign = rows[0].clone();
+        foreign.id = "other-chat".into();
+        foreign.requester_label = Some("another key".into());
+        rows.push(foreign);
+        f.state
+            .db
+            .collection::<ApprovalRequest>(REQUESTS)
+            .insert_many(rows)
+            .await
+            .unwrap();
+        let history =
+            crate::services::assistant_nyxagent::approval_history(&f.state.db, &f.owner, &key.id)
+                .await
+                .unwrap();
+        assert_eq!(history.len(), 4);
+        assert_eq!(
+            history
+                .iter()
+                .find(|r| r.id == "lazy-expired")
+                .unwrap()
+                .status,
+            "expired"
+        );
+        assert!(
+            history
+                .iter()
+                .all(|r| r.review_path == "/assistant/approvals")
+        );
+        let error = wait_for_decision(&f.state.db, "lazy-expired", 60)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            wait_failure_result(error, "lazy-expired", "https://app.example")["code"],
+            "approval_expired"
+        );
+    }
+
+    #[test]
     fn map_wait_for_decision_error_wraps_user_decision_failures() {
         let error = map_wait_for_decision_error(
             AppError::Forbidden("Approval request timed out".to_string()),
@@ -3184,7 +3310,7 @@ mod tests {
                 approve_url,
                 reason,
             } if request_id == "req-1"
-                && approve_url == "https://app.nyxid.dev/approvals/history"
+                && approve_url == "https://app.nyxid.dev/assistant/approvals"
                 && reason == "Approval request timed out"
         ));
     }
@@ -3737,6 +3863,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(approval_required),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: now,
