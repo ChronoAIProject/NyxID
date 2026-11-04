@@ -48,6 +48,11 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Server-derived automation identity; never accepted from client/tool JSON.
+    #[serde(default)]
+    pub trigger_run_id: Option<String>,
+    #[serde(default)]
+    pub continuation_protocol_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -93,6 +98,12 @@ pub struct AgentEvent {
 }
 
 impl AgentEvent {
+    pub fn for_trigger(mut self, run_id: Option<&str>) -> Self {
+        self.trigger_run_id = run_id.map(str::to_owned);
+        self.continuation_protocol_version = if run_id.is_some() { 2 } else { 0 };
+        self
+    }
+
     /// Carry the server-proven owner invocation family.
     pub fn for_invocation(mut self, id: Option<&str>) -> Self {
         self.invocation_id = id.map(str::to_owned);
@@ -249,6 +260,9 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     /// Whether this tool image may accompany a reply sent to a channel chat.
     #[serde(default)]
     pub chat_delivery: Option<bool>,
@@ -507,6 +521,10 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Exact live automation runs, maintained transactionally. Avoids any trigger
+    /// reads on ordinary Stop paths and serializes Stop against wake admission.
+    #[serde(default)]
+    pub coordinator_run_ids: Vec<String>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     /// Server-created, tool-free visitor model initialization. Never client input.

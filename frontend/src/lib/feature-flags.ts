@@ -43,6 +43,7 @@ export const FEATURE_FLAG = {
   HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
+  GENERATED_ARTIFACTS: "assistant:generated-artifacts",
   GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
   CHANNEL_MEDIA: "assistant:channel-media",
   ATTACHMENT_WRITES: "assistant:attachment-writes",

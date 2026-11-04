@@ -19,6 +19,7 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly artifactDelivery?: {readonly rejected?: readonly {readonly index: number; readonly filename: string; readonly reason: "invalid" | "too_large" | "unavailable" | "missing"}[]; readonly state: string; readonly count: number; readonly recoveryAvailable: boolean; readonly endpoint: string};
   readonly actionOutcome?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["action_outcome"];
   readonly cmaOperations?: readonly import("@/schemas/cma-operation").CmaOperation[];
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
@@ -68,7 +69,13 @@ export interface ChatMessage {
 }
 
 export interface ChatImage {
-  readonly origin?: "tool" | "user_upload";
+  readonly origin?: "tool" | "user_upload" | "generated_artifact";
+  readonly filename?: string;
+  readonly source?: string;
+  readonly resultVersion?: string;
+  readonly previewKind?: "image" | "video" | "download";
+  readonly size?: number;
+  readonly expiresAt?: string;
   readonly expired?: boolean;
   readonly imageInput?: "sent" | "unavailable";
   readonly imageInputReason?: string;

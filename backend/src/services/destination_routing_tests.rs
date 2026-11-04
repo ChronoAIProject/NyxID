@@ -529,6 +529,7 @@ pub(crate) async fn mcp_call(
         &mcp_service::McpExecContext {
             assistant_chat: None,
             response_body_limit: None,
+            strict_response_utf8: false,
             actor_user_id: None,
             caller_token: None,
             delegation_restrictions: Default::default(),
@@ -592,7 +593,8 @@ async fn drive_and_workspace_route_all_editors_over_rest_typed_and_generic_mcp()
     }
     let echo = Echo::start().await;
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client =
+        crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     let mut catalog = mcp_service::load_operation_catalog(
         &db,
         &state.node_ws_manager,
@@ -702,7 +704,8 @@ async fn workspace_rest_typed_generic_mcp_and_product_service_reach_real_host_wi
     connect(&db, &owner, "api-google-docs").await;
     let echo = Echo::start().await;
     let mut state = test_app_state(db.clone());
-    state.http_client = echo.client.clone();
+    state.http_client =
+        crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(), async {
         let response = rest_call(&state,&owner,"api-google-workspace","/v1/documents/document-1:batchUpdate",false).await.unwrap();
         assert_eq!(response.status(),200);
@@ -1265,7 +1268,8 @@ async fn workspace_resolved_target_cannot_enter_a_specialized_transport_after_se
         .await.unwrap();
     let echo = Echo::start().await;
     let mut state = test_app_state(db);
-    state.http_client = echo.client.clone();
+    state.http_client =
+        crate::services::assistant_model_control::HttpClient::unobserved(echo.client.clone());
     let response = crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER
         .scope(
             echo.client_builder.clone(),

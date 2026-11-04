@@ -563,6 +563,9 @@ pub struct NyxAgentRequest {
     pub body: Option<serde_json::Value>,
     pub idempotency_key: String,
     pub billing_policy: Option<super::billing::route_inventory::BillingRoutePolicy>,
+    /// Server-issued owner control; never parsed from public request JSON or
+    /// copied from arbitrary caller headers. Only registered runtime egress.
+    pub model_control: Option<super::assistant_model_control::TargetedControl>,
 }
 
 pub struct PreparedPublicTurn {

@@ -36,6 +36,7 @@ pub(super) async fn call(
     let context = mcp_service::McpExecContext {
         assistant_chat: chat.as_ref(),
         response_body_limit: None,
+        strict_response_utf8: false,
         actor_user_id: Some(&f.subject),
         caller_token: None,
         delegation_restrictions: Default::default(),

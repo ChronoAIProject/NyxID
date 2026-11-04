@@ -37,6 +37,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    "assistant:generated-artifacts",
     "assistant:org-agents",
     "assistant:shared-agents",
     super::collaboration_group_service::READINESS,
@@ -46,6 +47,7 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:machine-capabilities",
     "assistant:machine-contexts",
     "assistant:live-turn-gate",
+    super::assistant_model_control::READINESS_CAPABILITY,
     PLATFORM_POLICY,
     super::feature_flag_service::ORG_INSTRUCTION_FLAG_KEY,
     super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,

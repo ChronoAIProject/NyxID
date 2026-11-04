@@ -124,6 +124,11 @@ pub async fn create(
     encryption_keys: &EncryptionKeys,
     input: CreateInput,
 ) -> AppResult<CreatedTrigger> {
+    if matches!(&input.delivery, TriggerDelivery::Assistant { .. })
+        && schedules::continuation::enabled()
+    {
+        schedules::continuation::ready(db, schedules::continuation::enabled()).await?;
+    }
     let label = validate_label(&input.label)?;
     validate_associations(
         db,
@@ -204,6 +209,13 @@ pub async fn create(
         }
     }
     let trigger = Trigger {
+        continuation_protocol_version: if matches!(&delivery, TriggerDelivery::Assistant { .. })
+            && schedules::continuation::enabled()
+        {
+            2
+        } else {
+            0
+        },
         secret_context_versions,
         id: id.clone(),
         source: input.source,
@@ -440,6 +452,13 @@ pub async fn update(
             schedules::compute::next(spec, Utc::now())?
         };
     }
+    if next.status == TriggerStatus::Active
+        && matches!(&next.delivery, TriggerDelivery::Assistant { .. })
+        && schedules::continuation::requires_v2(next.continuation_protocol_version)
+    {
+        schedules::continuation::ready(db, schedules::continuation::enabled()).await?;
+        next.continuation_protocol_version = 2;
+    }
     let schedule_changed = next.schedule != current.schedule || input.status.is_some();
     let target_changed = match (&next.delivery, &current.delivery) {
         (
@@ -480,6 +499,7 @@ pub async fn update(
                     "label": &saved.label,
                     "status": bson::to_bson(&saved.status).map_err(serialization_error)?,
                     "delivery": bson::to_bson(&saved.delivery).map_err(serialization_error)?,
+                    "continuation_protocol_version": saved.continuation_protocol_version,
                     "delivery_secret_encrypted": encrypted,
                     "secret_context_versions":bson::to_bson(&saved.secret_context_versions).map_err(serialization_error)?,
                     "delivery_key_id": &saved.delivery_key_id,
@@ -1854,6 +1874,7 @@ mod tests {
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
+            continuation_protocol_version: 0,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,

@@ -1182,6 +1182,7 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            trigger_run_id: None,
             business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,

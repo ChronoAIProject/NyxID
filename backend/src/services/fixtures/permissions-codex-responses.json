@@ -1,0 +1,40 @@
+{
+  "model": "fixture-model",
+  "input": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "[sanitized]"
+        }
+      ]
+    }
+  ],
+  "store": false,
+  "stream": true,
+  "tools": [
+    {
+      "type": "function",
+      "name": "nyxid__search_tools",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "client_metadata": {
+    "root_turn_id": "00000000-0000-4000-8000-000000000000",
+    "session_id": "00000000-0000-4000-8000-000000000000",
+    "thread_id": "00000000-0000-4000-8000-000000000000",
+    "turn_id": "00000000-0000-4000-8000-000000000000",
+    "x-codex-installation-id": "00000000-0000-4000-8000-000000000000",
+    "x-codex-turn-metadata": "{\"field_00\":\"sanitized\",\"field_01\":\"sanitized\",\"field_02\":\"sanitized\",\"field_03\":\"sanitized\",\"field_04\":\"sanitized\",\"field_05\":\"sanitized\",\"field_06\":\"sanitized\",\"field_07\":\"sanitized\",\"field_08\":\"sanitized\",\"field_09\":\"sanitized\",\"field_10\":\"sanitized\",\"field_11\":\"sanitized\",\"field_12\":\"sanitized\",\"field_13\":\"sanitized\",\"field_14\":\"sanitized\",\"field_15\":\"sanitizedmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm\"}",
+    "x-codex-window-id": "00000000-0000-4000-8000-000000000006:0"
+  }
+}

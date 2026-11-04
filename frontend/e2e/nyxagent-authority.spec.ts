@@ -40,6 +40,11 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/public/config", (route) =>
     route.fulfill({ json: { mcp_url: "https://nyxid.test/mcp" } }),
   );
+  await page.route("**/api/v1/proxy/services?**", (route) =>
+    route.fulfill({
+      json: { services: [], custom_services: [], page: 1, per_page: 100, total: 0 },
+    }),
+  );
   await page.route("**/api/v1/platform-personal-bindings", (route) =>
     route.fulfill({ json: { bindings: [], next_before_id: null } }),
   );
@@ -756,7 +761,7 @@ test("conversation index previews and navigates messages outside the rendered wi
   async function expectRailFitsAboveComposer() {
     const bounds = (await rail.boundingBox())!;
     // Tall editors overlay the transcript beyond the dock's capped reservation.
-    const composer = (await page.locator("[data-composer-dock]").boundingBox())!;
+    const composer = (await page.locator("[data-composer-surface]").boundingBox())!;
     const transcriptBounds = (await transcript.boundingBox())!;
     expect(bounds.y).toBeCloseTo(transcriptBounds.y, 0);
     expect(bounds.y + bounds.height).toBeCloseTo(composer.y, 0);

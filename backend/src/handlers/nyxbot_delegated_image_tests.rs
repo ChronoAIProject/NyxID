@@ -87,6 +87,7 @@ async fn source(
 }
 async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> TurnAttachment {
     let attachment = AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         origin: "tool".into(),
@@ -105,6 +106,7 @@ async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> T
         .await
         .unwrap();
     let metadata = TurnAttachment {
+        artifact: Default::default(),
         id: attachment.id,
         content_type: attachment.content_type,
         size: 8,
@@ -1153,4 +1155,44 @@ async fn delegated_images_async_revoked_source_is_not_rendered_or_adopted() {
     let saved = engine::get(&f.state.db, OWNER, &receiver.id).await.unwrap();
     assert!(saved.pending_events.is_empty());
     assert!(saved.active_turn.is_none());
+}
+
+#[tokio::test]
+async fn delegated_images_ordinary_wait_preserves_queued_automation_results() {
+    let (mut f, _) = image_fixture("telegram", "direct").await;
+    let receiver = receiving(&mut f).await;
+    let sub = source(&f, &receiver, "camera").await;
+    let image = attach(&f, &sub, false).await;
+    finish(&f, &sub).await;
+    let queued = engine::get(&f.state.db, OWNER, &receiver.id).await.unwrap();
+    assert_eq!(queued.pending_events.len(), 1);
+    let a = queued.pending_events[0].clone().for_trigger(Some("run-A"));
+    let b = queued.pending_events[0].clone().for_trigger(Some("run-B"));
+    let mut a = a;
+    let mut b = b;
+    a.id = Uuid::new_v4().to_string();
+    b.id = Uuid::new_v4().to_string();
+    f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&receiver.id},
+        doc! {"$push":{"pending_events":{"$each":bson::to_bson(&vec![a.clone(),b.clone()]).unwrap()}}}).await.unwrap();
+    let result = delegated::consume_wait(
+        &f.state.db,
+        OWNER,
+        &receiver.id,
+        &receiver.active_turn.as_ref().unwrap().turn_id,
+        &[sub.agent_id.unwrap()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.references.len(), 1);
+    assert_eq!(result.references[0].attachment.id, image.id);
+    assert_eq!(result.results.len(), 1);
+    let remaining = engine::get(&f.state.db, OWNER, &receiver.id).await.unwrap();
+    assert_eq!(
+        remaining
+            .pending_events
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![a.id.as_str(), b.id.as_str()]
+    );
 }

@@ -7,6 +7,8 @@ mod faq;
 mod legacy_compatibility;
 #[path = "platform_manager_journey_tests/management.rs"]
 mod management;
+#[path = "assistant_model_control/tests/platform_denial.rs"]
+mod model_denial;
 #[path = "platform_manager_journey_tests/native_personal.rs"]
 mod native_personal;
 #[path = "platform_manager_journey_tests/outbound.rs"]

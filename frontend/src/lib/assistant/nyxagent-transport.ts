@@ -103,7 +103,16 @@ function images(
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
       label: attachment.label,
-      origin: attachment.origin || undefined,
+      ...(attachment.origin === "generated_artifact" ? {
+        filename: attachment.filename ?? undefined,
+        source: attachment.source ?? undefined,
+        resultVersion: attachment.result_version ?? undefined,
+        previewKind: attachment.preview_kind ?? undefined,
+        size: attachment.size,
+        expiresAt: attachment.expires_at ?? undefined,
+      } : {}),
+      origin: attachment.origin === "tool" || attachment.origin === "user_upload" || attachment.origin === "generated_artifact"
+        ? attachment.origin : undefined,
       ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
       ...(attachment.image_input_reason ? { imageInputReason: attachment.image_input_reason } : {}),
     })),
@@ -616,6 +625,7 @@ export class NyxAgentTransport {
       const view: ChatMessage = {
         actionOutcome: message.action_outcome,
         recovery: message.recovery,
+        artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,rejected: message.artifact_delivery.rejected,recoveryAvailable: message.artifact_delivery.recovery_available,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
         id: message.id,
         feedback: message.feedback ?? undefined,
         role: message.role,
@@ -680,6 +690,7 @@ export class NyxAgentTransport {
         const view: ChatMessage = {
           actionOutcome: settled?.action_outcome,
           recovery: settled?.recovery,
+          artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,rejected: settled.artifact_delivery.rejected,recoveryAvailable: settled.artifact_delivery.recovery_available,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,
           id: message.id,
           role: settled?.role ?? message.role,
           feedback: settled?.feedback ?? undefined,

@@ -6,6 +6,8 @@ use tower::ServiceExt;
 
 #[path = "assistant_owner_model_tests.rs"]
 mod owner_model_tests;
+#[path = "assistant_guest_permissions_integration_tests.rs"]
+mod permissions_reconciliation;
 
 async fn callback_proxy(
     State(state): State<AppState>,
@@ -118,11 +120,30 @@ async fn readiness_2092_real_codex_first_guest_all_profiles() {
 }
 
 async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
+    guest_pipeline_with_permissions(nyxbot, scenarios, false).await;
+}
+
+async fn guest_pipeline_with_permissions(nyxbot: bool, scenarios: &[&str], permissions: bool) {
     let f = if nyxbot {
         Box::pin(orchestrator_fixture("guest_1995_nyxbot")).await
     } else {
         Box::pin(direct_fixture("guest_1995_pipeline")).await
     };
+    if permissions {
+        use crate::models::assistant_settings::AccessMode;
+        use crate::services::assistant_settings_service::{self as settings, Update};
+        let saved = settings::update(
+            &f.state.db,
+            &f.owner,
+            Update {
+                access_mode: Some(AccessMode::AskEveryTime),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.access_mode, AccessMode::AskEveryTime);
+    }
     let bootstrap = scenarios
         .iter()
         .any(|scenario| scenario.starts_with("bootstrap_"));
@@ -199,8 +220,29 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         .delete_many(doc! {"user_id": &f.owner})
         .await
         .unwrap();
+    if permissions {
+        assert!(
+            f.state
+                .db
+                .collection::<bson::Document>("notification_channels")
+                .find_one(doc! {"user_id":&f.owner})
+                .await
+                .unwrap()
+                .is_none(),
+            "Permissions callbacks use the absent global preference, not the fixture exemption"
+        );
+    }
+    let model_callback = if permissions {
+        any(permissions_reconciliation::ask_every_time_callback_proxy)
+    } else {
+        any(callback_proxy)
+    };
     let callbacks = Router::new()
-        .route("/api/v1/proxy/s/{slug}/{*path}", any(callback_proxy))
+        .route("/api/v1/proxy/s/{slug}/{*path}", model_callback)
+        .route(
+            "/api/v1/proxy/held/{mutation}",
+            any(permissions_reconciliation::held_admission),
+        )
         .route(
             "/mcp",
             post(crate::handlers::mcp_transport::mcp_post).layer(Extension(
@@ -221,6 +263,10 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     let current_scenario = scenario_source.clone();
     let setup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let setup_sink = setup_calls.clone();
+    // These negative permission scenarios deliberately have no independent
+    // owner setup available; ordinary first-guest setup keeps main's contract.
+    let setup_rejections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let setup_rejection_sink = setup_rejections.clone();
     let callback_db = f.state.db.clone();
     let callback_conversation = f.row.id.clone();
     let agent = Router::new().route("/v1/responses", post(move |headers: HeaderMap, Json(body): Json<Value>| {
@@ -230,6 +276,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         let scenario_source = scenario_source.clone();
         let db = callback_db.clone();
         let setup_calls = setup_sink.clone();
+        let setup_rejections = setup_rejection_sink.clone();
         let conversation = callback_conversation.clone();
         async move {
             let scenario = scenario_source.lock().await.clone();
@@ -240,6 +287,16 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             let (_, validated_key, _) = crate::services::key_service::validate_api_key(&db,thread_key).await.unwrap();
             let setup = db.collection::<bson::Document>("assistant_conversations").find_one(doc!{"credential_api_key_id":&validated_key.id,"guest_model_setup":true}).await.unwrap().is_some();
             if setup {assert_eq!(body["input"],crate::services::assistant_guest_model_setup::INSTRUCTION);}
+            if setup && permissions && scenario == "unbound" {
+                // Main can legitimately establish a route through a separate
+                // owner setup. Keep this negative's no-authority premise by
+                // refusing that producer before any model callback/provider.
+                setup_rejections.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                let event = json!({"type":"response.failed","sequence_number":0,
+                    "response":{"id":RESPONSE,"conversation":{"id":SESSION},"status":"failed",
+                    "error":{"code":"turn_failed","message":"Owner setup unavailable in this fixture"},"output":[]}});
+                return Sse::new(futures::stream::iter([Ok::<_, Infallible>(Event::default().data(event.to_string()))])).into_response();
+            }
             let mut observations = Vec::new();
             for method in ["initialize", "tools/list"] {
                 let response = callbacks.clone().oneshot(Request::builder().method("POST").uri("/mcp")
@@ -250,12 +307,28 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 let bytes = axum::body::to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap();
                 observations.push(json!({"stage":method,"status":status,"body":serde_json::from_slice::<Value>(&bytes).unwrap()}));
             }
+            if scenario == "owner_no_attempt" {
+                db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
+                    "conversation_id":&conversation,"kind":"model_attempt"
+                }).await.unwrap();
+            }
             if !setup && scenario == "missing_input" {
                 db.collection::<bson::Document>("assistant_service_execution").delete_many(doc! {
                     "conversation_id":&conversation,"kind":"input_admission"
                 }).await.unwrap();
             }
-            let response = callbacks.clone().oneshot(Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{model_slug}/{model_path}"))
+            let uri = scenario.strip_prefix("stale_").map(|kind| format!("/api/v1/proxy/held/{kind}"))
+                .unwrap_or_else(|| format!("/api/v1/proxy/s/{model_slug}/{model_path}"));
+            let mut request = Request::builder().method("POST").uri(uri);
+            if !setup && scenario == "semantic_header" {
+                request = request.header("idempotency-key", "other");
+                assert_eq!(
+                    crate::services::proxy_service::collect_forward_headers(request.headers_ref().unwrap()),
+                    vec![("idempotency-key".to_string(), "other".to_string())],
+                    "semantic-header probe must change the effective forwarded headers"
+                );
+            }
+            let response = callbacks.clone().oneshot(request
                 .header("authorization", bearer.clone()).header("content-type", "application/json").header("accept", "*/*")
                 .body(Body::from(if setup {json!({"model":model_name,"store":false,"input":body["input"],"stream":false}).to_string()}else{input_source.lock().await.to_string()})).unwrap()).await.unwrap();
             let status = response.status().as_u16();
@@ -510,7 +583,15 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     {
         let provider_calls_before = provider.received_requests().await.unwrap().len();
         let setups_before = setup_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let setup_rejections_before = setup_rejections.load(std::sync::atomic::Ordering::SeqCst);
         let guest = !scenario.starts_with("owner");
+        let cards_before = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_acknowledgements")
+            .count_documents(doc! {})
+            .await
+            .unwrap();
         *current_scenario.lock().await = scenario.to_owned();
         let route_before = f
             .state
@@ -523,12 +604,28 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .get("owner_model_route")
             .cloned();
         *model_input.lock().await = json!({"model":model_name,"store": scenario == "stateful","input":"test","stream":false});
-        model_input.lock().await["client_metadata"] = json!({
-            "root_turn_id":Uuid::new_v4().to_string(),"session_id":Uuid::new_v4().to_string(),
-            "thread_id":Uuid::new_v4().to_string(),"turn_id":Uuid::new_v4().to_string(),
-            "x-codex-installation-id":"test-installation","x-codex-turn-metadata":"{}",
-            "x-codex-window-id":Uuid::new_v4().to_string(),
-        });
+        if !permissions {
+            model_input.lock().await["client_metadata"] = json!({
+                "root_turn_id":Uuid::new_v4().to_string(),"session_id":Uuid::new_v4().to_string(),
+                "thread_id":Uuid::new_v4().to_string(),"turn_id":Uuid::new_v4().to_string(),
+                "x-codex-installation-id":"test-installation","x-codex-turn-metadata":"{}",
+                "x-codex-window-id":Uuid::new_v4().to_string(),
+            });
+        } else if scenario.contains("metadata") {
+            *model_input.lock().await = permissions_reconciliation::metadata_callback(scenario);
+        }
+        if permissions {
+            assert_eq!(
+                crate::services::assistant_settings_service::get(&f.state.db, &f.owner)
+                    .await
+                    .unwrap()
+                    .access_mode,
+                crate::models::assistant_settings::AccessMode::AskEveryTime
+            );
+            if !scenario.contains("metadata") {
+                assert!(model_input.lock().await.get("client_metadata").is_none());
+            }
+        }
         if bootstrap
             && scenarios
                 .iter()
@@ -547,9 +644,9 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             .delete_many(doc! {})
             .await
             .unwrap();
-        if !guest {
-            // This synthetic, non-platform model route has an existing owner
-            // approval. Explicit approval policies remain independently enforced.
+        if !guest && !permissions {
+            // Retain the existing main harness's per-service policy. Permissions
+            // scenarios independently exercise the writes-only default.
             crate::services::approval_service::set_service_approval_config(
                 &f.state.db,
                 &f.owner,
@@ -666,10 +763,15 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         .unwrap();
         if guest {
             let current = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
-            assert!(
-                current.owner_model_route == row.owner_model_route,
-                "guest must not create or replace a thread route"
-            );
+            if scenario == "stale_route" {
+                assert!(row.owner_model_route.is_some());
+                assert!(current.owner_model_route.is_none());
+            } else {
+                assert!(
+                    current.owner_model_route == row.owner_model_route,
+                    "guest must not create or replace a thread route"
+                );
+            }
             let route_after = f
                 .state
                 .db
@@ -680,7 +782,10 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 .unwrap()
                 .get("owner_model_route")
                 .cloned();
-            if setups_before == setup_calls.load(std::sync::atomic::Ordering::SeqCst) {
+            if scenario == "stale_route" {
+                assert!(route_before.is_some());
+                assert!(route_after.is_none());
+            } else if setups_before == setup_calls.load(std::sync::atomic::Ordering::SeqCst) {
                 assert_eq!(
                     route_before, route_after,
                     "guest may not establish or replace a model route"
@@ -705,6 +810,52 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 .count_documents(doc! {"conversation_id":&row.id,"turn_id":completed["turn_id"].as_str(),"kind":"model_consent"})
                 .await.unwrap(), 0, "guest may not mint owner consent");
         }
+        if guest {
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_acknowledgements")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                cards_before,
+                "guest creates no cards"
+            );
+        }
+        if permissions && !guest {
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_acknowledgements")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                cards_before,
+                "AskEveryTime owner plain and safe metadata callbacks create no model card"
+            );
+        }
+        if scenario == "owner_no_attempt" {
+            assert!(
+                engine::get(&f.state.db, &f.owner, &row.id)
+                    .await
+                    .unwrap()
+                    .owner_model_route
+                    .is_none(),
+                "callback outside server model_attempt cannot teach the thread route"
+            );
+            assert!(
+                f.state
+                    .db
+                    .collection::<bson::Document>("assistant_agents")
+                    .find_one(doc! {"_id":&f.chat.agent_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get("owner_model_route")
+                    .is_none_or(|value| value == &bson::Bson::Null),
+                "callback outside the server model attempt cannot learn a route"
+            );
+        }
         let messages = engine::messages(&f.state.db, &f.owner, &row.id, 10, None)
             .await
             .unwrap();
@@ -722,6 +873,29 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
             assert!(reply.activities.is_empty());
         }
         let initialized = setup_calls.load(std::sync::atomic::Ordering::SeqCst) > setups_before;
+        if permissions && scenario == "unbound" {
+            assert!(
+                setup_rejections.load(std::sync::atomic::Ordering::SeqCst)
+                    > setup_rejections_before,
+                "the no-authority negative must actually refuse the independent owner setup"
+            );
+            assert_eq!(
+                setup_calls.load(std::sync::atomic::Ordering::SeqCst),
+                setups_before,
+                "a rejected setup must not send a model callback"
+            );
+            assert_eq!(
+                provider.received_requests().await.unwrap().len(),
+                provider_calls_before,
+                "neither the guest nor rejected setup may reach the provider"
+            );
+        }
+        if scenario == "bootstrap_byok" && !permissions {
+            assert!(
+                initialized,
+                "ordinary fresh BYOK setup must initialize independently of an owner message"
+            );
+        }
         assert_eq!(
             reply.turn_metadata.as_ref().unwrap().attempts,
             Some(if guest && initialized { 2 } else { 1 }),
@@ -748,10 +922,95 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         let expected = match scenario {
             "approval" => Some((403, "api_key_scope_forbidden", 9000)),
             "stateful" | "missing_input" => Some((403, "guest_model_route_required", 9000)),
+            "unbound" if permissions => Some((403, "guest_model_route_required", 9000)),
+            "metadata_stateful"
+            | "metadata_hosted"
+            | "metadata_unknown"
+            | "metadata_unknown_effect"
+            | "metadata_replacement"
+            | "semantic_header" => Some((403, "guest_model_route_required", 9000)),
             "concurrency" => Some((429, "service_concurrency_limited", 12600)),
             _ => None,
         };
-        if let Some((status, code, numeric)) = expected {
+        if scenario.starts_with("stale_") {
+            // The held route is a narrow Admission::revalidate seam, not the proxy
+            // ModelRequest observer. Keep real proxy attribution below intact.
+            assert_eq!(calls[2]["status"], 403);
+            assert_eq!(reply.status, "failed");
+            assert_eq!(
+                provider.received_requests().await.unwrap().len(),
+                provider_calls_before
+            );
+        } else if permissions && scenario == "unbound" {
+            // This fixture deliberately rejects the independently authenticated
+            // hidden owner setup. The saved visitor failure is NyxID-authored,
+            // distinct from the original upstream callback failure below.
+            assert_eq!(calls[2]["status"], 403);
+            assert_eq!(reply.status, "failed");
+            assert_eq!(
+                reply.error_code.as_deref(),
+                Some("guest_model_route_required")
+            );
+            assert_eq!(reply.upstream_error_code, None);
+            assert_eq!(reply.error_detail.as_ref().unwrap().stage, "guest_setup");
+            let setup = crate::services::assistant_guest_model_setup::record(
+                &f.state.db,
+                &f.owner,
+                &f.chat.agent_id,
+                &row.model,
+            )
+            .await
+            .unwrap()
+            .expect("failed independent owner setup remains durable");
+            assert_eq!(setup.get_str("status"), Ok("failed"));
+            assert_eq!(setup.get_str("reason"), Ok("model_route_unavailable"));
+            assert_eq!(setup.get("route"), Some(&bson::Bson::Null));
+            let reason = reply
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_ref()
+                .unwrap();
+            assert_eq!(reason.source, "nyxid");
+            assert_eq!(reason.stage, "guest_setup");
+            assert_eq!(reason.code, setup.get_str("reason").unwrap());
+            assert_eq!(reason.http_status, None);
+            assert_eq!(reason.nyxid_error_code, None);
+            let diagnostic = reason
+                .model_route
+                .as_ref()
+                .expect("closed setup diagnostic");
+            assert_eq!(diagnostic.reason, "model_route_unavailable");
+            assert!(diagnostic.unknown_fields.is_empty());
+            assert_eq!(diagnostic.attempt_id, None);
+            assert_eq!(
+                provider.received_requests().await.unwrap().len(),
+                provider_calls_before
+            );
+            let dto = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();
+            for event in [&dto, &completed] {
+                assert_eq!(event["turn_metadata"]["failure_reason"]["source"], "nyxid");
+                assert_eq!(
+                    event["turn_metadata"]["failure_reason"]["stage"],
+                    "guest_setup"
+                );
+                assert_eq!(
+                    event["turn_metadata"]["failure_reason"]["code"],
+                    "model_route_unavailable"
+                );
+                assert!(!event.to_string().contains("untrusted upstream detail"));
+                assert!(
+                    !event
+                        .to_string()
+                        .contains("Owner setup unavailable in this fixture")
+                );
+            }
+            assert_eq!(
+                completed["error"]["message"],
+                "Visitor setup could not finish. The owner has been notified. Please try again later."
+            );
+        } else if let Some((status, code, numeric)) = expected {
             assert_eq!(calls[2]["status"], status, "{scenario}: {}", calls[2]);
             assert_eq!(
                 provider.received_requests().await.unwrap().len(),

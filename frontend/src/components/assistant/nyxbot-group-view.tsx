@@ -188,7 +188,8 @@ export function GroupMessageRow({
                 id: item.id,
                 label: item.label,
                 contentType: item.content_type,
-                origin: item.origin || undefined,
+                origin: item.origin === "tool" || item.origin === "user_upload" || item.origin === "generated_artifact"
+                  ? item.origin : undefined,
                 imageInput: item.image_input ?? undefined,
                 imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
@@ -247,7 +248,8 @@ export function GroupMessageRow({
                 id: item.id,
                 label: item.label,
                 contentType: item.content_type,
-                origin: item.origin || undefined,
+                origin: item.origin === "tool" || item.origin === "user_upload" || item.origin === "generated_artifact"
+                  ? item.origin : undefined,
                 imageInput: item.image_input ?? undefined,
                 imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,

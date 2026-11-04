@@ -65,6 +65,158 @@ pub(crate) fn stateless_inference(path: &str, body: &Value) -> bool {
     stateless_model_transport(path, body)
 }
 
+/// Presentation only. Never include this diagnosis in an operation identity,
+/// consent digest or dispatch key. Messages contain no caller-supplied values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InferenceFallbackReason {
+    MetadataShape,
+    MetadataUnknownField,
+    MetadataTextLimit,
+    CompactProtocolUnverified,
+    ProviderStateOrEffect,
+    UnsupportedGeneration,
+}
+
+impl InferenceFallbackReason {
+    pub(crate) fn reusable_message(self) -> &'static str {
+        match self {
+            Self::MetadataShape => {
+                "Automatic Read requires the closed scalar correlation-metadata contract. Explicit approval permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::MetadataUnknownField => {
+                "Unrecognized provider metadata stays opaque and fully fixed under this approval. Validated continuation text may change with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::MetadataTextLimit => {
+                "Turn metadata exceeds the 8192-byte per-field automatic Read limit. Explicit approval fixes the complete bounded metadata and permits validated continuation text with the same exact connection, model and fixed Responses configuration."
+            }
+            Self::CompactProtocolUnverified => {
+                "Automatic Read does not cover standalone compaction. Reusable approval requires the presealed generation and standalone-compact family, the same exact connection and model, and complete observed compact output as the next context without pruning."
+            }
+            _ => {
+                "This shape is outside automatic Read. Reusable approval requires the closed Responses v1 contract; unsupported metadata, resources or compaction remain exact-only."
+            }
+        }
+    }
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::MetadataShape => "metadata_shape",
+            Self::MetadataUnknownField => "metadata_unknown_field",
+            Self::MetadataTextLimit => "metadata_text_limit",
+            Self::CompactProtocolUnverified => "compact_protocol_unverified",
+            Self::ProviderStateOrEffect => "provider_state_or_effect",
+            Self::UnsupportedGeneration => "unsupported_generation",
+        }
+    }
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::MetadataShape => {
+                "Automatic model Read requires the closed scalar correlation-metadata contract. Review this exact request or use a supported client shape."
+            }
+            Self::MetadataUnknownField => {
+                "Unrecognized metadata has no reviewed inert meaning. Approval covers this exact request only."
+            }
+            Self::MetadataTextLimit => {
+                "Automatic model Read allows at most 8192 UTF-8 bytes per correlation field. Approval covers this exact request only."
+            }
+            Self::CompactProtocolUnverified => {
+                "Compaction has no reviewed reusable protocol. Approval covers this exact body; changed compaction requires separate review."
+            }
+            Self::ProviderStateOrEffect => {
+                "Provider state or executable configuration is outside automatic model Read. Review the exact request and its effects."
+            }
+            Self::UnsupportedGeneration => {
+                "This generation shape has no reviewed automatic model contract. Review this exact request or use a supported shape."
+            }
+        }
+    }
+}
+
+pub(super) async fn record_fallback_reason(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+    operation: &Value,
+    reason: InferenceFallbackReason,
+    reusable: bool,
+) -> AppResult<()> {
+    // Retain an actionable diagnosis even when an existing policy permits the
+    // exact request without a card. Only the operation digest and static text
+    // are stored; none of the request's raw metadata or body is copied here.
+    db.collection::<Document>(COLLECTION)
+        .update_one(
+            doc! {"kind":"model_fallback_diagnostic", "user_id":&chat.user_id,
+            "conversation_id":&chat.conversation_id, "api_key_id":&chat.api_key_id,
+            "turn_id":&chat.turn_id, "operation":digest(operation.clone())},
+            doc! {"$setOnInsert": {"_id":uuid::Uuid::new_v4().to_string(),
+            "reason":reason.code(), "explanation":if reusable {reason.reusable_message()} else {reason.message()},
+            "scope":if reusable {"validated_model_continuation_v1"}else {"exact_request"},
+            "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(35))}},
+        )
+        .upsert(true)
+        .await?;
+    Ok(())
+}
+
+pub(crate) fn inference_fallback_reason(
+    path: &str,
+    body: &Value,
+) -> Option<InferenceFallbackReason> {
+    use InferenceFallbackReason as Reason;
+    if stateless_inference(path, body) {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_prefix("v1/").unwrap_or(path);
+    if !matches!(
+        path,
+        "responses" | "responses/compact" | "chat/completions" | "messages" | "embeddings"
+    ) {
+        return Some(Reason::UnsupportedGeneration);
+    }
+    let mut without_metadata = body.clone();
+    let Some(object) = without_metadata.as_object_mut() else {
+        return Some(Reason::UnsupportedGeneration);
+    };
+    object.remove("client_metadata");
+    // Diagnose executable/stateful changes first. Oversized telemetry must not
+    // disguise an unrelated effect or provider resource as a metadata problem.
+    let transport_path = if path == "responses/compact" {
+        "responses"
+    } else {
+        path
+    };
+    if !stateless_model_transport(transport_path, &without_metadata) {
+        return Some(Reason::ProviderStateOrEffect);
+    }
+    if path == "responses/compact" {
+        return Some(Reason::CompactProtocolUnverified);
+    }
+    let Some(metadata) = body.get("client_metadata").and_then(Value::as_object) else {
+        return Some(Reason::MetadataShape);
+    };
+    const KEYS: &[&str] = &[
+        "root_turn_id",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "x-codex-installation-id",
+        "x-codex-window-id",
+        "x-codex-turn-metadata",
+    ];
+    if metadata.keys().any(|key| !KEYS.contains(&key.as_str())) {
+        return Some(Reason::MetadataUnknownField);
+    }
+    if metadata.values().any(|value| !value.is_string()) {
+        return Some(Reason::MetadataShape);
+    }
+    if metadata
+        .values()
+        .any(|value| value.as_str().is_some_and(|text| text.len() > 8192))
+    {
+        return Some(Reason::MetadataTextLimit);
+    }
+    Some(Reason::ProviderStateOrEffect)
+}
+
 /// Shared closed generation contract. Correlation metadata is non-executable;
 /// the actual upstream payload is never modified by this projection.
 pub(crate) fn stateless_model_transport(path: &str, body: &Value) -> bool {

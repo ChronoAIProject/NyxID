@@ -26,6 +26,7 @@ pub(crate) async fn execute(
     let run = async {
         let request = body(&prepared)?;
         let make_request = || NyxAgentRequest {
+            model_control: None,
             method: http::Method::POST,
             relative_path: "v1/responses".into(),
             body: Some(request.clone()),

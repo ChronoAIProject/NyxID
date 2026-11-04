@@ -30,6 +30,7 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     if (!element || !boundary || typeof ResizeObserver === "undefined") return;
     let transcript: HTMLElement | null = null;
     let composer: HTMLElement | null = null;
+    let composerSurface: HTMLElement | null = null;
     function updateHeader() {
       const panels = element!.querySelector<HTMLElement>("[data-chat-thread-panels]");
       if (!transcript || !panels || headerAnchor.current) return;
@@ -45,23 +46,33 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     function scroll(event: Event) {
       if (event.target === transcript) updateHeader();
     }
-    const observer = new ResizeObserver(() => {
+    const measureLayout = () => {
       setAvailable(boundary.clientWidth);
       setScrollbar(transcript ? transcript.offsetWidth - transcript.clientWidth : 0);
-      setComposerInset(composer ? Math.max(0, element.getBoundingClientRect().bottom - composer.getBoundingClientRect().top) : null);
+      // An expanded editor can extend above its height-capped dock. Overlays
+      // must stop at the visible surface, or at a notice above it in the dock.
+      const composerTop = composer
+        ? Math.min(composer.getBoundingClientRect().top, composerSurface?.getBoundingClientRect().top ?? Infinity)
+        : null;
+      setComposerInset(composerTop === null ? null : Math.max(0, element.getBoundingClientRect().bottom - composerTop));
       updateHeader();
-    });
+    };
+    const observer = new ResizeObserver(measureLayout);
     function findTranscript() {
       // A dock holds the composer and anything stacked on it (a failure
       // notice); its top is where the transcript's overlays must stop.
       const nextComposer = element!.querySelector<HTMLElement>("[data-composer-dock]")
         ?? element!.querySelector<HTMLElement>("[data-composer-surface], [data-composer-band]:not(:has([data-composer-surface]))");
-      if (nextComposer !== composer) {
-        if (composer) observer.unobserve(composer);
-        composer = nextComposer;
-        if (composer) observer.observe(composer);
-        else setComposerInset(null);
-      }
+      const nextSurface = element!.querySelector<HTMLElement>("[data-composer-surface]");
+      const composerChanged = nextComposer !== composer || nextSurface !== composerSurface;
+      const previous = new Set([composer, composerSurface]);
+      const nextElements = new Set([nextComposer, nextSurface]);
+      for (const node of previous) if (node && !nextElements.has(node)) observer.unobserve(node);
+      for (const node of nextElements) if (node && !previous.has(node)) observer.observe(node);
+      composer = nextComposer;
+      composerSurface = nextSurface;
+      if (!composer) setComposerInset(null);
+      if (composerChanged) measureLayout();
       const next = element!.querySelector<HTMLElement>("[data-chat-transcript]");
       if (next === transcript) return;
       if (transcript) observer.unobserve(transcript);
@@ -74,10 +85,10 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     let railCheck = 0;
     function checkRail() {
       railCheck = 0;
+      findTranscript();
       setIndexRail(Boolean(element!.querySelector("[data-chat-index-rail]")));
     }
     const mutations = new MutationObserver(() => {
-      if (!transcript || !element.contains(transcript) || !composer || !element.contains(composer)) findTranscript();
       if (!railCheck) railCheck = requestAnimationFrame(checkRail);
     });
     mutations.observe(element, { childList: true, subtree: true });

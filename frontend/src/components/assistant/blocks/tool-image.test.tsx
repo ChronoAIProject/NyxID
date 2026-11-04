@@ -53,6 +53,27 @@ it("downloads documents only after an owner click and reports expiry", async () 
   expect(assistantHttp).toHaveBeenCalledWith("/private/doc");
 });
 
+it.each(["application/x-future-format", "video/x-future-codec", "image/svg+xml"])(
+  "keeps an unfamiliar %s attachment downloadable without eager bytes or preview",
+  async (contentType) => {
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      expect(this.download).toBe("future-file");
+      expect(this.href).toBe("blob:private");
+    });
+    try {
+      render(<ToolImage image={{ id: "future", endpoint: "/private/future", contentType, label: "future-file" }} />);
+      expect(assistantHttp).not.toHaveBeenCalled();
+      expect(screen.queryByRole("img")).not.toBeInTheDocument();
+      expect(document.querySelector("video, iframe, object")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /future-file/ }));
+      await waitFor(() => expect(click).toHaveBeenCalledOnce());
+      expect(assistantHttp).toHaveBeenCalledExactlyOnceWith("/private/future");
+    } finally {
+      click.mockRestore();
+    }
+  },
+);
+
 it.each(["image/png", "application/pdf"])("shows a retention placeholder for expired %s without fetching bytes", (contentType) => {
   render(<ToolImage image={{ id: "expired", endpoint: "/private/expired", label: "old file", contentType, expired: true }} />);
   expect(screen.getByRole("status")).toHaveTextContent("expired per retention policy");

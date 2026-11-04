@@ -402,7 +402,8 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             | "attachment_read"
             | "machine_list"
             | "saved_logins" => Read,
-            "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract" => Change,
+            "connect_service" | "oracle_ask" | "oracle_attach" | "oracle_extract"
+            | "artifact_delivery" => Change,
             // A wrapped service call is classified from the operation it reaches.
             "call_tool" => Read,
             "ssh_exec" => Destructive,
@@ -1008,6 +1009,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            trigger_run_id: None,
             business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
@@ -1042,6 +1044,8 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    /// Exact live, unstopped server turn; never derived from tool arguments.
+    pub trigger_run_id: Option<String>,
     pub business_system_success: bool,
     /// Explicitly bound collaboration thread; never a private memory/account lane.
     pub collaboration_thread: bool,
@@ -1572,6 +1576,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        trigger_run_id: live.and_then(|t| t.trigger_run_id.clone()),
         business_system_success: live.is_some_and(|turn| turn.business_system_success),
         collaboration_thread: conversation.collaboration.is_some(),
         channel_adapter_origin: conversation
@@ -2627,7 +2632,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
         "code": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
         "status":status,"conversation_id":row.conversation_id,"review_path":review_path,
         "message": if denied {"The request was denied; no approval is waiting."} else {"A pending request is available at review_path. This does not confirm that the owner has seen it."},
-        "expires_at":row.expires_at});
+        "expires_at":bson::DateTime::from_chrono(row.expires_at).to_chrono()});
     if row.kind == "action"
         && !denied
         && row.voice_request_id.is_none()
@@ -3092,6 +3097,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        trigger_run_id: None,
         business_system_success: false,
         collaboration_thread: target.collaboration.is_some(),
         channel_adapter_origin: None,
@@ -3273,6 +3279,9 @@ pub(crate) async fn decide_in_session(
     if allow && row.kind == "action" {
         row.expires_at = now + Duration::seconds(ACTION_SECONDS);
     }
+    // Reusable model authority inherits the actual saved Allow deadline.
+    super::assistant_model_control::decision_in_session(db, &row, session).await?;
+    super::assistant_model_denial_notice::decision_in_session(db, &row, session).await?;
     if target.collaboration.is_some() {
         if row.kind != "action" {
             return Err(not_found());

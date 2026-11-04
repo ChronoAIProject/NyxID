@@ -669,6 +669,7 @@ async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_n
             &agent,
             "Must not start",
             Some(&nyxbot.id),
+            None,
             None
         ))
         .await

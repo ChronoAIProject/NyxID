@@ -21,6 +21,8 @@ mod journeys;
 mod managed;
 #[path = "assistant_service_execution_native_tests.rs"]
 mod native;
+#[path = "assistant_service_execution_permissions_tests.rs"]
+mod permissions;
 #[path = "assistant_service_execution_receipt_tests.rs"]
 mod receipts;
 #[path = "assistant_service_execution_ssh_session_tests.rs"]

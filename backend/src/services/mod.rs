@@ -29,6 +29,9 @@ pub mod assistant_feedback_service;
 pub(crate) mod assistant_guest_model_setup;
 mod assistant_learning_publication;
 pub mod assistant_links;
+pub mod assistant_model_control;
+pub mod assistant_model_control_protocol;
+pub(crate) mod assistant_model_denial_notice;
 pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
 pub mod assistant_real_work;
@@ -539,6 +542,7 @@ pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;
+pub mod generated_artifacts;
 #[cfg(test)]
 mod shared_agent_tests;
 

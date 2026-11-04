@@ -398,6 +398,7 @@ impl AsyncContinuation {
                 summary: "Async operation continuation".into(),
                 job_id: None,
                 async_continuation: Some(authority),
+                model_control: None,
                 chat: chat.clone(),
             }),
         })

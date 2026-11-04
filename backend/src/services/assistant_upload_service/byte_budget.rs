@@ -39,6 +39,10 @@ pub async fn reserve(payload_limit: usize) -> AppResult<ByteReservation> {
         _permit: permit,
     })
 }
+#[cfg(test)]
+pub(crate) fn available_for_tests() -> usize {
+    BUDGET.available_permits()
+}
 
 pub fn initial_channel_limit(declared: Option<u64>, maximum: usize) -> usize {
     declared
