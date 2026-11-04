@@ -129,7 +129,7 @@ fn row(id: &str, reservation: &BillingReservation) -> UsageMeterRow {
         "credential_class": "no_auth", "reserved_credits": reservation.total_reserved_credits,
         "funding": bson::to_bson(&UsageFunding {
             credits_per_unit_micros: layer.credits_per_unit_micros, credits_per_unit_pico: layer.credits_per_unit_pico,
-            settlement_rate: Some(Credits::from_pico(i128::from(super::super::super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros))).unwrap()),
+            settlement_rate: Some(Credits::from_pico(super::super::super::amounts::rate_pico(layer.credits_per_unit_pico, layer.credits_per_unit_micros)).unwrap()),
             tax_accounting: true,
             applied_tax: layer.applied_tax.clone(),
             allowance_reservations: layer.allowance_reservations.clone(),
