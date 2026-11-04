@@ -413,7 +413,7 @@ async fn voice_child_http_discovery_and_start_enforce_exact_bot_connection() {
             &crate::services::assistant_nyxagent::get(&f.state.db, &f.owner, &f.nyxbot_thread).await.unwrap()).await.unwrap();
         for (method, path, data) in [
             ("GET", format!("voice/options?conversation_id={}", f.nyxbot_thread), serde_json::Value::Null),
-            ("POST", "voice/sessions".into(), serde_json::json!({"agent_id":root_agent.id,
+            ("POST", format!("conversations/{}/voice-sessions", f.nyxbot_thread), serde_json::json!({
                 "client_request_id":Uuid::new_v4(),"preferences":platform(&voice),"sdp_offer":"fixture"})),
             ("PUT", format!("agents/{}/voice-service", agent.id), serde_json::Value::Null),
             ("GET", "dictation/options".into(), serde_json::Value::Null),
