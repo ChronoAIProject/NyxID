@@ -80,17 +80,19 @@ pub async fn stream(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> AppResult<Response> {
+    open(state, auth, id, sid, headers, upgrade).await
+}
+
+pub(super) async fn open(
+    state: AppState,
+    auth: AuthUser,
+    id: String,
+    sid: String,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> AppResult<Response> {
     use crate::errors::voice_start::Stage;
     let prepared = async {
-        crate::services::voice::client_key::operation(
-            &state.db,
-            &auth,
-            &id,
-            "GET",
-            &format!("/voice/sessions/{sid}/stream"),
-            true,
-        )
-        .await?;
         super::client_key::origin(&state, &auth, &headers).map_err(|e| Stage::Origin.error(e))?;
         let authority = if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
             Authority::Key
@@ -111,7 +113,15 @@ pub async fn stream(
             crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
                 .await
                 .map_err(|e| Stage::Thread.error(e))?;
-        crate::services::voice::client_key::own_call(&state.db, &auth, &call).await?;
+        crate::services::voice::client_key::access_call(
+            &state.db,
+            &auth,
+            &call,
+            "GET",
+            &format!("/voice/sessions/{sid}/stream"),
+            true,
+        )
+        .await?;
         if call.dictation {
             return Err(AppError::Forbidden(
                 "Dictation has a dedicated audio-only stream".into(),
@@ -253,7 +263,7 @@ async fn serve(
                     }
                     Authority::Key => {
                         if let Err(error) = Box::pin(crate::services::voice::client_key::revalidate(&state.db,&call)).await {
-                            if crate::services::voice::client_key::permanent_authority_failure(&error) {
+                            if crate::errors::access_denial::permanent_authority_failure(&error) {
                                 crate::services::voice::client_key::end(&state.db,&call).await?;
                             }
                             return Err(error);

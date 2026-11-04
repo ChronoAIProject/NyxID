@@ -2017,6 +2017,7 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        execution: crate::services::proxy_service::ServiceExecution::External,
         credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,

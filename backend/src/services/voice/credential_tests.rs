@@ -1242,3 +1242,50 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn missing_task_model_is_dictation_only_and_discovery_matches_admission() {
+    Box::pin(async {
+        let (f, provider) = fixture("voice_missing_task_model").await;
+        f.state
+            .db
+            .collection::<bson::Document>(SERVICES)
+            .update_one(
+                doc! {"_id":&provider.id},
+                doc! {"$set":{"inference.voice.delegation_model":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        let choices = options(&f).await;
+        assert!(!choices.as_array().unwrap().is_empty());
+        for choice in choices.as_array().unwrap() {
+            assert_eq!(choice["available"], false);
+            assert_eq!(choice["unavailable_reason"], "delegation_model_required");
+        }
+        assert!(
+            credentials::resolve(&f.state, &f.owner, &f.row.id, &platform(&provider))
+                .await
+                .is_err()
+        );
+        let thread = assistant_voice::thread(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        let dictation =
+            assistant_voice::dictation_options(&f.state.db, &f.state.encryption_keys, &thread)
+                .await
+                .unwrap();
+        let dictation = serde_json::to_value(dictation).unwrap();
+        assert!(
+            dictation
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|choice| choice["available"] == true)
+        );
+        credentials::resolve_audio(&f.state, &f.owner, &f.row.id, &platform(&provider), true)
+            .await
+            .unwrap();
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}

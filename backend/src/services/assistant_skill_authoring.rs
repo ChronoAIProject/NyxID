@@ -168,15 +168,21 @@ async fn source_authority(
         .await?
         .is_some();
     let chat = if live {
-        acks::for_key_with_access_for_watch(db, actor, Some(key), None, true)
-            .await?
-            .filter(|chat| chat.conversation_id == conversation)
+        acks::for_key_with_access_in(
+            db,
+            actor,
+            Some(key),
+            None,
+            acks::ConversationAccess::Recovery,
+        )
+        .await?
+        .filter(|chat| chat.conversation_id == conversation)
     } else {
         None
     }
     .ok_or_else(|| AppError::Forbidden("Skill review key is no longer current".into()))?;
     if let Some(source) = voice_source {
-        Box::pin(super::voice::client_key::request(db, actor, source)).await?;
+        Box::pin(super::execution_source::Source::VoiceRequest(source).require(db, actor)).await?;
     }
     require_author(db, &chat).await?;
     Ok(chat)
@@ -864,7 +870,7 @@ pub async fn latest_card_chat(
     };
     match card_authority(db, actor, &card).await {
         Ok(chat) => Ok(Some(chat)),
-        Err(error) if super::voice::client_key::permanent_authority_failure(&error) => Ok(None),
+        Err(error) if crate::errors::access_denial::permanent_authority_failure(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }

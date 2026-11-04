@@ -3,7 +3,7 @@
 use crate::{
     errors::{AppError, AppResult},
     models::user_service::UserService,
-    mw::auth::{AuthMethod, AuthUser},
+    mw::auth::AuthUser,
 };
 use mongodb::{Database, bson::doc};
 pub const INTERNAL_BASE_URL: &str = "https://nyxid.invalid/internal/nyxbot-voice";
@@ -14,36 +14,18 @@ pub struct Identity {
 }
 
 pub async fn resolve(db: &Database, auth: &AuthUser, service: &str) -> AppResult<Identity> {
-    let key = super::client_key::authenticate(db, auth).await?;
-    let fresh;
-    let auth = if let Some(key) = key {
-        fresh = crate::mw::auth::api_key_auth_user(
-            db,
-            &key,
-            auth.api_key_credential_id.clone(),
-            None,
-            None,
-        )
-        .await?;
-        &fresh
-    } else {
-        auth
-    };
+    let caller = super::client_key::caller(db, auth).await?;
+    resolve_for_caller(db, &caller.auth, service).await
+}
+
+/// The caller has already been freshly authenticated for this request.
+pub(crate) async fn resolve_for_caller(
+    db: &Database,
+    auth: &AuthUser,
+    service: &str,
+) -> AppResult<Identity> {
     let owner = auth.user_id.to_string();
-    let row = if auth.auth_method == AuthMethod::ApiKey {
-        super::access::services(db, auth)
-            .await?
-            .into_iter()
-            .find(|row| row.id == service)
-    } else {
-        db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
-            .find_one(doc! {"_id":service,"user_id":&owner,"is_active":true,
-            "deleted_at":mongodb::bson::Bson::Null,"source":super::access::BOUND_SOURCE})
-            .await?
-    }
-    .ok_or_else(|| {
-        AppError::ApiKeyScopeForbidden("This Key has no access to this Voice connection".into())
-    })?;
+    let row = super::access::connection(db, auth, service).await?;
     let agent = crate::services::assistant_team_service::agent(
         db,
         &owner,
@@ -75,7 +57,11 @@ pub async fn conversation(db: &Database, identity: &Identity, conversation: &str
     Ok(())
 }
 
-pub async fn call(db: &Database, identity: &Identity, sid: &str) -> AppResult<()> {
+pub async fn call(
+    db: &Database,
+    identity: &Identity,
+    sid: &str,
+) -> AppResult<crate::models::assistant_voice_session::VoiceSession> {
     let call = db
         .collection::<crate::models::assistant_voice_session::VoiceSession>(
             crate::models::assistant_voice_session::COLLECTION_NAME,
@@ -91,5 +77,5 @@ pub async fn call(db: &Database, identity: &Identity, sid: &str) -> AppResult<()
             "Call belongs to another Voice connection".into(),
         ));
     }
-    Ok(())
+    Ok(call)
 }

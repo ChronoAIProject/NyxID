@@ -16,6 +16,7 @@ use mongodb::{
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::announcements::ensure_indexes(db).await?;
+    super::super::catalog_reader_fence::ensure_indexes(db).await?;
     db.collection::<VoiceSession>(COLLECTION_NAME)
         .create_indexes([
             IndexModel::builder()
@@ -160,10 +161,7 @@ async fn admit_audio(
     let shared_execution =
         super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
-        responses_model: None,
-        responses_reserved: false,
-        responses_finalized: false,
-        responses_usage: Default::default(),
+        responses: Default::default(),
         client_key,
         last_work_at: None,
         shared_execution,

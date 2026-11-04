@@ -60,14 +60,14 @@ pub(crate) async fn approval_target_for_tool(
         )
         .await?
         .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
-            is_internal_voice: false,
+            execution: crate::services::proxy_service::ServiceExecution::External,
             service_id: downstream_service_id.clone(),
             service_owner_id: effective_approval_owner_user_id.to_string(),
             is_auto_connected: false,
         }),
     };
 
-    if hint.is_internal_voice {
+    if hint.execution == crate::services::proxy_service::ServiceExecution::NyxBotVoice {
         return Err(AppError::Forbidden(
             "Voice requires ordinary internal execution".into(),
         ));

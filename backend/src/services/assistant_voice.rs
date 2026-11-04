@@ -60,7 +60,7 @@ pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantC
     private_thread(&row)?;
     if row.shared_agent_thread {
         super::shared_agent_transport::require_ready(db).await?;
-        crate::mw::auth::api_key_auth_user_for_voice(db, &row).await?;
+        crate::mw::auth::api_key_auth_user_for_thread_inference(db, &row).await?;
     }
     Ok(row)
 }
@@ -510,7 +510,7 @@ pub(crate) async fn claim(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Voice conversation unavailable".into()))?;
-    Box::pin(super::voice::client_key::fence_request(
+    Box::pin(super::voice::source::fence_request(
         db,
         &request.user_id,
         &request.id,
@@ -828,7 +828,7 @@ pub(crate) async fn ensure_task_conversation(
     keys: &std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
     request: &VoiceRequest,
 ) -> AppResult<VoiceRequest> {
-    Box::pin(super::voice::client_key::request(
+    Box::pin(super::voice::source::request(
         db,
         &request.user_id,
         &request.id,
@@ -1134,7 +1134,7 @@ pub(crate) async fn continuation(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Voice request unavailable".into()))?;
-    Box::pin(super::voice::client_key::fence_request(
+    Box::pin(super::voice::source::fence_request(
         db,
         &parent.user_id,
         &parent.id,
@@ -1512,6 +1512,9 @@ async fn audio_options(
             }
             own_connections.push(connection);
         }
+        let conversation_unavailable = (!dictation)
+            .then(|| super::inference_voice::conversation_unavailable_reason(voice))
+            .flatten();
         let billing = service.billing.as_ref();
         let platform_priced =
             super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing).is_ok();
@@ -1545,8 +1548,12 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: platform_enabled && platform_priced,
-                    unavailable_reason: if !platform_enabled {
+                    available: platform_enabled
+                        && platform_priced
+                        && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if !platform_enabled {
                         Some("provider_rollout_pending")
                     } else if !platform_priced {
                         Some("duration_tariff_unavailable")
@@ -1579,8 +1586,10 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: own_billing.is_ok(),
-                    unavailable_reason: if own_billing.is_err() {
+                    available: own_billing.is_ok() && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if own_billing.is_err() {
                         Some("duration_tariff_unavailable")
                     } else {
                         None

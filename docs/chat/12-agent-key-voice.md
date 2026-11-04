@@ -126,8 +126,58 @@ executors reject this internal capability.
 Upgrade **all API replicas and background workers**, then drain every old worker
 before enabling the flag. Older workers ignore the additive source fields and
 cannot enforce device revocation. Mixed-version activation is unsupported.
+Activation now uses NyxID's existing security readiness roster: declare every
+serving API/worker in `SECURITY_ROLLOUT_REPLICAS`, confirm
+`SECURITY_ROLLOUT_DRAINED=true`, and wait until each process reports
+`assistant:voice-agent-key`. Both flag enable and device admission require that
+readiness check. A missing, stale, duplicate or incompatible generation blocks
+activation. The roster remains an operator assertion; it cannot discover an
+unregistered old process.
+
+Disable device admission before rollback, end device calls, cancel/drain their
+queued requests and descendant work (including async watches), and verify there
+is no outstanding device source before starting a worker from before this
+change. Disabling the flag alone does not make an old worker safe to consume
+already-persisted device work. Native web calls also need to finish token
+settlement before downgrading to code that does not understand native Responses.
 No services are provisioned automatically and no production publication is
 performed by this branch.
+
+### Change and activation boundaries
+
+1. **Native Voice and billing:** OpenAI Live's model authors the complete task;
+   captions remain display data. This also changes web Voice and is independent
+   of the device flag. Migration fills an absent task-model field on old OpenAI
+   catalogs, including customized catalogs, preserving explicit model choices,
+   explicit null and administrator pricing. Null offers dictation only; discovery
+   reports `delegation_model_required` for full conversation, matching admission.
+2. **Execution sources and recovery:** delegated turns/events/watches retain the
+   initiating device authority independently of their reply destination. The
+   common execution-source boundary translates the existing persisted fields;
+   only a root continuation settles the original request. Native response state
+   follows planned → active → settled and keeps the existing BSON field names.
+3. **Device service and notifications:** ordinary UserService grants select an
+   exact owned Bot. The device flag and fleet capability gate these entry points;
+   they do not turn off the native web changes in the first boundary.
+
+Native HTTP and internal proxy adapters call `voice::application`; HTTP
+extractors, Origin checks and response encoding stay in the adapters. Resolved
+proxy targets carry a typed execution kind, so forwarding does not infer internal
+execution from a mutable slug or endpoint URL. A request reuses its fresh caller
+identity; effects still fence live authority in their transaction.
+
+Catalog read fences are per catalog and owner. Only the first registration
+writes the catalog; steady-state device admissions write the owner's guard.
+Catalog authority mutations touch registered guards in the same transaction,
+including the normal catalog deactivation path. Registration also touches the
+catalog, closing the race with a mutation that scanned before registration.
+Registrations must not be deleted independently. Future catalog authority writers
+must use `catalog_mutation_service` (bulk migrations must drain serving workers).
+The guard index bounds the mutation lookup; mutation fanout grows with registered
+owners, while unrelated owners no longer serialize on each admission.
+The runtime reviews ongoing call authority every five seconds; task/control/
+notification effects still perform fresh transactional checks. This is a polling
+interval for an open call, not a cached grant for new work.
 
 The board signs in once through Agent Key login, chooses its own restricted Key,
 refreshes its authorized Bots and saves a selection. Changing the local selection

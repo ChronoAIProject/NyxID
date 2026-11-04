@@ -232,7 +232,11 @@ impl Responses {
                         json!({"status":"stopped","detail":"The task was stopped. The call remains open."})
                     } else {
                         let source = VoiceTaskSource {
-                            model: call.responses_model.clone().ok_or_else(invalid)?,
+                            model: call
+                                .responses
+                                .model()
+                                .map(str::to_owned)
+                                .ok_or_else(invalid)?,
                             response_id: response_id.into(),
                             delegation_id: delegation.into(),
                         };
@@ -287,6 +291,12 @@ pub(super) async fn reserve(
     call: &mut VoiceSession,
     ctx: &crate::services::billing::BillingRouteContext,
 ) -> AppResult<()> {
+    if !matches!(
+        call.responses,
+        crate::models::voice_responses::ResponsesState::Planned { .. }
+    ) {
+        return Err(invalid());
+    }
     let ctx = super::tokens::context(ctx.clone(), billing_id(&call.id));
     if ctx.resale.is_some() {
         return Err(AppError::ValidationError(
@@ -306,16 +316,20 @@ async fn checkpoint_usage(
     response_id: &str,
     event: &Value,
 ) -> AppResult<()> {
-    if call.responses_usage.contains_key(response_id) {
+    if call
+        .responses
+        .usage()
+        .is_some_and(|usage| usage.contains_key(response_id))
+    {
         return Ok(());
     }
-    if call.responses_usage.len() >= LIMIT {
+    if call.responses.usage().map_or(0, |usage| usage.len()) >= LIMIT {
         return Err(invalid());
     }
     if let Some(reported) = crate::services::llm_usage_service::extract_reported_usage(event) {
         let mut usage = reported.apply_to(PlatformUsage::default());
         usage.tokens = reported.total_tokens.min(i64::MAX as u64) as i64;
-        let mut saved = call.responses_usage.clone();
+        let mut saved = call.responses.usage().cloned().unwrap_or_default();
         saved.insert(response_id.into(), usage);
         *call = session::write(
             &state.db,
@@ -328,12 +342,17 @@ async fn checkpoint_usage(
 }
 
 pub(super) async fn settle(state: &AppState, call: &mut VoiceSession) -> AppResult<()> {
-    if !call.responses_reserved || call.responses_finalized {
+    if !call.responses.active() {
         return Ok(());
     }
     let mut usage = PlatformUsage::default();
     let mut breakdown = crate::models::service_billing::TokenBreakdown::default();
-    for value in call.responses_usage.values() {
+    for value in call
+        .responses
+        .usage()
+        .into_iter()
+        .flat_map(|usage| usage.values())
+    {
         usage.tokens = usage.tokens.saturating_add(value.tokens);
         usage.input_tokens = usage.input_tokens.saturating_add(value.input_tokens);
         usage.output_tokens = usage.output_tokens.saturating_add(value.output_tokens);
@@ -356,12 +375,12 @@ pub(super) async fn settle(state: &AppState, call: &mut VoiceSession) -> AppResu
     }
     usage = usage
         .with_token_breakdown(Some(breakdown))
-        .with_reported_model(call.responses_model.clone());
+        .with_reported_model(call.responses.model().map(str::to_owned));
     crate::services::billing::meter::settle_voice_checkpoint(
         &state.db,
         &billing_id(&call.id),
         usage,
-        call.responses_model.clone(),
+        call.responses.model().map(str::to_owned),
     )
     .await?;
     *call = session::write(&state.db, call, doc! {"responses_finalized":true}).await?;
@@ -374,7 +393,7 @@ pub(super) async fn observe_closing(
     call: &mut VoiceSession,
     event: &Value,
 ) -> AppResult<()> {
-    if call.responses_model.is_some()
+    if call.responses.model().is_some()
         && event["type"] == "response.event"
         && matches!(
             event["event"]["type"].as_str(),

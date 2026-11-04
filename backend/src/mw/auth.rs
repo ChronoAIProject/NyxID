@@ -373,6 +373,11 @@ impl AuthUser {
     }
 }
 
+/// Server-owned route metadata: this endpoint executes a granted service, rather
+/// than changing account configuration. HTTP callers cannot supply this marker.
+#[derive(Clone, Copy)]
+pub(crate) struct ServiceExecutionRoute;
+
 /// Name of the session cookie.
 pub const SESSION_COOKIE_NAME: &str = "nyx_session";
 
@@ -557,56 +562,20 @@ pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Resu
     ))
 }
 
+fn ensure_route_write_scope(auth: &AuthUser, parts: &Parts, path: &str) -> Result<(), AppError> {
+    if parts.extensions.get::<ServiceExecutionRoute>().is_some()
+        && auth.auth_method == AuthMethod::ApiKey
+    {
+        auth.ensure_rest_proxy_access()
+    } else {
+        auth.ensure_management_write_scope(&parts.method, path)
+    }
+}
+
 fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
     // A restricted login credential can always revoke itself. The handler
     // requires the calling child identity and cannot revoke another credential.
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
-        return false;
-    }
-    // Voice is execution of an explicitly granted service, like proxy calls.
-    // Exempt only implemented POST operations; Bot management stays human-only.
-    if *method == Method::POST
-        && api_v1_path_segments(path).is_some_and(|parts| {
-            matches!(
-                parts.as_slice(),
-                ["assistant", "nyxagent", "voice", "sessions"]
-                    | ["assistant", "nyxagent", "voice", "sessions", _, "control"]
-                    | [
-                        "assistant",
-                        "nyxagent",
-                        "voice",
-                        "sessions",
-                        _,
-                        "announcements"
-                    ]
-                    | [
-                        "assistant",
-                        "nyxagent",
-                        "conversations",
-                        _,
-                        "voice-sessions"
-                    ]
-                    | [
-                        "assistant",
-                        "nyxagent",
-                        "conversations",
-                        _,
-                        "voice-sessions",
-                        _,
-                        "control"
-                    ]
-                    | [
-                        "assistant",
-                        "nyxagent",
-                        "conversations",
-                        _,
-                        "voice-requests",
-                        _,
-                        "cancel"
-                    ]
-            )
-        })
-    {
         return false;
     }
     if !matches!(
@@ -904,7 +873,16 @@ pub(crate) async fn api_key_auth_user(
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) -> Result<AuthUser, AppError> {
-    api_key_auth_user_inner(db, key, credential_id, ip_address, user_agent, false, false).await
+    api_key_auth_user_inner(
+        db,
+        key,
+        credential_id,
+        ip_address,
+        user_agent,
+        false,
+        crate::services::assistant_acknowledgement_service::ConversationAccess::Execution,
+    )
+    .await
 }
 
 /// Server-only authentication for one leased watch. Never reachable from a
@@ -938,12 +916,22 @@ pub(crate) async fn api_key_auth_user_for_watch(
     } else {
         false
     };
-    api_key_auth_user_inner(db, key, None, None, None, shared_resume, true).await
+    api_key_auth_user_inner(
+        db,
+        key,
+        None,
+        None,
+        None,
+        shared_resume,
+        crate::services::assistant_acknowledgement_service::ConversationAccess::Recovery,
+    )
+    .await
 }
 
-/// Only voice's exact private-thread loader can use an idle key. This never
-/// enters the HTTP/MCP authentication paths or supplies a live turn.
-pub(crate) async fn api_key_auth_user_for_voice(
+/// Resolve inference authority for one exact thread, including an idle thread.
+/// This is an internal capability loader, never HTTP/MCP authentication or a
+/// synthetic live turn that could authorize arbitrary service effects.
+pub(crate) async fn api_key_auth_user_for_thread_inference(
     db: &mongodb::Database,
     thread: &crate::models::assistant_conversation::AssistantConversation,
 ) -> Result<AuthUser, AppError> {
@@ -963,7 +951,7 @@ pub(crate) async fn api_key_auth_user_for_voice(
         None,
         None,
         thread.shared_agent_thread,
-        false,
+        crate::services::assistant_acknowledgement_service::ConversationAccess::Execution,
     )
     .await?;
     if auth.assistant_chat.as_ref().is_none_or(|chat| {
@@ -981,7 +969,7 @@ async fn api_key_auth_user_inner(
     ip_address: Option<String>,
     user_agent: Option<String>,
     shared_resume: bool,
-    watch: bool,
+    conversation_access: crate::services::assistant_acknowledgement_service::ConversationAccess,
 ) -> Result<AuthUser, AppError> {
     crate::services::key_service::require_ordinary_purpose(key.purpose)?;
     if !key.is_active || key.expires_at.is_some_and(|at| at <= chrono::Utc::now()) {
@@ -1008,16 +996,16 @@ async fn api_key_auth_user_inner(
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
     let assistant_chat = if is_assistant_conversation_key_candidate(key) {
-        crate::services::assistant_acknowledgement_service::for_key_with_access_for_watch(
+        crate::services::assistant_acknowledgement_service::for_key_with_access_in(
             db,
             &key.user_id,
             Some(&key.id),
             org_agent_access.as_ref(),
-            watch,
+            conversation_access,
         )
         .await
         .map_err(|error| {
-            if crate::services::voice::client_key::permanent_authority_failure(&error) {
+            if crate::errors::access_denial::permanent_authority_failure(&error) {
                 AppError::Unauthorized("Invalid authentication credentials".to_string())
             } else {
                 error
@@ -1252,10 +1240,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                             request_path,
                                         )
                                         .await?;
-                                    auth_user.ensure_management_write_scope(
-                                        &parts.method,
-                                        request_path,
-                                    )?;
+                                    ensure_route_write_scope(&auth_user, parts, request_path)?;
                                     return Ok(auth_user);
                                 }
                                 Err(_) => return Err(jwt_err),
@@ -1720,7 +1705,7 @@ impl FromRequestParts<AppState> for AuthUser {
                 auth_user
                     .ensure_conversation_key_route_if_enabled(&state.db, request_path)
                     .await?;
-                auth_user.ensure_management_write_scope(&parts.method, request_path)?;
+                ensure_route_write_scope(&auth_user, parts, request_path)?;
                 return Ok(auth_user);
             }
 
@@ -4615,6 +4600,36 @@ mod tests {
                 "{method:?} {path} should reject read-only API key auth"
             );
         }
+    }
+
+    #[test]
+    fn service_execution_classification_is_server_metadata_and_requires_proxy_scope() {
+        let path = "/api/v1/assistant/nyxagent/voice/sessions";
+        let (mut parts, _) = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("service-execution-route", "true")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let proxy = test_auth_user(AuthMethod::ApiKey, "read proxy");
+        assert!(
+            ensure_route_write_scope(&proxy, &parts, path).is_err(),
+            "Headers cannot classify a route"
+        );
+        parts.extensions.insert(ServiceExecutionRoute);
+        assert!(ensure_route_write_scope(&proxy, &parts, path).is_ok());
+        assert!(
+            ensure_route_write_scope(
+                &test_auth_user(AuthMethod::ApiKey, "read write"),
+                &parts,
+                path
+            )
+            .is_err(),
+            "Account write does not grant service execution"
+        );
+        parts.extensions.remove::<ServiceExecutionRoute>();
+        assert!(ensure_route_write_scope(&proxy, &parts, "/api/v1/keys").is_err());
     }
 
     #[test]

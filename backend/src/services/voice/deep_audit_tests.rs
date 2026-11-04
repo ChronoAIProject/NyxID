@@ -211,8 +211,9 @@ async fn audit_unconfirmed_recovery_preserves_usage_until_bounded_finalization()
                 crate::models::usage_meter::CredentialClass::UserOwned,
                 crate::models::service_billing::BillingMetric::Tokens, None, false,
             ).with_platform_metering(false);
+            call = voice::session::write(&state.db, &call, doc! {"responses_model":"fixture-model"}).await.unwrap();
             voice::responses::reserve(&state,&mut call,&context).await.unwrap();
-            assert!(call.responses_reserved);
+            assert!(call.responses.reserved());
         }
         state
             .db
@@ -246,7 +247,7 @@ async fn audit_unconfirmed_recovery_preserves_usage_until_bounded_finalization()
         assert!(recovered.end_requested);
         assert!(!recovered.billing_finalized);
         assert!(
-            !recovered.responses_finalized,
+            !recovered.responses.finalized(),
             "Do not freeze incomplete response usage while closure is uncertain"
         );
         // A second worker must preserve uncertainty, too. Once the bounded
@@ -266,7 +267,7 @@ async fn audit_unconfirmed_recovery_preserves_usage_until_bounded_finalization()
             assert_eq!(current.observed_seconds,12);
             assert_eq!(current.billing_finalized,expired);
             assert_eq!(current.live_slot,!expired);
-            assert_eq!(current.responses_finalized,native && expired);
+            assert_eq!(current.responses.finalized(),native && expired);
         }
         assert!(session::claim_orphans(&state.db,"another-worker").await.unwrap().is_empty());
         state.db.drop().await.unwrap();
@@ -351,6 +352,85 @@ async fn audit_unrelated_owner_turn_keeps_voice_reports_queued_under_their_sourc
             !stopped.active_turn.unwrap().stop_requested,
             "Revocation must preserve unrelated owner work"
         );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn audit_proxy_only_key_executes_mounted_voice_but_cannot_publish_or_manage() {
+    Box::pin(async {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let (f, provider, service, raw) = setup("audit_voice_route_classification").await;
+        let device = auth(&f, &raw).await;
+        f.state
+            .db
+            .collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":device.api_key_id.as_deref().unwrap()},
+                doc! {"$set":{"scopes":"read proxy"}},
+            )
+            .await
+            .unwrap();
+        let (_, router) = crate::routes::build_router_with_state(f.state.clone());
+        let app = router.with_state(f.state.clone());
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assistant/nyxagent/voice/sessions")
+                    .header("authorization", format!("Bearer {raw}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"service_id":service,"client_request_id":Uuid::new_v4(),
+                "preferences":platform(&provider),"sdp_offer":"invalid"})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(
+            status, 403,
+            "The mounted execution route must admit a proxy-only key: {body}"
+        );
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "Invalid SDP must fail before a provider call succeeds"
+        );
+        for (method, uri) in [
+            ("POST", "/api/v1/keys".to_owned()),
+            (
+                "PUT",
+                format!(
+                    "/api/v1/assistant/nyxagent/agents/{}/voice-service",
+                    f.chat.agent_id
+                ),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {raw}"))
+                        .header("service-execution-route", "true")
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 403);
+        }
         f.state.db.drop().await.unwrap();
     })
     .await;

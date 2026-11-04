@@ -6,7 +6,6 @@ use crate::{
     models::{
         api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as KEYS},
         api_key_credential::{ApiKeyCredential, COLLECTION_NAME as CREDENTIALS},
-        assistant_agent::AssistantAgent,
         assistant_voice_session::{COLLECTION_NAME as CALLS, VoiceSession},
     },
     mw::auth::{AuthMethod, AuthUser},
@@ -40,8 +39,14 @@ fn ordinary(key: &ApiKey) -> AppResult<()> {
     Ok(())
 }
 
-/// Discovery uses the same existing service grant and B1 operation checks.
-pub async fn covers(db: &Database, key: &ApiKey, agent: &AssistantAgent) -> AppResult<()> {
+/// Test probe for the existing connection grant. Production discovery resolves
+/// its connection set once instead of rebuilding caller authority per Bot.
+#[cfg(test)]
+pub async fn covers(
+    db: &Database,
+    key: &ApiKey,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+) -> AppResult<()> {
     ordinary(key)?;
     if agent.user_id != key.user_id || agent.destroyed_at.is_some() {
         return Err(refused());
@@ -51,10 +56,23 @@ pub async fn covers(db: &Database, key: &ApiKey, agent: &AssistantAgent) -> AppR
     Ok(())
 }
 
+pub struct Caller {
+    pub auth: AuthUser,
+    pub key: Option<ApiKey>,
+}
+
 pub async fn authenticate(db: &Database, auth: &AuthUser) -> AppResult<Option<ApiKey>> {
+    Ok(caller(db, auth).await?.key)
+}
+
+/// A fresh identity for this admission, reusable only within the current request.
+pub async fn caller(db: &Database, auth: &AuthUser) -> AppResult<Caller> {
     if auth.auth_method != AuthMethod::ApiKey {
         crate::mw::auth::require_first_party_human(auth)?;
-        return Ok(None);
+        return Ok(Caller {
+            auth: auth.clone(),
+            key: None,
+        });
     }
     if auth.assistant_chat.is_some() || auth.assistant_turn_fence.is_some() {
         return Err(refused());
@@ -75,6 +93,11 @@ pub async fn authenticate(db: &Database, auth: &AuthUser) -> AppResult<Option<Ap
     {
         return Err(AppError::Forbidden("Agent Key voice is not enabled".into()));
     }
+    crate::services::security_readiness_service::require(
+        db,
+        crate::services::feature_flag_service::VOICE_AGENT_KEY_FLAG_KEY,
+    )
+    .await?;
     // Reuse authentication's live user/organization checks, not just a key row.
     let fresh = crate::mw::auth::api_key_auth_user(
         db,
@@ -88,7 +111,10 @@ pub async fn authenticate(db: &Database, auth: &AuthUser) -> AppResult<Option<Ap
         return Err(refused());
     }
     child(db, &key, auth.api_key_credential_id.as_deref()).await?;
-    Ok(Some(key))
+    Ok(Caller {
+        auth: fresh,
+        key: Some(key),
+    })
 }
 
 async fn child(db: &Database, key: &ApiKey, id: Option<&str>) -> AppResult<()> {
@@ -113,17 +139,39 @@ pub async fn resolve(
 ) -> AppResult<Option<ClientKey>> {
     Ok(resolve_authority(db, auth, conversation)
         .await?
-        .map(|(binding, _)| binding))
+        .map(|(binding, _, _)| binding))
 }
 
 async fn resolve_authority(
     db: &Database,
     auth: &AuthUser,
     conversation: &str,
-) -> AppResult<Option<(ClientKey, AuthUser)>> {
-    let Some(key) = authenticate(db, auth).await? else {
+) -> AppResult<
+    Option<(
+        ClientKey,
+        AuthUser,
+        crate::models::user_service::UserService,
+    )>,
+> {
+    let caller = caller(db, auth).await?;
+    resolve_for_caller(db, &caller, conversation).await
+}
+
+async fn resolve_for_caller(
+    db: &Database,
+    caller: &Caller,
+    conversation: &str,
+) -> AppResult<
+    Option<(
+        ClientKey,
+        AuthUser,
+        crate::models::user_service::UserService,
+    )>,
+> {
+    let Some(key) = &caller.key else {
         return Ok(None);
     };
+    let auth = &caller.auth;
     let thread = assistant_voice::thread(db, &key.user_id, conversation).await?;
     if thread.shared_agent_thread
         || thread
@@ -134,25 +182,18 @@ async fn resolve_authority(
         return Err(refused());
     }
     let agent = team::agent_for_conversation(db, &thread).await?;
-    let fresh = crate::mw::auth::api_key_auth_user(
-        db,
-        &key,
-        auth.api_key_credential_id.clone(),
-        None,
-        None,
-    )
-    .await?;
+    let fresh = caller.auth.clone();
     let service = super::access::authorize(db, &fresh, &agent).await?;
     Ok(Some((
         ClientKey {
-            key_id: key.id,
+            key_id: key.id.clone(),
             credential_id: auth.api_key_credential_id.clone(),
-            key_version: key.state_version,
+
             agent_id: agent.id,
-            service_id: service.id,
-            service_version: service.state_version,
+            service_id: service.id.clone(),
         },
         fresh,
+        service,
     )))
 }
 /// Start admission composes the exact Key grant with the Bot Voice path.
@@ -161,22 +202,21 @@ pub async fn authorize(
     auth: &AuthUser,
     conversation: &str,
 ) -> AppResult<Option<ClientKey>> {
-    let Some((binding, fresh)) = resolve_authority(db, auth, conversation).await? else {
-        return Ok(None);
-    };
-    let service = bound_service(db, &binding.service_id).await?;
-    super::access::policy(db, &fresh, &service, "POST", "/voice/sessions", true).await?;
-    Ok(Some(binding))
+    let caller = caller(db, auth).await?;
+    authorize_for_caller(db, &caller, conversation).await
 }
 
-async fn bound_service(
+pub(crate) async fn authorize_for_caller(
     db: &Database,
-    id: &str,
-) -> AppResult<crate::models::user_service::UserService> {
-    db.collection(crate::models::user_service::COLLECTION_NAME)
-        .find_one(doc! {"_id":id})
-        .await?
-        .ok_or_else(refused)
+    caller: &Caller,
+    conversation: &str,
+) -> AppResult<Option<ClientKey>> {
+    let Some((binding, fresh, service)) = resolve_for_caller(db, caller, conversation).await?
+    else {
+        return Ok(None);
+    };
+    super::access::policy(db, &fresh, &service, "POST", "/voice/sessions", true).await?;
+    Ok(Some(binding))
 }
 
 /// Authorize the current Voice operation without creating service approvals.
@@ -188,10 +228,42 @@ pub async fn operation(
     path: &str,
     websocket: bool,
 ) -> AppResult<()> {
-    let Some((binding, fresh)) = resolve_authority(db, auth, conversation).await? else {
+    operation_binding(db, auth, conversation, method, path, websocket)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn operation_binding(
+    db: &Database,
+    auth: &AuthUser,
+    conversation: &str,
+    method: &str,
+    path: &str,
+    websocket: bool,
+) -> AppResult<Option<ClientKey>> {
+    let Some((binding, fresh, service)) = resolve_authority(db, auth, conversation).await? else {
+        return Ok(None);
+    };
+    super::access::policy(db, &fresh, &service, method, path, websocket).await?;
+    Ok(Some(binding))
+}
+
+pub(crate) async fn access_call(
+    db: &Database,
+    auth: &AuthUser,
+    call: &VoiceSession,
+    method: &str,
+    path: &str,
+    websocket: bool,
+) -> AppResult<()> {
+    let Some((binding, fresh, service)) =
+        resolve_authority(db, auth, &call.conversation_id).await?
+    else {
         return Ok(());
     };
-    let service = bound_service(db, &binding.service_id).await?;
+    if call.client_key.as_ref() != Some(&binding) {
+        return Err(refused());
+    }
     super::access::policy(db, &fresh, &service, method, path, websocket).await
 }
 
@@ -236,8 +308,8 @@ pub async fn revalidate(db: &Database, call: &VoiceSession) -> AppResult<()> {
     revalidate_binding(db, call, false).await.map(|_| ())
 }
 
-/// Capture the currently authorized versions for a transactional fence. Key
-/// state_version also changes on last_used_at; it is not a durable call identity.
+/// Recheck stable credential identity against live grants. Metadata versions
+/// (including last_used_at updates) are deliberately not authority tokens.
 async fn revalidate_binding(
     db: &Database,
     call: &VoiceSession,
@@ -289,9 +361,7 @@ async fn revalidate_binding(
     if !in_transaction {
         super::access::policy(db, &fresh, &service, "POST", "/voice/sessions", true).await?;
     }
-    let mut current = binding.clone();
-    current.key_version = key.state_version;
-    Ok(Some(current))
+    Ok(Some(binding.clone()))
 }
 pub async fn own_call(db: &Database, auth: &AuthUser, call: &VoiceSession) -> AppResult<()> {
     if let Some(proof) = resolve(db, auth, &call.conversation_id).await? {
@@ -307,69 +377,6 @@ pub async fn own_call(db: &Database, auth: &AuthUser, call: &VoiceSession) -> Ap
     }
     Ok(())
 }
-pub async fn request(db: &Database, user: &str, request_id: &str) -> AppResult<()> {
-    let request = db
-        .collection::<crate::models::assistant_voice::VoiceRequest>(
-            crate::models::assistant_voice::REQUESTS,
-        )
-        .find_one(doc! {"_id":request_id,"user_id":user})
-        .await?
-        .ok_or_else(refused)?;
-    if request.state == crate::models::assistant_voice::RequestState::Cancelled {
-        return Err(refused());
-    }
-    if let Some(call) = db
-        .collection::<VoiceSession>(CALLS)
-        .find_one(doc! {"_id":&request.session_id,"user_id":user})
-        .await?
-    {
-        if request.client_key != call.client_key {
-            return Err(refused());
-        }
-        Box::pin(revalidate(db, &call)).await?;
-    } else if request.client_key.is_some() {
-        return Err(refused());
-    }
-    Ok(())
-}
-
-/// Join the action's existing transaction, so revoking a Key/child credential,
-/// changing Bot grants, or disconnecting the service conflicts with admission.
-pub async fn fence_request(
-    db: &Database,
-    user: &str,
-    request_id: &str,
-    session: &mut mongodb::ClientSession,
-) -> AppResult<()> {
-    let row = db
-        .collection::<crate::models::assistant_voice::VoiceRequest>(
-            crate::models::assistant_voice::REQUESTS,
-        )
-        .find_one_and_update(
-            doc! {"_id":request_id,"user_id":user},
-            doc! {"$inc":{"source_authority_fence":1_i64}},
-        )
-        .session(&mut *session)
-        .await?
-        .ok_or_else(refused)?;
-    if row.state == crate::models::assistant_voice::RequestState::Cancelled {
-        return Err(refused());
-    }
-    let Some(original) = row.client_key else {
-        return Ok(());
-    };
-    let call = db
-        .collection::<VoiceSession>(CALLS)
-        .find_one(doc! {"_id":&row.session_id,"user_id":user})
-        .session(&mut *session)
-        .await?
-        .ok_or_else(refused)?;
-    if call.client_key.as_ref() != Some(&original) {
-        return Err(refused());
-    }
-    fence_call(db, &call, session).await
-}
-
 /// Join any authenticated call mutation to the same Key/child/service fences.
 pub async fn fence_call(
     db: &Database,
@@ -395,6 +402,13 @@ pub async fn fence_call(
         .session(&mut *session)
         .await?
         .ok_or_else(refused)?;
+    super::super::catalog_reader_fence::admit(
+        db,
+        service.catalog_service_id.as_deref().unwrap_or_default(),
+        user,
+        session,
+    )
+    .await?;
     let mut fences = vec![
         (
             crate::models::assistant_conversation::COLLECTION_NAME,
@@ -404,10 +418,6 @@ pub async fn fence_call(
         (
             crate::models::user::COLLECTION_NAME,
             doc! {"_id":user,"is_active":true,"$or":[{"user_type":"person"},{"user_type":{"$exists":false}}]},
-        ),
-        (
-            crate::models::downstream_service::COLLECTION_NAME,
-            doc! {"_id":service.catalog_service_id.as_deref().unwrap_or_default(),"is_active":true},
         ),
         (
             crate::models::assistant_agent::COLLECTION_NAME,
@@ -479,76 +489,4 @@ pub async fn end(db: &Database, call: &VoiceSession) -> AppResult<()> {
         assistant_voice::cancel(db, &row.user_id, &row.conversation_id, &row.id).await?;
     }
     Ok(())
-}
-
-/// Only confirmed loss of source authority is destructive. Storage, readiness,
-/// provider and concurrency failures preserve durable work for bounded retry.
-pub fn permanent_authority_failure(error: &AppError) -> bool {
-    error.is_forbidden()
-        || matches!(
-            error,
-            AppError::Unauthorized(_)
-                | AppError::ApiKeyScopeForbidden(_)
-                | AppError::NotFound(_)
-                | AppError::TokenExpired
-        )
-}
-
-/// A descendant retains its causing source while executing with its own Bot key.
-pub fn turn_source(turn: &crate::models::assistant_conversation::ActiveTurn) -> Option<&str> {
-    turn.voice_request_id
-        .as_deref()
-        .or(turn.voice_source_request_id.as_deref())
-}
-
-pub async fn source_for_chat(
-    db: &Database,
-    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
-) -> AppResult<Option<String>> {
-    let row = db
-        .collection::<crate::models::assistant_conversation::AssistantConversation>(
-            crate::models::assistant_conversation::COLLECTION_NAME,
-        )
-        .find_one(doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,
-        "credential_api_key_id":&chat.api_key_id})
-        .await?
-        .ok_or(AppError::AssistantTurnRequired)?;
-    // Ordinary tool dispatch keeps its existing live-turn rules. This helper
-    // adds a fence only when the current turn actually carries Voice authority.
-    let source = row
-        .active_turn
-        .as_ref()
-        .and_then(turn_source)
-        .map(str::to_owned);
-    if let Some(source) = &source {
-        if row.active_turn.as_ref().is_none_or(|turn| {
-            Some(turn.turn_id.as_str()) != chat.turn_id.as_deref() || turn.stop_requested
-        }) {
-            return Err(AppError::AssistantTurnRequired);
-        }
-        Box::pin(request(db, &chat.user_id, source)).await?;
-    }
-    Ok(source)
-}
-
-/// Delayed reports retain their causing authority. Remove only confirmed lost
-/// sources; uncertainty aborts admission without consuming any queued event.
-pub async fn filter_events_in_session(
-    db: &Database,
-    user: &str,
-    events: Vec<crate::models::assistant_conversation::AgentEvent>,
-    session: &mut mongodb::ClientSession,
-) -> AppResult<Vec<crate::models::assistant_conversation::AgentEvent>> {
-    let mut eligible = Vec::new();
-    for event in events {
-        if let Some(source) = &event.voice_source_request_id {
-            match Box::pin(fence_request(db, user, source, session)).await {
-                Ok(()) => {}
-                Err(error) if permanent_authority_failure(&error) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        eligible.push(event);
-    }
-    Ok(eligible)
 }

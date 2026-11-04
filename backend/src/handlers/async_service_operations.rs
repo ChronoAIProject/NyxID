@@ -29,10 +29,11 @@ async fn call(
         || (watch.state == "cancelling" && name == watch.contract.status_operation);
     if !cleanup
         && let Some(request) = &watch.delivery.voice_request_id
-        && let Err(error) =
-            crate::services::voice::client_key::request(&state.db, &watch.user_id, request).await
+        && let Err(error) = crate::services::execution_source::Source::VoiceRequest(request)
+            .require(&state.db, &watch.user_id)
+            .await
     {
-        if !crate::services::voice::client_key::permanent_authority_failure(&error) {
+        if !crate::errors::access_denial::permanent_authority_failure(&error) {
             return Err(error);
         }
         if let Some(request) = state
@@ -377,9 +378,7 @@ async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
-            Ok(Err(error))
-                if crate::services::voice::client_key::permanent_authority_failure(&error) =>
-            {
+            Ok(Err(error)) if crate::errors::access_denial::permanent_authority_failure(&error) => {
                 watches::ready(&state.db, &w, None, "authority_lost", None).await?;
             }
             _ => watches::defer(&state.db, &w).await?,

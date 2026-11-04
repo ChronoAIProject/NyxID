@@ -565,7 +565,7 @@ async fn active(
                         }
                     },
                     Some("session.delegation.created")=>{
-                        if call.responses_model.is_some() {
+                        if call.responses.model().is_some() {
                             c.responses.delegation(&event)?;
                             continue;
                         }
@@ -582,7 +582,7 @@ async fn active(
                             });}
                         }
                     },
-                    Some("response.event") if call.responses_model.is_some() => {
+                    Some("response.event") if call.responses.model().is_some() => {
                         c.responses.event(state,call,socket,&event,c.readback.is_some()).await?;
                     },
                     Some("session.input_audio.muted" | "session.input_audio.unmuted") => {
@@ -602,15 +602,16 @@ async fn active(
                 *call=session::refresh(&state.db,call).await?;
                 if call.end_requested {return Ok("user_ended")};
                 if Utc::now()>=call.deadline {return Ok("time_limit")};
-                if let Err(error) = Box::pin(super::client_key::revalidate(&state.db,call)).await {
-                    if super::client_key::permanent_authority_failure(&error) {
-                        super::client_key::end(&state.db,call).await?;
-                        return Err(error);
-                    }
-                    continue;
-                }
                 if let Transport::Grok(grok) = socket { measured_usage(state, call, grok.measured_ms()).await?; }
                 if Utc::now()-last_authority>=Duration::seconds(5) {
+                    if let Err(error) = Box::pin(super::client_key::revalidate(&state.db,call)).await {
+                        if crate::errors::access_denial::permanent_authority_failure(&error) {
+                            super::client_key::end(&state.db,call).await?;
+                            return Err(error);
+                        }
+                        continue;
+                    }
+
                     super::super::assistant_voice::require_enabled(&state.db,&call.user_id).await?;
                     let current=Box::pin(super::credentials::resolve(state,&call.user_id,&call.conversation_id,&call.preferences)).await?;
                     if current.identity!=call.credential_identity {return Ok("credential_changed")};
@@ -646,7 +647,7 @@ async fn active(
                         Box::pin(segment_ready(state,call,socket,c,current,classifier)).await?;
                     }
                 }
-                if call.responses_model.is_none() { Box::pin(admit_delegations(state,call,socket,c)).await?; }
+                if call.responses.model().is_none() { Box::pin(admit_delegations(state,call,socket,c)).await?; }
                 let busy=Box::pin(task_updates(state,call,socket,c)).await?;
                 if busy {
                     super::progress::keep_work_alive(&state.db,call,true).await?;
@@ -975,7 +976,7 @@ async fn segment_ready(
         }
     }
     if !consumed {
-        if call.responses_model.is_some() {
+        if call.responses.model().is_some() {
             return Ok(());
         }
         if let Transport::Grok(grok) = socket
@@ -1469,7 +1470,7 @@ pub async fn recover(state: &AppState) -> AppResult<()> {
         // Native Responses state cannot be resumed or replayed after lease loss.
         // End this call, retaining its provider identity and reported usage until
         // closure succeeds or the bounded reconciliation deadline is reached.
-        if call.end_requested || call.responses_model.is_some() {
+        if call.end_requested || call.responses.model().is_some() {
             call = session::write(
                 &state.db,
                 &call,

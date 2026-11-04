@@ -3064,7 +3064,7 @@ async fn preflight_proxy_deny_before_resolution(
         Some(hint)
     } else if let Some(service_id) = catalog_service_id {
         Some(proxy_service::ApprovalResolutionHint {
-            is_internal_voice: false,
+            execution: crate::services::proxy_service::ServiceExecution::External,
             service_id: service_id.to_string(),
             service_owner_id: approval_owner_user_id.clone(),
             is_auto_connected: false,
@@ -3072,7 +3072,7 @@ async fn preflight_proxy_deny_before_resolution(
     } else if let Some(slug) = slug {
         let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
         Some(proxy_service::ApprovalResolutionHint {
-            is_internal_voice: false,
+            execution: crate::services::proxy_service::ServiceExecution::External,
             service_id: service.id,
             service_owner_id: approval_owner_user_id.clone(),
             is_auto_connected: false,
@@ -4735,7 +4735,7 @@ async fn execute_resolved_proxy_inner<'a>(
     // existing realtime authority, confirmations and billing. It adds no
     // service-operation approval gate; other services retain their evaluator.
     let (approval_outcome, approval_auto) =
-        if target.service.slug == crate::services::voice::access::SERVICE_SLUG {
+        if target.execution == crate::services::proxy_service::ServiceExecution::NyxBotVoice {
             let denied = approval_service::evaluate_deny_only(
                 &state.db,
                 &approval_owner_user_id,
@@ -5329,7 +5329,7 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     };
 
-    if target.service.slug == crate::services::voice::access::SERVICE_SLUG {
+    if target.execution == crate::services::proxy_service::ServiceExecution::NyxBotVoice {
         let unsupported_voice_ingress = node_route.is_some()
             || streaming_body.is_some()
             || scheduled_api_key_id.is_some()
@@ -10120,6 +10120,7 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            execution: crate::services::proxy_service::ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

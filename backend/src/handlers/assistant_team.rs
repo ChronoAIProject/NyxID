@@ -508,7 +508,9 @@ pub(crate) async fn after_turn(
                 vec![
                     team::event("subagent_settled", note, Some(&agent.id))
                         .for_invocation(turn.invocation_id.as_deref())
-                        .with_voice_source(crate::services::voice::client_key::turn_source(turn)),
+                        .with_voice_source(
+                            crate::services::execution_source::legacy_turn_request_id(turn),
+                        ),
                 ],
             )
             .await
@@ -816,7 +818,7 @@ async fn deliver_skill_notification(
     }
     .await;
     if let Err(error) = &result {
-        let reason = if crate::services::voice::client_key::permanent_authority_failure(error) {
+        let reason = if crate::errors::access_denial::permanent_authority_failure(error) {
             Some("authority_unavailable")
         } else if matches!(error, AppError::NotFound(_)) {
             Some("source_unavailable")
@@ -1695,7 +1697,7 @@ async fn dispatch_specialists(
                                 task,
                                 Some(caller),
                                 chat.invocation_id.as_deref(),
-                                crate::services::voice::client_key::source_for_chat(db, chat)
+                                crate::services::execution_source::source_for_chat(db, chat)
                                     .await?
                                     .as_deref(),
                             ))
@@ -1724,7 +1726,7 @@ async fn dispatch_specialists(
                         text_arg(args, "text"),
                         Some(caller),
                         chat.invocation_id.as_deref(),
-                        crate::services::voice::client_key::source_for_chat(db, chat)
+                        crate::services::execution_source::source_for_chat(db, chat)
                             .await?
                             .as_deref(),
                     ))

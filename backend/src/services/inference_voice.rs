@@ -126,3 +126,10 @@ pub fn validate(voice: &VoiceInference) -> AppResult<()> {
     }
     Ok(())
 }
+
+/// The same provider metadata can offer dictation without conversation. Keep
+/// that capability valid while making discovery and call admission agree.
+pub fn conversation_unavailable_reason(voice: &VoiceInference) -> Option<&'static str> {
+    (voice.protocol == VoiceProtocol::OpenaiLive && voice.delegation_model.is_none())
+        .then_some("delegation_model_required")
+}

@@ -2347,10 +2347,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         if start.origin != TurnOrigin::Orchestrator || start.guest {
             return Err(AppError::Forbidden("Invalid delegated Voice source".into()));
         }
-        Box::pin(super::voice::client_key::fence_request(
-            db, user_id, source, session,
-        ))
-        .await?;
+        Box::pin(super::execution_source::Source::VoiceRequest(source).fence(db, user_id, session))
+            .await?;
     }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
@@ -2386,7 +2384,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .iter()
         .any(|event| event.voice_source_request_id.is_some());
     if had_voice_events {
-        row.pending_events = Box::pin(super::voice::client_key::filter_events_in_session(
+        row.pending_events = Box::pin(super::execution_source::filter_events_in_session(
             db,
             user_id,
             std::mem::take(&mut row.pending_events),

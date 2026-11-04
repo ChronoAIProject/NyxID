@@ -90,9 +90,7 @@ async fn authority(
     };
     match result {
         Ok(chat) => Ok(Some(chat)),
-        Err(error) if super::super::voice::client_key::permanent_authority_failure(&error) => {
-            Ok(None)
-        }
+        Err(error) if crate::errors::access_denial::permanent_authority_failure(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -253,7 +251,7 @@ pub(super) async fn reserve(
                 api_key_id: chat.api_key_id.clone(), turn_id: turn_id.clone(),
                 creation_turn_id: Some(turn_id.clone()),
                 requested_turn_id: if turn.trigger_run_id.is_some() { Some(turn_id.clone()) } else { started_by.map(|m| m.turn_id) },
-                voice_request_id: super::super::voice::client_key::turn_source(turn).map(str::to_owned), trigger_run_id: turn.trigger_run_id.clone(),
+                voice_request_id: super::super::execution_source::legacy_turn_request_id(turn).map(str::to_owned), trigger_run_id: turn.trigger_run_id.clone(),
                 // Recovery re-raises the card with the drafting turn's routing, not a later turn's.
                 routing: Some(super::super::assistant_access_policy::routing_for(chat, &conversation)),
             };

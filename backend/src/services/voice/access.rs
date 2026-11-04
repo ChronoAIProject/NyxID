@@ -70,15 +70,50 @@ pub async fn authorize(
             "This Key cannot invoke the selected Bot".into(),
         ));
     }
-    let service = services(db, auth)
+    personal_owner(db, &auth.user_id.to_string()).await?;
+    let catalog = db
+        .collection::<DownstreamService>(CATALOG)
+        .find_one(doc! {"slug":SERVICE_SLUG,"is_active":true})
         .await?
-        .into_iter()
-        .find(|service| service.source_id.as_deref() == Some(agent.id.as_str()))
+        .ok_or_else(|| AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()))?;
+    let service = db
+        .collection::<UserService>(SERVICES)
+        .find_one(doc! {
+            "user_id":auth.user_id.to_string(),"catalog_service_id":&catalog.id,
+            "source":BOUND_SOURCE,"source_id":&agent.id,"is_active":true,
+            "deleted_at":mongodb::bson::Bson::Null,"node_id":mongodb::bson::Bson::Null,
+        })
+        .await?
         .ok_or_else(|| {
             AppError::ApiKeyScopeForbidden(
                 "This Key has no voice connection for the selected Bot".into(),
             )
         })?;
+    key_service::ensure_api_key_service_scope(
+        auth.api_key_service_scope(),
+        std::slice::from_ref(&service.id),
+    )?;
+    Ok(service)
+}
+
+/// Resolve a selected connection directly; discovery alone scans the set.
+pub(crate) async fn connection(db: &Database, auth: &AuthUser, id: &str) -> AppResult<UserService> {
+    personal_owner(db, &auth.user_id.to_string()).await?;
+    key_service::ensure_api_key_service_scope(auth.api_key_service_scope(), &[id.to_owned()])?;
+    let service = db
+        .collection::<UserService>(SERVICES)
+        .find_one(doc! {
+            "_id":id,"user_id":auth.user_id.to_string(),"source":BOUND_SOURCE,
+            "source_id":{"$type":"string"},"is_active":true,
+            "deleted_at":mongodb::bson::Bson::Null,"node_id":mongodb::bson::Bson::Null,
+        })
+        .await?
+        .ok_or_else(|| AppError::ApiKeyScopeForbidden("Voice connection is unavailable".into()))?;
+    if db.collection::<DownstreamService>(CATALOG).find_one(doc! {
+        "_id":service.catalog_service_id.as_deref().unwrap_or_default(),"slug":SERVICE_SLUG,"is_active":true,
+    }).await?.is_none() {
+        return Err(AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()));
+    }
     Ok(service)
 }
 pub async fn policy(

@@ -3021,6 +3021,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/assistant/nyxagent/conversations/{id}/voice-requests/{rid}/cancel",
             post(handlers::assistant_voice::cancel),
         )
+        .route_layer(axum::Extension(crate::mw::auth::ServiceExecutionRoute))
         .layer(middleware::from_fn(
             crate::mw::auth::reject_oauth_client_tokens,
         ))

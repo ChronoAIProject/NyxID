@@ -1362,10 +1362,8 @@ async fn async_voice_lost_device_source_cancels_upstream_without_fetching_result
     let binding = crate::services::voice::client_key::ClientKey {
         key_id: uuid::Uuid::new_v4().to_string(),
         credential_id: Some(uuid::Uuid::new_v4().to_string()),
-        key_version: 0,
         agent_id: uuid::Uuid::new_v4().to_string(),
         service_id: uuid::Uuid::new_v4().to_string(),
-        service_version: 0,
     };
     a.f.state
         .db

@@ -2541,7 +2541,7 @@ async fn preflight_llm_deny_before_resolution(
     )
     .await?
     .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
-        is_internal_voice: false,
+        execution: crate::services::proxy_service::ServiceExecution::External,
         service_id: service_id.to_string(),
         service_owner_id: approval_owner_user_id.clone(),
         is_auto_connected: false,
@@ -3139,6 +3139,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            execution: crate::services::proxy_service::ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

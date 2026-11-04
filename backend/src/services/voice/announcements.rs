@@ -141,7 +141,7 @@ pub async fn claim(db: &Database, call: &VoiceSession) -> AppResult<Option<Annou
                 .session(&mut *tx).await? else { return Ok(None); };
             if let Err(error) = super::client_key::call_operation(&db, &call, "POST",
                 &format!("/voice/sessions/{}/announcements",call.id), false, tx).await {
-                if !super::client_key::permanent_authority_failure(&error) { return Err(error); }
+                if !crate::errors::access_denial::permanent_authority_failure(&error) { return Err(error); }
                 db.collection::<Announcement>(COLLECTION).update_one(doc! {"_id":&next.id,"state":"queued"},
                     doc! {"$set":{"state":"cancelled"}}).session(&mut *tx).await?;
                 return Ok(None);

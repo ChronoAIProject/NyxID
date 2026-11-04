@@ -11,6 +11,12 @@ const PAGE: i64 = 32;
 fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
+        // Accepted erasure has already fenced/revoked this owner's identity;
+        // no new catalog reader can register beyond the durable tombstone.
+        (
+            crate::services::catalog_reader_fence::COLLECTION,
+            doc! {"owner_id":owner},
+        ),
         (
             super::preparation::PREPARATIONS,
             doc! {"$or":[{"_id":owner},{"user_id":owner}]},

@@ -71,6 +71,7 @@ export function VoiceInferenceFields({
                   })
                 }
               />
+              <span className="text-muted-foreground">Required for live conversation. Leave empty to offer dictation only.</span>
             </label>
           )}
           {(["models", "voices"] as const).map((field) => (

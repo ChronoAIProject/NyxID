@@ -65,8 +65,34 @@ impl ProxyBody {
     }
 }
 
+/// Execution is resolved from trusted catalog metadata, independently of the
+/// connection's display slug and its compatibility endpoint URL.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServiceExecution {
+    #[default]
+    External,
+    NyxBotVoice,
+}
+impl ServiceExecution {
+    pub(crate) fn for_catalog(service: &DownstreamService) -> Self {
+        if service.slug == super::voice::access::SERVICE_SLUG {
+            Self::NyxBotVoice
+        } else {
+            Self::External
+        }
+    }
+    fn for_connection(service: &UserService) -> Self {
+        if service.source.as_deref() == Some(super::voice::access::BOUND_SOURCE) {
+            Self::NyxBotVoice
+        } else {
+            Self::External
+        }
+    }
+}
+
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    pub execution: ServiceExecution,
     pub credential_deferred: bool,
     pub workspace_destinations_pending: bool,
     pub target_id: Option<String>,
@@ -1138,7 +1164,7 @@ pub(crate) fn prepare_node_request(
     extra_outbound_headers: &[(String, String)],
 ) -> AppResult<PreparedNodeRequest> {
     target.require_credential_materialized()?;
-    if target.service.slug == super::voice::access::SERVICE_SLUG {
+    if target.execution == ServiceExecution::NyxBotVoice {
         return Err(AppError::Forbidden(
             "Voice requires internal service execution".into(),
         ));
@@ -1244,6 +1270,7 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            execution: ServiceExecution::for_catalog(&service),
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1270,6 +1297,7 @@ pub async fn resolve_admin_proxy_target(
     let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
+        execution: ServiceExecution::for_catalog(&service),
         credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -1361,6 +1389,7 @@ pub async fn resolve_curation_proxy_target(
     };
     Ok((
         ProxyTarget {
+            execution: ServiceExecution::for_catalog(&service),
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1480,6 +1509,7 @@ pub async fn resolve_proxy_target(
             super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            execution: ServiceExecution::for_catalog(&service),
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1532,6 +1562,7 @@ pub async fn resolve_proxy_target(
         super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        execution: ServiceExecution::for_catalog(&service),
         credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -1561,6 +1592,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     if super::platform_key_service::no_auth_platform_service(&service) {
         super::platform_key_service::require(db, &service, owner_id).await?;
         return Ok(ProxyTarget {
+            execution: ServiceExecution::for_catalog(&service),
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1591,6 +1623,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        execution: ServiceExecution::for_catalog(&service),
         credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -1697,6 +1730,7 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                execution: ServiceExecution::for_catalog(&service),
                 credential_deferred: false,
                 workspace_destinations_pending:
                     super::destination_routing::workspace_destinations_pending(&service),
@@ -1771,6 +1805,7 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            execution: ServiceExecution::for_catalog(&service),
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1830,7 +1865,7 @@ pub struct UserServiceResolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalResolutionHint {
     /// Server-owned internal Voice binding; generic approval is not its gate.
-    pub is_internal_voice: bool,
+    pub execution: ServiceExecution,
     pub service_id: String,
     pub service_owner_id: String,
     pub is_auto_connected: bool,
@@ -2909,8 +2944,15 @@ async fn legacy_approval_hint(
     catalog_service_id: Option<&str>,
 ) -> AppResult<Option<ApprovalResolutionHint>> {
     if let Some(service_id) = catalog_service_id {
+        let execution = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id":service_id})
+            .await?
+            .as_ref()
+            .map(ServiceExecution::for_catalog)
+            .unwrap_or_default();
         return Ok(Some(ApprovalResolutionHint {
-            is_internal_voice: false,
+            execution,
             service_id: service_id.to_string(),
             service_owner_id: actor_user_id.to_string(),
             is_auto_connected: false,
@@ -2920,7 +2962,7 @@ async fn legacy_approval_hint(
     if let Some(slug) = slug {
         let service = resolve_service_by_slug(db, slug).await?;
         return Ok(Some(ApprovalResolutionHint {
-            is_internal_voice: false,
+            execution: ServiceExecution::for_catalog(&service),
             service_id: service.id,
             service_owner_id: actor_user_id.to_string(),
             is_auto_connected: false,
@@ -2932,8 +2974,7 @@ async fn legacy_approval_hint(
 
 fn approval_hint_from_user_service(user_service: &UserService) -> ApprovalResolutionHint {
     ApprovalResolutionHint {
-        is_internal_voice: user_service.source.as_deref()
-            == Some(super::voice::access::BOUND_SOURCE),
+        execution: ServiceExecution::for_connection(user_service),
         service_id: user_service
             .catalog_service_id
             .clone()
@@ -3256,6 +3297,7 @@ async fn finish_resolution(
         };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            execution: catalog_proxy_authorization.execution,
             credential_deferred: !materialize_credentials,
                 base_url: catalog_service.base_url.clone(),
                 workspace_destinations_pending: catalog_proxy_authorization
@@ -3301,6 +3343,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            execution: catalog_proxy_authorization.execution,
             credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
@@ -3407,6 +3450,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            execution: catalog_proxy_authorization.execution,
             credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
@@ -3475,6 +3519,7 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            execution: catalog_proxy_authorization.execution,
             credential_deferred: !materialize_credentials,
             workspace_destinations_pending: catalog_proxy_authorization
                 .workspace_destinations_pending,
@@ -3551,7 +3596,7 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
-    internal_voice: bool,
+    execution: ServiceExecution,
     auth_scheme: Option<String>,
     platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     platform_key_configured: bool,
@@ -3571,7 +3616,10 @@ async fn load_catalog_proxy_authorization_for_user_service(
     user_service: &crate::models::user_service::UserService,
 ) -> AppResult<CatalogProxyAuthorization> {
     let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
-        return Ok(CatalogProxyAuthorization::default());
+        return Ok(CatalogProxyAuthorization {
+            execution: ServiceExecution::for_connection(user_service),
+            ..Default::default()
+        });
     };
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -3581,12 +3629,21 @@ async fn load_catalog_proxy_authorization_for_user_service(
         // Existing UserService resolution tolerates a missing catalog row and
         // continues with its stored endpoint/credential data. Policy lookup is
         // additive and must not turn that legacy shape into a new outage.
-        return Ok(CatalogProxyAuthorization::default());
+        return Ok(CatalogProxyAuthorization {
+            execution: ServiceExecution::for_connection(user_service),
+            ..Default::default()
+        });
     };
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
-        internal_voice: service.slug == super::voice::access::SERVICE_SLUG,
+        execution: if ServiceExecution::for_connection(user_service)
+            == ServiceExecution::NyxBotVoice
+        {
+            ServiceExecution::NyxBotVoice
+        } else {
+            ServiceExecution::for_catalog(&service)
+        },
         auth_scheme: service.auth_scheme.clone(),
         platform_key: service.platform_key.clone(),
         platform_key_configured: service.platform_key.is_some(),
@@ -3608,11 +3665,6 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
-    // The instance keeps its own slug, while the resolved execution target
-    // retains the catalog's internal capability identity for every transport.
-    if authorization.internal_voice {
-        service.slug = super::voice::access::SERVICE_SLUG.into();
-    }
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
     service.platform_key = authorization.platform_key.clone();
@@ -4550,7 +4602,7 @@ async fn forward_request_with_egress_guard_inner(
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     target.require_credential_materialized()?;
-    if target.service.slug == super::voice::access::SERVICE_SLUG {
+    if target.execution == ServiceExecution::NyxBotVoice {
         return Err(AppError::Forbidden("Voice requires internal service execution".into()).into());
     }
 
@@ -6801,6 +6853,7 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -7674,6 +7727,7 @@ mod tests {
     async fn voice_internal_capability_refuses_http_and_node_fallback_before_bearer_forwarding() {
         let vendor = wiremock::MockServer::start().await;
         let mut target = make_proxy_target(vendor.uri());
+        target.execution = ServiceExecution::NyxBotVoice;
         target.service.slug = super::super::voice::access::SERVICE_SLUG.into();
         target.service.forward_access_token = true; // Legacy imported catalog.
         let error = super::forward_request(
@@ -8254,6 +8308,7 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -8658,6 +8713,7 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -8902,6 +8958,7 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9337,6 +9394,7 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9359,6 +9417,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9381,6 +9440,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9400,6 +9460,7 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9419,6 +9480,7 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9438,6 +9500,7 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9491,6 +9554,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9512,6 +9576,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9736,6 +9801,7 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            execution: ServiceExecution::External,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

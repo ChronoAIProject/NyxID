@@ -63,7 +63,9 @@ pub(crate) async fn resolve_audio(
     let voice = super::selected_voice(metadata, &p.model, p.voice.as_deref())?;
     let protocol = metadata.protocol;
     let delegation_model = metadata.delegation_model.clone();
-    if protocol == VoiceProtocol::OpenaiLive && !dictation && delegation_model.is_none() {
+    if !dictation
+        && crate::services::inference_voice::conversation_unavailable_reason(metadata).is_some()
+    {
         return Err(AppError::ValidationError(
             "Configure a Responses delegation model in the voice catalog".into(),
         ));
@@ -284,7 +286,7 @@ pub(crate) async fn own_snapshot(
     id: &str,
 ) -> AppResult<proxy::UserServiceResolution> {
     let shared_auth = if thread.shared_agent_thread {
-        Some(crate::mw::auth::api_key_auth_user_for_voice(db, thread).await?)
+        Some(crate::mw::auth::api_key_auth_user_for_thread_inference(db, thread).await?)
     } else {
         None
     };
@@ -414,7 +416,7 @@ pub(crate) async fn inference_authority(
     thread: &crate::models::assistant_conversation::AssistantConversation,
 ) -> AppResult<InferenceAuthority> {
     super::super::assistant_voice::private_thread(thread)?;
-    let auth = crate::mw::auth::api_key_auth_user_for_voice(db, thread).await?;
+    let auth = crate::mw::auth::api_key_auth_user_for_thread_inference(db, thread).await?;
     auth.ensure_llm_proxy_access()?;
     // Model transport uses the normal assistant inference exception, bounded
     // here to this exact private thread and its live durable credential. A draft

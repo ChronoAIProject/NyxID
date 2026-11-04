@@ -1,6 +1,7 @@
 //! Realtime voice coordination; provider input never grants execution authority.
 pub mod access;
 pub mod announcements;
+pub mod application;
 pub mod binding;
 pub mod client_key;
 #[cfg(test)]
@@ -25,6 +26,7 @@ pub mod receipt;
 mod responses;
 pub mod runtime;
 pub mod session;
+pub(crate) mod source;
 mod speech;
 #[cfg(test)]
 mod tests;

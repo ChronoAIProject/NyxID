@@ -21,6 +21,7 @@ async fn setup(
     String,
 ) {
     let (f, voice) = fixture(name).await;
+    crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
     flags::set_platform_override(
         &f.state.db,
         flags::VOICE_AGENT_KEY_FLAG_KEY,
@@ -248,7 +249,7 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
         let _ = auth(&f, &secret).await;
         let mut tx = f.state.db.client().start_session().await.unwrap();
         tx.start_transaction().await.unwrap();
-        keys::fence_request(&f.state.db, &f.owner, &request.id, &mut tx)
+        super::source::fence_request(&f.state.db, &f.owner, &request.id, &mut tx)
             .await
             .unwrap();
         tx.commit_transaction().await.unwrap();
@@ -256,7 +257,7 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
         // retry after that admission commits rather than silently passing it.
         let mut admission = f.state.db.client().start_session().await.unwrap();
         admission.start_transaction().await.unwrap();
-        keys::fence_request(&f.state.db, &f.owner, &request.id, &mut admission)
+        super::source::fence_request(&f.state.db, &f.owner, &request.id, &mut admission)
             .await
             .unwrap();
         let mut revocation = f.state.db.client().start_session().await.unwrap();
@@ -285,7 +286,7 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
         let mut after_revocation = f.state.db.client().start_session().await.unwrap();
         after_revocation.start_transaction().await.unwrap();
         assert!(
-            keys::fence_request(&f.state.db, &f.owner, &request.id, &mut after_revocation)
+            super::source::fence_request(&f.state.db, &f.owner, &request.id, &mut after_revocation)
                 .await
                 .is_err()
         );
@@ -1122,7 +1123,9 @@ async fn voice_snapshot_concurrent_revocation_prevents_the_effect_after_retry() 
             .await;
         let error =
             crate::services::api_key_mutation_service::map_transaction_error(result.unwrap_err());
-        assert!(keys::permanent_authority_failure(&error));
+        assert!(crate::errors::access_denial::permanent_authority_failure(
+            &error
+        ));
         assert_eq!(
             f.state
                 .db
@@ -1146,7 +1149,9 @@ fn voice_authority_classification_preserves_uncertain_work() {
         AppError::NotFound("source removed".into()),
         AppError::Forbidden("disabled".into()),
     ] {
-        assert!(keys::permanent_authority_failure(&error));
+        assert!(crate::errors::access_denial::permanent_authority_failure(
+            &error
+        ));
     }
     for error in [
         AppError::Internal("temporary".into()),
@@ -1156,7 +1161,9 @@ fn voice_authority_classification_preserves_uncertain_work() {
             request_id: "pending".into(),
         },
     ] {
-        assert!(!keys::permanent_authority_failure(&error));
+        assert!(!crate::errors::access_denial::permanent_authority_failure(
+            &error
+        ));
     }
 }
 
@@ -1501,7 +1508,7 @@ async fn voice_delayed_reports_inherit_source_and_revocation_preserves_unrelated
         .await
         .unwrap();
         assert_eq!(
-            keys::source_for_chat(&f.state.db, &f.chat)
+            crate::services::execution_source::source_for_chat(&f.state.db, &f.chat)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -1510,7 +1517,7 @@ async fn voice_delayed_reports_inherit_source_and_revocation_preserves_unrelated
         let mut stale = f.chat.clone();
         stale.turn_id = Some(Uuid::new_v4().to_string());
         assert!(matches!(
-            keys::source_for_chat(&f.state.db, &stale).await,
+            crate::services::execution_source::source_for_chat(&f.state.db, &stale).await,
             Err(crate::errors::AppError::AssistantTurnRequired)
         ));
         rows.update_one(

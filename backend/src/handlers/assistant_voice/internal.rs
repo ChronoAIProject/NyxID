@@ -1,7 +1,7 @@
 //! HTTP projection for NyxID's internal Voice service transport. The ordinary
 //! proxy still owns service admission, concurrency, metering and attribution.
 use super::*;
-use crate::services::voice::execution;
+use crate::services::voice::{application as app, execution};
 use axum::{
     body::Body,
     extract::FromRequestParts,
@@ -28,15 +28,10 @@ pub(crate) async fn dispatch(
 ) -> AppResult<Response> {
     let identity = execution::resolve(&state.db, auth, service_id).await?;
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
-    let state_arg = State(state.clone());
-    let auth_arg = auth.clone();
+
     match (method, parts.as_slice()) {
         ("GET", ["voice", "agents"]) => {
-            Ok(
-                client_key::agents_for(state.clone(), auth.clone(), Some(&identity.agent.id))
-                    .await?
-                    .into_response(),
-            )
+            Ok(Json(app::agents(state, auth, Some(&identity.agent.id)).await?).into_response())
         }
         ("GET", ["voice", "options"]) => {
             let selected = query.and_then(|query| {
@@ -59,73 +54,72 @@ pub(crate) async fn dispatch(
                     .id
                 }
             };
-            Ok(options(
-                state_arg,
-                auth_arg,
-                Query(OptionsQuery {
-                    conversation_id: Some(conversation),
-                }),
+            Ok(Json(
+                app::options(
+                    state,
+                    auth,
+                    OptionsQuery {
+                        conversation_id: Some(conversation),
+                    },
+                )
+                .await?,
             )
-            .await?
             .into_response())
         }
         ("POST", ["voice", "sessions"]) => {
-            let mut value: serde_json::Value = body(bytes)?;
-            if value
-                .get("service_id")
-                .and_then(serde_json::Value::as_str)
+            let mut input: app::ServiceStart = body(bytes)?;
+            if input
+                .service_id
+                .as_deref()
                 .is_some_and(|id| id != service_id)
             {
                 return Err(AppError::ApiKeyScopeForbidden(
                     "Voice connection does not match proxy target".into(),
                 ));
             }
-            value
-                .as_object_mut()
-                .ok_or_else(|| AppError::ValidationError("Invalid Voice start body".into()))?
-                .insert("service_id".into(), service_id.into());
-            let body = serde_json::from_value(value)
-                .map_err(|_| AppError::ValidationError("Invalid Voice start body".into()))?;
-            Ok(
-                client_key::service_start(state_arg, auth_arg, headers, Json(body))
-                    .await?
-                    .into_response(),
-            )
+            input.service_id = Some(service_id.into());
+            client_key::start_origin(state, auth, &headers).await?;
+            Ok(Json(app::service_start(state, auth, input).await?).into_response())
         }
         ("GET", ["voice", "sessions", sid]) => {
-            execution::call(&state.db, &identity, sid).await?;
+            let call = execution::call(&state.db, &identity, sid).await?;
             Ok(
-                client_key::service_status(state_arg, auth_arg, Path((*sid).into()))
-                    .await?
+                Json(app::session_status(state, auth, call.conversation_id, (*sid).into()).await?)
                     .into_response(),
             )
         }
         ("POST", ["voice", "sessions", sid, "control"]) => {
-            execution::call(&state.db, &identity, sid).await?;
-            Ok(client_key::service_control(
-                state_arg,
-                auth_arg,
-                Path((*sid).into()),
-                headers,
-                Json(body(bytes)?),
+            let call = execution::call(&state.db, &identity, sid).await?;
+            client_key::origin(state, auth, &headers)?;
+            Ok(Json(
+                app::control(
+                    state,
+                    auth,
+                    call.conversation_id,
+                    (*sid).into(),
+                    body(bytes)?,
+                )
+                .await?,
             )
-            .await?
             .into_response())
         }
         ("POST", ["voice", "sessions", sid, "announcements"]) => {
-            execution::call(&state.db, &identity, sid).await?;
-            Ok(client_key::service_announcement(
-                state_arg,
-                auth_arg,
-                Path((*sid).into()),
-                headers,
-                Json(body(bytes)?),
+            let call = execution::call(&state.db, &identity, sid).await?;
+            client_key::origin(state, auth, &headers)?;
+            Ok(Json(
+                app::announcement(
+                    state,
+                    auth,
+                    call.conversation_id,
+                    (*sid).into(),
+                    body(bytes)?,
+                )
+                .await?,
             )
-            .await?
             .into_response())
         }
         ("GET", ["voice", "sessions", sid, "stream"]) => {
-            execution::call(&state.db, &identity, sid).await?;
+            let call = execution::call(&state.db, &identity, sid).await?;
             let (mut parts, _) = websocket
                 .ok_or_else(|| {
                     AppError::BadRequest("Voice stream requires WebSocket upgrade".into())
@@ -134,26 +128,35 @@ pub(crate) async fn dispatch(
             let upgrade = axum::extract::WebSocketUpgrade::from_request_parts(&mut parts, &())
                 .await
                 .map_err(|_| AppError::BadRequest("Invalid Voice WebSocket upgrade".into()))?;
-            client_key::service_stream(state_arg, auth_arg, Path((*sid).into()), headers, upgrade)
-                .await
+            socket::open(
+                state.clone(),
+                auth.clone(),
+                call.conversation_id,
+                (*sid).into(),
+                headers,
+                upgrade,
+            )
+            .await
         }
         ("GET", ["conversations", id, "voice-sessions", "active"]) => {
             execution::conversation(&state.db, &identity, id).await?;
-            Ok(active_session(state_arg, auth_arg, Path((*id).into()))
-                .await?
-                .into_response())
+            Ok(Json(app::active_session(state, auth, (*id).into()).await?).into_response())
         }
         ("GET", ["conversations", id, "voice-requests", rid]) => {
             execution::conversation(&state.db, &identity, id).await?;
-            Ok(
-                request(state_arg, auth_arg, Path(((*id).into(), (*rid).into())))
-                    .await?
-                    .into_response(),
-            )
+            Ok(Json(app::request(state, auth, (*id).into(), (*rid).into()).await?).into_response())
         }
         ("POST", ["conversations", id, "voice-requests", rid, "cancel"]) => {
             execution::conversation(&state.db, &identity, id).await?;
-            cancel(state_arg, auth_arg, Path(((*id).into(), (*rid).into()))).await?;
+            let cancelled = app::cancel(state, auth, (*id).into(), (*rid).into()).await?;
+            for conversation in cancelled {
+                crate::handlers::mcp_transport::async_operations::drain_cancellations(
+                    state,
+                    &auth.user_id.to_string(),
+                    &conversation,
+                )
+                .await?;
+            }
             Ok(axum::http::StatusCode::NO_CONTENT.into_response())
         }
         _ => Err(AppError::NotFound("Unknown Voice service operation".into())),

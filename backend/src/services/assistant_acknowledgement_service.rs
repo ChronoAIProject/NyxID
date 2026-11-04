@@ -1502,17 +1502,32 @@ pub async fn for_key_with_access(
     key: Option<&str>,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<Option<ChatAuthority>> {
-    Box::pin(for_key_with_access_for_watch(db, user, key, access, false)).await
+    Box::pin(for_key_with_access_in(
+        db,
+        user,
+        key,
+        access,
+        ConversationAccess::Execution,
+    ))
+    .await
+}
+
+/// Recovery is server-only: the caller must already own the exact work lease or
+/// persisted acknowledgement origin. It permits cleanup, never new user effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConversationAccess {
+    Execution,
+    Recovery,
 }
 
 /// The server's exact async watch checks its causing voice request separately;
 /// this permits bounded cancellation after the originating device is revoked.
-pub(crate) async fn for_key_with_access_for_watch(
+pub(crate) async fn for_key_with_access_in(
     db: &Database,
     user: &str,
     key: Option<&str>,
     access: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
-    watch: bool,
+    mode: ConversationAccess,
 ) -> AppResult<Option<ChatAuthority>> {
     let Some(key) = key else { return Ok(None) };
     let Some(row) = db
@@ -1553,13 +1568,13 @@ pub(crate) async fn for_key_with_access_for_watch(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
-    if !watch
+    if mode == ConversationAccess::Execution
         && let Some(request) = conversation
             .active_turn
             .as_ref()
-            .and_then(super::voice::client_key::turn_source)
+            .and_then(super::execution_source::legacy_turn_request_id)
     {
-        Box::pin(super::voice::client_key::request(db, user, request)).await?;
+        Box::pin(super::execution_source::Source::VoiceRequest(request).require(db, user)).await?;
     }
     let resolved = if access.is_none() && agent.user_id != user {
         super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
@@ -1738,14 +1753,11 @@ async fn fence_with_source(
     if let Some(request) = source.unwrap_or_else(|| {
         row.active_turn
             .as_ref()
-            .and_then(super::voice::client_key::turn_source)
+            .and_then(super::execution_source::legacy_turn_request_id)
     }) {
-        Box::pin(super::voice::client_key::fence_request(
-            db,
-            &row.user_id,
-            request,
-            session,
-        ))
+        Box::pin(
+            super::execution_source::Source::VoiceRequest(request).fence(db, &row.user_id, session),
+        )
         .await?;
     }
     let key = db
@@ -2439,7 +2451,7 @@ async fn request_candidate_in_session(
     row.voice_request_id = conversation
         .active_turn
         .as_ref()
-        .and_then(super::voice::client_key::turn_source)
+        .and_then(super::execution_source::legacy_turn_request_id)
         .map(str::to_owned);
     row.trigger_run_id = conversation
         .active_turn

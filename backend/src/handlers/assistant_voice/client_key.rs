@@ -1,5 +1,5 @@
 //! Bounded discovery for devices using an ordinary Agent Key.
-use crate::services::{assistant_team_service as team, voice::client_key as keys};
+use crate::services::assistant_team_service as team;
 use crate::{AppState, errors::AppResult, mw::auth::AuthUser};
 use axum::{Json, extract::State};
 use serde_json::json;
@@ -8,143 +8,21 @@ pub async fn agents(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> AppResult<Json<serde_json::Value>> {
-    agents_for(state, auth, None).await
-}
-
-pub(super) async fn agents_for(
-    state: AppState,
-    auth: AuthUser,
-    selected_bot: Option<&str>,
-) -> AppResult<Json<serde_json::Value>> {
-    let key = keys::authenticate(&state.db, &auth).await?;
-    let auth = match &key {
-        Some(key) => {
-            crate::mw::auth::api_key_auth_user(
-                &state.db,
-                key,
-                auth.api_key_credential_id.clone(),
-                None,
-                None,
-            )
-            .await?
-        }
-        None => auth,
-    };
-    if key.is_some() {
-        crate::services::voice::access::services(&state.db, &auth).await?;
-    }
-    let user = auth.user_id.to_string();
-    crate::services::assistant_voice::require_enabled(&state.db, &user).await?;
-    let mut rows = Vec::new();
-    for agent in team::agents(&state.db, &user, false).await? {
-        if agent.user_id != user || selected_bot.is_some_and(|id| id != agent.id) {
-            continue;
-        }
-        let mut service_id = None;
-        if let Some(key) = &key {
-            match keys::covers(&state.db, key, &agent).await {
-                Ok(()) => {}
-                Err(crate::errors::AppError::ApiKeyScopeForbidden(_)) => continue,
-                Err(error) => return Err(error),
-            }
-            let service =
-                crate::services::voice::access::authorize(&state.db, &auth, &agent).await?;
-            service_id = Some(service.id.clone());
-            match crate::services::voice::access::policy(
-                &state.db,
-                &auth,
-                &service,
-                "GET",
-                "/voice/agents",
-                false,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(error) if keys::permanent_authority_failure(&error) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
-        rows.push(json!({"agent_id":agent.id,"name":agent.name,
-            "display_name":agent.display_name,"service_id":service_id,"conversation_id":thread.id}));
-    }
-    let settings = crate::services::assistant_settings_service::get(&state.db, &user).await?;
-    Ok(Json(
-        json!({"agents":rows,"preferences":settings.voice.map(super::Preferences::from)}),
-    ))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServiceStart {
-    #[serde(default)]
-    service_id: Option<String>,
-    #[serde(default)]
-    agent_id: Option<String>,
-    client_request_id: String,
-    preferences: super::Preferences,
-    sdp_offer: String,
+    crate::services::voice::application::agents(&state, &auth, None)
+        .await
+        .map(Json)
 }
 
 pub async fn service_start(
     State(state): State<AppState>,
     auth: AuthUser,
     headers: axum::http::HeaderMap,
-    Json(body): Json<ServiceStart>,
+    Json(body): Json<crate::services::voice::application::ServiceStart>,
 ) -> AppResult<Json<super::StartResponse>> {
-    keys::authenticate(&state.db, &auth).await?;
-    let user = auth.user_id.to_string();
-    let agent = if let Some(service) = &body.service_id {
-        let identity =
-            crate::services::voice::execution::resolve(&state.db, &auth, service).await?;
-        if body
-            .agent_id
-            .as_deref()
-            .is_some_and(|id| id != identity.agent.id)
-        {
-            return Err(crate::errors::AppError::ApiKeyScopeForbidden(
-                "Bot does not match the selected Voice connection".into(),
-            ));
-        }
-        identity.agent
-    } else {
-        let agent = team::agent(
-            &state.db,
-            &user,
-            body.agent_id.as_deref().ok_or_else(|| {
-                crate::errors::AppError::ValidationError("Select a Voice connection".into())
-            })?,
-        )
-        .await?;
-        if agent.user_id != user || agent.destroyed_at.is_some() {
-            return Err(crate::errors::AppError::Forbidden(
-                "Select a personal Bot you own".into(),
-            ));
-        }
-        if auth.auth_method == crate::mw::auth::AuthMethod::ApiKey {
-            let service =
-                crate::services::voice::access::authorize(&state.db, &auth, &agent).await?;
-            crate::services::voice::execution::resolve(&state.db, &auth, &service.id)
-                .await?
-                .agent
-        } else {
-            agent
-        }
-    };
-    let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
-    super::start(
-        State(state),
-        auth,
-        axum::extract::Path(thread.id),
-        headers,
-        Json(super::StartRequest {
-            client_request_id: body.client_request_id,
-            preferences: body.preferences,
-            sdp_offer: body.sdp_offer,
-        }),
-    )
-    .await
+    start_origin(&state, &auth, &headers).await?;
+    crate::services::voice::application::service_start(&state, &auth, body)
+        .await
+        .map(Json)
 }
 
 pub async fn voice_service(
@@ -219,12 +97,9 @@ pub async fn service_status(
     axum::extract::Path(sid): axum::extract::Path<String>,
 ) -> AppResult<Json<super::SessionResponse>> {
     let row = call(&state, &auth, &sid).await?;
-    super::session_status(
-        State(state),
-        auth,
-        axum::extract::Path((row.conversation_id, sid)),
-    )
-    .await
+    crate::services::voice::application::session_status(&state, &auth, row.conversation_id, sid)
+        .await
+        .map(Json)
 }
 
 pub async fn service_control(
@@ -232,17 +107,13 @@ pub async fn service_control(
     auth: AuthUser,
     axum::extract::Path(sid): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
-    body: Json<super::ControlRequest>,
+    Json(body): Json<super::ControlRequest>,
 ) -> AppResult<Json<super::SessionResponse>> {
     let row = call(&state, &auth, &sid).await?;
-    super::control(
-        State(state),
-        auth,
-        axum::extract::Path((row.conversation_id, sid)),
-        headers,
-        body,
-    )
-    .await
+    origin(&state, &auth, &headers)?;
+    crate::services::voice::application::control(&state, &auth, row.conversation_id, sid, body)
+        .await
+        .map(Json)
 }
 
 pub async fn service_announcement(
@@ -250,17 +121,13 @@ pub async fn service_announcement(
     auth: AuthUser,
     axum::extract::Path(sid): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
-    body: Json<super::AnnouncementRequest>,
+    Json(body): Json<super::AnnouncementRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let row = call(&state, &auth, &sid).await?;
-    super::announcement(
-        State(state),
-        auth,
-        axum::extract::Path((row.conversation_id, sid)),
-        headers,
-        body,
-    )
-    .await
+    origin(&state, &auth, &headers)?;
+    crate::services::voice::application::announcement(&state, &auth, row.conversation_id, sid, body)
+        .await
+        .map(Json)
 }
 
 pub async fn service_stream(
@@ -271,14 +138,7 @@ pub async fn service_stream(
     upgrade: axum::extract::WebSocketUpgrade,
 ) -> AppResult<axum::response::Response> {
     let row = call(&state, &auth, &sid).await?;
-    super::stream(
-        State(state),
-        auth,
-        axum::extract::Path((row.conversation_id, sid)),
-        headers,
-        upgrade,
-    )
-    .await
+    super::socket::open(state, auth, row.conversation_id, sid, headers, upgrade).await
 }
 
 pub(super) fn origin(
@@ -292,4 +152,26 @@ pub(super) fn origin(
         super::require_origin(state, headers)?;
     }
     Ok(())
+}
+
+/// Preserve the public Voice start diagnostics while keeping HTTP Origin out
+/// of the application service used by the internal proxy.
+pub(super) async fn start_origin(
+    state: &AppState,
+    auth: &AuthUser,
+    headers: &axum::http::HeaderMap,
+) -> AppResult<()> {
+    use crate::errors::voice_start::Stage;
+    match origin(state, auth, headers) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::services::voice::diagnostics::finish(
+                &state.db,
+                &auth.user_id.to_string(),
+                Err(Stage::Origin.error(error)),
+                Stage::Transport,
+            )
+            .await
+        }
+    }
 }

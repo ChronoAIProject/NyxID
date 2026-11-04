@@ -133,11 +133,51 @@ async fn voice_responses_backfill_preserves_admin_model_choices() {
             .delegation_model = model.map(str::to_owned);
         rows.insert_one(service).await.unwrap();
     }
+    // Reproduce the wire format from versions predating the new field.
+    db.collection::<bson::Document>(COLLECTION_NAME)
+        .update_many(
+            doc! {"_id":{"$in":["old-default","old-admin"]}},
+            doc! {"$unset":{"inference.voice.delegation_model":""}},
+        )
+        .await
+        .unwrap();
+    let mut cleared = rows
+        .find_one(doc! {"_id":"old-admin"})
+        .await
+        .unwrap()
+        .unwrap();
+    cleared.id = "explicit-null".into();
+    let metadata = cleared.inference.as_mut().unwrap().voice.as_mut().unwrap();
+    metadata.models[0].label = "Admin voice label".into();
+    metadata.billing_metrics = vec![crate::models::service_billing::BillingMetric::VoiceSeconds];
+    rows.insert_one(&cleared).await.unwrap();
+    let raw = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {"_id":"explicit-null"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        raw.get_document("inference")
+            .unwrap()
+            .get_document("voice")
+            .unwrap()
+            .get("delegation_model"),
+        Some(&bson::Bson::Null)
+    );
     inference::backfill(&db).await.unwrap();
+    inference::backfill(&db).await.unwrap();
+    let preserved = rows
+        .find_one(doc! {"_id":"explicit-null"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(preserved.inference, cleared.inference);
     for (id, expected) in [
         ("old-default", Some("gpt-6-luna")),
-        ("old-admin", None),
+        ("old-admin", Some("gpt-6-luna")),
         ("chosen", Some("admin-task-model")),
+        ("explicit-null", None),
     ] {
         let row = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
         assert_eq!(

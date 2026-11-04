@@ -109,11 +109,10 @@ impl AsyncContinuation {
             && self.name == w.contract.status_operation;
         let voice_cleanup = Some(self.name.as_str()) == w.contract.cancel_operation.as_deref()
             || (w.state == "cancelling" && self.name == w.contract.status_operation);
-        if !voice_cleanup && let Some(request) = &w.delivery.voice_request_id {
-            Box::pin(crate::services::voice::client_key::request(
-                db, &w.user_id, request,
-            ))
-            .await?;
+        if !voice_cleanup
+            && let Some(source) = crate::services::execution_source::for_delivery(&w.delivery)
+        {
+            Box::pin(source.require(db, &w.user_id)).await?;
         }
         if chat.user_id != w.user_id
             || chat.api_key_id != w.api_key_id

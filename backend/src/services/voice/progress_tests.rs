@@ -673,7 +673,7 @@ fn native_state() -> super::super::responses::Responses {
 async fn native_voice_task_preserves_complete_model_request_without_captions_and_dedupes() {
     Box::pin(async {
         let (state, _, mut call) = super::super::tests::setup("voice_native_complete_task").await;
-        call = session::write(&state.db,&call,doc!{"responses_model":"catalog-task-model"}).await.unwrap();
+        call = session::write(&state.db,&call,doc!{"responses_model":"catalog-task-model","responses_reserved":true}).await.unwrap();
         let (mut socket, server, events) = fixture_socket().await;
         let mut native = native_state();
         native.event(&state,&mut call,&mut socket,&native_created(),false).await.unwrap();
@@ -700,8 +700,8 @@ async fn native_voice_task_preserves_complete_model_request_without_captions_and
         let message = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{"_id":&request.message_id}).await.unwrap().unwrap();
         assert_eq!(message.text,text);
         assert!(message.voice.is_none(),"A model task must not masquerade as an ASR caption");
-        assert_eq!(call.responses_usage.len(),1);
-        let usage = &call.responses_usage["native-response"];
+        assert_eq!(call.responses.usage().map_or(0, |usage| usage.len()),1);
+        let usage = &call.responses.usage().unwrap()["native-response"];
         assert_eq!(usage.tokens,100);
         assert_eq!(usage.input_tokens,70);
         assert_eq!(usage.cache_read_tokens,10);
@@ -740,7 +740,7 @@ async fn native_voice_rejects_untrusted_arguments_mismatched_identity_and_incomp
         call = session::write(
             &state.db,
             &call,
-            doc! {"responses_model":"catalog-task-model"},
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
         )
         .await
         .unwrap();
@@ -843,7 +843,7 @@ async fn native_voice_task_cannot_approve_a_pending_card_or_survive_a_stale_leas
         call = session::write(
             &state.db,
             &call,
-            doc! {"responses_model":"catalog-task-model"},
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
         )
         .await
         .unwrap();
@@ -913,12 +913,12 @@ async fn native_voice_task_cannot_approve_a_pending_card_or_survive_a_stale_leas
 async fn native_voice_shutdown_checkpoints_usage_without_admitting_work_and_recovery_closes() {
     Box::pin(async {
         let (state,_,mut call)=super::super::tests::setup("voice_native_shutdown").await;
-        call=session::write(&state.db,&call,doc!{"responses_model":"catalog-task-model"}).await.unwrap();
+        call=session::write(&state.db,&call,doc!{"responses_model":"catalog-task-model","responses_reserved":true}).await.unwrap();
         for _ in 0..2 {
             super::super::responses::observe_closing(&state,&mut call,&native_completed()).await.unwrap();
         }
-        assert_eq!(call.responses_usage.len(),1);
-        assert_eq!(call.responses_usage["native-response"].tokens,100);
+        assert_eq!(call.responses.usage().map_or(0, |usage| usage.len()),1);
+        assert_eq!(call.responses.usage().unwrap()["native-response"].tokens,100);
         state.db.collection::<Document>(COLLECTION_NAME).update_one(doc!{"_id":&call.id},doc!{"$set":{"lease_until":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(20)),
             "deadline":bson::DateTime::from_millis(0)}}).await.unwrap();
         recover(&state).await.unwrap();
@@ -965,7 +965,7 @@ async fn native_voice_token_hold_and_reported_checkpoint_settle_once_after_reloa
         super::super::responses::reserve(&state, &mut call, &ctx)
             .await
             .unwrap();
-        assert!(call.responses_reserved);
+        assert!(call.responses.reserved());
         let request_id = format!("voice:{}:responses", call.id);
         let rows = state
             .db
@@ -1006,7 +1006,7 @@ async fn native_voice_token_hold_and_reported_checkpoint_settle_once_after_reloa
                 .unwrap(),
             1
         );
-        assert!(recovered.responses_finalized);
+        assert!(recovered.responses.finalized());
     })
     .await;
 }
@@ -1021,8 +1021,8 @@ async fn device_and_skill_cards_request_owner_review_without_arming_speech() {
         // This fixture tests the coordinator separately from live-key admission.
         if device {
             call.client_key = Some(super::super::client_key::ClientKey {
-            key_id: "device".into(), credential_id: Some("child".into()), key_version: 1,
-            agent_id:"agent".into(), service_id:"service".into(), service_version:1,
+            key_id: "device".into(), credential_id: Some("child".into()),
+            agent_id:"agent".into(), service_id:"service".into(),
             });
         } else {
             state.db.collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).update_one(doc!{"_id":&card.id},

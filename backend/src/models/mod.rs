@@ -242,3 +242,5 @@ pub mod nyxbot_gateway_release;
 pub mod discord_gateway;
 
 pub mod assistant_delegated_image;
+
+pub mod voice_responses;
