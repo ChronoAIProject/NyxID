@@ -134,6 +134,7 @@ frontend/src/components/shared/upstream-scope-picker.tsx
 frontend/src/components/ui/button.tsx
 frontend/src/components/ui/checkbox.tsx
 frontend/src/components/ui/form.tsx
+frontend/src/components/ui/grouped-list.tsx
 frontend/src/components/ui/input.tsx
 frontend/src/components/ui/label.tsx
 frontend/src/components/ui/overlay-layer.tsx
@@ -141,6 +142,7 @@ frontend/src/components/ui/popover.tsx
 frontend/src/components/ui/select.tsx
 frontend/src/components/ui/skeleton.tsx
 frontend/src/components/ui/switch.tsx
+frontend/src/components/ui/textarea.tsx
 frontend/src/components/ui/tooltip.tsx
 frontend/src/hooks/use-keys.ts
 frontend/src/hooks/use-nodes.ts
