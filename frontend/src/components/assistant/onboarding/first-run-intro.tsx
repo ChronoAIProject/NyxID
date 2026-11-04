@@ -139,8 +139,7 @@ export function FirstRunIntro({
   }
 
   // Topics follow who NyxBot is for; personal topics until that is chosen.
-  const audience = workStyle ?? "solo";
-  const offered = topicsFor(state.topics, audience);
+  const offered = new Set(topicsFor(state.topics, workStyle ?? "solo").map((topic) => topic.id));
 
   function chooseWorkStyle(id: string) {
     const next = workStyle === id ? null : id;
@@ -188,18 +187,14 @@ export function FirstRunIntro({
                   onToggle={chooseWorkStyle}
                 />
                 <Overline>What should it help with?</Overline>
-                <div
-                  key={audience}
-                  className="animate-in fade-in-0 slide-in-from-bottom-1 duration-300 motion-reduce:animate-none"
-                >
-                  <ChoiceGrid
-                    label="Topics"
-                    choices={offered}
-                    selected={topics}
-                    onToggle={toggleTopic}
-                    multi
-                  />
-                </div>
+                <ChoiceGrid
+                  label="Topics"
+                  choices={state.topics}
+                  shown={offered}
+                  selected={topics}
+                  onToggle={toggleTopic}
+                  multi
+                />
               </StepHeading>
             ) : step === "chief" ? (
               <StepHeading
@@ -352,42 +347,59 @@ function Points({ items }: { readonly items: readonly string[] }) {
   );
 }
 
+/**
+ * Pills in a stable order. With `shown`, pills outside it collapse in place:
+ * switching audience animates only the pills that differ, and the shared
+ * ones slide to their new places.
+ */
 function ChoiceGrid({
   label,
   choices,
+  shown,
   selected,
   onToggle,
   multi,
 }: {
   readonly label: string;
   readonly choices: readonly OnboardingChoice[];
+  readonly shown?: ReadonlySet<string>;
   readonly selected: readonly string[];
   readonly onToggle: (id: string) => void;
   readonly multi?: boolean;
 }) {
   return (
-    <div role={multi ? "group" : "radiogroup"} aria-label={label} className="flex flex-wrap gap-2">
+    <div role={multi ? "group" : "radiogroup"} aria-label={label} className="flex flex-wrap gap-y-2">
       {choices.map((choice) => {
         const active = selected.includes(choice.id);
+        const visible = !shown || shown.has(choice.id);
         return (
-          <button
+          <span
             key={choice.id}
-            type="button"
-            role={multi ? "checkbox" : "radio"}
-            aria-checked={active}
-            onClick={() => onToggle(choice.id)}
+            aria-hidden={visible ? undefined : true}
+            inert={!visible}
             className={cn(
-              "inline-flex items-center gap-2 rounded-full border py-1 pr-3 pl-1 text-12 font-medium transition-[background-color,border-color,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
-              "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus",
-              active
-                ? "border-input-focus bg-overlay-strong text-foreground"
-                : "border-hairline text-muted-foreground hover:border-hairline-strong hover:bg-overlay hover:text-foreground",
+              "inline-flex overflow-hidden rounded-full transition-[max-width,margin,opacity,transform] duration-300 ease-out motion-reduce:transition-none",
+              visible ? "mr-2 max-w-[24rem] opacity-100" : "mr-0 max-w-0 scale-90 opacity-0",
             )}
           >
-            <ChoiceIcon name={choice.icon} active={active} />
-            {choice.label}
-            {active ? <Check aria-hidden="true" className="size-3" /> : null}
-          </button>
+            <button
+              type="button"
+              role={multi ? "checkbox" : "radio"}
+              aria-checked={active}
+              onClick={() => onToggle(choice.id)}
+              className={cn(
+                "inline-flex items-center gap-2 whitespace-nowrap rounded-full border py-1 pr-3 pl-1 text-12 font-medium transition-[background-color,border-color,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
+                "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-input-focus",
+                active
+                  ? "border-input-focus bg-overlay-strong text-foreground"
+                  : "border-hairline text-muted-foreground hover:border-hairline-strong hover:bg-overlay hover:text-foreground",
+              )}
+            >
+              <ChoiceIcon name={choice.icon} active={active} />
+              {choice.label}
+              {active ? <Check aria-hidden="true" className="size-3" /> : null}
+            </button>
+          </span>
         );
       })}
     </div>

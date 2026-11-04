@@ -3,6 +3,7 @@ import { Feather } from "@expo/vector-icons";
 import {
   ActivityIndicator,
   Image,
+  LayoutAnimation,
   Modal,
   Pressable,
   ScrollView,
@@ -132,6 +133,8 @@ export function FirstRunIntro({
     const kept = new Set(
       topicsFor(state.topics, next ?? "solo").map((topic) => topic.id),
     );
+    // Pills shared by both audiences stay; only the ones that differ animate.
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setWorkStyle(next);
     setTopics((current) => current.filter((topic) => kept.has(topic)));
   }
