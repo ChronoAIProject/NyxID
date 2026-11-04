@@ -17,8 +17,7 @@ type Phase =
   | "permission"
   | "connecting"
   | "listening"
-  | "stopping"
-  | "review";
+  | "stopping";
 
 const NO_SPEECH = "No speech was detected. Try again.";
 const DENIED =
@@ -117,8 +116,9 @@ function levelSource() {
 
 /**
  * Composer dictation on Apple's speech recognizer (on-device when the iPhone
- * supports it). Text stays in local review; nothing reaches NyxID until the
- * person inserts it and sends the message themselves.
+ * supports it). The words appear in the composer as they are recognized and
+ * join the draft when recording finishes; nothing reaches NyxID until the
+ * person sends the message themselves.
  */
 export function useComposerDictation({
   scope,
@@ -138,9 +138,6 @@ export function useComposerDictation({
   const [error, setError] = useState<string>();
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [levels] = useState(levelSource);
-  const review = useRef<
-    { scope: string; epoch: number; text: string } | undefined
-  >(undefined);
   const current = useRef({ scope, epoch, enabled, focused, onInsert });
   current.current = { scope, epoch, enabled, focused, onInsert };
   const operation = useRef<{ cancel(): void; stop(): void } | undefined>(
@@ -148,7 +145,6 @@ export function useComposerDictation({
   );
 
   function discard() {
-    review.current = undefined;
     operation.current?.cancel();
     operation.current = undefined;
     setPhase("idle");
@@ -212,22 +208,35 @@ export function useComposerDictation({
         release();
       }
     };
-    /** The recognizer ended: review what was heard, or explain why nothing was. */
+    /**
+     * The recognizer ended: what was heard joins the draft, where it can be
+     * edited before the person sends it, or the notice explains why nothing was.
+     */
     const settle = () => {
       detach();
       operation.current = undefined;
       const text = spoken();
-      review.current = text ? { ...identity, text } : undefined;
-      setCaption({ final: text, interim: "" });
-      setPhase(text ? "review" : "idle");
-      if (!text) setError((previous) => previous ?? failure ?? NO_SPEECH);
+      setCaption({ final: "", interim: "" });
+      setPhase("idle");
+      if (!text) {
+        setError((previous) => previous ?? failure ?? NO_SPEECH);
+        return;
+      }
+      if (
+        current.current.scope === identity.scope &&
+        current.current.epoch === identity.epoch &&
+        getAuthEpoch() === identity.epoch &&
+        current.current.enabled &&
+        current.current.focused
+      )
+        current.current.onInsert(text);
     };
     const attempt = {
       cancel,
       stop: () => {
         if (!valid() || stopping) return;
         if (!listening) {
-          // Released before the microphone opened: nothing to review.
+          // Released before the microphone opened: nothing was heard.
           cancel();
           operation.current = undefined;
           setPhase("idle");
@@ -254,7 +263,6 @@ export function useComposerDictation({
       discard();
     });
     operation.current = attempt;
-    review.current = undefined;
     setCaption({ final: "", interim: "" });
     setPhase("permission");
     try {
@@ -359,24 +367,6 @@ export function useComposerDictation({
           "Open your iPhone Settings to allow microphone and speech recognition access.",
         ),
       );
-    },
-    insert: () => {
-      const accepted = review.current;
-      if (
-        phase !== "review" ||
-        !current.current.enabled ||
-        !current.current.focused ||
-        getAuthEpoch() !== epoch ||
-        current.current.scope !== scope ||
-        !accepted ||
-        accepted.scope !== scope ||
-        accepted.epoch !== epoch ||
-        accepted.text !== text.trim()
-      )
-        return;
-      review.current = undefined;
-      current.current.onInsert(accepted.text);
-      discard();
     },
   };
 }

@@ -31,6 +31,14 @@ function render(
       View: "View",
       Pressable: "Pressable",
       AppState: { currentState: "active" },
+      Animated: {
+        Value: class {
+          stopAnimation() {}
+        },
+        createAnimatedComponent: (component: unknown) => component,
+        timing: () => ({ start: (done?: () => void) => done?.() }),
+        spring: () => ({ start: () => undefined }),
+      },
     },
     "lucide-react-native": {
       X: "X",
@@ -50,6 +58,9 @@ function render(
           successTone: {},
         },
       }),
+    },
+    "../../lib/accessibility/useReducedMotion": {
+      useReducedMotion: () => false,
     },
     "../../components/workspace/WorkspaceUI": {
       Card: "Card",

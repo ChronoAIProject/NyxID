@@ -604,16 +604,20 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   and a trailing Send/Stop circle inside a 44pt target. Attach offers Camera,
   Photos and Files through their native pickers. Dictation uses Apple's speech
   recognizer (on-device when the iPhone supports it) in the iPhone's language;
-  no audio goes to NyxID. It requires review before text is
-  inserted into the draft and never sends a message automatically. The first
-  tap opens a compact intro sheet once (what it does, microphone and speech
-  recognition access, on-iPhone recognition, language, Start); a long press
-  starts directly. While it runs it fills the
-  screen: Discard, a “Speech to Text” title with a live dot, status and mono
-  timer, the transcript as the page at 30/40pt with interim words in tertiary,
-  a microphone level meter (3pt bars, one per ~90ms native volume sample) and
-  one filled Finish pill, which becomes Insert in review. Idle errors stay a
-  compact notice above the field. Chat pages
+  no audio goes to NyxID. It never sends a message automatically. Until
+  speech recognition is allowed, the first tap opens a compact intro sheet
+  once (what it does, microphone and speech recognition access, on-iPhone
+  recognition, language, Start); once it is allowed a tap dictates at once,
+  and a long press always starts directly. While it runs it stays inside the
+  composer pill: the existing draft (secondary) and the recognized words
+  (interim words in tertiary) appear at the field's 14/20pt above a streaming
+  waveform line that takes the place of the placeholder (3pt bars, one per
+  ~90ms native volume sample, silent samples as dots), between an outlined
+  Discard circle and a filled Finish circle, with a mono timer. Finish adds
+  the words to the draft, where they are edited and sent like typed text.
+  Idle errors stay a compact notice above the field. The jump-to-latest arrow
+  dips 6pt and springs back as the transcript scrolls to the newest message
+  (immediate under Reduce Motion). Chat pages
   use an edge-to-edge transcript viewport within the system safe area, so its
   scroll indicator sits at the window edge. The centered transcript content
   retains 12pt horizontal padding and the configured column maximum; composers

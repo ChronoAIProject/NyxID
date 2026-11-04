@@ -6,7 +6,7 @@ import type { ComposerDictationState } from "./useComposerDictation";
 
 type Element = { type: string; props: Record<string, any> };
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-function setup({ introSeen = true } = {}) {
+function setup({ introSeen = true, granted = false } = {}) {
   const events: string[] = [];
   const menus: { onChange: (value: string) => void; options: unknown[] }[] = [];
   const saved: { language?: string } = {};
@@ -39,9 +39,6 @@ function setup({ introSeen = true } = {}) {
     discard: () => {
       events.push("discard");
     },
-    insert: () => {
-      events.push("insert");
-    },
   };
   const h = hookHarness<Element>({
     "react/jsx-runtime": {
@@ -70,6 +67,7 @@ function setup({ introSeen = true } = {}) {
     "expo-speech-recognition": {
       ExpoSpeechRecognitionModule: {
         getSupportedLocales: async () => ({ locales: ["en-US", "fr-FR"] }),
+        getPermissionsAsync: async () => ({ granted }),
       },
     },
     "../../components/settings/SettingsList": {
@@ -146,6 +144,7 @@ function setup({ introSeen = true } = {}) {
     }) => Element;
     ComposerDictationReview: (props: {
       dictation: ComposerDictationState;
+      draft?: string;
     }) => Element | null;
   };
   /** The mic button itself; the button renders beside its intro sheet. */
@@ -254,7 +253,7 @@ test("idle dictation adds no blank space; an idle error is a compact dismissible
   assert.deepEqual(x.events, ["settings", "discard"]);
 });
 
-test("listening fills the screen with a live transcript, meter and Finish", () => {
+test("listening stays in the composer: words above a streaming waveform, Discard and Finish", () => {
   const x = setup();
   x.dictation.phase = "listening";
   x.dictation.active = true;
@@ -265,62 +264,62 @@ test("listening fills the screen with a live transcript, meter and Finish", () =
   const tree = all(
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
-  assert.equal(tree[0]!.type, "Modal");
-  assert.equal(tree[0]!.props.presentationStyle, "overFullScreen");
+  assert.equal(
+    tree.some((node) => node.type === "Modal"),
+    false,
+    "no sheet or full-screen page covers the chat",
+  );
   const texts = tree.filter((node) => node.type === "Text");
-  assert.ok(texts.some((node) => node.props.children === "Speech to Text"));
-  assert.ok(texts.some((node) => node.props.children === "Listening"));
   const interim = texts.find((node) =>
     [node.props.children].flat().includes("for two"),
   )!;
   assert.equal(interim.props.style.color, "#888888");
+  const words = tree.find((node) => node.type === "ScrollView")!;
   assert.ok(
-    tree.some(
-      (node) => node.props.importantForAccessibility === "no-hide-descendants",
-    ),
-    "the level meter is hidden from assistive technology",
+    tree.indexOf(words) <
+      tree.findIndex(
+        (node) => node.props.importantForAccessibility === "no-hide-descendants",
+      ),
+    "the words sit above the waveform line",
   );
   const done = tree.find(
     (node) => node.props.accessibilityLabel === "Finish dictation",
   )!;
   assert.equal(done.props.disabled, false);
+  assert.match(done.props.accessibilityHint, /Nothing is sent/);
   done.props.onPress();
   tree
     .find((node) => node.props.accessibilityLabel === "Discard dictation")!
     .props.onPress();
   assert.deepEqual(x.events, ["stop", "discard"]);
-  assert.equal(
-    tree.some((node) => node.props.accessibilityLabel === "Insert text"),
-    false,
-  );
 });
 
-test("review keeps the full transcript scrollable and selectable, offering Insert instead of Finish", () => {
+test("with nothing said yet the waveform takes the field's place; an existing draft stays before new words", () => {
   const x = setup();
-  x.dictation.phase = "review";
+  x.dictation.phase = "listening";
   x.dictation.active = true;
-  x.dictation.final = "Long dictated message";
-  x.dictation.text = "Long dictated message";
-  const tree = all(
+  x.dictation.recording = true;
+  const empty = all(
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
-  const scroller = tree.find((node) => node.type === "ScrollView")!;
-  assert.equal(scroller.props.style.flex, 1);
-  const transcript = all(scroller).find(
-    (node) => node.type === "Text" && node.props.selectable !== undefined,
-  )!;
-  assert.equal(transcript.props.selectable, true);
-  assert.equal(
-    tree.some((node) => node.props.accessibilityLabel === "Finish dictation"),
-    false,
+  assert.equal(empty.some((node) => node.type === "ScrollView"), false);
+  x.dictation.final = "and a window seat";
+  x.dictation.text = "and a window seat";
+  const tree = all(
+    render(
+      x.ComposerDictationReview({
+        dictation: x.dictation,
+        draft: "Book a table for two ",
+      }),
+    ) as Element,
   );
-  tree
-    .find((node) => node.props.accessibilityLabel === "Insert text")!
-    .props.onPress();
-  tree
-    .find((node) => node.props.accessibilityLabel === "Discard dictation")!
-    .props.onPress();
-  assert.deepEqual(x.events, ["insert", "discard"]);
+  const draft = tree.find(
+    (node) =>
+      node.type === "Text" &&
+      [node.props.children].flat().includes("Book a table for two"),
+  )!;
+  assert.ok(draft, "the draft is shown without its trailing space");
+  assert.deepEqual([draft.props.children].flat(), ["Book a table for two", " "]);
 });
 
 test("pending phases keep Discard available while Done waits for capture", () => {
@@ -360,6 +359,18 @@ test("the first tap after a released long press starts dictation again", async (
     "keyboard",
     "start",
   ]);
+});
+
+test("once speech recognition is allowed, a tap dictates without the intro", async () => {
+  const x = setup({ introSeen: false, granted: true });
+  x.h.mount(() => x.ComposerDictationButton({ dictation: x.dictation }));
+  const mic = () =>
+    (x.h.value().props.children as Element[]).find(
+      (child) => child.type === "Pressable",
+    )!;
+  mic().props.onPress();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["keyboard", "start"]);
 });
 
 test("the first tap explains dictation once; Start begins it and a held press skips the intro", async () => {
@@ -426,7 +437,7 @@ test("the meter draws native volume levels as bars and stops listening when capt
   const heights = all(wave())
     .filter((node) => node.type === "View" && node !== wave())
     .map((node) => node.props.style[1].height);
-  assert.deepEqual(heights, [3, 3 + 0.5 * 33, 3 + 33]);
+  assert.deepEqual(heights, [3, 3 + 0.5 * 19, 3 + 19]);
   x.h.unmount();
   assert.equal(x.levelListeners.size, 0, "unsubscribed on unmount");
 });
@@ -442,17 +453,6 @@ test("copy says recognition happens on the iPhone in its language, not on a serv
   assert.match(words, /Current language/);
   assert.match(words, /Tap to change/);
   assert.doesNotMatch(words, /server|automatically/i);
-  x.dictation.phase = "listening";
-  x.dictation.active = true;
-  const panel = all(
-    render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
-  );
-  assert.ok(
-    panel.some((node) =>
-      String(node.props.accessibilityLabel ?? "").startsWith("Speech language"),
-    ),
-    "the recording panel names the language and can change it",
-  );
 });
 
 test("the language line names the current language and saves a new choice for the next recording", async () => {

@@ -191,7 +191,7 @@ test("on-device recognition is only required when the iPhone supports it", async
   x.h.unmount();
 });
 
-test("interim words are replaced, final segments append, and stop reviews before one insert", async () => {
+test("interim words are replaced, final segments append, and finishing inserts once into the draft", async () => {
   const x = setup();
   await x.begin();
   x.result("Book a");
@@ -216,15 +216,12 @@ test("interim words are replaced, final segments append, and stop reviews before
   assert.equal(x.events.filter((e) => e === "stop").length, 1);
   x.result(" for two", true);
   x.emit("end", null);
-  assert.equal(x.h.value().phase, "review");
-  assert.equal(x.h.value().text, "Book a table for two");
-  assert.deepEqual(x.native.listening(), [], "no recognizer listeners remain");
-  const insert = x.h.value().insert;
-  insert();
-  insert();
+  x.emit("end", null);
   x.h.flush();
+  assert.deepEqual(x.native.listening(), [], "no recognizer listeners remain");
   assert.deepEqual(x.inserted, ["Book a table for two"]);
   assert.equal(x.h.value().phase, "idle");
+  assert.equal(x.h.value().text, "", "the words now live in the draft");
   assert.ok(!x.events.includes("abort"), "a finished session needs no abort");
   assert.equal(x.append("Existing\n", "Hello"), "Existing\nHello");
   assert.equal(x.append("Existing", "Hello"), "Existing Hello");
@@ -260,7 +257,7 @@ test("discard aborts recognition and ignores late results without inserting", as
   x.h.unmount();
 });
 
-test("account/chat/access/focus/sheet changes abort capture and fence stale review", async () => {
+test("account/chat/access/focus/sheet changes abort capture and never insert stale words", async () => {
   for (const change of ["account", "chat", "disabled", "focus", "sheet"]) {
     const x = setup();
     await x.begin();
@@ -272,15 +269,6 @@ test("account/chat/access/focus/sheet changes abort capture and fence stale revi
     assert.equal(x.h.value().phase, "idle", change);
     assert.deepEqual(x.inserted, []);
     x.h.unmount();
-    const y = setup();
-    await y.begin();
-    y.result("Old review", true);
-    y.emit("end", null);
-    const insert = y.h.value().insert;
-    y.change(change);
-    insert();
-    assert.deepEqual(y.inserted, [], change);
-    y.h.unmount();
   }
 });
 
@@ -400,7 +388,7 @@ test("a new attempt waits for an aborted session's end before listening", async 
   x.h.unmount();
 });
 
-test("recognizer errors explain themselves; text heard before a failure stays for review", async () => {
+test("recognizer errors explain themselves; text heard before a failure still joins the draft", async () => {
   const cases: [string, RegExp][] = [
     ["no-speech", /No speech was detected/],
     ["network", /connection/],
@@ -433,20 +421,20 @@ test("recognizer errors explain themselves; text heard before a failure stays fo
   silent.h.unmount();
   const kept = setup();
   await kept.begin();
-  kept.result("Review me");
+  kept.result("Keep me");
   kept.emit("error", { error: "interrupted", message: "" });
   kept.emit("end", null);
-  assert.equal(kept.h.value().phase, "review");
-  assert.equal(kept.h.value().text, "Review me");
+  assert.equal(kept.h.value().phase, "idle");
   assert.match(kept.h.value().error!, /interrupted/);
-  assert.deepEqual(kept.inserted, []);
+  assert.deepEqual(kept.inserted, ["Keep me"]);
   kept.h.unmount();
   const late = setup();
   await late.begin();
   late.result("Heard", true);
   late.emit("error", { error: "no-speech", message: "" });
   late.emit("end", null);
-  assert.equal(late.h.value().phase, "review");
+  assert.equal(late.h.value().phase, "idle");
+  assert.deepEqual(late.inserted, ["Heard"]);
   assert.equal(late.h.value().error, undefined, "no-speech after words is not an error");
   late.h.unmount();
 });

@@ -1489,9 +1489,9 @@ export function AssistantScreen({
               {uploads.error ?? uploads.notice}
             </Label>
           ) : null}
-          <ComposerDictationReview dictation={dictation} />
+          <ComposerDictationReview dictation={dictation} draft={draft} />
           {/* Collapsed rather than unmounted: a held microphone press must still
-              receive its release while dictation covers the field. */}
+              receive its release while dictation takes the field's place. */}
           <View
             style={dictation.active ? styles.dictationHidden : undefined}
             accessibilityElementsHidden={dictation.active}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AppState, Pressable, View } from "react-native";
+import { Animated, AppState, Pressable, View } from "react-native";
 import {
   ArrowDown,
   Info,
@@ -10,6 +10,7 @@ import {
 } from "lucide-react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { useTheme } from "../../theme/ThemeContext";
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { assistantConnection } from "../../lib/api/connectionState";
@@ -96,6 +97,8 @@ export function AssistantErrorNotice({ message }: { message?: string }) {
     </AssistantBanner>
   );
 }
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
 export function JumpToLatest({
   visible,
   onPress,
@@ -104,7 +107,28 @@ export function JumpToLatest({
   onPress: () => void;
 }) {
   const { colors } = useTheme();
+  const reducedMotion = useReducedMotion();
+  const [offset] = useState(() => new Animated.Value(0));
   if (!visible) return null;
+  // The arrow dips toward the latest message, then springs back as the
+  // transcript scrolls there. Reduce Motion scrolls at once.
+  const jump = () => {
+    if (reducedMotion) return onPress();
+    offset.stopAnimation();
+    Animated.timing(offset, {
+      toValue: 6,
+      duration: 90,
+      useNativeDriver: true,
+    }).start(() => {
+      onPress();
+      Animated.spring(offset, {
+        toValue: 0,
+        speed: 24,
+        bounciness: 14,
+        useNativeDriver: true,
+      }).start();
+    });
+  };
   return (
     <View
       pointerEvents="box-none"
@@ -118,12 +142,13 @@ export function JumpToLatest({
         alignItems: "center",
       }}
     >
-      <Pressable
+      <AnimatedPressable
         accessibilityRole="button"
         accessibilityLabel="Jump to latest message"
         hitSlop={6}
-        onPress={onPress}
+        onPress={jump}
         style={{
+          transform: [{ translateY: offset }],
           position: "absolute",
           bottom: 12,
           width: 32,
@@ -142,7 +167,7 @@ export function JumpToLatest({
         }}
       >
         <ArrowDown size={16} color={colors.textMuted} />
-      </Pressable>
+      </AnimatedPressable>
     </View>
   );
 }
