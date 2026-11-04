@@ -93,6 +93,8 @@ function harness() {
         if (name.endsWith("/useNetworkStatus")) return { useNetworkStatus: () => ({ isConnected: true, recheckConnection: vi.fn() }) };
         if (name.endsWith("/sessionStore")) return { loadStoredAuthSession: async () => ({ accessToken: "fixture-token" }), clearStoredAuthSession: vi.fn(), persistAuthSession: vi.fn(), authSessionGeneration: () => 0, commitRefreshedAuthSession: vi.fn() };
         if (name.endsWith("/telemetry")) return { capture: vi.fn() };
+        // The Voice settings row is gated on a live feature read; this suite covers deletion only.
+        if (name.endsWith("/assistantVoiceApi")) return { assistantVoiceFeatures: async () => [] };
         if (name.endsWith("/pushNotifications")) return { activatePushAfterLogin: vi.fn() };
         if (name.endsWith("/errorMessages")) return { resolveErrorMessage: vi.fn() };
         if (name.endsWith("/OfflineBanner")) return { OfflineBanner: () => null };
