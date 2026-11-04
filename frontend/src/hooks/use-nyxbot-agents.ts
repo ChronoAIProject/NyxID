@@ -192,6 +192,13 @@ export function useLinkNyxBotChannel() {
   );
 }
 
+export function useRetryNyxBotChannelGateway() {
+  return useAgentsMutation(
+    ({ channelAgentId }: { channelAgentId: string }) => nyxBotApi.retryChannelGateway(channelAgentId),
+    true,
+  );
+}
+
 export function useSetNyxBotPrivateChats() {
   return useAgentsMutation(
     ({

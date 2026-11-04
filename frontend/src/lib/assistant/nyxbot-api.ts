@@ -154,6 +154,9 @@ export const nyxBotApi = {
       }),
     );
   },
+  async retryChannelGateway(channelAgentId: string) {
+    return assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}/retry-native-gateway`, { method: "POST" });
+  },
   /** Who may talk to the agent in the bot's private chats. */
   async setPrivateChats(channelAgentId: string, privateChats: "owner" | "everyone") {
     await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}`, {

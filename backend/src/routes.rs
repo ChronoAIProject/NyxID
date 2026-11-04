@@ -2888,6 +2888,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
+            "/nyxagent/channels/{id}/retry-native-gateway",
+            post(handlers::nyxbot::gateway_retry::retry_channel),
+        )
+        .route(
             "/nyxagent/channels/{id}/chats/{chat_id}/threads",
             get(handlers::nyxbot::thread_controls::list_threads),
         )
