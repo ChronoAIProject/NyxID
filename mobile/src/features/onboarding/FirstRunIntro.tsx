@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Feather } from "@expo/vector-icons";
 import {
-  ActivityIndicator,
   Image,
   LayoutAnimation,
   Modal,
@@ -77,7 +76,7 @@ export function FirstRunIntro({
   const [topics, setTopics] = useState<readonly string[]>([]);
   const [workStyle, setWorkStyle] = useState<string | null>(null);
   const [steps, setSteps] = useState<readonly NextStep[] | null>(null);
-  const saved = useRef(false);
+  const saved = useRef<string | undefined>(undefined);
   const openedAt = useRef(0);
   // Only a first-timer is greeted; a replay starts at the questions.
   const flow: readonly Step[] = entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
@@ -87,7 +86,7 @@ export function FirstRunIntro({
 
   useEffect(() => {
     if (!visible) return;
-    saved.current = false;
+    saved.current = undefined;
     openedAt.current = Date.now();
     setIndex(0);
     setSteps(null);
@@ -101,16 +100,18 @@ export function FirstRunIntro({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  // Saves when the answers differ from the last save, so revisiting a step
+  // and changing a pick after reaching the end is kept too.
   function persist(outcome: OnboardingAnswers["outcome"]) {
-    if (saved.current) return Promise.resolve(undefined);
-    saved.current = true;
-    return save
-      .mutateAsync({ outcome, topics, work_style: workStyle })
-      .catch(() => {
-        // The server still shows the intro next time.
-        saved.current = false;
-        return undefined;
-      });
+    const answers = { outcome, topics, work_style: workStyle };
+    const key = JSON.stringify(answers);
+    if (saved.current === key) return Promise.resolve(undefined);
+    saved.current = key;
+    return save.mutateAsync(answers).catch(() => {
+      // The server still shows the intro next time.
+      saved.current = undefined;
+      return undefined;
+    });
   }
 
   function skip() {
@@ -134,12 +135,17 @@ export function FirstRunIntro({
       name: "ui.mobile_dialog_step_completed",
       props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
     });
-    const target = index + 1;
+    goTo(index + 1);
+  }
+
+  function goTo(target: number) {
+    if (target < 0 || target > LAST || target === index) return;
     setIndex(target);
     if (target === LAST)
-      void persist("completed").then((result) =>
-        setSteps(result?.recommendations ?? state.recommendations),
-      );
+      // The current suggestions show at once; the save refreshes them.
+      void persist("completed").then((result) => {
+        if (result) setSteps(result.recommendations);
+      });
   }
 
   function start(nextStep: NextStep) {
@@ -178,22 +184,28 @@ export function FirstRunIntro({
         edges={["top", "bottom"]}
       >
         {step === "welcome" ? null : (
-          <View
-            style={styles.progress}
-            accessibilityLabel={`Step ${progress + 1} of ${STEPS.length}`}
-          >
+          <View style={styles.progress} accessibilityRole="tablist">
             {STEPS.map((item, position) => (
-              <View
+              <Pressable
                 key={item}
-                style={[
-                  styles.dot,
-                  {
-                    width: position === progress ? 24 : 12,
-                    backgroundColor:
-                      position <= progress ? colors.textPrimary : colors.border,
-                  },
-                ]}
-              />
+                accessibilityRole="tab"
+                accessibilityLabel={`Step ${position + 1} of ${STEPS.length}`}
+                accessibilityState={{ selected: position === progress }}
+                hitSlop={{ top: 12, bottom: 12, left: 2, right: 2 }}
+                onPress={() => goTo(flow.indexOf(item))}
+                style={styles.dotTarget}
+              >
+                <View
+                  style={[
+                    styles.dot,
+                    {
+                      width: position === progress ? 24 : 12,
+                      backgroundColor:
+                        position <= progress ? colors.textPrimary : colors.border,
+                    },
+                  ]}
+                />
+              </Pressable>
             ))}
           </View>
         )}
@@ -273,11 +285,11 @@ export function FirstRunIntro({
                 title="Pick your first step"
                 body="One tap and NyxBot takes it from there. These stay on your home page until you're done with them."
               />
-              {steps ? (
-                <NextStepList steps={steps} onStart={start} disabled={!online} />
-              ) : (
-                <ActivityIndicator color={colors.primary} />
-              )}
+              <NextStepList
+                steps={steps ?? state.recommendations}
+                onStart={start}
+                disabled={!online}
+              />
             </>
           )}
         </ScrollView>
@@ -292,7 +304,7 @@ export function FirstRunIntro({
               label="Back"
               variant="secondary"
               compact
-              onPress={() => setIndex(index - 1)}
+              onPress={() => goTo(index - 1)}
             />
           ) : null}
           <ActionButton
@@ -465,6 +477,7 @@ const styles = StyleSheet.create({
     paddingTop: 16,
   },
   dot: { height: 4, borderRadius: 2 },
+  dotTarget: { paddingVertical: 8 },
   body: { padding: 20, gap: 16 },
   heading: { gap: 6 },
   title: { fontFamily: fonts.displaySemi, fontSize: 22, lineHeight: 28 },

@@ -7,6 +7,12 @@ import type { AssistantOnboarding } from "@/schemas/assistant-onboarding";
 import { FirstRunIntro } from "./first-run-intro";
 import { NextStepCards } from "./next-step-cards";
 
+// No network: the intro would otherwise prefetch its replay files.
+vi.mock("./replay-clips", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./replay-clips")>()),
+  preloadReplays: () => undefined,
+}));
+
 const at = "2026-11-04T00:00:00Z";
 let writes: { method: string; endpoint: string; body: unknown }[];
 let client: QueryClient;
@@ -194,6 +200,22 @@ it("topics follow who NyxBot is for and drop picks that no longer apply", async 
   await user.click(screen.getByRole("button", { name: "Skip intro" }));
   await waitFor(() =>
     expect(writes[0]?.body).toEqual({ outcome: "skipped", topics: ["inbox", "sales"], work_style: "business" }),
+  );
+});
+
+it("step bars jump anywhere; suggestions show at once and later changes save again", async () => {
+  const user = userEvent.setup();
+  renderIntro();
+  await user.click(screen.getByRole("button", { name: /Step 5 of 5: First steps/ }));
+  // Suggestions show while the save runs.
+  expect(
+    screen.getAllByRole("button", { name: /Connect your inbox|Create a Research specialist/ }).length,
+  ).toBeGreaterThan(0);
+  await user.click(screen.getByRole("button", { name: /Step 1 of 5: Your picks/ }));
+  await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
+  await user.click(screen.getByRole("button", { name: /Step 5 of 5: First steps/ }));
+  await waitFor(() =>
+    expect(writes.map((write) => (write.body as { topics: string[] }).topics)).toEqual([[], ["inbox"]]),
   );
 });
 

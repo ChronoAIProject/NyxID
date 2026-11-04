@@ -10,7 +10,6 @@ import { Check, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { Skeleton } from "@/components/ui/skeleton";
 import { useSaveOnboarding } from "@/hooks/use-assistant-onboarding";
 import { useAuthStore } from "@/stores/auth-store";
 import { capture } from "@/lib/telemetry";
@@ -72,7 +71,7 @@ export function FirstRunIntro({
   const [nextSteps, setNextSteps] = useState<readonly NextStep[] | null>(null);
   const [exiting, setExiting] = useState<ReadonlySet<string>>(() => new Set());
   const styleSwitch = useRef<number | undefined>(undefined);
-  const saved = useRef(false);
+  const saved = useRef<string | undefined>(undefined);
   const openedAt = useRef(0);
   const body = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
@@ -81,7 +80,7 @@ export function FirstRunIntro({
   useEffect(() => {
     if (!open) return;
     preloadReplays();
-    saved.current = false;
+    saved.current = undefined;
     openedAt.current = Date.now();
     setIndex(0);
     setNextSteps(null);
@@ -99,16 +98,18 @@ export function FirstRunIntro({
     body.current?.focus({ preventScroll: true });
   }, [index]);
 
+  // Saves when the answers differ from the last save, so revisiting a step
+  // and changing a pick after reaching the end is kept too.
   function persist(outcome: "completed" | "skipped") {
-    if (saved.current) return Promise.resolve(undefined);
-    saved.current = true;
-    return save
-      .mutateAsync({ outcome, topics, work_style: workStyle })
-      .catch(() => {
-        // Retried on the next visit: the server still shows the intro.
-        saved.current = false;
-        return undefined;
-      });
+    const answers = { outcome, topics, work_style: workStyle };
+    const key = JSON.stringify(answers);
+    if (saved.current === key) return Promise.resolve(undefined);
+    saved.current = key;
+    return save.mutateAsync(answers).catch(() => {
+      // Retried on the next visit: the server still shows the intro.
+      saved.current = undefined;
+      return undefined;
+    });
   }
 
   function skip() {
@@ -122,25 +123,29 @@ export function FirstRunIntro({
     onOpenChange(false);
   }
 
+  function goTo(target: number) {
+    if (target < 0 || target > LAST || target === index) return;
+    moved.current = true;
+    setIndex(target);
+    if (target === LAST) {
+      // The current suggestions show at once; the save refreshes them.
+      void persist("completed").then((result) => {
+        if (result) setNextSteps(result.recommendations);
+      });
+    }
+  }
+
   function next() {
     if (index >= LAST) return;
     void capture({
       name: "ui.dialog_step_completed",
       props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
     });
-    const target = index + 1;
-    moved.current = true;
-    setIndex(target);
-    if (target === LAST) {
-      void persist("completed").then((result) => setNextSteps(result?.recommendations ?? state.recommendations));
-    }
+    goTo(index + 1);
   }
 
   function back() {
-    if (index > 0 && index < LAST && flow[index - 1] !== "welcome") {
-      moved.current = true;
-      setIndex(index - 1);
-    }
+    if (index > 0 && flow[index - 1] !== "welcome") goTo(index - 1);
   }
 
   function start(nextStep: NextStep) {
@@ -212,7 +217,12 @@ export function FirstRunIntro({
         aria-describedby="nyxbot-intro-description"
       >
         <div className="flex min-h-0 flex-1 flex-col md:min-h-[690px]">
-          {step === "welcome" ? null : <Progress index={(STEPS as readonly string[]).indexOf(step)} />}
+          {step === "welcome" ? null : (
+            <Progress
+              index={(STEPS as readonly string[]).indexOf(step)}
+              onSelect={(position) => goTo(flow.indexOf(STEPS[position] ?? "interests"))}
+            />
+          )}
           <div
             key={step}
             ref={body}
@@ -295,15 +305,7 @@ export function FirstRunIntro({
                 title="Pick your first step"
                 description="One click and NyxBot takes it from there. These stay on your home page until you're done with them. New here? Take a quick tour of the screen first."
               >
-                {nextSteps ? (
-                  <NextStepCards steps={nextSteps} onStart={start} />
-                ) : (
-                  <div className="grid gap-2" aria-label="Loading suggestions">
-                    {[0, 1, 2].map((item) => (
-                      <Skeleton key={item} className="h-14 rounded-lg" />
-                    ))}
-                  </div>
-                )}
+                <NextStepCards steps={nextSteps ?? state.recommendations} onStart={start} />
               </StepHeading>
             )}
           </div>
@@ -412,20 +414,48 @@ function Welcome({
   );
 }
 
-function Progress({ index }: { readonly index: number }) {
+const STEP_LABELS: Readonly<Record<(typeof STEPS)[number], string>> = {
+  interests: "Your picks",
+  chief: "Chief of staff",
+  specialists: "Specialists",
+  control: "You stay in control",
+  next: "First steps",
+};
+
+/** Every step is a target: click a bar to jump there. */
+function Progress({
+  index,
+  onSelect,
+}: {
+  readonly index: number;
+  readonly onSelect: (position: number) => void;
+}) {
   return (
-    <div className="flex items-center gap-1.5 pt-1 md:px-6 md:pt-5" aria-label={`Step ${index + 1} of ${STEPS.length}`}>
+    <nav aria-label="Intro steps" className="flex items-center gap-0.5 pt-1 md:px-5 md:pt-4">
       {STEPS.map((step, position) => (
-        <span
+        <button
           key={step}
-          aria-hidden="true"
-          className={cn(
-            "h-1 rounded-full transition-all duration-300 motion-reduce:transition-none",
-            position === index ? "w-6 bg-foreground" : position < index ? "w-3 bg-muted-foreground" : "w-3 bg-overlay-strong",
-          )}
-        />
+          type="button"
+          title={STEP_LABELS[step]}
+          aria-label={`Step ${position + 1} of ${STEPS.length}: ${STEP_LABELS[step]}`}
+          aria-current={position === index ? "step" : undefined}
+          onClick={() => onSelect(position)}
+          className="group rounded-full px-1 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus"
+        >
+          <span
+            aria-hidden="true"
+            className={cn(
+              "block h-1 rounded-full transition-all duration-300 motion-reduce:transition-none",
+              position === index
+                ? "w-6 bg-foreground"
+                : position < index
+                  ? "w-3 bg-muted-foreground group-hover:w-4 group-hover:bg-foreground"
+                  : "w-3 bg-overlay-strong group-hover:w-4 group-hover:bg-muted-foreground",
+            )}
+          />
+        </button>
       ))}
-    </div>
+    </nav>
   );
 }
 
