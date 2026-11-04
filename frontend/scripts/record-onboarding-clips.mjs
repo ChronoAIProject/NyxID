@@ -6,9 +6,10 @@
 //   npm run dev -- --port 3101 --strictPort    # in another terminal
 //   node scripts/record-onboarding-clips.mjs [http://localhost:3101]
 //
-// Writes src/assets/onboarding/<clip>.{webm,mp4,webp} (web: VP9, H.264 and a
-// poster frame) and ../mobile/assets/onboarding/<clip>.gif (mobile). Needs
-// ffmpeg (with libvpx) on PATH.
+// Writes src/assets/onboarding/<clip>.webp (web: animated WebP, which plays
+// through the image pipeline like a GIF) plus <clip>-still.webp (the finished
+// conversation, for reduced motion), and ../mobile/assets/onboarding/<clip>.gif
+// (mobile). Needs ffmpeg (with libwebp) on PATH.
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -126,20 +127,21 @@ for (const [name, run] of Object.entries(CLIPS)) {
     .join("\n");
   const concat = path.join(dir, "frames.txt");
   fs.writeFileSync(concat, `${list}\nfile '${frames.at(-1).file}'\n`);
-  const mp4 = path.join(webOut, `${name}.mp4`);
+  // An intermediate H.264 master; the shipped formats are encoded from it.
+  const mp4 = path.join(dir, `${name}.mp4`);
   execFileSync("ffmpeg", [
     "-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", concat,
     "-vf", "fps=30,scale=1280:-2:flags=lanczos", "-c:v", "libx264", "-preset", "slow",
     "-crf", "24", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", mp4,
   ]);
   execFileSync("ffmpeg", [
-    "-y", "-loglevel", "error", "-i", mp4, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0",
-    "-row-mt", "1", "-pix_fmt", "yuv420p", "-an", path.join(webOut, `${name}.webm`),
+    "-y", "-loglevel", "error", "-i", mp4, "-vf", "fps=15,scale=960:-2:flags=lanczos",
+    "-c:v", "libwebp_anim", "-lossless", "0", "-quality", "72", "-compression_level", "5",
+    "-loop", "0", "-an", path.join(webOut, `${name}.webp`),
   ]);
-  // A frame from the settled conversation, shown while the clip loads.
   execFileSync("ffmpeg", [
     "-y", "-loglevel", "error", "-sseof", "-1", "-i", mp4, "-frames:v", "1",
-    "-vf", "scale=960:-2:flags=lanczos", "-quality", "82", path.join(webOut, `${name}.webp`),
+    "-vf", "scale=960:-2:flags=lanczos", "-quality", "82", path.join(webOut, `${name}-still.webp`),
   ]);
   execFileSync("ffmpeg", [
     "-y", "-loglevel", "error", "-i", mp4, "-vf",
@@ -147,6 +149,6 @@ for (const [name, run] of Object.entries(CLIPS)) {
     path.join(mobileOut, `${name}.gif`),
   ]);
   fs.rmSync(dir, { recursive: true, force: true });
-  console.log(`${name}: ${(fs.statSync(mp4).size / 1024).toFixed(0)} KB mp4, ${(fs.statSync(path.join(mobileOut, `${name}.gif`)).size / 1024).toFixed(0)} KB gif`);
+  console.log(`${name}: ${(fs.statSync(path.join(webOut, `${name}.webp`)).size / 1024).toFixed(0)} KB webp, ${(fs.statSync(path.join(mobileOut, `${name}.gif`)).size / 1024).toFixed(0)} KB gif`);
 }
 await browser.close();

@@ -26,9 +26,8 @@ function WindowBar({ title }: { readonly title: string }) {
 
 /**
  * A recorded replay of the real assistant (dev mock mode, fixture data;
- * regenerate with `scripts/record-onboarding-clips.mjs`). Loops silently like
- * a GIF: VP9 first, H.264 as the fallback, and a still frame while loading.
- * With reduced motion it waits for the play control instead.
+ * regenerate with `scripts/record-onboarding-clips.mjs`). It loops like a GIF;
+ * with reduced motion it shows the finished conversation as a still.
  */
 export function ReplayClip({
   clip,
@@ -45,25 +44,13 @@ export function ReplayClip({
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-background shadow-sm">
       <WindowBar title={title} />
-      <video
+      <img
         key={clip}
-        aria-label={label}
-        poster={files.poster}
+        src={reduced ? files.still : files.animated}
+        alt={label}
+        decoding="async"
         className="block aspect-[1280/864] w-full bg-background object-cover"
-        autoPlay={!reduced}
-        controls={reduced}
-        loop
-        muted
-        playsInline
-        preload="auto"
-        // Some browsers ignore autoplay on a freshly inserted element.
-        onCanPlay={(event) => {
-          if (!reduced && event.currentTarget.paused) void event.currentTarget.play().catch(() => undefined);
-        }}
-      >
-        <source src={files.webm} type="video/webm" />
-        <source src={files.mp4} type="video/mp4" />
-      </video>
+      />
     </div>
   );
 }
