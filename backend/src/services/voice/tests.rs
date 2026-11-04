@@ -126,6 +126,27 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
     Box::pin(async {
         let (state, thread, call) = setup("voice_session_receipt").await;
         let db = &state.db;
+        // The deployed schema predates both device identity and native token
+        // settlement. Recover/control that exact shape without a data migration.
+        db.collection::<bson::Document>(CALLS)
+            .update_one(
+                doc! {"_id":&call.id},
+                doc! {"$unset":{
+                    "client_key":"", "responses_model":"", "responses_reserved":"",
+                    "responses_finalized":"", "responses_usage":"",
+                }},
+            )
+            .await
+            .unwrap();
+        let legacy = session::get(db, &call.user_id, &thread.id, &call.id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            legacy.responses,
+            crate::models::voice_responses::ResponsesState::Disabled
+        ));
+        assert!(legacy.client_key.is_none());
+        assert_eq!(legacy.created_at, call.created_at);
         let other = session::admit(
             db,
             &call.user_id,
