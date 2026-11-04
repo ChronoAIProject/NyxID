@@ -3103,7 +3103,7 @@ const MOCK_HANDLERS: MockHandler[] = [
       ? new URLSearchParams(window.location.search).get("mock") === "hosted"
         ? {
             ...MOCK_PUBLIC_CONFIG,
-            mcp_url: "https://nyx-api.chrono-ai.fun/mcp",
+            mcp_url: "https://api.nyxid.ai/mcp",
           }
         : MOCK_PUBLIC_CONFIG
       : undefined,
