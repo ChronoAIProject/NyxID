@@ -45,7 +45,7 @@ import { VoiceAura } from "./VoiceAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
 import { voiceAuraPhase, voiceAuraStatus } from "./voiceAuraState";
 import { chooseVoiceOption, voiceElapsed, voiceTariff } from "./voiceSelection";
-import type { VoiceSnapshot } from "./voiceContracts";
+import type { VoicePreferences, VoiceSnapshot } from "./voiceContracts";
 
 type Props = {
   thread: string;
@@ -152,9 +152,11 @@ function VoiceConversation({
   const choices = options.data?.options ?? [];
   const option = chooseVoiceOption(choices);
   const isGrok = option?.voice.protocol === "xai_realtime";
+  const [modeChoice, setModeChoice] =
+    useState<VoicePreferences["input_mode"]>();
   const inputMode = isGrok
     ? "push_to_talk"
-    : (saved?.input_mode ?? "push_to_talk");
+    : (modeChoice ?? saved?.input_mode ?? "push_to_talk");
   const voiceId =
     option?.voice.voices.find((row) => row.id === saved?.voice)?.id ??
     option?.voice.voices[0]?.id ??
@@ -162,7 +164,6 @@ function VoiceConversation({
   const voiceLabel = option?.voice.voices.find(
     (row) => row.id === voiceId,
   )?.label;
-  const modeLabel = inputMode === "automatic" ? "Hands-free" : "Hold to talk";
   const active = voice.starting || voice.connected;
   const session = voice.snapshot?.session;
   const muted = session?.muted ?? false;
@@ -236,22 +237,38 @@ function VoiceConversation({
     minimize();
     onReview(acknowledgementId);
   }
+  function preferences(
+    mode: VoicePreferences["input_mode"],
+  ): VoicePreferences | undefined {
+    if (!option) return undefined;
+    return {
+      service_id: option.service_id,
+      connection_id: option.connection_id,
+      key_source: option.key_source,
+      model: option.model,
+      voice: voiceId,
+      input_mode: mode,
+      language: saved?.language ?? null,
+      notify_on_completion: saved?.notify_on_completion ?? false,
+    };
+  }
   async function start() {
-    if (!canStart || !option) return;
+    const chosen = preferences(inputMode);
+    if (!canStart || !option || !chosen) return;
     setBillingOpenError(false);
-    await voice.start(
-      {
-        service_id: option.service_id,
-        connection_id: option.connection_id,
-        key_source: option.key_source,
-        model: option.model,
-        voice: voiceId,
-        input_mode: inputMode,
-        language: saved?.language ?? null,
-        notify_on_completion: saved?.notify_on_completion ?? false,
-      },
-      option.voice.protocol,
-    );
+    await voice.start(chosen, option.voice.protocol);
+  }
+  /** Hands-free or Hold to talk, from the call itself; saved for next time. */
+  function changeMode(mode: VoicePreferences["input_mode"]) {
+    if (isGrok || mode === inputMode) return;
+    if (active && !voice.setInputMode(mode)) return;
+    setModeChoice(mode);
+    const chosen = preferences(mode);
+    if (chosen)
+      void environment.api
+        .savePreferences(chosen)
+        .then(() => settings.refetch())
+        .catch(() => {});
   }
   async function openBilling() {
     setBillingOpenError(false);
@@ -451,7 +468,8 @@ function VoiceConversation({
                 {option ? (
                   <Text style={[styles.introDetail, quiet]}>
                     {voiceLabel ? `${voiceLabel} voice · ` : ""}
-                    {modeLabel} · Change in Settings › Voice
+                    {isGrok ? "Hold to talk · " : ""}
+                    Change in Settings › Voice
                   </Text>
                 ) : null}
               </View>
@@ -665,6 +683,52 @@ function VoiceConversation({
               ) : headline ? (
                 taskRow(headline)
               ) : null}
+            </View>
+          ) : null}
+          {/* Grok runs on explicit holds only, so it has no mode to choose. */}
+          {option && !isGrok ? (
+            <View
+              accessibilityRole="radiogroup"
+              accessibilityLabel="Listening mode"
+              style={[styles.modes, styles.floating, { backgroundColor: surface }]}
+            >
+              {(["automatic", "push_to_talk"] as const).map((mode) => {
+                const selected = inputMode === mode;
+                return (
+                  <Pressable
+                    key={mode}
+                    accessibilityRole="radio"
+                    accessibilityLabel={
+                      mode === "automatic" ? "Hands-free mode" : "Hold to talk mode"
+                    }
+                    accessibilityHint={
+                      mode === "automatic"
+                        ? "NyxBot listens and answers when you pause"
+                        : "NyxBot listens while you hold the microphone"
+                    }
+                    accessibilityState={{
+                      selected,
+                      checked: selected,
+                      disabled: voice.starting,
+                    }}
+                    disabled={voice.starting}
+                    onPress={() => changeMode(mode)}
+                    style={[
+                      styles.mode,
+                      selected && { backgroundColor: main },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.modeLabel,
+                        { color: selected ? onMain : colors.textSecondary },
+                      ]}
+                    >
+                      {mode === "automatic" ? "Hands-free" : "Hold to talk"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
           ) : null}
           <View style={styles.controls}>
@@ -963,6 +1027,21 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   speech: { alignItems: "center", gap: 10 },
+  modes: {
+    flexDirection: "row",
+    alignSelf: "center",
+    borderRadius: 20,
+    padding: 3,
+  },
+  mode: {
+    minHeight: 36,
+    minWidth: 112,
+    paddingHorizontal: 14,
+    borderRadius: 17,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modeLabel: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 18 },
   pill: {
     borderRadius: 12,
     paddingHorizontal: 12,

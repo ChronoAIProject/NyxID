@@ -114,7 +114,15 @@ function setup(
   let focused = true;
   let online = true;
   let browserFails = false;
-  const environment = { origin: "https://nyx.example", epoch: 7 };
+  const environment = {
+    origin: "https://nyx.example",
+    epoch: 7,
+    api: {
+      savePreferences: async (preferences: VoicePreferences) => {
+        events.push(["save", preferences.input_mode]);
+      },
+    },
+  };
   const levels = {
     input: { value: 0 },
     output: { value: 0 },
@@ -151,6 +159,10 @@ function setup(
     },
     muteSpeaker: (value: boolean) => {
       events.push(["speaker", value]);
+    },
+    setInputMode: (mode: string) => {
+      events.push(["mode", mode]);
+      return true;
     },
     resumeAudio: async () => {
       events.push(["resume"]);
@@ -815,4 +827,41 @@ test("action cards from the chat appear on the call so they can be decided in pl
   const none = setup({ active: true, actionCount: 0 });
   assert.doesNotMatch(none.text(), /needs you/);
   none.harness.unmount();
+});
+
+test("the call switches between Hands-free and Hold to talk in place and remembers it", async () => {
+  const f = setup({ active: true });
+  assert.equal(f.button("Hands-free mode").props.accessibilityState.selected, true);
+  f.button("Hold to talk mode").props.onPress();
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events.slice(0, 2), [
+    ["mode", "push_to_talk"],
+    ["save", "push_to_talk"],
+  ]);
+  // Hold to talk is now the centre control and the toggle reflects it.
+  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
+  f.harness.unmount();
+  // Before a call the choice is only saved, for the call about to start.
+  const idle = setup();
+  idle.button("Hold to talk mode").props.onPress();
+  await idle.harness.settle();
+  assert.deepEqual(idle.events, [["save", "push_to_talk"]]);
+  idle.harness.unmount();
+});
+
+test("Grok keeps Hold to talk and offers no mode toggle", () => {
+  const f = setup({
+    active: true,
+    source: {
+      ...source,
+      voice: { ...source.voice, protocol: "xai_realtime", usage_source: "server_measured" },
+    },
+  });
+  assert.equal(
+    f.all().some((row) => row.props.accessibilityLabel === "Hands-free mode"),
+    false,
+  );
+  assert.equal(typeof f.button("Hold to talk").props.onPressIn, "function");
+  f.harness.unmount();
 });

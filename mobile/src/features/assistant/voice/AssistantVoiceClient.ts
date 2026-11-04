@@ -501,6 +501,22 @@ export class AssistantVoiceClient {
     return this.held;
   }
 
+  /**
+   * Switch Hands-free / Hold to talk during a call. OpenAI listens for turns
+   * itself, so the mode only decides whether the microphone stays open; Grok
+   * runs on explicit hold events and stays Hold to talk.
+   */
+  setInputMode(mode: VoicePreferences["input_mode"]): boolean {
+    if (this.closed || !this.preferences) return false;
+    if (this.protocol === "xai_realtime" && mode !== "push_to_talk")
+      return false;
+    if (this.preferences.input_mode === mode) return true;
+    if (this.held) this.hold(false);
+    this.preferences = { ...this.preferences, input_mode: mode };
+    this.updateInput();
+    return true;
+  }
+
   muteSpeaker(muted: boolean) {
     if (this.closed) return;
     this.speakerMuted = muted;
