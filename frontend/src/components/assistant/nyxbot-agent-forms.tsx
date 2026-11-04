@@ -46,7 +46,7 @@ import {
   GroupedDialog,
   GroupedDialogContent,
 } from "@/components/ui/grouped-dialog";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import { Switch } from "@/components/ui/switch";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { useKeys } from "@/hooks/use-keys";
@@ -227,7 +227,6 @@ function AgentOwnerPicker({
   const writable = useWritableOrgs();
   return (
     <GroupedList
-      title="Ownership"
       footer={
         value
           ? "Admins and Members maintain this agent. Each member has private chats; memory is shared."
@@ -276,6 +275,7 @@ export function NewAgentDialog({
   const create = useCreateNyxBotAgent();
   const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const form = useAppForm<AssistantAgentCreate>({
+    mode: "onChange",
     resolver: zodResolver(assistantAgentCreateSchema),
     defaultValues: {
       name: "",
@@ -287,8 +287,6 @@ export function NewAgentDialog({
     },
   });
   const [error, setError] = useState<string>();
-  const name = form.watch("name");
-  const description = form.watch("description");
   const org = form.watch("org");
   const firstOrg = useWritableOrgs()[0]?.id;
   // Organizations may still be loading when the dialog opens; preselect once known.
@@ -515,11 +513,12 @@ export function NewAgentDialog({
                 </GroupedList>
               ) : null}
             </DialogBody>
-            <GroupedFormActions
+            <GroupedDialogActions
+              intent="create"
               label="new agent"
               dirty={form.formState.isDirty}
               pending={create.isPending}
-              disabled={!name.trim() || !description.trim()}
+              disabled={!form.formState.isValid}
               save={form.handleSubmit(submit)}
               discard={() => {
                 form.reset();

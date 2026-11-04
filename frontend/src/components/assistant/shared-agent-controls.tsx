@@ -1,3 +1,4 @@
+import { GroupedDialog as Dialog, GroupedDialogContent as DialogContent } from "@/components/ui/grouped-dialog";
 import {
   GroupedFormActions,
   GroupedFormScope,
@@ -23,7 +24,7 @@ import {
   SelectItem,
   SelectValue,
 } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -75,7 +76,7 @@ export function ShareAgentDialog({
             {policy.data && policy.data.revision > 0 ? (
               <Notes id={agent.id} kind="shared-memory" editable />
             ) : null}
-            <GroupedFormBar />
+            <GroupedFormBar dialog />
           </GroupedFormScope>
         </DialogContent>
       </Dialog>
@@ -91,7 +92,7 @@ function SharingEditor({
   readonly policy: Sharing;
 }) {
   const save = useSaveAgentSharing(id);
-  const form = useAppForm<SharingForm>({ resolver: zodResolver(sharingFormSchema), defaultValues: {
+  const form = useAppForm<SharingForm>({ mode: "onChange", resolver: zodResolver(sharingFormSchema), defaultValues: {
     enabled: policy.enabled,
     audience: policy.audience.map(({ subject_kind, subject_id, role }) => ({ subject_kind, subject_id, role })),
     shared_access: policy.shared_access,
@@ -280,6 +281,7 @@ function SharingEditor({
           )}
         </GroupedList>
         <GroupedFormActions
+          disabled={!form.formState.isValid}
           label="sharing"
           dirty={form.formState.isDirty}
           pending={save.isPending}
@@ -384,7 +386,7 @@ function NotesEditor({
   readonly footer: string;
 }) {
   const save = useSaveSharedNotes(id, kind);
-  const form = useAppForm<z.infer<typeof notesFormSchema>>({ resolver: zodResolver(notesFormSchema), defaultValues: { text: value.notes.map((n) => n.text).join("\n") } });
+  const form = useAppForm<z.infer<typeof notesFormSchema>>({ mode: "onChange", resolver: zodResolver(notesFormSchema), defaultValues: { text: value.notes.map((n) => n.text).join("\n") } });
   const submit = form.handleSubmit(async ({ text }) => {
     try {
       await save.mutateAsync({
@@ -453,6 +455,7 @@ function NotesEditor({
           </GroupedRow>
         </GroupedList>
         <GroupedFormActions
+          disabled={!form.formState.isValid}
           label={kind === "private-notes" ? "private notes" : "team memory"}
           dirty={form.formState.isDirty}
           pending={save.isPending}

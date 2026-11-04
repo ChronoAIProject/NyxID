@@ -48,10 +48,9 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
             <span className="min-w-0 flex-1 break-words">{row.label}</span>
             <span className="text-11 text-text-tertiary">
               {row.status === "active"
-                ? formatAutomationTime(
-                    row.next_run_at,
-                    settings.data?.timezone ?? browserTimezone(),
-                  )
+                ? row.source === "webhook" ? "Runs on webhook events" : row.next_run_at
+                  ? formatAutomationTime(row.next_run_at, settings.data?.timezone ?? browserTimezone())
+                  : "No run scheduled"
                 : "Paused"}
             </span>
           </Link>
@@ -70,14 +69,14 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
   );
 }
 
-export function AutomationPreferences() {
+export function AutomationPreferences({ title = "Automations" }: { readonly title?: string }) {
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [open, setOpen] = useState(false);
   const guard = useGroupedDraftGuard();
   return (
     <div className="max-w-2xl space-y-6 text-12">
-      <GroupedList title="Automations">
+      <GroupedList title={title}>
         <GroupedDisclosure
           aria-expanded={open}
           onClick={async () => {

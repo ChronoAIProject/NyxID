@@ -101,7 +101,7 @@ export function GroupedRow({
         "relative not-first:before:absolute not-first:before:left-4 not-first:before:right-0 not-first:before:top-0 not-first:before:h-px not-first:before:bg-border/50 flex min-h-11 w-full flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5 text-left text-12 font-medium text-foreground",
         leading && "not-first:before:left-11",
         interactive &&
-          "cursor-pointer transition-colors hover:bg-overlay active:bg-overlay-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:text-text-tertiary disabled:hover:bg-transparent",
+          "cursor-pointer transition-colors hover:bg-overlay active:bg-overlay-strong focus-visible:outline-none disabled:cursor-not-allowed disabled:text-text-tertiary disabled:hover:bg-transparent",
         className,
         child?.props.className,
       )}
@@ -162,7 +162,7 @@ export function GroupedInput({
   return (
     <Input
       className={cn(
-        "h-auto rounded-none border-0 font-normal px-0 py-1 shadow-none focus-visible:ring-2 focus-visible:ring-ring",
+        "h-auto rounded-none border-0 font-normal px-0 py-1 shadow-none focus-visible:ring-0",
         className,
       )}
       {...props}
@@ -177,7 +177,7 @@ export function GroupedTextarea({
   return (
     <Textarea
       className={cn(
-        "rounded-none border-0 bg-transparent px-0 py-1 text-12 font-normal shadow-none focus-visible:ring-2 focus-visible:ring-ring",
+        "rounded-none border-0 bg-transparent px-0 py-1 text-12 font-normal shadow-none focus-visible:ring-0",
         className,
       )}
       {...props}
@@ -193,7 +193,7 @@ export function GroupedSelectTrigger({
     <SelectTrigger
       data-slot="grouped-select"
       className={cn(
-        "ml-auto h-auto min-h-8 w-auto max-w-full gap-2 font-normal rounded-md border-0 bg-transparent px-0 py-1 shadow-none [&>span]:line-clamp-none [&>span]:whitespace-normal [&>span]:break-words [&>span]:text-left",
+        "ml-auto h-auto min-h-8 w-auto max-w-full gap-2 font-normal rounded-md border-0 bg-transparent px-0 py-1 shadow-none focus-visible:ring-0 [&>span]:line-clamp-none [&>span]:whitespace-normal [&>span]:break-words [&>span]:text-left",
         className,
       )}
       {...props}

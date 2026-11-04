@@ -28,6 +28,7 @@ import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
 import { SHARED_LEGACY_WARNING, SINGLE_USER_WARNING } from "@/schemas/machines";
 import type { NodeInfo } from "@/types/nodes";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -147,7 +148,7 @@ export function MachineSettings({
                     <span className="min-w-0 flex-1">
                       Update automatically when idle
                     </span>
-                    <Checkbox
+                    <Switch
                       checked={automatic}
                       disabled={!canManage}
                       onCheckedChange={(value) => setAutomaticDraft(value === true)}
@@ -283,7 +284,7 @@ export function MachineSettings({
                     <span className="min-w-0 flex-1">
                       Allow saved-login typing on this machine
                     </span>
-                    <Checkbox
+                    <Switch
                       checked={allow}
                       disabled={saving}
                       onCheckedChange={(value) => {
@@ -299,7 +300,7 @@ export function MachineSettings({
                       <span className="min-w-0 flex-1">
                         I understand the shared-user risk and allow typing.
                       </span>
-                      <Checkbox
+                      <Switch
                         checked={acknowledged}
                         disabled={saving}
                         onCheckedChange={(value) => setAcknowledged(value === true)

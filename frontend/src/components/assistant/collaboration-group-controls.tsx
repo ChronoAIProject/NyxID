@@ -29,7 +29,6 @@ import {
   GroupedDialogCancel,
   GroupedDecisionDraft,
 } from "@/components/ui/grouped-dialog";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -141,6 +140,7 @@ function Rename({
   readonly busy: boolean;
 }) {
   const form = useAppForm<z.infer<typeof renameSchema>>({
+    mode: "onChange",
     resolver: zodResolver(renameSchema),
     defaultValues: { name },
   });
@@ -166,6 +166,7 @@ function Rename({
           />
         </GroupedList>
         <GroupedFormActions
+          disabled={!form.formState.isValid}
           label="group name"
           dirty={form.formState.isDirty}
           pending={busy}
@@ -616,7 +617,7 @@ export function CollaborationSettings({
               )}
             </GroupedList>
           </DialogBody>
-          <GroupedFormBar />
+          <GroupedFormBar dialog />
         </GroupedFormScope>
         {confirm ? (
           <Dialog
@@ -799,12 +800,13 @@ export function GroupInviteDialog({
               />
               <GroupedRow asChild interactive>
                 <label>
-                  <Checkbox
+                  <Switch
+                    className="order-last shrink-0"
                     checked={disclosed}
                     onCheckedChange={(checked) => setDisclosed(checked === true)}
                   />
-                  I understand everyone can read the full retained group
-                  history.
+                  <span className="min-w-0 flex-1">I understand everyone can read the full retained group
+                  history.</span>
                 </label>
               </GroupedRow>
             </GroupedList>

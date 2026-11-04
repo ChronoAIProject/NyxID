@@ -5,7 +5,9 @@ export function WorkspacePageHeader({
   title,
   description,
   actions,
+  column = false,
 }: {
+  readonly column?: boolean;
   readonly title: string;
   readonly description: string;
   readonly actions?: ReactNode;
@@ -13,7 +15,7 @@ export function WorkspacePageHeader({
   return (
     <header
       data-workspace-header=""
-      className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
+      className={`flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4${column ? " max-w-2xl" : ""}`}
     >
       <div className="min-w-0 space-y-2">
         <h1 className="text-22 font-bold leading-tight tracking-tight sm:text-28">

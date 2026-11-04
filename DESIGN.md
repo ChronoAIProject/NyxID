@@ -132,7 +132,7 @@ shapes retain their meaning.
 - **ButtonIcon:** `h-[18px] w-[18px] rounded-[4px]` — small inset icon container for primary/destructive buttons
 - **Variants:** default (ghost border), primary (gradient — used as the dominant dialog/CTA submit), destructive, outline, secondary, ghost, link
 - **Loading:** `isLoading` prop shows `Loader2` spinner + children, disables button. Some legacy pages still use a label-swap (`{mutation.isPending ? "Creating..." : "Add"}`) — prefer `isLoading` for new code.
-- **Rule:** Submit/Save buttons must be disabled when no changes exist or required fields are empty
+- **Rule:** Edit Save buttons are disabled while pristine, invalid or pending. Create actions are disabled only while invalid or pending; valid prefilled defaults can be submitted.
 - **`AddCtaButton`** (shared) — the standard "create" trigger on every list page header. `h-8`, `rounded-lg`, `border-hairline` idle / `border-hairline-strong` hover, `text-12 text-text-tertiary`, with a 22×22 inset icon container (`rounded-[6px]`, `border-hairline`, `bg-overlay`, 12px Plus icon). Distinct from `variant="primary"` — used when the button is the page-level "add" affordance.
 
 ### Composer toolbar
@@ -237,8 +237,9 @@ custom theme tokens. Headings and footers use `px-4`.
 `GroupedRow` provides a `min-h-11` touch target, `px-4 py-2.5`, wrapping titles
 and accessories, and a hairline before adjacent rows inset by `left-4` (or `left-11` after a leading icon).
 Optional leading icons use `1.125em`. Use `asChild` to retain the native
-button, link, label or form-item element. Only interactive rows receive hover,
-pressed and focus-visible styles. `GroupedDisclosure` is a native button with
+button, link, label or form-item element. Only interactive rows receive hover and pressed styles. Keyboard focus uses an inset
+`input-focus` ring on the whole row, with the card’s corner radius on first and last
+rows; focus within adds a subtle `bg-overlay`. Borderless fields have no inner ring. `GroupedDisclosure` is a native button with
 a trailing chevron; buttons and links must keep accessible names.
 
 Groups never contain another group, card or outlined control. Use borderless
@@ -249,7 +250,8 @@ under their label. Validation text is destructive and linked with
 explanations below the group, never in another bordered box. Destructive
 actions are destructive-colored rows in their own neutral group.
 
-Selection lists use checkmark or switch rows, search when there are more than
+Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
+multi-select lists. Selection lists use checkmark or switch rows, search when there are more than
 eight items, and scroll internally only for long lists. `GroupedFormScope` gives
 each tab one dirty-only `GroupedFormBar`, naming its unsaved forms. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
@@ -273,8 +275,13 @@ inputs and linked errors in row and footer slots. `GroupedDialog`, `GroupedSheet
 and `GroupedPage` register dirty drafts for X, Escape, overlay, route navigation
 and browser unload. Each dialog isolates its save scope from a settings form
 behind it. Immediate reviewed decisions retain their existing buttons and register
-only their acknowledgment draft. Persisted request retries and generating a setup
-command from reviewed defaults are action rows, available without a new draft;
+only their acknowledgment draft. Dialogs always show Cancel (ghost/outline) and a
+primary action through `GroupedDialogActions` (or `GroupedFormBar dialog` for a
+coordinated edit). They never show Unsaved or Discard. Edit Save additionally requires
+a dirty form; Create can submit valid pristine defaults. Cancel follows the same
+discard guard as X, Escape and the overlay. Dirty-only bars are for inline drawer
+tabs/drill-ins, the NyxBot settings panel and machine settings sheets. Persisted
+request retries stay explicit actions, available without a new draft;
 they preserve the existing acceptance, idempotency and revision checks.
 Light-theme destructive text uses the darker semantic red so field errors in
 footers meet 4.5:1 contrast against the page background as well as cards.
@@ -292,7 +299,8 @@ desktop. All spacing, text and icons follow the assistant display scale.
 
 Approvals, Plugins, Automations and Machines use `WorkspacePageHeader` inside the
 workspace's common scroll and padding container. Titles, description width and
-wrapping action slots share one scale. Approvals use Pending/History segments and
+wrapping action slots share one scale. Automations and Approvals headers and content
+share `max-w-2xl`; Plugins keeps its wide grid. Approvals use Pending/History segments and
 local-day history groups; the workspace wrapper adapts the existing approval
 block without changing its decision handling or transcript presentation.
 
@@ -584,7 +592,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 
 ## Interaction Rules
 - **Edit buttons:** Save/Cancel always positioned bottom-right of their edit container; Save is the rightmost button (`variant="primary"`), Cancel sits to its left
-- **CTA disabled state:** Submit/Save buttons disabled when no changes exist or required fields are empty
+- **CTA disabled state:** Edit Save is disabled while pristine, invalid or pending; Create is disabled only while invalid or pending.
 - **Tables with no actions:** Actions column must not be present if the table has no row actions
 - **Tables with 2+ actions:** Use 3-dot dropdown menu instead of inline buttons (legacy violations: `approval-history`, `admin-user-detail` — fix when touching)
 - **Status badges:** Always title-case (`Active`, `Pending`, not `active`, `PENDING`)
@@ -595,7 +603,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
-| 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and dirty-only primary submit bars. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |
+| 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and primary submit actions. Dialog footers stay visible; inline settings bars appear while dirty. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |
 | 2026-11-04 | Workspace page family and equal-size plugin cards | Shared headers and segmented status views align workspace pages. Connectors and skill results share a text-scaled card size with native full-card actions and contained secondary controls; attached skills remain grouped rows. |
 | 2026-11-04 | NyxBot inset grouped forms and segmented navigation | One neutral card per group, inset hairlines, borderless controls and external helper text replace nested boxes. Mounted tabs preserve drafts; detail navigation keeps independent revision-fenced saves. The subtle `border-border/50` edge preserves light-theme contrast. |
 | 2026-04-01 | Initial design system created | Created by /design-consultation + /design-shotgun. User reviewed 7 directions and chose refined purple with warm neutrals. |

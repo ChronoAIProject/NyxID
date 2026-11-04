@@ -29,6 +29,7 @@ import {
   FormField,
   FormLabel,
   useAppForm,
+  FormDescription as RowDescription,
 } from "@/components/ui/form";
 import {
   Select,
@@ -217,35 +218,35 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                 min: 0,
                 max: 32,
                 description:
-                  "Resume long tasks automatically when the assistant reaches a tool or time budget, keeping its context. Default 8; 0 turns this off, up to 32. Stop always ends the task. Continuing uses credits at the usual rates.",
+                  "0–32 · 0 turns this off. Resumes with the same context after a tool or time budget; Stop always ends the task.",
               },
               {
                 name: "max_live_subagents",
                 label: "Live specialists",
                 min: 0,
                 max: settings.max_live_subagents_limit,
-                description: `0 to ${settings.max_live_subagents_limit}. 0 stops new specialists.`,
+                description: `0–${settings.max_live_subagents_limit} · 0 stops new specialists`,
               },
               {
                 name: "max_concurrent_subagent_turns",
                 label: "Specialists working at once",
                 min: 1,
                 max: settings.max_concurrent_subagent_turns_limit,
-                description: `1 to ${settings.max_concurrent_subagent_turns_limit}.`,
+                description: `1–${settings.max_concurrent_subagent_turns_limit} · Maximum specialists working simultaneously`,
               },
               {
                 name: "max_group_handoffs",
                 label: "Group hand-offs per message",
                 min: 0,
                 max: settings.max_group_handoffs_limit,
-                description: `How many times agents in a group may pass work to each other after one of your messages. 0 to ${settings.max_group_handoffs_limit}; 0 turns hand-offs off.`,
+                description: `0–${settings.max_group_handoffs_limit} · 0 turns off hand-offs after a message`,
               },
               {
                 name: "max_group_handoffs_per_hour",
                 label: "Group hand-offs per hour",
                 min: 0,
                 max: settings.max_group_handoffs_per_hour_limit,
-                description: `Across all your groups. 0 to ${settings.max_group_handoffs_per_hour_limit}.`,
+                description: `0–${settings.max_group_handoffs_per_hour_limit} · Across all your groups`,
               },
             ] as const
           ).map(({ name, label, min, max, description }) => (
@@ -259,10 +260,9 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     <FormLabel className="text-12 font-medium">
                       {label}
                     </FormLabel>
-                    <FormDescription>
-                      <span className="font-medium">{label}: </span>
+                    <RowDescription className="text-11 font-normal text-text-tertiary">
                       {description}
-                    </FormDescription>
+                    </RowDescription>
                   </div>
                   <FormControl>
                     <Input

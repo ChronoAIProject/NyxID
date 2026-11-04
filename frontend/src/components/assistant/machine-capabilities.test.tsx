@@ -174,7 +174,7 @@ it("keeps missing evidence actionable with flags off and requires affirmative le
   ).not.toBeInTheDocument();
   const request = screen.getByRole("button", { name: "Request shared legacy owner approval" });
   expect(request).toBeDisabled();
-  fireEvent.click(screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ }));
+  fireEvent.click(screen.getByRole("switch", { name: /I explicitly choose shared legacy/ }));
   fireEvent.click(request);
   await waitFor(() => expect(contextSave).toHaveBeenCalledWith({ node: "node", selection: { mode: "shared_legacy", expected_revision: 3, capabilities: off, saved_login_ids: [] } }));
   expect(screen.getByText(/may read node tokens, signing secrets and stored credentials/)).toBeInTheDocument();
@@ -183,7 +183,7 @@ it("keeps missing evidence actionable with flags off and requires affirmative le
 it("keeps owner selection available with capability editing off and disables it for a read-only view", () => {
   const pending = { ...machine, mode: "selection_required" as const, selection_required: true };
   const view = render(<MachineCapabilityForm machine={pending} agentId="agent" capabilityEditing={false} />);
-  const consent = screen.getByRole("checkbox", { name: /I explicitly choose shared legacy/ });
+  const consent = screen.getByRole("switch", { name: /I explicitly choose shared legacy/ });
   expect(consent).toBeEnabled();
   fireEvent.click(consent);
   expect(screen.getByRole("button", { name: "Request shared legacy owner approval" })).toBeEnabled();

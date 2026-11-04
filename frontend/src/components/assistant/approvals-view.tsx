@@ -194,6 +194,7 @@ export function ApprovalsView() {
   return (
     <div className="space-y-6">
       <WorkspacePageHeader
+        column
         title="Approvals"
         description="Review actions waiting for your permission. Decisions here, in Telegram or on mobile stay in sync."
       />

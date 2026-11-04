@@ -28,7 +28,7 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Form,
   FormControl,
@@ -518,16 +518,17 @@ export function ConfirmationDecision({
               name="reviewed"
               render={({ field }) => (
                 <FormItem inline>
-                  <div className="flex items-start gap-2">
+                  <div className="flex w-full items-start gap-2">
                     <FormControl>
-                      <Checkbox
+                      <Switch
+                        className="order-last shrink-0"
                         checked={field.value}
                         onCheckedChange={(value) =>
                           field.onChange(value === true)
                         }
                       />
                     </FormControl>
-                    <FormLabel className="text-12">
+                    <FormLabel className="min-w-0 flex-1 text-12">
                       I reviewed this identity and safe request summary.
                     </FormLabel>
                   </div>
@@ -551,7 +552,7 @@ export function ConfirmationDecision({
         </GroupedList>
         <DialogFooter className="flex-wrap border-t border-border/50 bg-background pt-3 md:bg-background [&>button]:h-auto [&>button]:min-h-8 [&>button]:min-w-0 [&>button]:flex-auto [&>button]:whitespace-normal [&>button]:py-1.5">
           <GroupedDialogCancel disabled={mutation.isPending}>
-            Close
+            Cancel
           </GroupedDialogCancel>
           <Button
             variant="destructive"

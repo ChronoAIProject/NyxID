@@ -10,6 +10,7 @@ import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { GroupedFormActions } from "@/components/ui/grouped-form";
 import { GroupedDetail } from "@/components/ui/grouped-detail";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -21,6 +22,13 @@ import {
 } from "@/hooks/use-machine-access";
 import { machineSelectionSchema, type MachineAccess, type MachineSelection } from "@/schemas/machine-access";
 const labels = { shell: "Shell commands", files: "File tools", browser: "Secure browser", computer: "Full computer control", developer_browser: "Developer browser" } as const;
+const descriptions: Record<keyof typeof labels, string> = {
+  shell: "Run commands as the machine’s OS user",
+  files: "Read and write files",
+  browser: "Saved logins stay here; browser-only access avoids desktop authority",
+  computer: "Operate applications through their UI",
+  developer_browser: "Run JavaScript in a separate browser",
+};
 
 export function MachineCapabilities({
   agentId,
@@ -316,7 +324,7 @@ export function MachineCapabilityForm({
                   I explicitly choose shared legacy access and acknowledge this
                   warning.
                 </span>
-                <Checkbox
+                <Switch
                   disabled={disabled || contextMutation.isPending}
                   checked={legacyAccepted}
                   onCheckedChange={(value) => setLegacyAccepted(value === true)}
@@ -353,7 +361,7 @@ export function MachineCapabilityForm({
       </GroupedList>
       <GroupedList
         title="Allowed capabilities"
-        footer="Shell commands can read and write anything their OS user can access, even with file tools off. Full computer control can operate applications through their UI. Browser-only access avoids desktop authority. Developer browser permits JavaScript evaluation in its separate browser; saved logins stay in the secure browser. Saving changes cancels this agent’s current work on this machine."
+        footer="Shell commands can read and write anything their OS user can access, even with file tools off. Saving changes cancels this agent’s current work on this machine."
       >
         <fieldset disabled={blocked || mutation.isPending} className="min-w-0">
           <legend className="sr-only">Allowed capabilities</legend>
@@ -362,11 +370,9 @@ export function MachineCapabilityForm({
               <label>
                 <span className="min-w-0 flex-1">
                   {labels[key]}
-                  {!machine.ceiling[key] ? (
-                    <span className="block text-11 font-normal text-text-tertiary">
-                      Off on node
-                    </span>
-                  ) : null}
+                  <span className="block text-11 font-normal text-text-tertiary">
+                    {descriptions[key]}{!machine.ceiling[key] ? " · Off on node" : ""}
+                  </span>
                 </span>
                 <Checkbox
                   aria-label={labels[key]}

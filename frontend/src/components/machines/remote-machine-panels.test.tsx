@@ -260,7 +260,7 @@ it("a safe review requires acknowledgement and submits the bound decision contra
     screen.getByRole("button", { name: "Approve one retry" }),
   ).toBeDisabled();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),

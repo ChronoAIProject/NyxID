@@ -117,7 +117,7 @@ it("preselects NyxBot, offers live agents only, and creates the group", async ()
   expect(within(dialog).queryByRole("checkbox", { name: /old/ })).not.toBeInTheDocument();
   expect(
     within(dialog).queryByRole("button", { name: "Create crew" }),
-  ).not.toBeInTheDocument();
+  ).toBeDisabled();
   await user.type(within(dialog).getByRole("textbox", { name: "Name" }), "Launch crew");
   await user.click(within(dialog).getByRole("checkbox", { name: /researcher/ }));
   await user.click(within(dialog).getByRole("button", { name: "Create crew" }));
@@ -161,7 +161,7 @@ it("saves only what changed", async () => {
   const dialog = screen.getByRole("dialog", { name: "Group settings" });
   expect(
     within(dialog).queryByRole("button", { name: "Save" }),
-  ).not.toBeInTheDocument();
+  ).toBeDisabled();
   const name = within(dialog).getByRole("textbox", { name: "Name" });
   await user.clear(name);
   await user.type(name, "Release crew");
@@ -265,7 +265,7 @@ it("lets a participant leave but never edit or delete the organization group", a
   expect(screen.getByLabelText("Name")).toBeDisabled();
   expect(
     screen.queryByRole("button", { name: "Save" }),
-  ).not.toBeInTheDocument();
+  ).toBeDisabled();
   expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
   expect(screen.getByText(/The creator or a participating Admin must remain/)).toHaveTextContent("Leaving as the last participant deletes the group.");
   expect(screen.getByText(/Wait for your running turns/)).toBeInTheDocument();

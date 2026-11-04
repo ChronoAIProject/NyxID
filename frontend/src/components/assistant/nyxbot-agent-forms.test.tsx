@@ -111,7 +111,7 @@ it("creates a specialist with its role, services and account read, then opens it
   const dialog = screen.getByRole("dialog", { name: "New agent" });
   expect(
     within(dialog).queryByRole("button", { name: "Create agent" }),
-  ).not.toBeInTheDocument();
+  ).toBeDisabled();
   // Only connected, active services are offered.
   const services = within(dialog).getByRole("group", { name: "Services" });
   expect(services).not.toHaveTextContent("Old API");

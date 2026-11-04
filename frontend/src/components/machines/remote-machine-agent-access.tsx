@@ -28,7 +28,7 @@ import {
   GroupedDraftOwnerContext,
   useGroupedDraftGuard,
 } from "@/lib/grouped-drafts";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
@@ -262,14 +262,16 @@ function AgentAssignment({
             >
               <GroupedRow asChild interactive>
                 <label>
-                  {" "}
-                  <Checkbox
+                  <Switch
+                    className="order-last shrink-0"
                     checked={form.watch("assigned")}
                     onCheckedChange={(value) =>
                       form.setValue("assigned", value === true)
                     }
                   />
-                  Assign this machine to {agent.display_name ?? agent.name}
+                  <span className="min-w-0 flex-1">
+                    Assign this machine to {agent.display_name ?? agent.name}
+                  </span>
                 </label>
               </GroupedRow>
             </GroupedList>

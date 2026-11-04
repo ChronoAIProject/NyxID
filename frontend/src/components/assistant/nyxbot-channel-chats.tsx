@@ -8,7 +8,6 @@ import { GuestReadiness } from "./guest-readiness";
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
 import { Megaphone, User, Users } from "lucide-react";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -377,7 +376,7 @@ export function ChannelChats({
               <span className="min-w-0 flex-1">
                 Also apply to existing private chats
               </span>
-              <Checkbox
+              <Switch
                 checked={applyToExisting}
                 disabled={posts.isPending}
                 onCheckedChange={(checked) =>

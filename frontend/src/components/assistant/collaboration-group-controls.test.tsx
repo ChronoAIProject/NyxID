@@ -255,7 +255,7 @@ it("requires history acknowledgement after invite preview and before acceptance"
   expect(
     screen.getByRole("button", { name: "Accept invitation" }),
   ).toBeDisabled();
-  await userEvent.click(screen.getByRole("checkbox"));
+  await userEvent.click(screen.getByRole("switch"));
   await userEvent.click(
     screen.getByRole("button", { name: "Accept invitation" }),
   );

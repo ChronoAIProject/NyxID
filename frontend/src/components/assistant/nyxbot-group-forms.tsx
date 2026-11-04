@@ -5,6 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogBody,
@@ -37,7 +38,7 @@ import {
   GroupedDialog,
   GroupedDialogContent,
 } from "@/components/ui/grouped-dialog";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import {
   Select,
   SelectContent,
@@ -220,7 +221,6 @@ function GroupOwnerPicker({
   const enabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   return (
     <GroupedList
-      title="Ownership"
       footer={
         !enabled && (orgs.data?.length ?? 0) > 0
           ? "Organization groups are not enabled yet."
@@ -371,6 +371,7 @@ export function NewGroupDialog({
   const userId = useAuthStore((state) => state.user?.id);
   const nyxbotId = nyxBotOf(agents)?.id;
   const form = useAppForm<AssistantGroupForm>({
+    mode: "onChange",
     resolver: zodResolver(assistantGroupFormSchema),
     defaultValues: { name: "", member_agent_ids: nyxbotId ? [nyxbotId] : [] },
   });
@@ -378,8 +379,6 @@ export function NewGroupDialog({
   const org = form.watch("org");
   const collaboration = form.watch("collaboration");
   const people = form.watch("participant_user_ids") ?? [];
-  const name = form.watch("name");
-  const members = form.watch("member_agent_ids");
   // Agents may still be loading when the dialog opens; preselect NyxBot once known.
   useEffect(() => {
     if (org || collaboration || !nyxbotId || form.getValues("member_agent_ids").length) return;
@@ -432,11 +431,11 @@ export function NewGroupDialog({
                 >
                   <GroupedRow asChild interactive>
                     <label>
-                      <Checkbox checked={Boolean(collaboration)} onCheckedChange={(checked) => {
+                      <Switch className="order-last shrink-0" checked={Boolean(collaboration)} onCheckedChange={(checked) => {
                         form.setValue("collaboration", checked === true);
                         form.setValue("member_agent_ids", []);
                       }} />
-                      Invite other people
+                      <span className="min-w-0 flex-1">Invite other people</span>
                     </label>
                   </GroupedRow>
                 </GroupedList>
@@ -459,11 +458,12 @@ export function NewGroupDialog({
                 </GroupedList>
               ) : null}
             </DialogBody>
-            <GroupedFormActions
+            <GroupedDialogActions
+              intent="create"
               label="new crew"
               dirty={form.formState.isDirty}
               pending={create.isPending}
-              disabled={!name.trim() || !members.length}
+              disabled={!form.formState.isValid}
               save={form.handleSubmit(submit)}
               discard={() => {
                 form.reset();
@@ -506,6 +506,7 @@ export function GroupSettingsDialog({
   // Members that are gone leave on the next save (the server refuses them).
   const goneMembers = group.members.some((member) => !alive(member));
   const form = useAppForm<AssistantGroupForm>({
+    mode: "onChange",
     resolver: zodResolver(assistantGroupFormSchema),
     defaultValues: {
       name: group.name,
@@ -514,7 +515,6 @@ export function GroupSettingsDialog({
       member_agent_ids: group.members.filter(alive).map((member) => member.id),
     },
   });
-  const name = form.watch("name");
   const members = form.watch("member_agent_ids");
   const busy = update.isPending || remove.isPending;
 
@@ -687,11 +687,11 @@ export function GroupSettingsDialog({
                   </GroupedList>
                 ) : null}
               </DialogBody>
-              <GroupedFormActions
+              <GroupedDialogActions
                 label="group settings"
                 dirty={form.formState.isDirty}
                 pending={busy}
-                disabled={!canManage || !name.trim() || !members.length}
+                disabled={!canManage || !form.formState.isValid}
                 save={form.handleSubmit(save)}
                 discard={() => {
                   form.reset();

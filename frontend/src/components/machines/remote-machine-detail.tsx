@@ -8,7 +8,7 @@ import {
   GroupedRow,
   GroupedFooter,
 } from "@/components/ui/grouped-list";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import {
   assertRemoteMachineAdmission,
@@ -66,7 +66,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { MachineGrantList } from "@/components/shared/machine-grant-list";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -869,6 +869,7 @@ function LifecycleActionDialog({
   const [error, setError] = useState<string | null>(review.error);
   const [conflict, setConflict] = useState(false);
   const form = useAppForm<z.infer<typeof actionReviewSchema>>({
+    mode: "onChange",
     resolver: zodResolver(actionReviewSchema),
     defaultValues: { acknowledged: false },
   });
@@ -1028,16 +1029,17 @@ function LifecycleActionDialog({
                 name="acknowledged"
                 render={({ field }) => (
                   <GroupedField inline>
-                    <div className="flex items-start gap-3">
+                    <div className="flex w-full items-start gap-3">
                       <FormControl>
-                        <Checkbox
+                        <Switch
+                          className="order-last shrink-0"
                           checked={field.value}
                           onCheckedChange={(checked) =>
                             field.onChange(checked === true)
                           }
                         />
                       </FormControl>
-                      <FormLabel className="text-12">
+                      <FormLabel className="min-w-0 flex-1 text-12">
                         I understand{" "}
                         {action === "delete"
                           ? "the irreversible data loss and cleanup policy"
@@ -1102,12 +1104,13 @@ function LifecycleActionDialog({
                 </GroupedRow>
               )}
             </GroupedList>
-            <GroupedFormActions
+            <GroupedDialogActions
+              intent="create"
               label="machine lifecycle acceptance"
               dirty={form.formState.isDirty}
               pending={mutation.isPending}
               disabled={
-                !form.watch("acknowledged") || conflict || Boolean(review.error)
+                !form.formState.isValid || !form.watch("acknowledged") || conflict || Boolean(review.error)
               }
               save={form.handleSubmit(submit)}
               discard={() => form.reset()}

@@ -321,6 +321,29 @@ html.assistant-display [data-grouped-list] [data-slot="grouped-select"] {
   padding-inline: 0;
 }
 
+/* Focus belongs to the entire row, including its borderless field or accessory. */
+[data-grouped-row]:focus-within {
+  background-color: var(--color-overlay);
+}
+
+[data-grouped-row]:focus-visible,
+[data-grouped-row]:has(:focus-visible) {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-input-focus);
+}
+
+[data-grouped-list] > [data-grouped-row]:first-child,
+[data-grouped-list] > :first-child:not([data-grouped-row]) > [data-grouped-row]:nth-child(1 of [data-grouped-row]) {
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+
+[data-grouped-list] > [data-grouped-row]:last-child,
+[data-grouped-list] > :last-child:not([data-grouped-row]) > [data-grouped-row]:nth-last-child(1 of [data-grouped-row]) {
+  border-bottom-left-radius: var(--radius-xl);
+  border-bottom-right-radius: var(--radius-xl);
+}
+
 [data-grouped-row].grouped-field > span:first-child,
 [data-grouped-row].grouped-field > label,
 [data-grouped-row].grouped-field > label > span:first-child {

@@ -138,7 +138,7 @@ afterEach(() => {
 const show = () => render(<RemoteMachineCreate onCreated={state.created} />);
 const accept = () =>
   userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
+    screen.getByRole("switch", { name: /I accept the shared environment/ }),
   );
 
 it("requires policy acceptance and sends only explicit free-slot creation with durable intent", async () => {
@@ -394,7 +394,7 @@ it("preserves configuration through free and paid quote review and replays a pai
   expect(screen.getByLabelText("Machine name")).toHaveValue("paid-research");
   expect(screen.getByRole("checkbox", { name: /^Browser/ })).toBeChecked();
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(
     (
@@ -413,7 +413,7 @@ it("preserves configuration through free and paid quote review and replays a pai
     screen.getByRole("button", { name: "Review paid creation" }),
   );
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Accept quote and create" }),
@@ -434,7 +434,7 @@ it("preserves configuration through free and paid quote review and replays a pai
   expect(screen.getByLabelText("Machine name")).toHaveValue("paid-research");
   expect(screen.getByLabelText("Machine name")).toBeDisabled();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Retry saved create request" }),
@@ -491,7 +491,7 @@ it("keeps selected configuration when a rejected intent is explicitly reset for 
   expect(screen.getByLabelText("Machine name")).toHaveValue("preserved-name");
   expect(screen.getByRole("checkbox", { name: /^Browser/ })).toBeChecked();
   expect(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
+    screen.getByRole("switch", { name: /I accept the shared environment/ }),
   ).not.toBeChecked();
   await accept();
   await userEvent.click(

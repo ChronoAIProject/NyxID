@@ -17,7 +17,7 @@ import {
   GroupedDialog,
   GroupedDialogContent,
 } from "@/components/ui/grouped-dialog";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import { Form, FormControl, FormField, useAppForm } from "@/components/ui/form";
 import {
   Select,
@@ -703,7 +703,8 @@ function SetupForm({
             {error && <ErrorBanner message={error} />}
           </GroupedFooter>
         </GroupedList>
-        <GroupedFormActions
+        <GroupedDialogActions
+          intent="create"
           label="phone or speech connection"
           dirty={form.formState.isDirty}
           pending={actions.create.isPending}

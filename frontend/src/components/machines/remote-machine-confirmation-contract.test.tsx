@@ -102,7 +102,7 @@ it("shows the actual safe summary and keeps absent pagination explicitly unknown
     }),
   ).not.toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),
@@ -285,7 +285,7 @@ it("reports approval as waiting for the original caller even before the next rea
   // accepted approval, never infer that the caller's operation executed.
   http.get.mockImplementation(() => new Promise(() => {}));
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),

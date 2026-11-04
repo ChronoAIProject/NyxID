@@ -12,6 +12,8 @@ import {
 } from "@/lib/grouped-form";
 import { GroupedSaveBar } from "./grouped-list";
 import { Button } from "./button";
+import { GroupedDialogCancel } from "./grouped-dialog";
+import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 
 export function GroupedFormScope({
   children,
@@ -72,36 +74,92 @@ export function GroupedFormScope({
   );
 }
 
-export function GroupedFormBar() {
+export function GroupedFormBar({ dialog = false }: { readonly dialog?: boolean }) {
   const context = useContext(GroupedFormContext);
   const dirty = [...(context?.entries.values() ?? [])].filter(
     (entry) => entry.dirty,
   );
-  if (!context || !dirty.length) return null;
+  if (!context || (!dialog && !dirty.length)) return null;
   const busy = context.saving || dirty.some((entry) => entry.pending);
   return (
-    <GroupedSaveBar role="region" aria-label="Unsaved changes">
-      <p
-        className="mr-auto basis-full text-11 text-text-tertiary"
-        aria-live="polite"
-      >
-        Unsaved: {[...new Set(dirty.map((entry) => entry.label))].join(", ")}
-      </p>
-      <Button
-        type="button"
-        variant="ghost"
-        disabled={busy}
-        onClick={() => dirty.forEach((entry) => entry.discard())}
-      >
-        Discard
-      </Button>
+    <GroupedSaveBar
+      role="region"
+      aria-label={dialog ? "Form actions" : "Unsaved changes"}
+    >
+      {!dialog && (
+        <p
+          className="mr-auto basis-full text-11 text-text-tertiary"
+          aria-live="polite"
+        >
+          Unsaved: {[...new Set(dirty.map((entry) => entry.label))].join(", ")}
+        </p>
+      )}
+      {dialog ? (
+        <GroupedDialogCancel disabled={busy}>Cancel</GroupedDialogCancel>
+      ) : (
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={busy}
+          onClick={() => dirty.forEach((entry) => entry.discard())}
+        >
+          Discard
+        </Button>
+      )}
       <Button
         type="button"
         variant="primary"
-        disabled={busy || dirty.some((entry) => entry.disabled)}
+        disabled={busy || !dirty.length || dirty.some((entry) => entry.disabled)}
         onClick={() => void context.save()}
       >
         Save changes
+      </Button>
+    </GroupedSaveBar>
+  );
+}
+
+/** Dialog actions stay visible even when reviewed defaults are already valid. */
+export function GroupedDialogActions({
+  intent = "edit",
+  cancel,
+  saveLabel = "Save changes",
+  saveVariant = "primary",
+  ...entry
+}: GroupedFormEntry & {
+  readonly intent?: "create" | "edit";
+  readonly cancel?: () => void;
+  readonly saveLabel?: string;
+  readonly saveVariant?: "primary" | "destructive";
+}) {
+  const coordinated = useGroupedForm(entry);
+  const guard = useGroupedDraftGuard();
+  if (coordinated) return null;
+  return (
+    <GroupedSaveBar role="region" aria-label="Form actions">
+      {cancel ? (
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={entry.pending}
+          onClick={() => {
+            if (!guard) cancel();
+            else void guard.confirmDiscard().then((discard) => {
+              if (discard) cancel();
+            });
+          }}
+        >
+          Cancel
+        </Button>
+      ) : (
+        <GroupedDialogCancel disabled={entry.pending}>Cancel</GroupedDialogCancel>
+      )}
+      <Button
+        type="button"
+        variant={saveVariant}
+        disabled={entry.disabled || entry.pending || (intent === "edit" && !entry.dirty)}
+        onClick={() => void entry.save()}
+      >
+        {saveLabel}
       </Button>
     </GroupedSaveBar>
   );

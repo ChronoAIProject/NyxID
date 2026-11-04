@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/form";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   GroupedList,
   GroupedRow,
@@ -27,7 +28,7 @@ import {
   GroupedField as FormItem,
   GroupedMessage as FormMessage,
 } from "@/components/ui/grouped-fields";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import {
   Select,
   SelectContent,
@@ -79,6 +80,7 @@ const labels = {
 };
 type Props = {
   readonly onCreated: (machineId: string, operationId: string) => void;
+  readonly onCancel?: () => void;
   readonly initialFreeSlot?: boolean;
 };
 
@@ -93,7 +95,7 @@ export function RemoteMachineCreate(props: Props) {
   return <HostedCreateForm key={ownerId} {...props} />;
 }
 
-function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
+function HostedCreateForm({ onCreated, onCancel, initialFreeSlot = true }: Props) {
   const user = useAuthStore((state) => state.user);
   const ownerId = user?.id;
   const entitlement = useRemoteMachineEntitlement();
@@ -130,6 +132,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
     unknown,
     z.output<typeof formSchema>
   >({
+    mode: "onChange",
     resolver: zodResolver(formSchema),
     defaultValues: {
       ...remoteMachineHostedConfigurationSchema.parse(
@@ -205,7 +208,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
       : null;
 
   async function submit(values: z.output<typeof formSchema>) {
-    if (!canCreate || !ownerId || useAuthStore.getState().user?.id !== ownerId)
+    if (!form.formState.isValid || !canCreate || !ownerId || useAuthStore.getState().user?.id !== ownerId)
       return;
     setError(undefined);
     try {
@@ -618,7 +621,8 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             render={({ field }) => (
               <FormItem inline className="items-start">
                 <FormControl>
-                  <Checkbox
+                  <Switch
+                    className="order-last shrink-0"
                     checked={field.value}
                     onCheckedChange={(value) => field.onChange(value === true)}
                     disabled={
@@ -630,7 +634,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
                     }
                   />
                 </FormControl>
-                <div>
+                <div className="min-w-0 flex-1">
                   <FormLabel className="text-12 font-medium text-foreground">
                     {freeSlot
                       ? "I accept the shared environment, fixed specification, and data policies."
@@ -670,47 +674,29 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             </button>
           </GroupedRow>
         </GroupedList>
-        {saved ? (
-          <GroupedList>
-            <GroupedRow asChild interactive>
-              <button
-                type="button"
-                disabled={
-                  create.isPending ||
-                  !canCreate ||
-                  !form.watch("acknowledged") ||
-                  !capabilities.length ||
-                  !form.watch("name")
-                }
-                onClick={() => void form.handleSubmit(submit)()}
-              >
-                Retry saved create request
-              </button>
-            </GroupedRow>
-          </GroupedList>
-        ) : (
-          <GroupedFormActions
-            label="hosted machine configuration"
-            dirty={form.formState.isDirty}
-            pending={create.isPending}
-            disabled={
-              !canCreate ||
-              !form.watch("acknowledged") ||
-              !capabilities.length ||
-              !form.watch("name")
-            }
-            save={form.handleSubmit(submit)}
-            discard={() => {
-              form.reset();
-              setError(undefined);
-            }}
-            saveLabel={
-              freeSlot
-                ? "Create free remote machine"
-                : "Accept quote and create"
-            }
-          />
-        )}
+        <GroupedDialogActions
+          intent="create"
+          cancel={onCancel ?? (() => window.location.assign("/assistant/machines"))}
+          label="hosted machine configuration"
+          dirty={form.formState.isDirty}
+          pending={create.isPending}
+          disabled={
+            !form.formState.isValid || !canCreate ||
+            !form.watch("acknowledged") ||
+            !capabilities.length ||
+            !form.watch("name")
+          }
+          save={form.handleSubmit(submit)}
+          discard={() => {
+            form.reset();
+            setError(undefined);
+          }}
+          saveLabel={
+            saved ? "Retry saved create request" : freeSlot
+              ? "Create free remote machine"
+              : "Accept quote and create"
+          }
+        />
       </form>
     </Form>
   );

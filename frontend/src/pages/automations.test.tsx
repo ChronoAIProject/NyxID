@@ -156,7 +156,7 @@ it("preserves schedule drafts across segments and guards dismissal until discard
   ).toHaveValue(3);
   expect(screen.getByLabelText("Maximum occurrences")).toHaveValue(7);
   expect(
-    screen.getAllByRole("region", { name: "Unsaved changes" }),
+    screen.getAllByRole("region", { name: "Form actions" }),
   ).toHaveLength(1);
   await user.keyboard("{Escape}");
   const guard = await screen.findByRole("dialog", {
@@ -167,14 +167,11 @@ it("preserves schedule drafts across segments and guards dismissal until discard
   expect(
     screen.getByRole("spinbutton", { name: "Interval amount" }),
   ).toHaveValue(3);
-  await user.click(screen.getByRole("button", { name: "Discard" }));
-  expect(
-    screen.queryByRole("region", { name: "Unsaved changes" }),
-  ).not.toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "Calendar" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  await user.click(within(await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  })).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
   expect(mocks.create).not.toHaveBeenCalled();
 });
 
@@ -560,4 +557,18 @@ it("keeps expired setup instructions unavailable", () => {
   render(<AutomationsPage />);
   expect(screen.getByText("Setup link expired")).toBeInTheDocument();
   expect(screen.queryByLabelText("Instruction")).not.toBeInTheDocument();
+});
+
+
+it("names webhook, paused and never-run states without placeholder dashes", () => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [
+    { ...trigger, id: "webhook", source: "webhook", schedule: null, next_run_at: null, last_run: null },
+    { ...trigger, id: "paused", status: "disabled", next_run_at: null, last_run: null },
+    { ...trigger, id: "active", next_run_at: null, last_run: null },
+  ] } });
+  render(<AutomationsPage />);
+  expect(screen.getByText(/Runs on webhook events/)).toHaveTextContent("Not run yet");
+  expect(screen.getByText(/Schedule paused/)).toHaveTextContent("Not run yet");
+  expect(screen.getByText(/No run scheduled/)).toHaveTextContent("Not run yet");
+  expect(screen.queryByText(/Next: [—–-]/)).not.toBeInTheDocument();
 });

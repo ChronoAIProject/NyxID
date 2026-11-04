@@ -14,6 +14,7 @@ import {
   GroupedList,
   GroupedRow,
   GroupedFooter,
+  GroupedSaveBar,
   GroupedSelectTrigger as SelectTrigger,
 } from "@/components/ui/grouped-list";
 import {
@@ -21,10 +22,11 @@ import {
   GroupedLabel as FormLabel,
   GroupedMessage as FormMessage,
 } from "@/components/ui/grouped-fields";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import { GroupedPage, GroupedDecisionDraft } from "@/components/ui/grouped-dialog";
 import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   SegmentedControl as Tabs,
   SegmentedControlList as TabsList,
@@ -247,6 +249,7 @@ function MachineSetupContent() {
       </Tabs>
       {hosted ? (
         <RemoteMachineCreate
+          onCancel={() => void navigate({ to: "/assistant/machines" })}
           onCreated={(machineId, operationId) =>
             void navigate({
               to: "/assistant/machines",
@@ -347,7 +350,7 @@ function MachineSetupContent() {
                     <span className="flex-1">
                       I explicitly accept shared legacy access and this warning.
                     </span>
-                    <Checkbox disabled={locked} checked={form.watch("legacy_warning_acknowledged") === true} onCheckedChange={value => form.setValue("legacy_warning_acknowledged", value === true)} />
+                    <Switch disabled={locked} checked={form.watch("legacy_warning_acknowledged") === true} onCheckedChange={value => form.setValue("legacy_warning_acknowledged", value === true)} />
                     <FormField control={form.control} name="legacy_warning_acknowledged" render={() => <FormMessage />} />
                   </label>
                 </GroupedRow>
@@ -454,7 +457,8 @@ function MachineSetupContent() {
             >
               <GroupedRow asChild>
                 <label>
-                  <Checkbox
+                  <Switch
+                    className="order-last shrink-0"
                     checked={form.watch("automatic_updates") ?? true}
                     disabled={locked}
                     onCheckedChange={(value) =>
@@ -465,20 +469,10 @@ function MachineSetupContent() {
                 </label>
               </GroupedRow>
             </GroupedList>
-            {!locked && !form.formState.isDirty && (
-              <GroupedList>
-                <GroupedRow asChild interactive>
-                  <button
-                    type="submit"
-                    disabled={!capabilities.length || !form.watch("name")}
-                  >
-                    Create my setup command
-                  </button>
-                </GroupedRow>
-              </GroupedList>
-            )}
             {!locked && (
-              <GroupedFormActions
+              <GroupedDialogActions
+                intent="create"
+                cancel={() => void navigate({ to: "/assistant/machines" })}
                 label="machine setup"
                 dirty={form.formState.isDirty}
                 pending={issuing}
@@ -527,6 +521,7 @@ export function MachinePairPage() {
 }
 
 function MachinePairContent() {
+  const navigate = useNavigate();
   const search = useSearch({ strict: false }) as { code?: string };
   const [code, setCode] = useState(search.code ?? "");
   const [details, setDetails] = useState<MachineSetup>();
@@ -566,7 +561,7 @@ function MachinePairContent() {
               aria-label="Pairing code"
               value={code}
               maxLength={16}
-              disabled={Boolean(decision.data) || preview.isPending}
+              disabled={Boolean(decision.data) || preview.isPending || decision.isPending}
               onChange={(event) => {
                 setCode(event.target.value);
                 setDetails(undefined);
@@ -576,7 +571,7 @@ function MachinePairContent() {
               variant="ghost"
               type="submit"
               isLoading={preview.isPending}
-              disabled={!code || Boolean(decision.data)}
+              disabled={!code || Boolean(decision.data) || preview.isPending || decision.isPending}
             >
               Review
             </Button>
@@ -600,9 +595,10 @@ function MachinePairContent() {
           >
             <GroupedRow asChild>
               <label>
-                <Checkbox
+                <Switch
+                  className="order-last shrink-0"
                   checked={automatic}
-                  disabled={Boolean(decision.data)}
+                  disabled={Boolean(decision.data) || decision.isPending}
                   onCheckedChange={(value) => setAutomatic(value === true)}
                 />
                 <span className="flex-1">
@@ -614,8 +610,10 @@ function MachinePairContent() {
               <>
                 <GroupedRow asChild>
                   <label>
-                    <Checkbox
+                    <Switch
+                      className="order-last shrink-0"
                       checked={confirmed}
+                      disabled={decision.isPending}
                       onCheckedChange={(value) => setConfirmed(value === true)}
                     />
                     <span className="flex-1">
@@ -623,25 +621,6 @@ function MachinePairContent() {
                     </span>
                   </label>
                 </GroupedRow>
-                <GroupedFooter>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="primary"
-                      disabled={!confirmed}
-                      isLoading={decision.isPending}
-                      onClick={() => void decide(true).catch(() => undefined)}
-                    >
-                      Approve pairing
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      disabled={decision.isPending}
-                      onClick={() => void decide(false).catch(() => undefined)}
-                    >
-                      Decline
-                    </Button>
-                  </div>
-                </GroupedFooter>
               </>
             ) : (
               <GroupedRow>
@@ -653,6 +632,28 @@ function MachinePairContent() {
             )}
           </GroupedList>
         </div>
+      ) : null}
+      {details && !decision.data ? (
+        <GroupedSaveBar aria-label="Pairing actions">
+          <Button variant="ghost" disabled={decision.isPending} onClick={() => void navigate({ to: "/assistant/machines" })}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            disabled={decision.isPending}
+            onClick={() => void decide(false).catch(() => undefined)}
+          >
+            Decline
+          </Button>
+          <Button
+            variant="primary"
+            disabled={!confirmed || decision.isPending}
+            isLoading={decision.isPending}
+            onClick={() => void decide(true).catch(() => undefined)}
+          >
+            Approve pairing
+          </Button>
+        </GroupedSaveBar>
       ) : null}
       {preview.error || decision.error ? (
         <GroupedList

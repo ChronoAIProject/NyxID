@@ -150,7 +150,7 @@ const show = (machine?: RemoteMachine) =>
   );
 const accept = () =>
   userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   );
 const submit = () =>
   userEvent.click(
@@ -311,7 +311,7 @@ it("requires a fresh review and a new intent after a revision conflict", async (
     }),
   );
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(sessionStorage.length).toBe(0);
   await accept();
@@ -368,7 +368,7 @@ it("clears reviewed acceptance when the signed-in account changes", async () => 
     }),
   );
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(
     (
@@ -424,7 +424,7 @@ it("requires a fresh manual review after insufficient funds and never retries au
     }),
   );
   expect(
-    screen.getByRole("checkbox", { name: /I accept this exact rate/ }),
+    screen.getByRole("switch", { name: /I accept this exact rate/ }),
   ).not.toBeChecked();
   expect(state.create).toHaveBeenCalledTimes(1);
 });

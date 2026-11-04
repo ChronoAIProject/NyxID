@@ -156,7 +156,7 @@ it("preserves private access, bulk posting and per-chat settings payloads", asyn
     }),
   );
   await user.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Also apply to existing private chats",
     }),
   );
@@ -170,7 +170,7 @@ it("preserves private access, bulk posting and per-chat settings payloads", asyn
     }),
   );
   expect(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Also apply to existing private chats",
     }),
   ).not.toBeChecked();

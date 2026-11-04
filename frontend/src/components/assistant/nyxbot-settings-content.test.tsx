@@ -789,7 +789,7 @@ it("defaults new private chat posting off on legacy responses and saves without 
     body: { private_chat_posts: true, apply_to_existing: false },
   });
   await user.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Also apply to existing private chats",
     }),
   );

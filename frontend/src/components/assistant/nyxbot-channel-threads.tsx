@@ -7,7 +7,7 @@ import {
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { useNyxBotChannelThreads, useStopNyxBotChannelThread } from "@/hooks/use-nyxbot-agents";
 import { formatRelativeTime } from "@/lib/utils";
 import type { NyxAgentChannelChat, NyxAgentChannelThread } from "@/schemas/assistant-nyxagent";
@@ -133,7 +133,7 @@ export function ChannelThreads({
               <span className="min-w-0 flex-1">
                 Include stopped and expired threads
               </span>
-              <Checkbox
+              <Switch
                 checked={history}
                 onCheckedChange={(value) => setHistory(value === true)}
               />

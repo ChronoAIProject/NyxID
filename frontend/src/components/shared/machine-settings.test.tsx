@@ -71,7 +71,7 @@ it("requires the owner to acknowledge the single-user warning before enabling fi
     screen.getByText(/prompt-injected agent could read/),
   ).toBeInTheDocument();
   fireEvent.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Allow saved-login typing on this machine",
     }),
   );
@@ -79,7 +79,7 @@ it("requires the owner to acknowledge the single-user warning before enabling fi
     screen.getByRole("button", { name: "Save machine settings" }),
   ).toBeDisabled();
   fireEvent.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "I understand the shared-user risk and allow typing.",
     }),
   );
@@ -170,12 +170,12 @@ it("keeps a failed grant dirty after settings save, and retries only that grant"
   render(<MachineSettings node={node} canManage />);
   fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
   fireEvent.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Allow saved-login typing on this machine",
     }),
   );
   fireEvent.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "I understand the shared-user risk and allow typing.",
     }),
   );

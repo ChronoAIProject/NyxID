@@ -16,6 +16,7 @@ import { GroupedList, GroupedInput } from "./grouped-list";
 import { GroupedField, GroupedLabel, GroupedMessage } from "./grouped-fields";
 import {
   GroupedFormActions,
+  GroupedDialogActions,
   GroupedFormBar,
   GroupedFormScope,
 } from "./grouped-form";
@@ -37,8 +38,9 @@ afterEach(() => {
   vi.mocked(useRouter).mockReset();
 });
 
-function Draft({ label = "Name" }: { readonly label?: string }) {
-  const form = useAppForm({ defaultValues: { name: "Original" } });
+function Draft({ label = "Name", inline = false, create = false }: { readonly label?: string; readonly inline?: boolean; readonly create?: boolean }) {
+  const Actions = inline ? GroupedFormActions : GroupedDialogActions;
+  const form = useAppForm({ mode: "onChange", defaultValues: { name: "Original" } });
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(() => {})}>
@@ -58,9 +60,12 @@ function Draft({ label = "Name" }: { readonly label?: string }) {
             )}
           />
         </GroupedList>
-        <GroupedFormActions
+        <Actions
+          {...(!inline ? { intent: create ? "create" as const : "edit" as const } : {})}
+          disabled={!form.formState.isValid}
           label={label}
           dirty={form.formState.isDirty}
+          saveLabel={create ? "Create profile" : "Save changes"}
           save={form.handleSubmit(() => {})}
           discard={() => form.reset()}
         />
@@ -68,26 +73,26 @@ function Draft({ label = "Name" }: { readonly label?: string }) {
     </Form>
   );
 }
-function Editor({ sheet = false }: { readonly sheet?: boolean }) {
+function Editor({ sheet = false, create = false }: { readonly sheet?: boolean; readonly create?: boolean }) {
   const [open, setOpen] = useState(true);
   return sheet ? (
     <GroupedSheet open={open} onOpenChange={setOpen}>
       <GroupedSheetContent>
         <SheetTitle>Edit profile</SheetTitle>
-        <Draft />
+        <Draft inline />
       </GroupedSheetContent>
     </GroupedSheet>
   ) : (
     <GroupedDialog open={open} onOpenChange={setOpen}>
       <GroupedDialogContent>
         <DialogTitle>Edit profile</DialogTitle>
-        <Draft />
+        <Draft create={create} />
       </GroupedDialogContent>
     </GroupedDialog>
   );
 }
 
-it.each(["X", "Escape", "overlay"])(
+it.each(["X", "Escape", "overlay", "Cancel"])(
   "keeps a dirty dialog draft when dismissed with %s until Discard",
   async (method) => {
     const user = userEvent.setup();
@@ -99,6 +104,7 @@ it.each(["X", "Escape", "overlay"])(
     if (method === "X")
       await user.click(screen.getByRole("button", { name: "Close" }));
     else if (method === "Escape") await user.keyboard("{Escape}");
+    else if (method === "Cancel") await user.click(screen.getByRole("button", { name: "Cancel" }));
     else
       await user.click(
         document.querySelector('[data-state="open"].fixed.inset-0')!,
@@ -159,7 +165,7 @@ it("guards route Back through a nested dialog and leaves its independent save ba
   render(
     <GroupedPage>
       <GroupedFormScope>
-        <Draft label="Page name" />
+        <Draft label="Page name" inline />
         <Editor />
         <GroupedFormBar />
       </GroupedFormScope>
@@ -171,10 +177,10 @@ it("guards route Back through a nested dialog and leaves its independent save ba
     " draft",
   );
   expect(
-    within(dialog).getAllByRole("region", { name: "Unsaved changes" }),
+    within(dialog).getAllByRole("region", { name: "Form actions" }),
   ).toHaveLength(1);
   expect(
-    screen.getAllByRole("region", { name: "Unsaved changes" }),
+    screen.getAllByRole("region", { name: "Form actions" }),
   ).toHaveLength(1);
   await act(async () => history.back());
   const guard = await screen.findByRole("dialog", {
@@ -184,4 +190,25 @@ it("guards route Back through a nested dialog and leaves its independent save ba
   await userEvent.click(within(guard).getByRole("button", { name: "Discard" }));
   await waitFor(() => expect(history.location.pathname).toBe("/assistant"));
   history.destroy();
+});
+
+
+it("shows an enabled primary create action for valid pristine prefilled defaults", async () => {
+  render(<Editor create />);
+  const save = screen.getByRole("button", { name: "Create profile" });
+  await waitFor(() => expect(save).toBeEnabled());
+  expect(save).toHaveClass("nyx-gradient-vivid");
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+  expect(screen.queryByText(/^Unsaved:/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
+});
+
+it("keeps edit Save visible and disabled until valid changes exist", async () => {
+  render(<Editor />);
+  const save = screen.getByRole("button", { name: "Save changes" });
+  expect(save).toBeDisabled();
+  await userEvent.type(screen.getByRole("textbox", { name: "Name" }), " updated");
+  await waitFor(() => expect(save).toBeEnabled());
+  await userEvent.clear(screen.getByRole("textbox", { name: "Name" }));
+  await waitFor(() => expect(save).toBeDisabled());
 });

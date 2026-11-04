@@ -122,7 +122,7 @@ it("updates specialist membership through existing grants while preserving servi
   const form = screen.getByRole("form", {
     name: "Specialist machine membership",
   });
-  await userEvent.click(within(form).getByRole("checkbox"));
+  await userEvent.click(within(form).getByRole("switch"));
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() =>
     expect(state.setGrants).toHaveBeenCalledWith({
@@ -143,7 +143,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
   const membership = screen.getByRole("form", {
     name: "Specialist machine membership",
   });
-  await userEvent.click(within(membership).getByRole("checkbox"));
+  await userEvent.click(within(membership).getByRole("switch"));
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   await waitFor(() => expect(state.setGrants).toHaveBeenCalled());
   // The real grants mutation invalidates and refreshes the Agent list.
@@ -166,7 +166,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
   expect(
     within(
       screen.getByRole("form", { name: "Specialist machine membership" }),
-    ).getByRole("checkbox"),
+    ).getByRole("switch"),
   ).toBeChecked();
   expect(state.setGrants).toHaveBeenCalledTimes(1);
   state.assigned = false;
@@ -175,7 +175,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
     expect(
       within(
         screen.getByRole("form", { name: "Specialist machine membership" }),
-      ).getByRole("checkbox"),
+      ).getByRole("switch"),
     ).not.toBeChecked(),
   );
   expect(
@@ -191,14 +191,14 @@ it("refreshes authoritative membership without keeping another Machine's feedbac
     expect(
       within(
         screen.getByRole("form", { name: "Specialist machine membership" }),
-      ).getByRole("checkbox"),
+      ).getByRole("switch"),
     ).toBeChecked(),
   );
   view.rerender(<RemoteMachineAgentAccess machineId="different-machine" />);
   expect(
     within(
       screen.getByRole("form", { name: "Specialist machine membership" }),
-    ).getByRole("checkbox"),
+    ).getByRole("switch"),
   ).not.toBeChecked();
   expect(
     screen.queryByText(/Machine assignment saved/),

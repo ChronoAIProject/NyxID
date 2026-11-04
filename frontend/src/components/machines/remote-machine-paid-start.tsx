@@ -30,8 +30,8 @@ import {
   GroupedRow,
   GroupedFooter,
 } from "@/components/ui/grouped-list";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
-import { Checkbox } from "@/components/ui/checkbox";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
+import { Switch } from "@/components/ui/switch";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   useRemoteMachineQuote,
@@ -138,6 +138,7 @@ function PaidStartContent({
   const [conflict, setConflict] = useState(false);
   const [now, setNow] = useState(Date.now);
   const form = useAppForm<z.infer<typeof acceptanceSchema>>({
+    mode: "onChange",
     resolver: zodResolver(acceptanceSchema),
     defaultValues: { accepted: Boolean(saved) },
   });
@@ -419,7 +420,8 @@ function PaidStartContent({
                 render={({ field }) => (
                   <FormItem inline className="items-start">
                     <FormControl>
-                      <Checkbox
+                      <Switch
+                        className="order-last shrink-0"
                         checked={field.value}
                         onCheckedChange={(value) =>
                           field.onChange(value === true)
@@ -427,7 +429,7 @@ function PaidStartContent({
                         disabled={!acceptable || busy || quote.isPending}
                       />
                     </FormControl>
-                    <div className="space-y-1">
+                    <div className="min-w-0 flex-1 space-y-1">
                       <FormLabel>
                         I accept this exact rate, continuous account-balance
                         charging with no per-instance cap, and the displayed
@@ -465,29 +467,16 @@ function PaidStartContent({
               </GroupedRow>
             </GroupedList>
           ) : null}
-          {saved ? (
-            <GroupedList>
-              <GroupedRow asChild interactive>
-                <button
-                  type="button"
-                  disabled={!canSubmit || !form.watch("accepted")}
-                  onClick={() => void form.handleSubmit(submit)()}
-                >
-                  Retry saved paid request
-                </button>
-              </GroupedRow>
-            </GroupedList>
-          ) : (
-            <GroupedFormActions
-              label="paid resume acceptance"
-              dirty={form.formState.isDirty}
-              pending={busy}
-              disabled={!canSubmit || !form.watch("accepted")}
-              save={form.handleSubmit(submit)}
-              discard={() => form.reset()}
-              saveLabel="Accept quote and resume"
-            />
-          )}
+          <GroupedDialogActions
+            intent="create"
+            label="paid resume acceptance"
+            dirty={form.formState.isDirty}
+            pending={busy}
+            disabled={!form.formState.isValid || !canSubmit || !form.watch("accepted")}
+            save={form.handleSubmit(submit)}
+            discard={() => form.reset()}
+            saveLabel={saved ? "Retry saved paid request" : "Accept quote and resume"}
+          />
         </form>
       </Form>
     </DialogContent>

@@ -80,7 +80,7 @@ import {
   GroupedDisclosure,
   GroupedFooter,
 } from "@/components/ui/grouped-list";
-import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import {
   GroupedPage,
   GroupedDialog,
@@ -194,6 +194,7 @@ function AutomationsContent() {
   return (
     <div className="space-y-6">
       <WorkspacePageHeader
+        column
         title="Automations"
         description="Scheduled work, reminders and webhook events for your agents."
         actions={
@@ -203,7 +204,7 @@ function AutomationsContent() {
           />
         }
       />
-      <AutomationPreferences />
+      <AutomationPreferences title="Settings" />
       {triggers.error && (
         <ErrorBanner
           message={triggers.error.message}
@@ -259,8 +260,13 @@ function AutomationsContent() {
                   </span>
                 </span>
                 <span className="mt-1 block text-11 font-normal text-text-tertiary">
-                  Next: {formatAutomationTime(row.next_run_at, zone)} · Last
-                  run: {row.last_run?.outcome?.replaceAll("_", " ") ?? "—"}
+                  {row.source === "webhook"
+                    ? "Runs on webhook events"
+                    : row.next_run_at
+                      ? `Next: ${formatAutomationTime(row.next_run_at, zone)}`
+                      : row.status === "active" ? "No run scheduled" : "Schedule paused"} · {row.last_run?.outcome
+                    ? `Last run: ${row.last_run.outcome.replaceAll("_", " ")}`
+                    : "Not run yet"}
                 </span>
                 {row.pause_reason && (
                   <span className="mt-1 block text-11 font-normal text-warning">
@@ -378,6 +384,7 @@ export function AutomationEditor({
     return value;
   });
   const form = useAppForm<AutomationForm>({
+    mode: "onChange",
     resolver: zodResolver(automationFormSchema),
     defaultValues: defaults,
   });
@@ -918,7 +925,9 @@ export function AutomationEditor({
                 ])}
               </GroupedList>
             </DialogBody>
-            <GroupedFormActions
+            <GroupedDialogActions
+              intent={row ? "edit" : "create"}
+              disabled={!form.formState.isValid}
               label="automation"
               dirty={form.formState.isDirty || prefillDirty}
               pending={busy}
@@ -1015,8 +1024,8 @@ function AutomationHistory({
                 }
               >
                 <GroupedRow
-                  title="Scheduled"
-                  accessory={formatAutomationTime(run.scheduled_at, zone, true)}
+                  title={run.scheduled_at ? "Scheduled" : "On demand"}
+                  accessory={run.scheduled_at ? formatAutomationTime(run.scheduled_at, zone, true) : "Started by an event or request"}
                 />
                 {run.thread_id && (
                   <GroupedRow asChild interactive>
