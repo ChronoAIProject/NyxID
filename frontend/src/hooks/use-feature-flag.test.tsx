@@ -135,6 +135,7 @@ describe("feature flag catalog", () => {
       ORG_AGENTS: "assistant:org-agents",
       SHARED_AGENTS: "assistant:shared-agents",
       BILLING: "experimental:billing",
+      CMA_SANDBOX_BILLING: "experimental:cma-sandbox-billing",
       REMOTE_MACHINES: "experimental:remote-machines",
       SERVICE_MONITORING: "services:monitoring",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",

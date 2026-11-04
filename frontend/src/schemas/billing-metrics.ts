@@ -15,7 +15,7 @@ export const SERVICE_BILLING_METRICS = [
   "sandbox_disk_gib_seconds",
 ] as const;
 // Machine fixed-profile billing has its own logical SKU. Sandbox allocation
-// units reuse ordinary service prices; only lifecycle evidence meters them.
+// units use versioned CMA rate cards; only retained lifecycle evidence meters them.
 export const BILLING_METRICS = [
   ...SERVICE_BILLING_METRICS,
   "machine_running_seconds",
