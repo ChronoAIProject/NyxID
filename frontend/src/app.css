@@ -1404,9 +1404,14 @@ html.theme-dark .assistant-halo--visible {
 /* The index is a dense graphical navigator, not a row of text controls.
    Its measured pitch must also be its rendered pitch at every reading size. */
 :root {
-  --chat-index-pitch: calc(0.875rem / 0.85);
-  --chat-index-tick-width: calc(var(--chat-index-pitch) * 2.25);
-  --chat-index-gutter-width: calc(var(--chat-index-tick-width) + var(--chat-index-pitch));
+  --chat-index-pitch: calc(0.5rem / 0.85);
+  --chat-index-tick-width: calc(var(--chat-index-pitch) * 2);
+  --chat-index-tick-thickness: calc(var(--chat-index-pitch) / 8);
+  --chat-index-track-width: calc(var(--chat-index-pitch) * 3);
+}
+
+@media (max-resolution: 1dppx) {
+  :root { --chat-index-tick-thickness: calc(var(--chat-index-pitch) * 3 / 16); }
 }
 
 html.assistant-display [data-chat-index-target] {
@@ -1416,19 +1421,12 @@ html.assistant-display [data-chat-index-target] {
   flex: none;
 }
 
-[data-chat-index-rail] {
-  mask-image: linear-gradient(to bottom,
-    transparent, rgb(0 0 0 / 20%) calc(var(--scroll-fade-top) * .4),
-    black var(--scroll-fade-top),
-    black calc(100% - var(--scroll-fade-bottom)),
-    rgb(0 0 0 / 20%) calc(100% - var(--scroll-fade-bottom) * .4), transparent);
-}
-[data-chat-index-rail][data-scroll-edges~="top"] { --scroll-fade-top: min(64px, 20%); }
-[data-chat-index-rail][data-scroll-edges~="bottom"] { --scroll-fade-bottom: min(64px, 20%); }
+[data-chat-index-rail][data-scroll-edges~="top"] { --scroll-fade-top: min(calc(var(--chat-index-pitch) * 4), 20%); }
+[data-chat-index-rail][data-scroll-edges~="bottom"] { --scroll-fade-bottom: min(calc(var(--chat-index-pitch) * 4), 20%); }
 
 @media (min-width: 768px) {
   [data-chat-content-layout]:has([data-chat-index-rail]) {
-    --chat-index-width: var(--chat-index-gutter-width);
+    --chat-index-width: var(--chat-index-track-width);
   }
 }
 

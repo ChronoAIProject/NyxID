@@ -118,7 +118,7 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     "--chat-content-width": `${width}px`,
     "--assistant-scrollbar-width": `${scrollbar}px`,
     "--assistant-content-inset": "calc(var(--assistant-scrollbar-width) + var(--chat-index-width, 0px))",
-    ...(indexRail ? { "--chat-index-width": "var(--chat-index-gutter-width)" } : {}),
+    ...(indexRail ? { "--chat-index-width": "var(--chat-index-track-width)" } : {}),
   } as CSSProperties;
   const grips = (
     <div className="group/edge pointer-events-none absolute inset-0" style={layoutVars}>

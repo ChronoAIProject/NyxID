@@ -1,6 +1,6 @@
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import type { ComponentProps } from "react";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -162,6 +162,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   client.clear();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   globalThis.__nyxidAssistantHttpMock = undefined;
   useAuthStore.getState().setUser(null);
@@ -181,7 +182,12 @@ function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = 
       />
     </QueryClientProvider>,
   );
-  return { onDeleted, user: userEvent.setup() };
+  return { onDeleted, user: userEvent.setup({ delay: null }) };
+}
+
+// Set up draft values in one render; keyboard/focus behavior uses user-event below.
+function appendText(field: HTMLElement, text: string) {
+  fireEvent.change(field, { target: { value: (field as HTMLInputElement).value + text } });
 }
 
 /**
@@ -267,7 +273,7 @@ it("edits the role and destroys only after confirmation", async () => {
   const profile = await within(sheet).findByRole("form", { name: "Profile" });
   const description = within(profile).getByRole("textbox", { name: "Role" });
   await user.clear(description);
-  await user.type(description, "Tracks p0 issues");
+  appendText(description, "Tracks p0 issues");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() =>
@@ -325,7 +331,7 @@ it("sets a display name and persona, and clears them by emptying the fields", as
   expect(displayName).toHaveValue("Scout");
   expect(persona).toHaveValue("Brisk and factual.");
   await user.clear(displayName);
-  await user.type(displayName, "Luna");
+  appendText(displayName, "Luna");
   await user.clear(persona);
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
@@ -346,7 +352,7 @@ it("shows the server's refusal of a display name", async () => {
     new Response(JSON.stringify({ message: "A display name must not contain credentials" }), {
       status: 400,
     });
-  await user.type(within(profile).getByRole("textbox", { name: "Display name" }), "sk-live");
+  appendText(within(profile).getByRole("textbox", { name: "Display name" }), "sk-live");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   expect(await within(profile).findByRole("alert")).toHaveTextContent(
@@ -360,8 +366,8 @@ it("lets NyxBot get a display name and persona, with full access and no grants o
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const profile = await within(sheet).findByRole("form", { name: "Profile" });
   expect(within(sheet).queryByRole("textbox", { name: "Name" })).not.toBeInTheDocument();
-  await user.type(within(profile).getByRole("textbox", { name: "Display name" }), "Nyx");
-  await user.type(within(profile).getByRole("textbox", { name: "Persona" }), "Warm and concise.");
+  appendText(within(profile).getByRole("textbox", { name: "Display name" }), "Nyx");
+  appendText(within(profile).getByRole("textbox", { name: "Persona" }), "Warm and concise.");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() =>
@@ -424,7 +430,7 @@ it("lets an organization Member edit shared memory with the privacy note and bac
   expect(
     screen.queryByRole("button", { name: "Save changes" }),
   ).not.toBeInTheDocument();
-  await user.type(input, "Public team convention");
+  appendText(input, "Public team convention");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() =>
@@ -663,7 +669,7 @@ it("preserves drafts across tabs and saves all dirty sections from any tab", asy
   const profile = await screen.findByRole("form", { name: "Profile" });
   const role = within(profile).getByRole("textbox", { name: "Role" });
   await user.clear(role);
-  await user.type(role, "Unsaved profile");
+  appendText(role, "Unsaved profile");
   await user.click(screen.getByRole("tab", { name: "Access" }));
   const grants = screen.getByRole("form", { name: "Grants" });
   await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
@@ -688,7 +694,7 @@ it("refreshes pristine fields without replacing a dirty profile draft", async ()
   const profile = await screen.findByRole("form", { name: "Profile" });
   const role = within(profile).getByRole("textbox", { name: "Role" });
   await user.clear(role);
-  await user.type(role, "My draft");
+  appendText(role, "My draft");
   agent = { ...agent, description: "Remote role", display_name: "Remote name" };
   await client.invalidateQueries();
   await waitFor(() => expect(within(profile).getByRole("textbox", { name: "Display name" })).toHaveValue("Remote name"));
@@ -701,8 +707,11 @@ it("refreshes pristine fields without replacing a dirty profile draft", async ()
 it("keeps arrow navigation on the tablist after switching sections", async () => {
   const { user } = renderSheet();
   const first = await screen.findByRole("tab", { name: "Overview" });
-  first.focus();
-  await user.keyboard("{ArrowRight}{ArrowRight}");
+  act(() => first.focus());
+  await user.keyboard("{ArrowRight}");
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Access" })).toHaveFocus());
+  await user.keyboard("{ArrowRight}");
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Skills" })).toHaveFocus());
   expect(screen.getByRole("tab", { name: "Skills" })).toHaveFocus();
   expect(screen.getByRole("tab", { name: "Skills" })).toHaveAttribute("aria-selected", "true");
 });
@@ -718,8 +727,8 @@ it("falls back to Overview for an unavailable Channels deep link", async () => {
 
 it("offers personal add-note and prevents every memory write after destruction", async () => {
   const { user } = renderSheet({ tab: "memory" });
-  const note = await screen.findByRole("textbox", { name: "Note" });
-  await user.type(note, "A personal convention");
+  const note = await screen.findByLabelText("Note");
+  appendText(note, "A personal convention");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() => expect(writes).toContainEqual({ method: "POST", endpoint: "/assistant/nyxagent/agents/agent-researcher/memory", body: { text: "A personal convention" } }));
@@ -820,9 +829,9 @@ function machineAccessFixture() {
 async function editGrantsAndMachine() {
   const { user } = renderSheet({ tab: "grants" });
   const grants = await screen.findByRole("form", { name: "Grants" });
-  await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
-  await user.click(await screen.findByRole("button", { name: /Work Mac/ }));
-  await user.click(screen.getByRole("checkbox", { name: "Shell commands" }));
+  fireEvent.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Work Mac/ }));
+  fireEvent.click(screen.getByLabelText("Shell commands"));
   const bar = screen.getByRole("region", { name: "Unsaved changes" });
   expect(
     screen.getAllByRole("region", { name: "Unsaved changes" }),
@@ -910,18 +919,18 @@ it.each(["grants", "machine access"])(
 
 it("discards every dirty Access form including retained machine drafts", async () => {
   machineAccessFixture();
-  const user = await editGrantsAndMachine();
-  await user.click(screen.getByRole("button", { name: "Discard" }));
+  await editGrantsAndMachine();
+  fireEvent.click(screen.getByRole("button", { name: "Discard" }));
   await waitFor(() =>
     expect(
       screen.queryByRole("region", { name: "Unsaved changes" }),
     ).not.toBeInTheDocument(),
   );
-  await user.click(screen.getByRole("button", { name: "Back to Access" }));
-  expect(screen.getByRole("checkbox", { name: /Slack/ })).not.toBeChecked();
-  await user.click(screen.getByRole("button", { name: /Work Mac/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Back to Access" }));
+  await waitFor(() => expect(screen.getByRole("checkbox", { name: /Slack/ })).not.toBeChecked());
+  fireEvent.click(screen.getByRole("button", { name: /Work Mac/ }));
   expect(
-    screen.getByRole("checkbox", { name: "Shell commands" }),
+    screen.getByLabelText("Shell commands"),
   ).not.toBeChecked();
   expect(writes).toEqual([]);
 });
@@ -929,8 +938,8 @@ it("discards every dirty Access form including retained machine drafts", async (
 it.each(["X", "Escape"])("guards dirty sheet dismissal via %s and preserves edits on Keep editing", async (method) => {
   const onOpenChange = vi.fn();
   const { user } = renderSheet({ onOpenChange });
-  const description = await screen.findByRole("textbox", { name: "Role" });
-  await user.type(description, " unsaved");
+  const description = await screen.findByLabelText("Role");
+  appendText(description, " unsaved");
   if (method === "X") await user.click(screen.getByRole("button", { name: "Close agent details" }));
   else await user.keyboard("{Escape}");
   expect(onOpenChange).not.toHaveBeenCalled();
@@ -947,56 +956,58 @@ it.each(["X", "Escape"])("guards dirty sheet dismissal via %s and preserves edit
 it("closes a pristine sheet immediately", async () => {
   const onOpenChange = vi.fn();
   const { user } = renderSheet({ onOpenChange });
-  await screen.findByRole("textbox", { name: "Role" });
+  await screen.findByLabelText("Role");
   await user.click(screen.getByRole("button", { name: "Close agent details" }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
   expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).toBeNull();
 });
 
 async function openSearch(user: ReturnType<typeof userEvent.setup>) {
-  const control = await waitFor(() => screen.queryByRole("searchbox") ?? screen.getByRole("button", { name: /^Search .+ agent details$/ }));
-  if (control.getAttribute("role") !== "searchbox") await user.click(control);
+  const control = await waitFor(() => screen.queryByRole("searchbox") ?? screen.getByLabelText(/^Search .+ agent details$/, { selector: "button" }));
+  if (!(control instanceof HTMLInputElement)) await user.click(control);
   return screen.findByRole("searchbox");
 }
 
 it("searches across mounted tabs, reveals a memory row and moves focus to it", async () => {
-  const { user } = renderSheet();
-  const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("weekly monday");
+  vi.useFakeTimers();
+  renderSheet();
+  await act(() => vi.advanceTimersByTimeAsync(100));
+  fireEvent.click(screen.getByRole("button", { name: "Search researcher agent details" }));
+  const search = screen.getByRole("searchbox");
+  fireEvent.change(search, { target: { value: "weekly monday" } });
   const results = screen.getByRole("list", { name: "Memory search results" });
   expect(screen.getByRole("status")).toHaveTextContent("1 result for weekly monday");
   expect(within(results).getAllByRole("mark")).toHaveLength(2);
   expect(screen.queryByRole("form", { name: "Profile" })).not.toBeInTheDocument();
-  await user.click(within(results).getByRole("button", { name: /Weekly digests on Mondays Memory/ }));
+  fireEvent.click(within(results).getByRole("button", { name: /Weekly digests on Mondays Memory/ }));
+  await act(() => vi.advanceTimersByTimeAsync(32));
   expect(search).toHaveValue("");
   expect(screen.getByRole("tab", { name: "Memory" })).toHaveAttribute("aria-selected", "true");
-  await waitFor(() => expect(document.querySelector('[data-drawer-search-target="memory-n1"]')).toHaveFocus());
-  expect(document.activeElement).toHaveAttribute("data-search-highlight");
+  const target = document.querySelector('[data-drawer-search-target="memory-n1"]');
+  expect(target).toHaveFocus();
+  expect(target).toHaveAttribute("data-search-highlight");
+  await act(() => vi.advanceTimersByTimeAsync(1600));
+  expect(target).not.toHaveAttribute("data-search-highlight");
 });
 
 it("preserves profile and grants drafts and a single coordinated save bar while searching", async () => {
   const { user } = renderSheet();
-  const role = await screen.findByRole("textbox", { name: "Role" });
+  const role = await screen.findByLabelText("Role");
   await user.clear(role);
-  await user.type(role, "Fresh unsaved role");
+  appendText(role, "Fresh unsaved role");
   await user.click(screen.getByRole("tab", { name: "Access" }));
   await user.click(screen.getByRole("checkbox", { name: /Slack/ }));
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("fresh unsaved");
+  fireEvent.change(search, { target: { value: "fresh unsaved" } });
   const bars = screen.getAllByRole("region", { name: "Unsaved changes" });
   expect(bars).toHaveLength(1);
   expect(bars[0]).toHaveTextContent("Unsaved: profile, grants");
-  await user.click(screen.getByRole("button", { name: "Role Overview › Profile" }));
+  await user.click(screen.getByLabelText("Role Overview › Profile", { selector: "button" }));
   expect(role).toHaveValue("Fresh unsaved role");
   await user.click(screen.getByRole("tab", { name: "Access" }));
   expect(screen.getByRole("checkbox", { name: /Slack/ })).toBeChecked();
   await openSearch(user);
-  await user.click(search);
-  await user.paste("slack");
+  fireEvent.change(search, { target: { value: "slack" } });
   await user.click(screen.getByRole("button", { name: "Save changes" }));
   await confirmChanges();
   await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
@@ -1007,12 +1018,10 @@ it("preserves profile and grants drafts and a single coordinated save bar while 
 it("clears the query, collapses empty search, then follows the dirty dismissal guard", async () => {
   const close = vi.fn();
   const { user } = renderSheet({ onOpenChange: close });
-  const role = await screen.findByRole("textbox", { name: "Role" });
-  await user.type(role, " draft");
+  const role = await screen.findByLabelText("Role");
+  appendText(role, " draft");
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("role");
+  fireEvent.change(search, { target: { value: "role" } });
   await user.keyboard("{Escape}");
   expect(search).toHaveValue("");
   expect(search).toHaveFocus();
@@ -1032,13 +1041,12 @@ it("supports drawer shortcuts, result arrows and Enter without stealing editable
   const { user } = renderSheet();
   const tab = await screen.findByRole("tab", { name: "Overview" });
   expect(screen.queryByRole("searchbox")).toBeNull();
-  tab.focus();
+  act(() => tab.focus());
   await user.keyboard("/");
   const search = await screen.findByRole("searchbox");
   expect(search).toHaveFocus();
   await openSearch(user);
-  await user.click(search);
-  await user.paste("account");
+  fireEvent.change(search, { target: { value: "account" } });
   await user.keyboard("{ArrowDown}");
   const result = document.activeElement!;
   expect(result).toHaveRole("button");
@@ -1046,11 +1054,11 @@ it("supports drawer shortcuts, result arrows and Enter without stealing editable
   await waitFor(() => expect(search).toHaveValue(""));
   expect(screen.getByRole("tab", { name: "Access" })).toHaveAttribute("aria-selected", "true");
   const selected = screen.getByRole("tab", { name: "Access" });
-  selected.focus();
+  act(() => selected.focus());
   await user.keyboard("{Control>}f{/Control}");
   expect(search).toHaveFocus();
   await user.click(screen.getByRole("tab", { name: "Overview" }));
-  const role = screen.getByRole("textbox", { name: "Role" });
+  const role = screen.getByLabelText("Role");
   await user.click(role);
   await user.keyboard("/");
   expect(role).toHaveFocus();
@@ -1061,39 +1069,39 @@ it("reveals a machine drill-in and guards leaving its dirty draft through search
   machineAccessFixture();
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("work mac");
-  await user.click(await screen.findByRole("button", { name: "Work Mac Access › Machine access" }));
-  const target = document.querySelector('[data-drawer-search-target="machine-detail-node"]');
+  fireEvent.change(search, { target: { value: "work mac" } });
+  await user.click(await screen.findByLabelText("Work Mac Access › Machine access", { selector: "button" }));
+  const target = document.querySelector('[data-drawer-search-target="machine-detail-node"]')!;
   await waitFor(() => expect(target).toHaveFocus());
-  const shell = screen.getByRole("checkbox", { name: "Shell commands" });
-  await user.click(shell);
-  await user.type(search, "persona");
+  const page = within(target.closest<HTMLElement>("[data-grouped-detail]")!);
+  const shell = page.getByRole("checkbox", { name: "Shell commands" });
+  fireEvent.click(shell);
+  fireEvent.change(search, { target: { value: "persona" } });
   expect(search).toHaveValue("persona");
   expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
-  await user.click(screen.getByRole("button", { name: "Persona Overview › Profile" }));
-  expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Keep editing" }));
+  fireEvent.click(screen.getByLabelText("Persona Overview › Profile", { selector: "button" }));
+  const prompt = await screen.findByRole("dialog", { name: "Discard unsaved changes?" });
+  fireEvent.click(within(prompt).getByRole("button", { name: "Keep editing" }));
+  await waitFor(() => expect(prompt).not.toBeInTheDocument());
   expect(search).toHaveValue("persona");
-  await user.click(screen.getByRole("button", { name: "Clear agent search" }));
+  fireEvent.click(screen.getByLabelText("Clear agent search"));
   expect(shell).toBeChecked();
-  await user.click(screen.getByRole("button", { name: "Back to Access" }));
-  await user.click(screen.getByRole("button", { name: "Discard" }));
-  expect(screen.getByRole("button", { name: /Work Mac/ })).toBeVisible();
+  fireEvent.click(page.getByRole("button", { name: "Back to Access" }));
+  const discard = await screen.findByRole("dialog", { name: "Discard unsaved changes?" });
+  fireEvent.click(within(discard).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: /Work Mac/ })).toBeVisible());
 });
 
 it("searches only entries available to an organization viewer and preserves read-only controls", async () => {
   agent = agentRow({ owner_kind: "org", owner_id: "team", org_role: "viewer", can_maintain: false });
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await user.type(search, "persona");
-  await user.click(screen.getByRole("button", { name: "Persona Overview › Profile" }));
-  expect(screen.getByRole("textbox", { name: "Persona" })).toBeDisabled();
+  appendText(search, "persona");
+  await user.click(screen.getByLabelText("Persona Overview › Profile", { selector: "button" }));
+  expect(screen.getByLabelText("Persona")).toBeDisabled();
   for (const query of ["connect another bot", "weekly digests", "destroy", "share agent", "find skills", "read my account"]) {
     await openSearch(user);
-  await user.clear(search);
-    await user.type(search, query);
+    fireEvent.change(search, { target: { value: query } });
     expect(screen.getByText(`No results for “${query}”.`)).toBeInTheDocument();
   }
   expect(writes).toHaveLength(0);
@@ -1103,21 +1111,13 @@ it("keeps destroyed-agent search available with deletion and remembered notes bu
   agent = agentRow({ status: "destroyed", destroyed_at: at });
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("delete");
+  fireEvent.change(search, { target: { value: "delete" } });
   expect(screen.getByRole("button", { name: "Delete permanently Overview" })).toBeInTheDocument();
   await openSearch(user);
-  await user.clear(search);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("weekly");
+  fireEvent.change(search, { target: { value: "weekly" } });
   expect(screen.getByRole("button", { name: /Weekly digests on Mondays Memory/ })).toBeInTheDocument();
   await openSearch(user);
-  await user.clear(search);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("connect another bot");
+  fireEvent.change(search, { target: { value: "connect another bot" } });
   expect(screen.getByText("No results for “connect another bot”.")).toBeInTheDocument();
 });
 
@@ -1130,10 +1130,8 @@ it("opens the exact service operation scope from search without changing its rev
       all_operations: true, allows_explicit_rules: true, endpoint_ids: [], rules: [], operations: [] }])) : original(request);
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("notion operations");
-  await user.click(await screen.findByRole("button", { name: "Notion · Operations Access › Service operations" }));
+  fireEvent.change(search, { target: { value: "notion operations" } });
+  await user.click(await screen.findByLabelText("Notion · Operations Access › Service operations", { selector: "button" }));
   const view = document.querySelector('[data-operation-view="notion-id"]')!;
   await waitFor(() => expect(document.querySelector('[data-drawer-search-target="operations-notion-id"]')).toHaveFocus());
   expect(view).toHaveTextContent("Revision 7");
@@ -1158,16 +1156,13 @@ it("finds attached skills by description and version and opens retained history 
   };
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("cafe 1.2.3");
-  await user.click(await screen.findByRole("button", { name: "kek-faq-reference Skills › kek-faq-reference" }));
+  fireEvent.change(search, { target: { value: "cafe 1.2.3" } });
+  await user.click(await screen.findByLabelText("kek-faq-reference Skills › kek-faq-reference", { selector: "button" }));
   await waitFor(() => expect(document.querySelector('[data-drawer-search-target="skill-faq"]')).toHaveFocus());
   expect(screen.getByRole("heading", { name: "kek-faq-reference" })).toBeVisible();
   await openSearch(user);
-  await user.click(search);
-  await user.paste("history");
-  await user.click(screen.getByRole("button", { name: "History Skills › History" }));
+  fireEvent.change(search, { target: { value: "history" } });
+  await user.click(screen.getByLabelText("History Skills › History", { selector: "button" }));
   await waitFor(() => expect(document.querySelector('[data-drawer-search-target="skill-history"]')).toHaveFocus());
   expect(screen.getByRole("list", { name: "Skill history" })).toHaveTextContent("Attached skills changed");
   await user.click(screen.getByRole("button", { name: "Back to Skills" }));
@@ -1191,22 +1186,16 @@ it("indexes connected bot handles, unopened chats and available bots, revealing 
   };
   const { user } = renderSheet();
   const search = await openSearch(user);
+  fireEvent.change(search, { target: { value: "helper_bot" } });
+  expect(await screen.findByLabelText("Helper Channels › Connected bot", { selector: "button" })).toBeInTheDocument();
   await openSearch(user);
-  await user.click(search);
-  await user.paste("helper_bot");
-  expect(await screen.findByRole("button", { name: "Helper Channels › Connected bot" })).toBeInTheDocument();
-  await openSearch(user);
-  await user.clear(search);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("cafe room");
-  await user.click(await screen.findByRole("button", { name: "Café research room Channels › Helper › Chats" }));
+  fireEvent.change(search, { target: { value: "cafe room" } });
+  await user.click(await screen.findByLabelText("Café research room Channels › Helper › Chats", { selector: "button" }));
   await waitFor(() => expect(document.querySelector('[data-drawer-search-target="channel-chat-room"]')).toHaveFocus());
   expect(screen.getByRole("heading", { name: /Café research room · Group/ })).toBeVisible();
   await openSearch(user);
-  await user.click(search);
-  await user.paste("help desk");
-  await user.click(screen.getByRole("button", { name: "Help desk Channels › Available bots" }));
+  fireEvent.change(search, { target: { value: "help desk" } });
+  await user.click(screen.getByLabelText("Help desk Channels › Available bots", { selector: "button" }));
   await waitFor(() => expect(document.querySelector('[data-drawer-search-target="available-bot-new-bot"]')).toHaveFocus());
   expect(screen.getByRole("button", { name: /Connect Help desk to researcher/ })).toBeVisible();
   await user.click(screen.getByRole("button", { name: "Back to Channels" }));
@@ -1224,21 +1213,13 @@ it.each(["user", "manager"] as const)("keeps shared %s search scoped to its rend
   };
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("friendly");
+  fireEvent.change(search, { target: { value: "friendly" } });
   expect(screen.getByRole("button", { name: "Persona Overview" })).toBeInTheDocument();
   await openSearch(user);
-  await user.clear(search);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("cafe convention");
+  fireEvent.change(search, { target: { value: "cafe convention" } });
   expect((await screen.findAllByRole("button", { name: /Memory/ })).length).toBeGreaterThan(0);
   await openSearch(user);
-  await user.clear(search);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("connect another bot");
+  fireEvent.change(search, { target: { value: "connect another bot" } });
   expect(screen.getByText("No results for “connect another bot”.")).toBeInTheDocument();
   expect(writes).toHaveLength(0);
 });
@@ -1247,28 +1228,23 @@ it("indexes NyxBot's full-access row without specialist-only profile or lifecycl
   agent = agentRow({ kind: "nyxbot", name: "nyxbot" });
   const { user } = renderSheet();
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("connected services account");
+  fireEvent.change(search, { target: { value: "connected services account" } });
   await user.click(screen.getByRole("button", { name: "Connected services and account Access" }));
   await waitFor(() => expect(document.querySelector('[data-drawer-search-target="nyxbot-full-access"]')).toHaveFocus());
   expect(screen.queryByRole("form", { name: "Grants" })).not.toBeInTheDocument();
   await openSearch(user);
-  await user.click(search);
-  await user.paste("destroy");
+  fireEvent.change(search, { target: { value: "destroy" } });
   expect(screen.getByText("No results for “destroy”.")).toBeInTheDocument();
 });
 
 it("honors an incoming tab deep link while searching and preserves the mounted profile draft", async () => {
   const props = { agentId: String(agent.id), agents: [], open: true, onOpenChange: vi.fn(), onDeleted: vi.fn() };
   const { rerender } = render(<QueryClientProvider client={client}><AgentDetailsSheet {...props} /></QueryClientProvider>);
-  const user = userEvent.setup();
-  const role = await screen.findByRole("textbox", { name: "Role" });
-  await user.type(role, " draft");
+  const user = userEvent.setup({ delay: null });
+  const role = await screen.findByLabelText("Role");
+  appendText(role, " draft");
   const search = await openSearch(user);
-  await openSearch(user);
-  await user.click(search);
-  await user.paste("missing");
+  fireEvent.change(search, { target: { value: "missing" } });
   rerender(<QueryClientProvider client={client}><AgentDetailsSheet {...props} tab="skills" /></QueryClientProvider>);
   await waitFor(() => expect(search).toHaveValue(""));
   await waitFor(() => expect(screen.getByRole("heading", { name: "Skills", level: 2 })).toHaveFocus());
@@ -1279,7 +1255,7 @@ it("honors an incoming tab deep link while searching and preserves the mounted p
 it("pins the same save bar outside scrolling content through tabs, drill-ins and search", async () => {
   machineAccessFixture();
   const { user } = renderSheet();
-  await user.type(await screen.findByRole("textbox", { name: "Role" }), " draft");
+  appendText(await screen.findByLabelText("Role"), " draft");
   const bar = screen.getByRole("region", { name: "Unsaved changes" });
   expect(bar).toHaveAttribute("data-viewport-save-bar");
   expect(bar.closest("[data-form-viewport], [data-compact-scroll], [data-panel]")).toBeNull();
@@ -1288,7 +1264,7 @@ it("pins the same save bar outside scrolling content through tabs, drill-ins and
   await user.click(await screen.findByRole("button", { name: /Work Mac/ }));
   expect(bar).toBeVisible();
   expect(bar.closest("[inert], [aria-hidden=true]")).toBeNull();
-  await user.type(await openSearch(user), "persona");
+  appendText(await openSearch(user), "persona");
   expect(bar).toBeVisible();
   expect(screen.getAllByRole("button", { name: "Save changes" })).toHaveLength(1);
   expect(screen.getByRole("button", { name: "Discard" })).toBeVisible();
@@ -1311,16 +1287,16 @@ it("adds named help to every rendered drawer section and keeps help text searcha
   await user.click(screen.getByRole("button", { name: "About Services" }));
   expect(await screen.findByRole("tooltip", { name: "About Services" })).toHaveTextContent("which connected services this specialist may call");
   await user.keyboard("{Escape}");
-  await user.type(await openSearch(user), "connected services specialist");
+  appendText(await openSearch(user), "connected services specialist");
   expect(screen.getByRole("list", { name: "Access search results" })).toHaveTextContent("Services");
 });
 
 it("reviews profile values before saving and keeps Enter on the same review path", async () => {
   const { user } = renderSheet();
-  const role = await screen.findByRole("textbox", { name: "Role" });
+  const role = await screen.findByLabelText("Role");
   await user.clear(role);
-  await user.type(role, "Review this role");
-  await user.click(screen.getByRole("textbox", { name: "Name" }));
+  appendText(role, "Review this role");
+  await user.click(screen.getByLabelText("Name"));
   await user.keyboard("{Enter}");
   const review = await screen.findByRole("dialog", { name: "Review changes" });
   expect(writes).toEqual([]);
@@ -1342,7 +1318,7 @@ it("toggles the circular search control, collapses empty blur, and preserves non
   await user.click(screen.getByRole("tab", { name: "Skills" }));
   expect(screen.queryByRole("searchbox")).toBeNull();
   await openSearch(user);
-  await user.type(input, "persona");
+  appendText(input, "persona");
   await user.click(screen.getByRole("tab", { name: "Overview" }));
   expect(input).toBeVisible();
   expect(input).toHaveValue("persona");
@@ -1352,9 +1328,9 @@ it("uses a leading search glyph and clears then closes search without losing its
   const { user } = renderSheet();
   const role = await screen.findByLabelText("Role");
   await user.clear(role);
-  await user.type(role, "Retain this role");
+  appendText(role, "Retain this role");
   await openSearch(user);
-  await user.type(screen.getByRole("searchbox"), "persona");
+  appendText(screen.getByRole("searchbox"), "persona");
   expect(screen.queryByRole("button", { name: "Close agent search" })).toBeNull();
   expect(document.querySelector(".agent-header-search-glyph")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Clear agent search" }));

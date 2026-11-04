@@ -55,7 +55,7 @@ Light mode uses exactly two neutral tones (zinc grey page, white cards) with no 
 - **Info/Auth:** `#60a5fa` — informational badges, auth events
 
 ### Usage Rules
-- Purple accent ONLY on: active navigation icon color (`text-nyx-secondary-400`), sidebar control active dot, the `variant="primary"` button (gradient — used as the dominant action in dialogs, onboarding, and right-panel cards), AI setup card glow, role badges (`accent` variant for owner), logo
+- Purple accent ONLY on: active navigation icon color and current conversation-index tick (`text-nyx-secondary-400`), sidebar control active dot, the `variant="primary"` button (gradient — used as the dominant action in dialogs, onboarding, and right-panel cards), AI setup card glow, role badges (`accent` variant for owner), logo
 - Purple NOT on: idle surfaces, every hover state, surface tints on idle cards, decorative backgrounds. Hover stays neutral (`bg-overlay` / `bg-overlay-strong`).
 - Buttons: Approve = success green background tint, Deny / destructive = error red background tint, Secondary = ghost with border, Primary CTA = `variant="primary"` (`nyx-gradient-vivid`) — used on dialog submits, onboarding CTA, and right-panel promo cards
 - The ambient status line at the top of the viewport is colored by node-fleet health: success gradient when healthy, warning when draining, destructive when offline (`AmbientStatusLine`, 2px, fixed top)
@@ -304,18 +304,23 @@ Drawer deep links focus the selected panel heading; detail Back restores focus
 to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
 desktop. All spacing, text and icons follow the assistant display scale.
 
-The conversation index uses a `bg-sidebar` gutter with a content-side
-`border-border/50` hairline and right-aligned, round-capped ticks. Its uniform
-pitch is 14px at the new 1×; long assistant ticks are 2.25× the pitch (31.5px),
-short user ticks half that (15.75px), and thickness is 2px. Tick dimensions and
-the gutter width scale with text independently of spacing. Long threads window
-rather than stretching or compressing the pitch. This dense graphical navigator
+The conversation index floats at the transcript's right edge with no panel
+fill or hairline. Right-aligned, round-capped ticks use an 8px uniform pitch
+at 1× text, 16px long assistant ticks and 8px short user ticks. Thickness is
+1px on retina displays, increased to 1.5px at 1dppx for crispness. Geometry
+scales with text independently of spacing. This dense graphical navigator
 explicitly opts out of text-button minimum dimensions. Resting ticks use
-`text-text-tertiary`, hover uses `text-muted-foreground`, and the current tick
-always uses the long length and `success`. Hover/focus shows a preview and
-click, drag and keyboard navigation jump to messages.
-Observe the toolbar size to keep all ticks below its controls, including wrapped
-compact headers.
+`text-text-tertiary`, hover and keyboard focus stay neutral, and only the
+current tick uses the long length and `text-nyx-secondary-400`.
+
+Long rails have a real scroll viewport with bounded tick rendering. Reuse the
+transcript's edge-aware mask pattern: fade only an edge with more ticks beyond
+it, and remove that fade at the revealed edge. Wheel browsing, dragging (with
+edge autoscroll), and keyboard navigation scroll the rail; transcript navigation
+keeps the current tick visible. Rail scrolling is immediate, including with
+reduced motion. Hover/focus shows a preview and click, drag and keyboard
+navigation jump to messages. Observe the toolbar size to keep the rail below
+its controls, including wrapped compact headers.
 
 ### Agent drawer search
 
