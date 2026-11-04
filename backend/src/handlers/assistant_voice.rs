@@ -159,6 +159,7 @@ pub struct SessionResponse {
 }
 impl From<crate::models::assistant_voice_session::VoiceSession> for SessionResponse {
     fn from(row: crate::models::assistant_voice_session::VoiceSession) -> Self {
+        let idle = crate::services::voice::progress::idle_seconds(&row, chrono::Utc::now());
         Self {
             id: row.id,
             generation: row.generation,
@@ -173,7 +174,7 @@ impl From<crate::models::assistant_voice_session::VoiceSession> for SessionRespo
             reserved_until: row.reserved_until,
             final_usage_confirmed: row.final_usage_confirmed,
             end_reason: row.end_reason,
-            idle_warning: (chrono::Utc::now() - row.last_user_at).num_seconds() >= 165,
+            idle_warning: idle >= 165,
             resumable: !row.dictation
                 && row.protocol
                     != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)

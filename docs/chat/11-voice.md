@@ -335,12 +335,13 @@ on any replica and request a new audio session when necessary. Do not rely on
 an in-process map or load-balancer stickiness for uniqueness or Stop.
 
 Proposed fixed limits: 30-minute call, or provider `expires_at` if earlier;
-3-minute user inactivity with a visible/brief 15-second warning; 30-second
+3-minute user inactivity after accepted work finishes, with a visible/brief 15-second warning; 30-second
 control-heartbeat deadline; 20-second startup deadline; 5 start attempts/minute
 and 30/hour/person; 20 control messages/second; 10 pending requests/thread;
 same backend per-person turn limits as text. Synthetic silence, provider
-heartbeats and the assistant's own progress do not reset user inactivity.
-A pending long job can outlive idle closure and still notify. All bounds and
+heartbeats and the assistant's own speech do not reset user inactivity. Accepted
+queued/running work and real approval waits suspend this idle deadline only.
+A pending long job can outlive audio closure and still notify. All bounds and
 exact user-facing wording need no new environment variable.
 
 ## 6. Delegation, progress, interruption and persistence
@@ -377,8 +378,8 @@ wakes the dispatcher after every admission or decision. A result is published
 to the visible thread once, then announced when the authoritative input
 transcript has no open user segment; reconnects cannot replay the publication or
 the task because request state, hidden-thread active-turn fences, and the call
-generation are durable. The existing 30-second heartbeat and three-minute idle
-rules remain independent. Unknown provider events remain ignored and never
+generation are durable. The 30-second heartbeat remains independent of work;
+the three-minute user-idle clock resumes after pending work finishes. Unknown provider events remain ignored and never
 become execution authority; durable request/session state is the recovery
 source of truth. A future change-stream push could replace the control socket's
 one-second refresh tick.
@@ -425,7 +426,7 @@ remove a pending card or imply denial.
 
 While work runs, translate allowlisted activity identifiers into short facts:
 "Checking your calendar", "Waiting for approval", "The specialist is working".
-Unknown labels become "Still working on it". Never narrate arguments, URLs,
+Unknown labels become a generic service-stage description. Never narrate arguments, URLs,
 tool output, secrets or chain-of-thought. Send quiet state changes immediately;
 speak the first meaningful progress after about 2 s, then coalesce to at most
 one useful update per 8 s. Avoid repetitive reassurance. Activity status
@@ -439,6 +440,57 @@ activity alone. If no safe bounded summary is available, say the result is ready
 in the chat. Suppress duplicate or superseded announcements using task version
 and session generation. Append acknowledgement is not proof the user heard it;
 reconnect should show "Result ready" rather than blindly replaying speech.
+
+### Voice task progress and delivery (#2083)
+
+The coordinator projects durable request state and matching live-turn activities
+into an additive `progress` snapshot: stage, a closed human-readable label, the
+last finished step, finished-step count and update time. A stale execution
+heartbeat reports that a fresh update is awaited. A tool error is a failed step,
+not successful completion. The first useful update is eligible after two seconds;
+later changed evidence coalesces to one update per eight seconds across the call.
+User speech and a pending read-back defer narration; unchanged evidence is silent.
+The UI displays the same projection. No arguments, outputs or raw operation names
+are used as progress narration.
+
+Settled hidden-task answers are copied in full through the existing transactional
+publisher, including when audio has ended. Concurrent sweeps adopt the same result
+receipt. Speech is one bounded, billed one-shot summary in the answer's language,
+with a two-second timeout and at most 100 characters, followed by the normal
+voice surface. It must state the finding/failure and point to the full chat answer.
+If summarization is unavailable, use only a complete safe sentence/clause or a
+fixed notice pointing to the saved answer. Unicode sentence/clause boundaries
+replace the old 64-byte fragments; never read a truncated clause. Admission-only
+and async-submit acknowledgements remain distinct from settled results.
+
+Read-back uses a server presentation of the existing card, while the original
+card summary, action digest, expiry, current-key and continuation fences remain
+authoritative. Organization-connection consent can legitimately apply to reads;
+an ordinary permitted personal read creates no extra card. Account-identity reads
+name their business purpose and account scope, not the connection slug, UUID,
+HTTP verb or internal operation. Other actions retain their resource details
+with protocol wrappers removed. The voice model is instructed never to invent
+confirmation questions. Only a durable server read-back can ask for a decision.
+
+Queued/running/background-service tasks and real approval waits refresh a
+separate `last_work_at` idle reference. The three-minute user-idle warning resumes
+after work finishes; it never requires speech while accepted work is pending.
+The 30-minute deadline, 30-second heartbeat, live authority and funding checks
+still apply. On audio closure the call receipt explains why audio ended and
+that accepted tasks continue subject to their own limits, with answers/failures
+delivered to this chat. An available transport also receives this notice.
+Expiry, denied access, interrupted workers and service errors retain explicit
+failure explanations; call closure itself is not a task result.
+
+Each voice request has additive metadata-only `timing` offsets in milliseconds
+from call creation: transcription end, delegation event, queue admission, first
+activity/tool start, first tool finish, first progress, approval wait, result and
+first audio. Existing turn timing supplies model/tool durations. First audio
+requires matching authoritative assistant text plus the browser playback
+watermark and audible interval; interrupted, uncorrelated or paraphrased output
+stays unknown. Marks contain only closed names/numbers and existing request IDs;
+no content enters audit or logs. Old replicas ignore new fields and old rows
+remain readable; complete instrumentation requires upgraded coordinators.
 
 ### Talking over the assistant is not Stop
 
