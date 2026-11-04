@@ -1172,6 +1172,7 @@ pub(crate) async fn process_decision_with_access(
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
         let grant = ApprovalGrant {
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: updated.user_id.clone(),
             service_id: updated.service_id.clone(),
@@ -1880,7 +1881,8 @@ fn build_grants_filter(
 
 /// List active approval grants for a user.
 ///
-/// Only returns grants for services with current grant capability.
+/// Legacy rows require services with current grant capability. Execution rows
+/// are listed independently with the same owner/admin visibility boundaries.
 /// Capability may come from top-level `Grant` mode (including legacy
 /// configs with a missing field) or a `require_approval` rule whose
 /// mode is `Grant`. Services with no config default to `PerRequest`
@@ -1939,7 +1941,21 @@ pub async fn list_grants(
         v.extend(set);
     }
 
-    let filter = build_grants_filter(user_id, admin_branches, &grant_mode_by_owner, now);
+    let legacy = build_grants_filter(user_id, admin_branches, &grant_mode_by_owner, now);
+    // Explicit execution permission is independent of legacy Grant mode. Keep
+    // the same per-owner/admin service visibility; no additional lookups.
+    let mut execution_owners = vec![doc! {"user_id": user_id}];
+    for branch in admin_branches {
+        let mut owner = doc! {"user_id": &branch.org_id, "org_scoped": true};
+        if let Some(ids) = &branch.service_id_scope {
+            owner.insert("service_id", doc! {"$in": ids});
+        }
+        execution_owners.push(owner);
+    }
+    let filter = doc! {"$or": [legacy, doc! {
+        "execution": {"$type": "object"}, "revoked": false,
+        "expires_at": {"$gt": now}, "$or": execution_owners,
+    }]};
 
     let total = db
         .collection::<ApprovalGrant>(GRANTS)
@@ -1973,7 +1989,7 @@ pub async fn revoke_grant(db: &Database, user_id: &str, grant_id: &str) -> AppRe
                 "_id": grant_id,
                 "user_id": user_id,
             },
-            doc! { "$set": { "revoked": true } },
+            revoke_grant_update(Utc::now()),
         )
         .await?;
 
@@ -1991,7 +2007,7 @@ pub async fn revoke_all_grants(db: &Database, user_id: &str) -> AppResult<u64> {
         .collection::<ApprovalGrant>(GRANTS)
         .update_many(
             doc! { "user_id": user_id, "revoked": false },
-            doc! { "$set": { "revoked": true } },
+            revoke_grant_update(Utc::now()),
         )
         .await?;
 
@@ -2311,9 +2327,22 @@ async fn revoke_grants_for_service(
         filter.insert("scope", bson::Bson::Null);
     }
     db.collection::<ApprovalGrant>(GRANTS)
-        .update_many(filter, doc! { "$set": { "revoked": true } })
+        .update_many(filter, revoke_grant_update(Utc::now()))
         .await?;
     Ok(())
+}
+
+/// Existing legacy expiry is unchanged. Explicit permissions use a bounded
+/// terminal TTL, including persistent rows; no extra read and no index change.
+pub(crate) fn revoke_grant_update(now: chrono::DateTime<Utc>) -> Vec<bson::Document> {
+    vec![doc! {"$set": {
+        "revoked": true,
+        "expires_at": {"$cond": [
+            {"$eq": [{"$type": "$execution"}, "object"]},
+            bson::DateTime::from_chrono(super::execution_permission::terminal_expiry(now)),
+            "$expires_at"
+        ]}
+    }}]
 }
 
 fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
@@ -2838,6 +2867,52 @@ mod tests {
             exact_service: None,
             created_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn execution_revocation_preserves_legacy_expiry_and_unscoped_filter() {
+        let db = crate::test_utils::connect_test_database("execution_permission_revoke_filter")
+            .await
+            .expect("review Mongo required");
+        let rows = db.collection::<ApprovalGrant>(GRANTS);
+        let execution = super::super::execution_permission::tests::fixture();
+        let mut legacy = execution.clone();
+        legacy.id = uuid::Uuid::new_v4().to_string();
+        legacy.execution = None;
+        legacy.scope = None;
+        legacy.expires_at = chrono::DateTime::from_timestamp_millis(
+            (Utc::now() + chrono::Duration::hours(1)).timestamp_millis(),
+        )
+        .unwrap();
+        rows.insert_many([&execution, &legacy]).await.unwrap();
+        revoke_grants_for_service(&db, "actor", "catalog", true)
+            .await
+            .unwrap();
+        let current = rows
+            .find_one(doc! {"_id": &execution.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!current.revoked);
+        assert_eq!(current.expires_at, execution.expires_at);
+        let old = rows
+            .find_one(doc! {"_id": &legacy.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old.revoked);
+        assert_eq!(old.expires_at, legacy.expires_at);
+        revoke_grants_for_service(&db, "actor", "catalog", false)
+            .await
+            .unwrap();
+        let current = rows
+            .find_one(doc! {"_id": &execution.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(current.revoked);
+        assert!(current.expires_at < Utc::now() + chrono::Duration::days(31));
+        db.drop().await.unwrap();
     }
 
     #[test]
@@ -3493,6 +3568,7 @@ mod tests {
             updated_at: Utc::now(),
         };
         config.rules.push(ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/chat/**".to_string(),
             verbs: vec![],
@@ -3902,6 +3978,7 @@ mod tests {
     ) -> ApprovalGrant {
         let now = Utc::now();
         ApprovalGrant {
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             service_id: service_id.to_string(),
@@ -4671,6 +4748,7 @@ mod tests {
         insert_grant(&db, &service_wide).await;
 
         let grant_rule = ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/chat/**".to_string(),
             verbs: vec![],
@@ -4747,6 +4825,7 @@ mod tests {
 
         let rules = vec![
             ApprovalRule {
+                mandatory_review: false,
                 methods: vec!["DELETE".to_string()],
                 resource_pattern: "/v1/admin/**".to_string(),
                 verbs: vec![],
@@ -4754,6 +4833,7 @@ mod tests {
                 mode: ApprovalMode::PerRequest,
             },
             ApprovalRule {
+                mandatory_review: false,
                 methods: vec!["POST".to_string()],
                 resource_pattern: "/v1/chat/**".to_string(),
                 verbs: vec![],
@@ -5179,6 +5259,7 @@ mod tests {
         let service_id = uuid::Uuid::new_v4().to_string();
         let mut config = make_service_config(&user_id, &service_id, true, ApprovalMode::PerRequest);
         config.rules.push(ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/chat/**".to_string(),
             verbs: vec![],

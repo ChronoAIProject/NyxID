@@ -144,6 +144,7 @@ describe("feature flag catalog", () => {
       NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
       NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
       DISCORD_GATEWAY: "channel:discord-gateway",
+      EXECUTION_PERMISSIONS: "permissions:execution-v1",
       NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
       NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
       NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",

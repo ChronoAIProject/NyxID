@@ -775,6 +775,7 @@ mod tests {
 
     fn api_key() -> ApiKey {
         ApiKey {
+            permission_policy_id: None,
             id: "key-1".to_string(),
             user_id: "user-1".to_string(),
             name: "test-agent".to_string(),

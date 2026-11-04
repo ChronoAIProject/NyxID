@@ -8057,6 +8057,7 @@ mod tests {
 
         db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
             .insert_one(ApprovalGrant {
+                execution: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: org_id.clone(),
                 service_id: catalog_service_id.clone(),
