@@ -678,26 +678,31 @@ Native support remains portrait iPhone on iOS and Android phone, with wide
 Android windows as a secondary layout. Eligible private chats expose a
 voice-conversation mode in the trailing composer button when the server enables
 `assistant:voice`: an empty composer shows the waveform, text or attachments
-show Send, and an active reply shows Stop. Voice mode is a full-screen call on
-the pastel wash: a top bar with a back chevron, the "Voice" title and a speaker
-toggle; a live aura in the centre with the agent pill, status (Connecting…,
-Listening, Thinking, Speaking, Muted) and a mono call timer; the live
-transcript under it (the two newest utterances large, earlier ones smaller,
-interim words in tertiary, scrolling for more, older lines fading out toward
-the top once they overflow); the chat's pending action cards and a small
-collapsible tasks tray only while they exist; the Hands-free / Hold to talk
-switch (text only); round mute and End controls around the centre control;
-and Details / No sound? Resume audio links, with the microphone, echo and price
-notes behind Details. Both modes use a 76pt microphone in the centre.
-Hands-free is a phone call: a running call timer, one short hint line and an
-End that hangs up. Hold to talk is a walkie-talkie: the instruction ("Hold to
-talk", "Release to send" while held, "Muted") sits directly under the
-microphone, the left control is always the mute symbol, no call timer runs,
-and the timer counts only the current transmission while the microphone is
-held. Holding swells the microphone and lifts a soft halo around it, settling
-back on release (no animation under Reduce Motion). Leaving the voice page by any route ends the call; accepted agent
-tasks keep running. The aura is decorative and hidden from VoiceOver (see the
-2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside
+show Send, and an active reply shows Stop. Voice mode is a full-screen page on
+the pastel wash. Before a call it shows a back chevron and the "Voice" title, a
+large live aura with the agent pill and status, "Hey, what can I do for you
+today?", the Hands-free / Hold to talk switch (text only), Start, and the price
+with "How voice is billed". In a call the conversation becomes the page, as a
+chat: your words in right-aligned bubbles, the agent's as plain text under its
+name, live words in secondary until they settle, and a slim working line per
+running task with the server's progress. Pending action cards, approvals and
+agent replies that arrive during the call with an in-app link (hosted connect,
+add service, bot setup, account pages) appear inline in this chat and are acted
+on there; connect sheets open over the call, which keeps running. The aura
+becomes a 72pt orb above the controls; the agent name, status and timer share
+one line with a task chip (count, spinner while running, amber "Needs your OK")
+that opens the task list on demand; the speaker toggle and a ⋯ menu (call
+notes, No sound? Resume audio) sit in the top bar; and the bottom hints leave
+so the controls sit low. Hands-free is a phone call: a 76pt microphone, a
+running call timer and an End that hangs up. Hold to talk is a walkie-talkie:
+the instruction ("Hold to talk", "Release to send" while held, "Muted") sits
+directly under the microphone, the left control is always the mute symbol, no
+call timer runs, and the timer counts only the current transmission while the
+microphone is held. Holding swells the microphone and lifts a soft halo,
+settling back on release (no animation under Reduce Motion). Older lines fade
+toward the top once the chat overflows. Leaving the voice page by back, End or
+swipe ends the call; accepted agent tasks keep running. The aura is decorative
+and hidden from VoiceOver (see the 2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside
 the composer (see Chat composers).
 Crew chats retain the keyboard’s own dictation.
 
