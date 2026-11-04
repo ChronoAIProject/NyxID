@@ -771,12 +771,15 @@ function SettingsSheetRoute({
           <SheetStack.Screen
             name="DeviceLogin"
             component={DeviceLoginScreen}
-            options={{ title: "Scan QR code" }}
+            options={{ title: "Scan QR Code" }}
           />
           <SheetStack.Screen
             name="AgentKeyLogin"
             component={AgentKeyLoginScreen}
-            options={{ title: "Agent Key login" }}
+            // Minting a terminal code says so, matching the drawer row.
+            options={({ route }) => ({
+              title: route.params?.mint ? "Terminal Login Code" : "Agent Key Login",
+            })}
           />
         </SheetStack.Navigator>
       </WorkspaceSheetSurface>
