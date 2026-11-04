@@ -8066,13 +8066,16 @@ mod tests {
             .unwrap();
         let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(result["result"]["isError"], true);
-        assert!(
-            result["result"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Approval request was rejected"),
+        // The MCP text is the structured wait outcome (#2072): a truthful,
+        // stable code plus the reviewed state, never a pending-card claim.
+        let outcome: serde_json::Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap())
+                .expect("structured approval outcome");
+        assert_eq!(
+            outcome["code"], "approval_denied",
             "the MCP result must honor the web rejection"
         );
+        assert_eq!(outcome["status"], "rejected");
         assert_eq!(
             db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
                 .count_documents(doc! { "service_id": &service.id })
