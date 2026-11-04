@@ -351,7 +351,7 @@ function GroupCard({
           }}
           className={cn(
             "relative flex flex-col bg-card",
-            expanded ? "border border-border" : "h-72",
+            expanded ? "border border-border" : "min-h-72",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
@@ -378,7 +378,7 @@ function GroupCard({
                     {group.name}
                   </button>
                 </h3>
-                <p className="mt-0.5 text-xs text-muted-foreground">
+                <p className="mt-0.5 text-11 text-muted-foreground">
                   {matchingCount < count
                     ? `${matchingCount} of ${count}`
                     : count}{" "}
@@ -411,7 +411,7 @@ function GroupCard({
             </Glide>
             {!expanded && (
               <Glide className="shrink-0">
-                <p className="line-clamp-2 h-8 text-xs leading-4 text-muted-foreground">
+                <p className="line-clamp-2 min-h-[2lh] text-12 text-muted-foreground">
                   {search.trim()
                     ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
                     : group.description}
@@ -420,7 +420,7 @@ function GroupCard({
             )}
             <div
               className={cn(
-                "mt-auto text-xs",
+                "mt-auto text-11",
                 expanded
                   ? "grid items-center gap-x-6 gap-y-2 md:grid-cols-2"
                   : "space-y-0.5",
@@ -461,7 +461,7 @@ function GroupCard({
                         aria-expanded={expanded}
                         aria-controls={contentId}
                         aria-label={`Show agent keys and use for ${group.name}`}
-                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-11 focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <Clock3
                           className="size-3.5 shrink-0 text-muted-foreground"
@@ -503,7 +503,7 @@ function GroupCard({
                       ? `${lastEdit.edit.action_label ?? "Last edited"} · ${lastEdit.edit.at} · ${lastEdit.edit.actor.name} · ${lastEdit.connection.label}`
                       : "No edit attribution was reported for these connections"
                   }
-                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-11 focus-visible:outline-2 focus-visible:outline-ring"
                 >
                   <History
                     className="size-3.5 shrink-0 text-muted-foreground"
@@ -562,7 +562,7 @@ function GroupCard({
                 to="/keys/services/$groupId"
                 params={{ groupId: group.id }}
                 aria-label={`View all ${group.name} service details`}
-                className="text-xs text-primary-text hover:underline"
+                className="text-12 font-medium text-primary-text hover:underline"
               >
                 Service details
               </Link>
@@ -636,7 +636,7 @@ function GroupCard({
                           ? selectedPool.user_id
                           : undefined,
                     }}
-                    className="ml-auto text-xs text-primary-text hover:underline"
+                    className="ml-auto text-12 font-medium text-primary-text hover:underline"
                   >
                     Manage in Service Pools
                   </Link>
@@ -649,7 +649,7 @@ function GroupCard({
                     insights={insights}
                   />
                 ) : (
-                  <p className="p-4 text-xs text-muted-foreground">
+                  <p className="p-4 text-11 text-muted-foreground">
                     {routing.loading
                       ? "Loading saved pools…"
                       : routing.incomplete
@@ -658,7 +658,7 @@ function GroupCard({
                   </p>
                 )}
                 {selectedPool && routing.incomplete && (
-                  <p className="px-4 pb-4 text-xs text-muted-foreground">
+                  <p className="px-4 pb-4 text-11 text-muted-foreground">
                     Additional organization pools may require admin access.
                   </p>
                 )}
@@ -822,7 +822,7 @@ export function GroupedServiceCards({
         stuck={filtersStuck}
         actions={actions}
       >
-        <span className="text-xs text-muted-foreground" aria-live="polite">
+        <span className="text-11 text-muted-foreground" aria-live="polite">
           {visible.length} {visible.length === 1 ? "service" : "services"} ·{" "}
           {matchingKeys.length} matching{" "}
           {matchingKeys.length === 1 ? "connection" : "connections"}

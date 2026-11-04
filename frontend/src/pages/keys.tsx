@@ -249,7 +249,7 @@ function NyxIdApiKeysTab({
               <h3 className="text-13 font-semibold text-foreground">
                 Set up an isolated AI agent
               </h3>
-              <p className="max-w-2xl text-xs text-muted-foreground">
+              <p className="max-w-2xl text-12 text-muted-foreground">
                 Create or select an Agent Key, choose allowed services, add
                 credential bindings only when needed, then copy a verification
                 command that proves the key is scoped.

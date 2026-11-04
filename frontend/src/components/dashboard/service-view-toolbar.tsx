@@ -315,7 +315,7 @@ export function ServiceViewToolbar({
               "flex items-center gap-2 p-0.5",
               stuck
                 ? "flex-nowrap overflow-x-auto overscroll-x-contain [&>form]:min-w-48 [&>form]:w-auto"
-                : "flex-wrap",
+                : "flex-wrap [&>form]:basis-full sm:[&>form]:basis-0",
             )}
           >
             <div

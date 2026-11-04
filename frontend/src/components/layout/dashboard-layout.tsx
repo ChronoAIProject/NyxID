@@ -279,8 +279,8 @@ function TopBar({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
             <div className="px-2 py-1.5">
-              <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-              <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
+              <p className="shell-user-name">{user?.display_name ?? "User"}</p>
+              <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
@@ -323,8 +323,8 @@ function TopBar({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-48 p-2">
             <div className="px-2 py-1.5">
-              <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-              <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
+              <p className="shell-user-name">{user?.display_name ?? "User"}</p>
+              <p className="shell-user-email">{user?.email ?? ""}</p>
             </div>
             <DropdownMenuItem
               onClick={() => void navigate({ to: "/settings" })}
@@ -381,7 +381,7 @@ function MobileNavItem({
     <Link
       to={item.to}
       onClick={onClick}
-      className={`flex items-center gap-3 rounded-xl px-4 py-3 text-14 transition-colors ${
+      className={`flex items-center gap-3 rounded-xl px-4 py-3 shell-nav-item transition-colors ${
         active
           ? "bg-overlay-strong font-medium text-foreground"
           : "text-muted-foreground active:bg-overlay-strong"
@@ -531,7 +531,7 @@ function MobileNav({
             </div>
 
             <div className="px-4 my-3">
-              <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+              <span className="shell-group-label">
                 Approvals
               </span>
             </div>
@@ -547,7 +547,7 @@ function MobileNav({
             </div>
 
             <div className="px-4 my-3">
-              <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+              <span className="shell-group-label">
                 Developer
               </span>
             </div>
@@ -565,7 +565,7 @@ function MobileNav({
             {(adminNav.length > 0) && (
               <>
                 <div className="px-4 my-3">
-                  <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+                  <span className="shell-group-label">
                     Admin
                   </span>
                 </div>
@@ -592,8 +592,8 @@ function MobileNav({
             <User className="h-[14px] w-[14px] text-text-tertiary" />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-13 font-medium text-foreground truncate">{user?.display_name ?? "User"}</p>
-            <p className="text-11 text-text-tertiary truncate">{user?.email ?? ""}</p>
+            <p className="shell-user-name truncate">{user?.display_name ?? "User"}</p>
+            <p className="shell-user-email truncate">{user?.email ?? ""}</p>
           </div>
         </div>
         <div className="flex gap-2">

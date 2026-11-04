@@ -46,7 +46,7 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
   const container = useRef<HTMLDivElement>(null);
   const pitchMeasure = useRef<HTMLSpanElement>(null);
   const rail = useRef<HTMLElement>(null);
-  const [layout, setLayout] = useState({ height: 480, pitch: 8 });
+  const [layout, setLayout] = useState({ height: 480, pitch: 7 });
   const [viewportScroll, setViewportScroll] = useState(0);
   const [activeId, setActiveId] = useState<string>();
   const [keyboardIndex, setKeyboardIndex] = useState<number | null>(null);
@@ -68,22 +68,28 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
     const element = container.current;
     const measureElement = pitchMeasure.current;
     if (!element || !measureElement || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
     const measure = () => {
+      frame = 0;
       // Keep the floating rail below the toolbar, including wrapped headers.
       const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
       const parent = element.parentElement;
       element.style.top = `${controls && parent ? Math.max(0, controls.getBoundingClientRect().bottom - parent.getBoundingClientRect().top + 8) : 0}px`;
-      const pitch = measureElement.getBoundingClientRect().height || 8;
+      const pitch = measureElement.getBoundingClientRect().height || 7;
       const height = element.clientHeight;
       setLayout((current) => current.height === height && current.pitch === pitch ? current : { height, pitch });
     };
-    const observer = new ResizeObserver(measure);
+    // Updating top also resizes this observed viewport. Write in the next
+    // frame, outside ResizeObserver delivery, including during header motion.
+    const observer = new ResizeObserver(() => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    });
     observer.observe(element);
     observer.observe(measureElement);
     const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
     if (controls) observer.observe(controls);
     measure();
-    return () => observer.disconnect();
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [scrollRef]);
 
   const reveal = useCallback((index: number) => {
@@ -256,16 +262,16 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
                 aria-label={`Jump to message ${index + 1}: ${entry.author} — ${entry.title}`}
                 aria-current={selected ? "location" : undefined}
                 tabIndex={index === focusIndex ? 0 : -1}
-                className="group absolute left-0 flex w-full cursor-pointer items-center justify-end pr-[calc(var(--chat-index-pitch)/2)] outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-muted-foreground"
+                className="group absolute left-0 flex w-full cursor-pointer items-center justify-end pr-[calc(var(--chat-index-tick-width)/4)] outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-muted-foreground"
                 style={{ height: layout.pitch, top: centerOffset + index * layout.pitch }}
                 onPointerEnter={(event) => { if (event.pointerType !== "touch" && !dragging.current) preview(index, event.currentTarget); }}
                 onFocus={(event) => { reveal(index); preview(index, event.currentTarget); }}
                 onClick={(event) => { if (event.detail === 0) navigate(index); }}
               >
                 <span aria-hidden="true" className={cn(
-                  "h-[var(--chat-index-tick-thickness)] shrink-0 rounded-full bg-current transition-colors duration-150 motion-reduce:transition-none",
+                  "h-[var(--chat-index-tick-thickness)] shrink-0 rounded-full bg-current transition-[color,opacity] duration-150 motion-reduce:transition-none",
                   selected || entry.role === "assistant" ? "w-[var(--chat-index-tick-width)]" : "w-[calc(var(--chat-index-tick-width)/2)]",
-                  selected ? "text-nyx-secondary-400" : "text-text-tertiary group-hover:text-muted-foreground group-focus-visible:text-muted-foreground group-active:text-muted-foreground",
+                  selected ? "text-nyx-secondary-400 opacity-100" : "text-text-tertiary opacity-50 group-hover:text-muted-foreground group-hover:opacity-100 group-focus-visible:text-muted-foreground group-focus-visible:opacity-100 group-active:text-muted-foreground group-active:opacity-100",
                 )} />
               </button>
             );

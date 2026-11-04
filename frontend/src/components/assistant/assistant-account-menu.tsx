@@ -55,10 +55,10 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
   return (
     <>
       <div className="px-3 py-1.5">
-        <p className="truncate text-12 font-medium text-foreground">
+        <p className="truncate shell-user-name">
           {user?.display_name ?? "User"}
         </p>
-        <p className="truncate text-11 text-text-tertiary">
+        <p className="truncate shell-user-email">
           {user?.email ?? ""}
         </p>
       </div>

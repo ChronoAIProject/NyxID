@@ -141,7 +141,7 @@ export function DataTableSearch<SearchKey extends string>({
               onCancel();
             }
           }}
-          className="h-full min-w-0 flex-1 bg-transparent px-1 text-xs text-foreground outline-none placeholder:text-text-tertiary"
+          className="h-full min-w-0 flex-1 bg-transparent px-1 text-12 text-foreground outline-none placeholder:text-text-tertiary"
         />
         <button
           type="button"

@@ -90,7 +90,7 @@ const TITLE_FADE =
 
 function GroupLabel({ children }: { readonly children: string }) {
   return (
-    <div className="px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <div className="px-3 py-2 shell-group-label">
       {children}
     </div>
   );
@@ -99,7 +99,7 @@ function GroupLabel({ children }: { readonly children: string }) {
 /** An owner's agents or crews: a top-level section label, flush with WORKSPACE. */
 function OwnerLabel({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="-ml-2 px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <p className="-ml-2 px-3 py-2 shell-group-label">
       {children}
     </p>
   );
@@ -120,7 +120,7 @@ function ComingSoonItem({
       <TooltipTrigger asChild>
         <div
           aria-disabled="true"
-          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground opacity-50"
+          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item text-muted-foreground opacity-50"
         >
           <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -695,7 +695,7 @@ function CreateAgentMenu({
               // The dialogs are rendered by this sidebar; closing the mobile
               // drawer would unmount them.
               data-keep-drawer-open=""
-              className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
+              className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left shell-nav-item text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
             >
               <Plus aria-hidden="true" className="h-4 w-4 shrink-0 text-text-tertiary" />
               <span className="truncate">Create new agent</span>
@@ -753,7 +753,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                     .map((member) => agentTitle(member))
                     .join(", ")}${working ? `, ${String(working)} working` : ""}`}
                   className={cn(
-                    "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-13 transition-colors",
+                    "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors",
                     selected
                       ? "bg-overlay-strong font-medium text-foreground"
                       : "text-muted-foreground hover:bg-sidebar-hover hover:text-foreground",
@@ -935,7 +935,7 @@ export function AssistantSidebar({
             type="button"
             onClick={agents.onHome}
             aria-current={agents.homeActive ? "page" : undefined}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors ${
               agents.homeActive
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -949,7 +949,7 @@ export function AssistantSidebar({
         ) : (
           <Link
             to="/assistant"
-            className="flex items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
+            className="flex items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item text-muted-foreground hover:bg-overlay hover:text-foreground"
           >
             <HomeGlyph className="h-4 w-4" />
             Home
@@ -976,7 +976,7 @@ export function AssistantSidebar({
             to={item.to}
             aria-current={activeView === item.view ? "page" : undefined}
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors",
+              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors",
               activeView === item.view
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -996,7 +996,7 @@ export function AssistantSidebar({
         <Link
           to="/assistant/plugins"
           aria-current={pluginsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors ${
             pluginsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -1021,7 +1021,7 @@ export function AssistantSidebar({
         <Link
           to="/assistant/approvals"
           aria-current={approvalsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors ${
             approvalsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -1090,10 +1090,10 @@ export function AssistantSidebar({
               <User className="h-3.5 w-3.5 text-text-tertiary" />
             </div>
             <div className="min-w-0 flex-1">
-              <p className="truncate text-12 font-medium text-foreground">
+              <p className="truncate shell-user-name">
                 {user?.display_name ?? "User"}
               </p>
-              <p className="truncate text-10 text-text-tertiary">
+              <p className="truncate shell-user-email">
                 {user?.email ?? ""}
               </p>
             </div>

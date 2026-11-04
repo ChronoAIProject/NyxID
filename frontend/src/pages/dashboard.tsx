@@ -789,7 +789,7 @@ function AiSetupCard({
         <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 text-10 font-semibold text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">
           NEW
         </span>
-        <h3 className="text-15 font-bold text-foreground leading-snug">
+        <h3 className="text-15 font-semibold text-foreground leading-snug">
           Give your AI agents superpowers
         </h3>
         <p className="text-12 text-muted-foreground leading-relaxed">

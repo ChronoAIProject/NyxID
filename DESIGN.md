@@ -69,28 +69,38 @@ Light mode uses exactly two neutral tones (zinc grey page, white cards) with no 
 - **Loading:** Google Fonts CDN
 
 ### Scale (in-app)
-Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. New 1× equals the previous 0.85×: the themed root is 85% of the browser default (13.6px with a 16px browser default). Old non-default text preferences migrate once to `clamp(value / 0.85, 0.5, 2)` without rounding; old default preferences adopt the smaller baseline. Slider labels round to two decimals; migration retains the precise stored value. `text-12` is 10.2px at the new default 1×.
+Use the `text-{px}` tokens (`text-9` … `text-36`, defined as rem in `app.css`), never `text-[Npx]`. They follow the user's Settings → Display text size (0.5×–2× in 0.01× steps via the root font size). Display → Spacing independently scales the default 4px `--spacing` unit from 0.5×–2× in 0.01× steps, so use spacing utilities rather than fixed `[Npx]` paddings/heights. Both sliders show a draft multiplier while dragging, then apply and save on release; native keyboard adjustments apply as the value changes. New 1× equals the previous 0.85×: the themed root is 85% of the browser default (13.6px with a 16px browser default). Old non-default text preferences migrate once to `clamp(value / 0.85, 0.5, 2)` without rounding; old default preferences adopt the smaller baseline. Slider labels round to two decimals; migration retains the precise stored value. `text-12` is 11.9px at the new default 1× on every themed surface.
 
-| Token (new 1× = previous 0.85×) | Studio at new 1× | Use |
+| Token (themed 1×, root 13.6px) | Every themed surface | Use |
 |------|------|-----|
-| `text-9` | 7.65px | Sidebar group labels (uppercase, tracking 1.5px, `text-text-tertiary`) |
-| `text-10` | 8.5px | Section labels (uppercase, tracking 1.5px), badge text, smallest overline text |
-| `text-11` | 9.35px | Timestamps, stat descriptions, tertiary text, status labels, pagination counters |
-| `text-12` | 10.2px | Body text, button text, nav items, table cells, input/select text, dropdown items, detail row values, breadcrumbs, page descriptions |
-| `text-13` | 11.05px | Sidebar nav items, card body text, `DetailSection` headers, standard mobile-card primary text |
-| `text-14` | 11.9px | Long-form welcome/marketing copy (e.g. onboarding takeover body, mobile nav items) |
-| `text-15` | 12.75px | Dialog titles, card headings ("Shortcuts", "Getting started"), mobile Activity service titles, wizard step titles |
-| `text-22` | 18.7px | Page titles on mobile (auto-scales to 28px at `sm`), `text-lg` mid-page section headings (`channel-bots`, `org-detail`) |
-| `text-28` | 23.8px | Page titles on `sm+` (`PageHeader`, `font-bold`, `letter-spacing: -0.03em`); dashboard greeting |
+| `text-9` | 10.2px | Compact badges and sidebar group labels |
+| `text-10` | 10.2px | Section labels, table headers and badge text |
+| `text-11` | 11.05px | Timestamps, tertiary text and status labels |
+| `text-12` | 11.9px | Body text, button labels, table cells and input/select text |
+| `text-13` | 12.75px | Sidebar items, card body text and detail row titles |
+| `text-14` | 11.9px | Welcome/marketing copy |
+| `text-15` | 12.75px | Dialog titles and card headings |
+| `text-16` | 13.6px | Chat messages, composer and larger body text |
+| `text-17` | 14.45px | Emphasized body text |
+| `text-20` | 17px | Section headings |
+| `text-22` | 18.7px | Mobile page titles |
+| `text-24` | 20.4px | Large section headings |
+| `text-28` | 23.8px | Page titles at `sm` and above |
+| `text-36` | 30.6px | Display titles |
 
-The assistant uses a reading scale scoped by `html.assistant-display`, including
-portaled menus and account settings: `text-9`/`text-10` resolve to 10.2px,
-`text-11` to 11.05px, `text-12` to 11.9px, and `text-13` to 12.75px at the new 1×. Chat messages
-and the composer use `text-16` (13.6px), with unitless line heights. Markdown
-headings use 13.6–20.4px, and code blocks and tables use 11.9px. These values all
-follow the selected text multiplier; spacing remains independent. Controls
-reserve room for their line height and a minimum pointer target of max(24px, 1.5rem). Touch inputs retain a 16px minimum to prevent iOS focus zoom.
-Settings rows wrap according to the space their content needs.
+Studio, NyxBot, public auth pages using the app theme, and portaled menus/dialogs
+share the same root reading tokens (`html.theme-light` / `html.theme-dark`) and
+unitless base body line height of 1.5. Adding `assistant-display` does not change
+font-size tokens or body line height. The same `text-*` class always resolves to
+the same size, including `text-16` in chat and Studio. These values follow the
+selected text multiplier; spacing remains independent. Landing/blog keep their
+never-themed `@theme` size defaults and body line height. Component-specific
+leading utilities can express prose, labels or compact headings without changing
+the shared font sizes.
+
+Assistant controls reserve room for their line height and a minimum pointer
+target of max(24px, 1.5rem). Touch inputs retain a 16px minimum to prevent iOS focus
+zoom. Settings rows wrap according to the space their content needs.
 Assistant interface icons use the surrounding label's font size (`1.125em`),
 including sidebar glyphs, portaled menus, and dialog controls. Icon gaps and
 padding use `em` multiplied by the user's density, so increasing text size
@@ -305,13 +315,16 @@ to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
 desktop. All spacing, text and icons follow the assistant display scale.
 
 The conversation index floats at the transcript's right edge with no panel
-fill or hairline. Right-aligned, round-capped ticks use an 8px uniform pitch
+fill or hairline. Right-aligned, round-capped ticks use a 7px uniform pitch
 at 1× text, 16px long assistant ticks and 8px short user ticks. Thickness is
 1px on retina displays, increased to 1.5px at 1dppx for crispness. Geometry
 scales with text independently of spacing. This dense graphical navigator
-explicitly opts out of text-button minimum dimensions. Resting ticks use
-`text-text-tertiary`, hover and keyboard focus stay neutral, and only the
-current tick uses the long length and `text-nyx-secondary-400`.
+explicitly opts out of text-button minimum dimensions. Resting decorative
+ticks use `text-text-tertiary` at 50% opacity; their accessible message labels
+remain fully available. Hover, press and keyboard focus use full-opacity
+`text-muted-foreground`, and only the current tick uses the long length and
+full-opacity `text-nyx-secondary-400`. Tick lengths and thickness scale with
+text independently of pitch.
 
 Long rails have a real scroll viewport with bounded tick rendering. Reuse the
 transcript's edge-aware mask pattern: fade only an edge with more ticks beyond
@@ -320,7 +333,9 @@ edge autoscroll), and keyboard navigation scroll the rail; transcript navigation
 keeps the current tick visible. Rail scrolling is immediate, including with
 reduced motion. Hover/focus shows a preview and click, drag and keyboard
 navigation jump to messages. Observe the toolbar size to keep the rail below
-its controls, including wrapped compact headers.
+its controls, including wrapped compact headers. Defer rail position and size
+writes to an animation frame outside ResizeObserver delivery: moving the
+rail's top also changes the measured viewport height during header animation.
 
 ### Agent drawer search
 
@@ -465,12 +480,13 @@ Triggered by the search button or `/` key. Searches all sidebar destinations plu
 - **Collapsed mode:** label is replaced with a short divider line (`mx-auto w-3 border-t border-border/40`) so the visual separation survives.
 - **Active nav item:** `bg-overlay-strong font-medium text-foreground`, icon: `text-nyx-secondary-400`
 - **Hover:** `bg-overlay`
-- **Nav item:** `text-13`, icon `h-[16px] w-[16px]`, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Labels use the remaining row width and truncate only when their text exceeds it. Collapse transitions via `max-width: 0 → 100%` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
+- **Shared shell typography:** Studio and NyxBot use `shell-nav-item` (`text-13`, normal at rest / medium when active), `shell-group-label` (`text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary`), and `shell-user-name` / `shell-user-email` (`text-12 font-medium` / `text-10`). User blocks use those same roles in mobile navigation and portaled account menus.
+- **Nav item:** icons in both shells use `max(0.75rem, 1.125em)` relative to the shared nav label, `py-2` height, `gap-3 px-3` when expanded / `justify-center px-0 gap-0` when collapsed. Labels use the remaining row width and truncate only when their text exceeds it. Collapse transitions via `max-width: 0 → 100%` and `opacity: 0 → 1` (animated, never conditionally rendered, so layout never jumps).
 - **Sidebar control:** bottom popover with 3 mode options, active option indicated by purple-filled `Circle` dot
 - **Expand on hover:** outer `<aside>` is 52px in document flow, inner `<div>` is absolutely positioned and transitions width with shadow on the expanded state. 120ms enter delay, 250ms leave delay (via refs) to prevent flicker. Content is never blocked.
 
 ### Mobile Nav
-Full-screen takeover (`fixed inset-0 z-[80]`) with `slide-in-from-bottom` enter / `slide-out-to-bottom` exit. Header with NyxID icon + wordmark + close button. Search input (`h-10 rounded-xl`) at top — typing filters the same `ALL_ITEMS` list as the command palette. Sections mirror the sidebar (Main → Approvals → Developer → Admin) with `text-14` items in `rounded-xl px-4 py-3` rows; active state is a highlighted full-width row (`bg-overlay-strong font-medium text-foreground`), not a fixed-size square. Footer: a user-info row (`h-8 w-8` icon tile holding a Lucide `User` glyph — not an avatar image — plus name and email) above two full-width split buttons (Settings / Log out, both `rounded-xl py-2.5`), safe-area-aware bottom padding.
+Full-screen takeover (`fixed inset-0 z-[80]`) with `slide-in-from-bottom` enter / `slide-out-to-bottom` exit. Header with NyxID icon + wordmark + close button. Search input (`h-10 rounded-xl`) at top — typing filters the same `ALL_ITEMS` list as the command palette. Sections mirror the sidebar (Main → Approvals → Developer → Admin) with shared `shell-nav-item` (`text-13`) items in `rounded-xl px-4 py-3` rows; active state is a highlighted full-width row (`bg-overlay-strong font-medium text-foreground`), not a fixed-size square. Footer: a user-info row (`h-8 w-8` icon tile holding a Lucide `User` glyph — not an avatar image — plus name and email) above two full-width split buttons (Settings / Log out, both `rounded-xl py-2.5`), safe-area-aware bottom padding.
 
 ### Right Panel
 - **Width:** `w-[280px]`
@@ -702,6 +718,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | One reading scale across Studio and NyxBot | The themed root owns the reading tokens and 1.5 body line height, so route changes and portals cannot change a token’s rendered size. Control sizing and density stay scoped to the assistant; shared navigation icons follow their labels in both shells. Never-themed landing/blog defaults remain separate. |
 | 2026-11-04 | Rebase default text size to the previous 0.85×; restore dense rail and compact save chrome | The root baseline applies consistently in Studio and the assistant. Versioned migration preserves custom rendered sizes within bounds without changing spacing. Explicit rail geometry prevents general control scaling from stretching tick slots; compact bars and single-line reviews keep editing chrome small. |
 | 2026-11-04 | Compact titles, explicit change review and viewport save actions | Observer-driven headers retain search focus and compensate their height in the scroll content. One bar outside the scrolling viewport preserves access to dirty forms across tabs, detail pages and mobile keyboards. Allowlisted field diffs make edit saves reviewable without exposing credentials; section help adds searchable context. |
 | 2026-11-04 | Agent drawer search uses explicit live section registrations | Search groups results by tab and reveals exact rows or retained detail pages, preserving dirty drafts, save fences and dismissal guards. Search stays above the content region; keyboard and reduced-motion behavior are part of the pattern. |

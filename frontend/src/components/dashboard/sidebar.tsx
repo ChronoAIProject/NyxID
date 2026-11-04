@@ -184,7 +184,7 @@ function NavItem({
       onClick={onClick}
       title={collapsed ? item.label : undefined}
       className={cn(
-        "group/nav flex items-center rounded-lg py-2 text-13 overflow-hidden",
+        "shell-nav-item group/nav flex items-center rounded-lg py-2 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
         collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
         active
@@ -194,7 +194,7 @@ function NavItem({
     >
       <item.icon
         className={cn(
-          "h-[16px] w-[16px] shrink-0",
+          "size-[1.125em] shrink-0",
           active ? "text-nyx-secondary-400" : "text-text-tertiary",
         )}
       />
@@ -229,9 +229,9 @@ export function AssistantNavEntry({
       onClick={onClick}
       title={collapsed ? "Assistant" : undefined}
       className={cn(
-        "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
+        "shell-nav-item group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
-        mobile ? "gap-3 px-4 py-3 text-14" : "py-[7px] text-12",
+        mobile ? "gap-3 px-4 py-3" : "py-[7px]",
         !mobile && (collapsed ? "justify-center gap-0 px-0" : "gap-[9px] px-3"),
       )}
     >
@@ -331,7 +331,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+            <span className="shell-group-label">
               Approvals
             </span>
           )}
@@ -352,7 +352,7 @@ export function Sidebar({
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+            <span className="shell-group-label">
               Developer
             </span>
           )}
@@ -375,7 +375,7 @@ export function Sidebar({
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
-                <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+                <span className="shell-group-label">
                   Admin
                 </span>
               )}

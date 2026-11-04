@@ -76,7 +76,7 @@ export function ServicePoolSummary({
         <TooltipTrigger asChild>
           <button
             type="button"
-            className="flex h-8 w-full min-w-0 flex-col rounded-sm text-left text-xs leading-4 focus-visible:outline-2 focus-visible:outline-ring"
+            className="flex min-h-[2lh] w-full min-w-0 flex-col rounded-sm text-left text-11 leading-snug focus-visible:outline-2 focus-visible:outline-ring"
             aria-label={`Show routing for ${serviceName}`}
             aria-expanded={expanded}
             aria-controls={contentId}
