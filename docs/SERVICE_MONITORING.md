@@ -3,8 +3,9 @@
 The Monitoring card on `/keys/{id}` reads and manages one exact UserService
 through fixed NyxID routes. chrono-probe owns configuration, check resolution,
 latest check results, and discovered paths. NyxID stores no monitoring
-configuration or results, runs no status ingestion job, and adds no monitoring
-work to normal REST, LLM, or MCP invocations.
+configuration or raw check results and runs no status ingestion job. Successful
+REST, LLM and MCP invocations do not contact monitoring. Eligible failed
+invocations can add the bounded diagnostic evidence described below.
 
 ## Deployment
 
@@ -135,3 +136,102 @@ outages, incompatible responses, identity mismatches, oversized responses and
 timeouts return `monitoring_unavailable` (503). Audits contain only action,
 actor, exact UserService ID, optional revision, and existing request metadata;
 never body substrings, response bodies, or tokens.
+
+## Automatic failure diagnostics
+
+With `CHRONO_PROBE_URL` configured and `services:monitoring` enabled for the
+acting person, failed authenticated REST proxy, provider LLM, LLM gateway and
+MCP service-tool calls can carry secondary health evidence. Both direct MCP
+tools and `nyx__call_tool` use the same diagnostic path. This does not retry the
+business operation. Local input/scope/approval/capacity/billing denials and
+client cancellation do not initiate a probe; downstream 4xx (including
+operation-specific 401/403/404) and 5xx responses qualify. Transport and broker
+failures qualify only after an exact UserService has been resolved. Platform
+or legacy routes without an exact UserService are left alone. Responses whose
+stream already started cannot be decorated with later evidence.
+
+The exact selected UserService UUID comes from execution resolution, including
+the concrete member chosen by a pool. No diagnostic resolves a service by slug.
+NyxID rechecks live ownership, organization role/resource access and active HTTP
+service state. An ordinary access-token call forwards **only its original
+request bearer** to chrono-probe. It does not derive a human/agent/delegated
+replacement. chrono-probe's authorizer and its callback to NyxID retain that
+credential's service, node, resource and execution restrictions. If those
+restrictions prevent a check, evidence stays unknown.
+
+Agent Keys (even when carried as Bearer), sessions authenticated by cookies,
+service accounts, relay/delegated credentials and calls without an original
+bearer receive `observation: unknown`, `outcome: non_delegable`; they never use
+an operator monitoring key. There is no cached status fallback: the current
+latest-status contract does not bind its shared observation to this caller
+credential, so cached evidence cannot safely prove caller reachability.
+
+A bounded `GET /api/v1/monitoring/services/{id}/status` first establishes that a
+configured or discovered health path exists. Its cached health **result is not
+used as evidence**. Without a known recipe, NyxID reports `no_health_path` and
+does not intentionally initiate candidate-path discovery. It then makes at
+most one `POST /api/v1/monitoring/services/{id}/probes`, using chrono-probe's
+existing contract. No draft expectations or business request paths are sent.
+The caller check can update chrono-probe's shared latest result, but does not
+update scheduler-owned Prometheus metrics or alerts. No chrono-probe #14
+change is required.
+
+The existing probe API does not atomically pin the preflight configuration or
+offer a no-discovery mode. If an owner clears a recipe between the status read
+and the probe, chrono-probe can still discover candidate paths. NyxID rejects
+evidence whose returned health path differs from the preflight path, but this
+cannot undo upstream discovery. Eliminating this configuration race requires
+an additive chrono-probe API contract.
+
+The entire diagnostic (feature/ACL reads, rate admission, both upstream
+requests and response reads) has a 750ms budget. Client disconnect cancels the
+HTTP work; no detached task retains the bearer. Metrics admission has an
+additional maximum of 25ms. Redirects and ambient HTTP proxies remain disabled,
+and responses retain the existing 64KiB bound. A MongoDB token bucket permits
+one diagnostic per acting person/exact service per ten seconds across replicas;
+a process permits at most 32 simultaneous diagnostic futures. Nested pool and
+gateway wrappers diagnose once, not once per attempt. chrono-probe delegated
+callbacks and services on the configured monitoring origin are excluded;
+reentrant caller probes also hit the same consumed rate bucket.
+
+Raw REST/LLM status codes, bodies and forwarded headers are preserved. The
+NyxID-owned `X-NyxID-Service-Diagnostic` response header contains only this
+bounded JSON projection:
+
+```json
+{"observation":"caller","assessment":"operation_specific_likely","outcome":"completed"}
+```
+
+MCP errors retain their original content first, add a bounded
+`structuredContent.nyxid_service_diagnostic` object, and append a separate text
+content block containing the same evidence plus its interpretation.
+This also works with the universal tool's notification/SSE response. The
+projection never contains paths, raw bodies, free-text reasons, hostnames,
+tokens, keys or internal errors.
+
+| Live caller evidence | `assessment` |
+| --- | --- |
+| Reachable and healthy; readiness ready or absent | `operation_specific_likely` |
+| Healthy; fresh reachable readiness assertion failed | `dependency_unavailable` |
+| Reachable; health assertion failed | `health_assertion_failed` |
+| Probe reports broker error | `broker_error` |
+| Probe reports selected node offline | `node_offline` |
+| Probe reports transport timeout | `timeout` |
+| Missing/stale/mismatched/incomplete check evidence | `unknown` |
+
+Monitoring timeout, outage, throttling and missing health paths also retain
+`observation: unknown`, `assessment: unknown`. Their `outcome` is respectively
+`timeout`, `unavailable`, `rate_limited` or `no_health_path`. The original
+invocation error always remains authoritative. A healthy check suggests an
+operation/path/input/permission-specific failure; it does not establish that
+the operation is valid or authorized. An unhealthy check does not erase that
+operation's error.
+
+Operational log counter `service_invocation_diagnostics_total` has only the
+finite outcome/observation/assessment labels (no caller/service labels). The
+same projection uses canonical `monitoring.invocation_diagnostic` product
+telemetry under the existing live consent gates. Admitted diagnostic attempts
+write `service_invocation_diagnostic` audit rows with actor, exact UserService
+UUID and the bounded outcome projection. Raw check results, paths and tokens
+are never persisted by this feature; suppressed/non-delegable calls do not
+create per-failure audit rows.

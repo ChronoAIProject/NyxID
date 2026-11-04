@@ -67,3 +67,10 @@ Audit/billing evidence is retained under its integrity contract. No account-eras
 Dispatch reconciliation retains at most 32 unresolved requests per account. At that limit new product capture fails closed until existing requests settle or an operator records evidence; uncertainty is never discarded on lease expiry. Confirmed transport acceptance removes the per-event row and retains one account generation checkpoint. This bounds event-row growth while preserving provider-processing uncertainty.
 
 A provider deletion status outside its documented `pending`/`completed` states, including an explicit failure, marks the destination job `operator_action` with a stable error code. The worker never reports that as accepted or complete. After investigating the provider, `telemetry-erasure bind-person` with the verified UUID, operator identity and evidence reference records reconciliation and starts a fresh request with a fresh status baseline. `attest-no-data` is reserved for independently evidenced absence, not a workaround for failure.
+
+`monitoring.invocation_diagnostic` counts the bounded secondary evidence added
+to eligible failed service invocations. Its only event properties are the finite
+`outcome`, `observation` and `assessment` enums described in
+[SERVICE_MONITORING.md](SERVICE_MONITORING.md#automatic-failure-diagnostics).
+It uses the same account/device consent gates as other product events; the
+separate operational log counter and security audit do not depend on consent.
