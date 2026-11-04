@@ -364,7 +364,7 @@ async fn voice_service_ingress_checks_actual_optional_and_required_query_limits(
         // Both conversations belong to this Bot. The input limit, rather than
         // the independent Bot boundary, must reject the second conversation.
         let mut other = f.row.clone();
-        other.id = Uuid::new_v4().to_string();
+        other.id = format!("nyxa-{}", Uuid::new_v4().simple());
         f.state
             .db
             .collection::<crate::models::assistant_conversation::AssistantConversation>(
