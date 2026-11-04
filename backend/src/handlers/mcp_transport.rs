@@ -297,6 +297,9 @@ fn content_result_with_diagnostic(
     is_error: bool,
     diagnostic: Option<&crate::services::invocation_diagnostic_service::Diagnostic>,
 ) -> Response {
+    if !is_error || diagnostic.is_none() {
+        return content_result(id, content, is_error);
+    }
     rpc_success(id, diagnosed_tool_result(content, is_error, diagnostic))
 }
 
