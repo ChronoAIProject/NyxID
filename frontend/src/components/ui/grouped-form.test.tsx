@@ -1,12 +1,12 @@
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { useState } from "react";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { GroupedFormActions, GroupedFormBar, GroupedFormScope } from "./grouped-form";
 import { toast } from "sonner";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 function Draft({ name, initiallyDirty = false, save }: { name: string; initiallyDirty?: boolean; save: () => Promise<void> }) {
   const [dirty, setDirty] = useState(initiallyDirty);
@@ -63,9 +63,10 @@ it("reviews each dirty section before saving and names only successes after a pa
   const grants = vi.fn().mockRejectedValue(new Error("Revision changed"));
   render(<GroupedFormScope viewport><Draft name="profile" initiallyDirty save={profile} /><Draft name="grants" initiallyDirty save={grants} /><GroupedFormBar viewport /></GroupedFormScope>);
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
-  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("Off → On");
-  expect(screen.getByRole("heading", { name: "profile" })).toBeVisible();
-  expect(screen.getByRole("heading", { name: "grants" })).toBeVisible();
+  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("Before: Off");
+  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("After: On");
+  expect(screen.getByRole("heading", { name: "Profile" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Grants" })).toBeVisible();
   expect(profile).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole("button", { name: "Keep editing" }));
   expect(profile).not.toHaveBeenCalled();
@@ -80,13 +81,31 @@ it("reviews each dirty section before saving and names only successes after a pa
 });
 
 it("keeps both values visible when a long previous value is truncated in review", async () => {
-  const before = "Previous instructions ".repeat(30), after = "Revised instructions";
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(48);
+  vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function (this: HTMLElement) { return (this.textContent?.length ?? 0) > 160 ? 120 : 24; });
+  const before = "Previous instructions ".repeat(30), after = "Revised instructions ".repeat(30);
   render(<GroupedFormActions label="profile" dirty changes={() => [{ label: "Persona", before, after }]} save={vi.fn()} discard={vi.fn()} />);
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
   const previous = screen.getByText(before.trim());
-  expect(previous).toHaveClass("line-clamp-3");
-  expect(screen.getByText(after)).toHaveClass("line-clamp-3");
-  expect(screen.getByText("→").closest(".line-clamp-3")).toBeNull();
-  await userEvent.click(screen.getByRole("button", { name: "Show more" }));
-  expect(previous).not.toHaveClass("line-clamp-3");
+  const revised = screen.getByText(after.trim());
+  expect(previous.parentElement).toHaveClass("line-clamp-3");
+  expect(previous).toHaveClass("line-through");
+  expect(previous.closest("[data-review-value]")).toHaveClass("text-text-tertiary");
+  expect(revised.parentElement).toHaveClass("line-clamp-3");
+  expect(revised).not.toHaveClass("line-through");
+  expect(revised.closest("[data-review-value]")).toHaveClass("text-foreground");
+  expect(screen.queryByText("→")).toBeNull();
+  await userEvent.click(within(previous.closest<HTMLElement>("[data-review-value]")!).getByRole("button", { name: "Show more" }));
+  expect(previous.parentElement).not.toHaveClass("line-clamp-3");
+  expect(revised.parentElement).toHaveClass("line-clamp-3");
+  expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute("aria-expanded", "true");
+});
+
+it("uses sentence-case section labels and separate list additions and removals", async () => {
+  render(<GroupedFormActions label="machine access" dirty changes={() => [{ label: "Machines", added: ["Office Mac"], removed: ["Old laptop"] }]} save={vi.fn()} discard={vi.fn()} />);
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  expect(screen.getByRole("heading", { name: "Machine access" })).toBeVisible();
+  expect(screen.getByText("+ Office Mac")).toBeVisible();
+  expect(screen.getByText("− Old laptop")).toBeVisible();
+  expect(screen.queryByText("Before:")).toBeNull();
 });

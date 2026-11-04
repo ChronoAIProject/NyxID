@@ -115,7 +115,8 @@ it("registers a drawer draft with the viewport bar and reviews it before its rev
   await user.type(screen.getByRole("textbox", { name: "Skill description" }), " updated");
   expect(screen.getByRole("region", { name: "Unsaved changes" })).toHaveTextContent("skill draft · weekly-review");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
-  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("A reusable procedure → A reusable procedure updated");
+  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("Before: A reusable procedure");
+  expect(screen.getByRole("dialog", { name: "Review changes" })).toHaveTextContent("After: A reusable procedure updated");
   expect(sentDrafts()).toHaveLength(0);
   await confirmChanges();
   await waitFor(() => expect(sentDrafts()).toHaveLength(1));

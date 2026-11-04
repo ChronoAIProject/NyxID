@@ -8,19 +8,30 @@ import { afterGroupedFormCommit, type GroupedFormEntry } from "@/lib/grouped-for
 import type { FormChange } from "@/lib/grouped-form-changes";
 import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
 
-function ReviewValue({ children }: { readonly children: string }) {
+function ReviewValue({ label, children }: { readonly label: "Before" | "After"; readonly children: string }) {
   const [expanded, setExpanded] = useState(false);
-  return <span className="block min-w-0 break-words whitespace-pre-wrap">
-    <span className={!expanded ? "line-clamp-3" : undefined}>{children}</span>
-    {children.length > 160 && <button type="button" className="mt-1 text-11 font-medium text-primary-text" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
-  </span>;
+  const [overflow, setOverflow] = useState(false);
+  const value = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = value.current;
+    if (!node || expanded) return;
+    const measure = () => setOverflow(node.scrollHeight > node.clientHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [children, expanded]);
+  return <div data-review-value={label.toLowerCase()} className={`min-w-0 break-words whitespace-pre-wrap ${label === "Before" ? "text-text-tertiary" : "text-foreground"}`}>
+    <div ref={value} className={!expanded ? "line-clamp-3" : undefined}><span className="font-medium">{label}: </span><span className={label === "Before" ? "line-through" : undefined}>{children}</span></div>
+    {overflow && <button type="button" className="mt-1 text-11 font-medium text-primary-text" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>{expanded ? "Show less" : "Show more"}</button>}
+  </div>;
 }
 function Change({ change }: { readonly change: FormChange }) {
   return <GroupedRow className="items-start">
     <div className="min-w-0 flex-1 space-y-1">
       <p>{change.label}</p>
       <div className="text-11 font-normal text-text-tertiary">
-        {change.added ? <>{change.added.map((value) => <p key={`+${value}`}>+ {value}</p>)}{change.removed.map((value) => <p key={`-${value}`}>− {value}</p>)}</> : <div className="space-y-1"><ReviewValue>{change.before}</ReviewValue><span className="block">{" → "}</span><ReviewValue>{change.after}</ReviewValue></div>}
+        {change.added ? <>{change.added.map((value) => <p className="text-foreground" key={`+${value}`}>+ {value}</p>)}{change.removed.map((value) => <p key={`-${value}`}>− {value}</p>)}</> : <div className="space-y-2"><ReviewValue label="Before">{change.before}</ReviewValue><ReviewValue label="After">{change.after}</ReviewValue></div>}
       </div>
     </div>
   </GroupedRow>;
@@ -43,7 +54,7 @@ export function ChangeReview({ entries, save, disabled, children }: {
       <DialogContent scrollMode="body" className="bg-background">
         <DialogHeader><DialogTitle>Review changes</DialogTitle><DialogDescription>Check what will be saved before continuing.</DialogDescription></DialogHeader>
         <DialogBody className="space-y-6 py-4"><DrawerSectionInfoContext value={false}>
-          {review?.map((section, index) => <GroupedList key={`${section.label}-${index}`} title={section.label}>
+          {review?.map((section, index) => <GroupedList key={`${section.label}-${index}`} title={section.label.charAt(0).toLocaleUpperCase() + section.label.slice(1)}>
             {section.changes.length ? section.changes.map((change, index) => <Change key={`${change.label}-${index}`} change={change} />) : <GroupedRow title="Save changes to this section" />}
           </GroupedList>)}
         </DrawerSectionInfoContext></DialogBody>

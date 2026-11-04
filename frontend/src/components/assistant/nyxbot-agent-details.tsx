@@ -277,7 +277,7 @@ function AgentDetailsSheetContent({
             searchHost?.querySelector<HTMLButtonElement>('button[data-search-toggle]')?.focus();
           }
         }}
-        className="flex w-full flex-col gap-0 overflow-clip bg-background p-0 sm:max-w-lg"
+        className="agent-details-sheet flex w-full flex-col gap-0 overflow-clip bg-background p-0 sm:max-w-lg"
         onOpenAutoFocus={() => {
           returnFocus.current =
             document.activeElement instanceof HTMLElement
@@ -291,10 +291,10 @@ function AgentDetailsSheetContent({
           }
         }}
       >
-        <CompactChrome data-agent-header="" className="relative z-30 px-4 pb-2 pt-3">
+        <CompactChrome data-agent-header="" data-search-open={searchOpen} className="relative z-30 px-4 pb-2 pt-3">
           <SheetHeader className="space-y-0 text-left">
             <SheetTitle className="sr-only">Agent details</SheetTitle>
-            <div className="flex min-h-8 items-center gap-2">
+            <div className="agent-header-row relative flex min-h-8 items-center gap-2">
               {agent ? <>
                 <span className="agent-header-avatar flex size-8 shrink-0 items-center justify-center"><AgentAvatar agent={agent} size="lg" /></span>
                 <p title={agentTitle(agent)} className={`agent-header-name min-w-0 truncate text-15 font-semibold ${searchOpen ? "max-w-[30%] shrink" : "flex-1"}`}>{agentTitle(agent)}</p>

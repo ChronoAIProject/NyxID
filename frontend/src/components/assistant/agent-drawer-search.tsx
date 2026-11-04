@@ -2,6 +2,7 @@ import { CompactScroll } from "@/components/ui/compact-title";
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   createContext,
@@ -10,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Search, X } from "lucide-react";
+import { ArrowLeft, Search, X } from "lucide-react";
 import {
   DrawerSearchContext,
   DRAWER_SEARCH_TABS,
@@ -128,7 +129,25 @@ export function AgentDrawerSearch({
   const searchLabel = `Search ${title} agent details`;
   const input = useRef<HTMLInputElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
+  const [placeholder, setPlaceholder] = useState(searchLabel);
   useEffect(() => { if (open) input.current?.focus({ preventScroll: true }); }, [open]);
+  useLayoutEffect(() => {
+    const node = input.current;
+    if (!node || !open) return;
+    const measure = () => {
+      if (!node.clientWidth) return;
+      const context = document.createElement("canvas").getContext("2d");
+      if (!context) return;
+      const style = getComputedStyle(node);
+      context.font = style.font;
+      const width = node.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
+      setPlaceholder([searchLabel, `Search ${title}`, "Search agent"].find((text) => context.measureText(text).width <= width) ?? "Search");
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [open, searchLabel, title, host]);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const [pending, setPending] = useState<DrawerSearchEntry>();
   const [highlighted, setHighlighted] = useState<HTMLElement>();
@@ -244,6 +263,11 @@ export function AgentDrawerSearch({
           ordered.length;
     buttons.current.get(ordered[next]!.id)?.focus();
   }
+  function closeSearch() {
+    setQuery("");
+    setOpen(false);
+    requestAnimationFrame(() => toggle.current?.focus({ preventScroll: true }));
+  }
   return (
     <>
       {host && createPortal(
@@ -252,13 +276,14 @@ export function AgentDrawerSearch({
             <Search aria-hidden className="size-4" />
           </button>
           <div className="agent-header-search-field flex min-h-8 items-center gap-1 rounded-full bg-overlay-strong px-2" inert={!open} aria-hidden={!open || undefined}>
-            <Search aria-hidden className="size-3 shrink-0 text-text-tertiary" />
+            <button type="button" data-icon-button="" aria-label="Close agent search" className="agent-header-search-back size-6 shrink-0 items-center justify-center rounded-full text-text-tertiary hover:bg-overlay focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={closeSearch}><ArrowLeft aria-hidden className="size-3" /></button>
+            <Search aria-hidden className="agent-header-search-glyph size-3 shrink-0 text-text-tertiary" />
             <input
               ref={input}
               type="search"
               role="searchbox"
               aria-label={searchLabel}
-              placeholder={searchLabel}
+              placeholder={placeholder}
               maxLength={200}
               value={query}
               tabIndex={open ? 0 : -1}
@@ -275,8 +300,7 @@ export function AgentDrawerSearch({
                 if (event.key === "Escape" && !searching) {
                   event.preventDefault();
                   event.stopPropagation();
-                  setOpen(false);
-                  toggle.current?.focus();
+                  closeSearch();
                 }
               }}
               className="min-h-8 min-w-0 flex-1 border-0 bg-transparent py-1 text-12 font-normal shadow-none outline-none placeholder:text-text-tertiary [&::-webkit-search-cancel-button]:appearance-none"

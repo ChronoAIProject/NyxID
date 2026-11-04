@@ -287,8 +287,10 @@ footers meet 4.5:1 contrast against the page background as well as cards.
 
 Every edit Save first opens `Review changes`. Register a `changes()` describer
 with each form: compare its defaults with current values using an explicit
-allowlist of fields. Show human select labels, On/Off booleans, before → after
-text and + added / − removed list values. Long text can be expanded. Never
+allowlist of fields. Section headings use sentence-case display labels. Show human
+select labels and On/Off booleans under each field title: a tertiary Before line
+with the replaced value struck through, then a foreground After line. Clamp each
+value separately and offer Show more when it overflows. Lists use + added / − removed rows. Never
 enumerate arbitrary form values or expose secret/token fields; sensitive
 destinations are described as changed without showing their contents. Keep
 editing returns to the draft. Save changes runs the existing callbacks and
@@ -312,7 +314,12 @@ hover fill and a visible keyboard focus ring. Search is named “Search {agent t
 agent details” and exposes `aria-expanded`; Close is named “Close agent details”
 and retains Sheet dismissal semantics. Search expands into a compact inline field
 between the agent name and Close, with autofocus, a leading icon, a clear action
-and the same accessible name/placeholder. Empty blur collapses it to its icon;
+and the same accessible name/placeholder. Below a 480px drawer container width,
+open search hides the avatar/name with a short transition and fills their header
+row, including a Close agent search back button. Measure the placeholder against
+the available input width: shorten it to “Search {agent title}” when needed, then
+“Search agent” for unusually long names; its accessible name always stays full.
+Empty blur collapses it to its icon;
 a nonempty query keeps it open. Search and tabs use compact spacing (`text-12`, minimum 24px targets)
 and scale with the assistant reading setting. Nonempty searches replace the
 visible panels with inset result groups named for their tabs. Results are native
