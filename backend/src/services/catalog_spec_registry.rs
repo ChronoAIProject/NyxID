@@ -436,20 +436,28 @@ mod tests {
             .iter()
             .find(|endpoint| endpoint.name == "take_camera_photo")
             .unwrap();
-        assert_eq!(camera.method, "GET");
-        assert_eq!(camera.path, "/camera/snapshot.jpg");
+        assert_eq!(camera.method, "POST");
+        assert_eq!(camera.path, "/camera/capture");
         assert_eq!(camera.response.content_types, vec!["image/jpeg"]);
         for endpoint in &endpoints {
             assert!(matches!(
                 endpoint.path.as_str(),
                 "/status"
+                    | "/openapi.json"
                     | "/camera"
+                    | "/camera/capture"
                     | "/camera/snapshot.jpg"
                     | "/lcd/snapshot.jpg"
+                    | "/lcd/screen"
+                    | "/lcd/image"
                     | "/lcd/text"
                     | "/lcd/clear"
                     | "/voice"
                     | "/voice/open"
+                    | "/voice/agents"
+                    | "/voice/agents/refresh"
+                    | "/voice/start"
+                    | "/voice/hold"
                     | "/voice/say"
                     | "/voice/microphone"
                     | "/voice/stop"

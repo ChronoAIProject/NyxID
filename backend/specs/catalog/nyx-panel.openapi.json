@@ -58,11 +58,11 @@
     },
     "/camera/snapshot.jpg": {
       "get": {
-        "operationId": "take_camera_photo",
-        "summary": "Take a fresh photograph using the panel camera and return the actual JPEG image for visual understanding. Camera resources are released after capture. A busy camera returns 503; there is no continuous stream.",
+        "operationId": "get_camera_photo",
+        "summary": "Capture a camera JPEG without changing the panel display. Use take_camera_photo for normal user-facing capture and display. No continuous stream; camera resources are released afterwards.",
         "x-aevatar-tool": {
-          "name": "take_camera_photo",
-          "description": "Take a fresh photograph using the panel camera and return the actual JPEG image for visual understanding. Camera resources are released after capture. A busy camera returns 503; there is no continuous stream.",
+          "name": "get_camera_photo",
+          "description": "Capture a camera JPEG without changing the panel display. Use take_camera_photo for normal user-facing capture and display. No continuous stream; camera resources are released afterwards.",
           "readOnly": true,
           "destructive": false,
           "requiresApproval": false
@@ -406,6 +406,235 @@
             }
           }
         }
+      }
+    },
+    "/camera/capture": {
+      "post": {
+        "operationId": "take_camera_photo",
+        "summary": "Take one fresh photograph with the panel camera, display that exact photograph fullscreen on the panel for two minutes, and return the same JPEG for visual understanding. Use this for normal user requests to look through the camera. Voice controls and captions remain available; the saved fallback image is preserved. Camera resources are released after capture, with no continuous stream.",
+        "x-aevatar-tool": {
+          "name": "take_camera_photo",
+          "description": "Take one fresh photograph with the panel camera, display that exact photograph fullscreen on the panel for two minutes, and return the same JPEG for visual understanding. Use this for normal user requests to look through the camera. Voice controls and captions remain available; the saved fallback image is preserved. Camera resources are released after capture, with no continuous stream.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Camera is busy or unavailable; no image was captured."
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "get_api_description",
+        "summary": "Read this panel firmware version and the live API description filtered to this service permission scope.",
+        "x-aevatar-tool": {
+          "name": "get_api_description",
+          "description": "Read this panel firmware version and the live API description filtered to this service permission scope.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lcd/screen": {
+      "get": {
+        "operationId": "get_screen",
+        "summary": "Read the active application and screen navigation depth.",
+        "x-aevatar-tool": {
+          "name": "get_screen",
+          "description": "Read the active application and screen navigation depth.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lcd/image": {
+      "post": {
+        "operationId": "show_image",
+        "summary": "Show a temporary fullscreen JPEG supplied as binary request bytes, at most 65536 bytes. Leaves the persistent fallback unchanged.",
+        "x-aevatar-tool": {
+          "name": "show_image",
+          "description": "Show a temporary fullscreen JPEG supplied as binary request bytes, at most 65536 bytes. Leaves the persistent fallback unchanged.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "202": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "image/jpeg": {
+              "schema": {
+                "type": "string",
+                "description": "Raw JPEG bytes. For a fresh camera photo shown on the panel, use take_camera_photo."
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/agents": {
+      "get": {
+        "operationId": "list_voice_bots",
+        "summary": "List the Bots whose Voice services the panel own Key is authorized to use. Changing the saved selection requires the separate management service.",
+        "x-aevatar-tool": {
+          "name": "list_voice_bots",
+          "description": "List the Bots whose Voice services the panel own Key is authorized to use. Changing the saved selection requires the separate management service.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/agents/refresh": {
+      "post": {
+        "operationId": "refresh_voice_bots",
+        "summary": "Refresh the list of Bots authorized for this panel Key. Does not alter the selected Bot or its service grants.",
+        "x-aevatar-tool": {
+          "name": "refresh_voice_bots",
+          "description": "Refresh the list of Bots authorized for this panel Key. Does not alter the selected Bot or its service grants.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/start": {
+      "post": {
+        "operationId": "start_voice",
+        "summary": "Start voice with the saved input mode. Use open_voice for remote automatic two-way conversation.",
+        "x-aevatar-tool": {
+          "name": "start_voice",
+          "description": "Start voice with the saved input mode. Use open_voice for remote automatic two-way conversation.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/hold": {
+      "post": {
+        "operationId": "hold_voice",
+        "summary": "Press or release the talk control in push-to-talk mode. Use open_voice for automatic conversation without holding a button.",
+        "x-aevatar-tool": {
+          "name": "hold_voice",
+          "description": "Press or release the talk control in push-to-talk mode. Use open_voice for automatic conversation without holding a button.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "pressed",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "enum": [
+                0,
+                1
+              ]
+            },
+            "description": "1 presses talk; 0 releases it."
+          }
+        ]
       }
     }
   }

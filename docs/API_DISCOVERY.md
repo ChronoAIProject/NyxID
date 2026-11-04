@@ -257,11 +257,16 @@ To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register 
 The `nyx-panel` overlay is an instance-mounted device contract, without a
 seeded catalog connection. Panels register its hosted URL on their daily
 `UserEndpoint.openapi_spec_url`; each connection retains its own node route
-and service grants. It exposes on-demand camera JPEGs, display captions and
+and service grants. It exposes on-demand camera JPEGs, display images/captions and
 voice controls, and excludes configuration and system management. Tool-returned
 images use the ordinary NyxAgent image pipeline; voice tasks use the selected
 Bot's existing service grants. No camera transport or device-specific executor
 is added to Voice.
+With panel firmware v0.6.14 or later, the default camera tool calls
+`POST /camera/capture`: the panel displays the
+same JPEG returned to the model for two minutes, then restores its fallback.
+`GET /camera/snapshot.jpg` remains available for captures that leave the display
+unchanged. Display source metadata is available in `/status` for verification.
 Existing panels can attach the contract through `PUT /keys/{slug}` with
 `openapi_spec_url` pointing to this deployment's
 `/api/v1/catalog-specs/nyx-panel/openapi.json`; no grant or key change is needed.
