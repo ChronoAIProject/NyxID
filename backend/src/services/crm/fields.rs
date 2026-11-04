@@ -196,9 +196,29 @@ fn validate_value(
             let date = value
                 .as_str()
                 .ok_or_else(|| error(path, "must be a YYYY-MM-DD string"))?;
-            NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            let bytes = date.as_bytes();
+            let exact_width = bytes.len() == 10
+                && bytes[..4].iter().all(u8::is_ascii_digit)
+                && bytes[4] == b'-'
+                && bytes[5..7].iter().all(u8::is_ascii_digit)
+                && bytes[7] == b'-'
+                && bytes[8..].iter().all(u8::is_ascii_digit);
+            if !exact_width {
+                return Err(error(
+                    path,
+                    "must be a valid calendar date in YYYY-MM-DD format",
+                ));
+            }
+            let parsed = NaiveDate::parse_from_str(date, "%Y-%m-%d")
                 .map_err(|_| error(path, "must be a valid calendar date in YYYY-MM-DD format"))?;
-            Ok(ValidatedValue::Stored(Bson::String(date.to_owned())))
+            let canonical = parsed.format("%Y-%m-%d").to_string();
+            if canonical != date {
+                return Err(error(
+                    path,
+                    "must be a valid calendar date in YYYY-MM-DD format",
+                ));
+            }
+            Ok(ValidatedValue::Stored(Bson::String(canonical)))
         }
         CrmFieldKind::Datetime {} => {
             let instant = value
@@ -691,6 +711,26 @@ mod tests {
                 "values.date",
             )
             .is_err()
+        );
+        for noncanonical in ["2026-2-01", "2026-02-1", " 2026-02-01"] {
+            assert!(
+                validate_write_value(
+                    &field(CrmFieldKind::Date {}),
+                    &json!(noncanonical),
+                    "values.date",
+                )
+                .is_err(),
+                "accepted noncanonical date {noncanonical}"
+            );
+        }
+        assert_eq!(
+            validate_write_value(
+                &field(CrmFieldKind::Date {}),
+                &json!("2028-02-29"),
+                "values.date",
+            )
+            .unwrap(),
+            ValidatedValue::Stored(Bson::String("2028-02-29".into()))
         );
     }
 }

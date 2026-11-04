@@ -10,6 +10,14 @@ use crate::errors::{AppError, AppResult, CrmValidationIssue};
 
 pub const FLAG_KEY: &str = "assistant:crm";
 
+pub(crate) async fn fence_owner(
+    db: &mongodb::Database,
+    owner_id: &str,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    crate::services::erasure_admission::fence_in_session(db, owner_id, tx).await
+}
+
 pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()> {
     use mongodb::{
         IndexModel,
@@ -73,11 +81,19 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
         )
         .await?;
     db.collection::<Document>(crate::models::crm_saved_view::COLLECTION_NAME)
-        .create_index(
+        .create_indexes([
             IndexModel::builder()
                 .keys(doc! {"owner_id": 1, "updated_at": -1, "_id": -1})
                 .build(),
-        )
+            IndexModel::builder()
+                .keys(doc! {"deleted_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(7 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        ])
         .await?;
     db.collection::<Document>(crate::models::crm_mutation_receipt::COLLECTION_NAME)
         .create_indexes([

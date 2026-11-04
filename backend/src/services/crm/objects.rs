@@ -63,24 +63,40 @@ pub struct PatchField {
 }
 
 pub async fn ensure_seeded(db: &Database, owner_id: &str) -> AppResult<()> {
-    let now = Utc::now();
-    for object in seeded_objects(owner_id, now) {
-        let document =
-            bson::to_document(&object).map_err(|error| AppError::Internal(error.to_string()))?;
-        if let Err(error) = db
-            .collection::<CrmObject>(COLLECTION_NAME)
-            .update_one(
-                doc! {"owner_id": owner_id, "key": &object.key},
-                doc! {"$setOnInsert": document},
-            )
-            .upsert(true)
-            .await
-            && !crate::services::assistant_team_service::is_duplicate(&error)
-        {
-            return Err(error.into());
+    let context = (db.clone(), owner_id.to_owned());
+    let mut attempts = 0;
+    loop {
+        let result =
+            crate::services::transaction_service::run_db_only(db, &context, |tx, (db, owner)| {
+                Box::pin(async move {
+                    super::fence_owner(db, owner, tx).await?;
+                    for object in seeded_objects(owner, Utc::now()) {
+                        let document = bson::to_document(&object)
+                            .map_err(|error| AppError::Internal(error.to_string()))?;
+                        db.collection::<CrmObject>(COLLECTION_NAME)
+                            .update_one(
+                                doc! {"owner_id": owner, "key": &object.key},
+                                doc! {"$setOnInsert": document},
+                            )
+                            .upsert(true)
+                            .session(&mut *tx)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await;
+        match result {
+            Err(AppError::DatabaseError(error))
+                if attempts < 7
+                    && crate::services::assistant_team_service::is_duplicate(&error) =>
+            {
+                attempts += 1;
+                tokio::task::yield_now().await;
+            }
+            result => return result,
         }
     }
-    Ok(())
 }
 
 pub async fn list(db: &Database, owner_id: &str) -> AppResult<Vec<CrmObject>> {
@@ -95,7 +111,6 @@ pub async fn list(db: &Database, owner_id: &str) -> AppResult<Vec<CrmObject>> {
 }
 
 pub async fn get(db: &Database, owner_id: &str, key: &str) -> AppResult<CrmObject> {
-    ensure_seeded(db, owner_id).await?;
     db.collection::<CrmObject>(COLLECTION_NAME)
         .find_one(doc! {"owner_id": owner_id, "key": key})
         .await?
@@ -137,6 +152,7 @@ pub async fn add_field(
         db,
         &context,
         |tx, (db, owner, object_key, expected, field, receipt)| Box::pin(async move {
+            super::fence_owner(db, owner, tx).await?;
             if let Some(value) = super::records::receipt_in_session(db, receipt.as_ref(), tx).await? {
                 return serde_json::from_value(value).map_err(|_| AppError::Internal("Stored CRM object response is invalid".into()));
             }
@@ -184,6 +200,7 @@ pub async fn patch_field(
         receipt.clone(),
     );
     let result = crate::services::transaction_service::run_db_only(db, &context, |tx, (db, owner, object_key, field_key, patch, receipt)| Box::pin(async move {
+    super::fence_owner(db, owner, tx).await?;
     if let Some(value) = super::records::receipt_in_session(db, receipt.as_ref(), tx).await? {
         return serde_json::from_value(value).map_err(|_| AppError::Internal("Stored CRM object response is invalid".into()));
     }
@@ -242,7 +259,17 @@ pub async fn patch_field(
     }
     validation_result(fields::validate_definition(field, "field"))?;
     let updated_field = field.clone();
-    if object_fields == current.fields {
+    let default_columns = if updated_field.archived {
+        current
+            .default_columns
+            .iter()
+            .filter(|key| key.as_str() != field_key.as_str())
+            .cloned()
+            .collect()
+    } else {
+        current.default_columns.clone()
+    };
+    if object_fields == current.fields && default_columns == current.default_columns {
         super::records::insert_receipt(db, tx, receipt.as_ref(), &current, Utc::now()).await?;
         return Ok(current);
     }
@@ -254,6 +281,7 @@ pub async fn patch_field(
             doc! {
                 "$set": {
                     format!("fields.{index}"): bson::to_bson(&updated_field).map_err(|error| AppError::Internal(error.to_string()))?,
+                    "default_columns": bson::to_bson(&default_columns).map_err(|error| AppError::Internal(error.to_string()))?,
                     "updated_at": bson::DateTime::from_chrono(now),
                 },
                 "$inc": {"schema_revision": 1_i64},
@@ -265,7 +293,7 @@ pub async fn patch_field(
         let current = db.collection::<CrmObject>(COLLECTION_NAME).find_one(doc! {"_id": &current.id, "owner_id": owner}).session(&mut *tx).await?.ok_or_else(|| AppError::NotFound("CRM object not found".into()))?;
         return Err(schema_conflict(current));
     }
-    let object = CrmObject { fields: object_fields, schema_revision: current.schema_revision + 1, updated_at: now, ..current };
+    let object = CrmObject { fields: object_fields, default_columns, schema_revision: current.schema_revision + 1, updated_at: now, ..current };
     super::records::insert_receipt(db, tx, receipt.as_ref(), &object, now).await?;
     Ok(object)
     })).await;
@@ -530,5 +558,31 @@ mod tests {
         }];
         let error = validate_option_edit(&existing, &[]).unwrap_err();
         assert!(matches!(error, AppError::CrmValidationFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn seeding_is_rejected_by_the_durable_owner_erasure_fence() {
+        let db = crate::test_utils::connect_transaction_test_database("crm_seed_fence").await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(crate::services::erasure_admission::COLLECTION)
+            .insert_one(doc! {
+                "_id": &owner,
+                "erasure_accepted": true,
+                "revision": 1_i64,
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            ensure_seeded(&db, &owner).await,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            db.collection::<CrmObject>(COLLECTION_NAME)
+                .count_documents(doc! {"owner_id": &owner})
+                .await
+                .unwrap(),
+            0
+        );
     }
 }
