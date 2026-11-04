@@ -1,15 +1,18 @@
 # NyxBot first-run onboarding
 
 New NyxBot users get a short, skippable intro on web (`/assistant`) and mobile
-(the NyxBot home). It has three parts:
+(the NyxBot home). A first-timer is greeted by name on a welcome page first;
+a replay starts at the questions. It then has three parts:
 
 1. **Who it's for and interests.** The user first picks who NyxBot is for: just
    me, my team, or my business. The topic list then follows that answer, using
    each topic's `work_styles`. Personal and team topics cover getting work done
    (email, calendar, research, code, docs, team chat, reports). Business topics
    are SaaS-like (customer support, sales and leads, marketing, reports,
-   payments). Switching the answer drops picks that no longer apply. Every pick
-   is optional.
+   payments). Switching the answer drops picks that no longer apply, and only
+   the pills that differ animate: leaving pills fade out in place, shared
+   pills glide to their new places, and new pills fade in one after another.
+   Every pick is optional.
 2. **Three intro screens.**
    - **Chief of staff, specialists and "You stay in control"** play recorded
      replays of the real assistant. The replays are captured in dev mock mode, so they contain

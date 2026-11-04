@@ -1,9 +1,18 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Check } from "lucide-react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
+import { Check, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
+import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useSaveOnboarding } from "@/hooks/use-assistant-onboarding";
+import { useAuthStore } from "@/stores/auth-store";
 import { capture } from "@/lib/telemetry";
 import { cn } from "@/lib/utils";
 import type {
@@ -15,14 +24,21 @@ import { NextStepCards } from "./next-step-cards";
 import { OnboardingIcon } from "./onboarding-icons";
 import { AccessModesPreview, ReplayClip } from "./intro-previews";
 
+/** The screens after the greeting; the progress bar counts these. */
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
-type Step = (typeof STEPS)[number];
-const LAST = STEPS.length - 1;
+type Step = "welcome" | (typeof STEPS)[number];
+/** Leaving pills fade out before the shared ones move. */
+const PILL_EXIT_MS = 140;
+
+function reducedMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
 
 /**
- * The first-run NyxBot intro: a light, skippable interest picker, three short
- * screens on how NyxBot and specialists work, then one-click next steps
- * ranked by the answers. Finishing or skipping saves the answers once.
+ * The first-run NyxBot intro: a greeting for first-timers, a light, skippable
+ * interest picker, three short screens on how NyxBot and specialists work,
+ * then one-click next steps ranked by the answers. Finishing or skipping
+ * saves the answers once.
  */
 export function FirstRunIntro({
   open,
@@ -42,24 +58,34 @@ export function FirstRunIntro({
   readonly onTour?: () => void;
 }) {
   const save = useSaveOnboarding();
+  const firstName = useAuthStore((auth) => auth.user?.display_name?.trim().split(/\s+/)[0]);
+  // Only a first-timer is greeted; a replay starts at the questions.
+  const flow: readonly Step[] = entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
+  const LAST = flow.length - 1;
   const [index, setIndex] = useState(0);
   const [topics, setTopics] = useState<readonly string[]>(() => state.profile?.topics ?? []);
   const [workStyle, setWorkStyle] = useState<string | null>(() => state.profile?.work_style ?? null);
-  const [steps, setSteps] = useState<readonly NextStep[] | null>(null);
+  // The audience the topic list shows; it follows `workStyle` once leaving
+  // pills have faded, while the choice itself is selected at once.
+  const [audience, setAudience] = useState<string>(() => state.profile?.work_style ?? "solo");
+  const [nextSteps, setNextSteps] = useState<readonly NextStep[] | null>(null);
+  const [exiting, setExiting] = useState<ReadonlySet<string>>(() => new Set());
+  const styleSwitch = useRef<number | undefined>(undefined);
   const saved = useRef(false);
   const openedAt = useRef(0);
   const body = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
-  const step: Step = STEPS[index] ?? "interests";
+  const step: Step = flow[index] ?? "interests";
 
   useEffect(() => {
     if (!open) return;
     saved.current = false;
     openedAt.current = Date.now();
     setIndex(0);
-    setSteps(null);
+    setNextSteps(null);
     setTopics(state.profile?.topics ?? []);
     setWorkStyle(state.profile?.work_style ?? null);
+    setAudience(state.profile?.work_style ?? "solo");
     void capture({ name: "ui.dialog_opened", props: { dialog_id: "nyxbot_intro", entry_point: entryPoint } });
     // Only a fresh open resets the intro; later state refreshes keep progress.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -98,18 +124,18 @@ export function FirstRunIntro({
     if (index >= LAST) return;
     void capture({
       name: "ui.dialog_step_completed",
-      props: { dialog_id: "nyxbot_intro", step: index, total_steps: STEPS.length },
+      props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
     });
     const target = index + 1;
     moved.current = true;
     setIndex(target);
     if (target === LAST) {
-      void persist("completed").then((result) => setSteps(result?.recommendations ?? state.recommendations));
+      void persist("completed").then((result) => setNextSteps(result?.recommendations ?? state.recommendations));
     }
   }
 
   function back() {
-    if (index > 0 && index < LAST) {
+    if (index > 0 && index < LAST && flow[index - 1] !== "welcome") {
       moved.current = true;
       setIndex(index - 1);
     }
@@ -139,14 +165,31 @@ export function FirstRunIntro({
   }
 
   // Topics follow who NyxBot is for; personal topics until that is chosen.
-  const offered = new Set(topicsFor(state.topics, workStyle ?? "solo").map((topic) => topic.id));
+  const offered = new Set(topicsFor(state.topics, audience).map((topic) => topic.id));
 
+  // Switching audience runs in order: pills that leave fade out in place,
+  // then the shared pills glide to their new places and new ones fade in.
   function chooseWorkStyle(id: string) {
     const next = workStyle === id ? null : id;
-    const kept = new Set(topicsFor(state.topics, next ?? "solo").map((topic) => topic.id));
+    const nextAudience = next ?? "solo";
+    const kept = new Set(topicsFor(state.topics, nextAudience).map((topic) => topic.id));
     setWorkStyle(next);
     setTopics((current) => current.filter((topic) => kept.has(topic)));
+    const apply = () => {
+      styleSwitch.current = undefined;
+      setExiting(new Set());
+      setAudience(nextAudience);
+    };
+    window.clearTimeout(styleSwitch.current);
+    const leaving = new Set([...offered].filter((topic) => !kept.has(topic)));
+    if (!leaving.size || reducedMotion()) {
+      apply();
+      return;
+    }
+    setExiting(leaving);
+    styleSwitch.current = window.setTimeout(apply, PILL_EXIT_MS);
   }
+  useEffect(() => () => window.clearTimeout(styleSwitch.current), []);
 
   function toggleTopic(id: string) {
     setTopics((current) =>
@@ -167,14 +210,16 @@ export function FirstRunIntro({
         aria-describedby="nyxbot-intro-description"
       >
         <div className="flex min-h-0 flex-1 flex-col md:min-h-[690px]">
-          <Progress index={index} />
+          {step === "welcome" ? null : <Progress index={(STEPS as readonly string[]).indexOf(step)} />}
           <div
             key={step}
             ref={body}
             tabIndex={-1}
             className="flex-1 space-y-4 outline-none px-0 pt-4 pb-2 animate-in fade-in-0 slide-in-from-right-3 duration-300 motion-reduce:animate-none md:px-6"
           >
-            {step === "interests" ? (
+            {step === "welcome" ? (
+              <Welcome firstName={firstName} onStart={next} onSkip={skip} />
+            ) : step === "interests" ? (
               <StepHeading
                 title="Let's set NyxBot up for you"
                 description="Tell us who it's for and what it should help with. We'll tailor your first suggestions and NyxBot will remember. You can skip this."
@@ -191,6 +236,7 @@ export function FirstRunIntro({
                   label="Topics"
                   choices={state.topics}
                   shown={offered}
+                  exiting={exiting}
                   selected={topics}
                   onToggle={toggleTopic}
                   multi
@@ -247,8 +293,8 @@ export function FirstRunIntro({
                 title="Pick your first step"
                 description="One click and NyxBot takes it from there. These stay on your home page until you're done with them. New here? Take a quick tour of the screen first."
               >
-                {steps ? (
-                  <NextStepCards steps={steps} onStart={start} />
+                {nextSteps ? (
+                  <NextStepCards steps={nextSteps} onStart={start} />
                 ) : (
                   <div className="grid gap-2" aria-label="Loading suggestions">
                     {[0, 1, 2].map((item) => (
@@ -259,6 +305,7 @@ export function FirstRunIntro({
               </StepHeading>
             )}
           </div>
+          {step === "welcome" ? null : (
           <div className="mt-auto flex items-center gap-2 border-t border-border/50 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:px-6">
             {index < LAST ? (
               <Button variant="ghost" size="sm" onClick={skip}>
@@ -266,14 +313,14 @@ export function FirstRunIntro({
               </Button>
             ) : null}
             <div className="ml-auto flex items-center gap-2">
-              {index > 0 && index < LAST ? (
+              {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
                 <Button variant="outline" size="sm" onClick={back}>
                   Back
                 </Button>
               ) : null}
               {index < LAST ? (
                 <Button variant="primary" size="sm" onClick={next}>
-                  {index === 0 ? (topics.length || workStyle ? "Continue" : "Continue without picking") : "Next"}
+                  {step === "interests" ? (topics.length || workStyle ? "Continue" : "Continue without picking") : "Next"}
                 </Button>
               ) : (
                 <>
@@ -289,9 +336,77 @@ export function FirstRunIntro({
               )}
             </div>
           </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** The greeting a first-timer sees before any question. */
+function Welcome({
+  firstName,
+  onStart,
+  onSkip,
+}: {
+  readonly firstName: string | undefined;
+  readonly onStart: () => void;
+  readonly onSkip: () => void;
+}) {
+  const points = [
+    { icon: Sparkles, text: "A chief of staff that works across your apps" },
+    { icon: UsersRound, text: "Specialists with one job each, under your rules" },
+    { icon: ShieldCheck, text: "Nothing sensitive happens without your say-so" },
+  ];
+  return (
+    <div className="flex min-h-full flex-col items-center justify-center gap-6 py-10 text-center md:py-16">
+      <div className="relative animate-in fade-in-0 zoom-in-90 duration-500 ease-out motion-reduce:animate-none">
+        <span
+          aria-hidden="true"
+          className="absolute inset-0 -m-3 rounded-full bg-nyx-500/15 blur-md motion-safe:animate-pulse"
+        />
+        <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="xl" className="relative h-16 w-16" />
+      </div>
+      <div
+        className="max-w-md space-y-2 animate-in fade-in-0 slide-in-from-bottom-2 duration-500 fill-mode-both motion-reduce:animate-none"
+        style={{ animationDelay: "120ms" }}
+      >
+        <DialogTitle className="text-22 font-bold text-foreground sm:text-28" style={{ letterSpacing: "-0.03em" }}>
+          {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
+        </DialogTitle>
+        <DialogDescription id="nyxbot-intro-description" className="text-14 leading-relaxed text-muted-foreground">
+          I'm NyxBot, your personal chief of staff. Give me a minute and I'll show you how we'll work together.
+        </DialogDescription>
+      </div>
+      <ul className="w-full max-w-sm space-y-2 text-left">
+        {points.map(({ icon: Icon, text }, position) => (
+          <li
+            key={text}
+            className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2 shadow-sm animate-in fade-in-0 slide-in-from-bottom-1 duration-400 fill-mode-both motion-reduce:animate-none"
+            style={{ animationDelay: `${260 + position * 90}ms` }}
+          >
+            <span
+              aria-hidden="true"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay text-foreground"
+            >
+              <Icon className="size-3.5" />
+            </span>
+            <span className="text-12 text-foreground">{text}</span>
+          </li>
+        ))}
+      </ul>
+      <div
+        className="flex flex-col items-center gap-2 animate-in fade-in-0 duration-500 fill-mode-both motion-reduce:animate-none"
+        style={{ animationDelay: "560ms" }}
+      >
+        <Button variant="primary" onClick={onStart}>
+          Let's get started
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onSkip}>
+          Skip for now
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -348,14 +463,16 @@ function Points({ items }: { readonly items: readonly string[] }) {
 }
 
 /**
- * Pills in a stable order. With `shown`, pills outside it collapse in place:
- * switching audience animates only the pills that differ, and the shared
- * ones slide to their new places.
+ * Pills in a stable order. With `shown`, only those pills render; `exiting`
+ * pills fade out in place first. Pills that stay glide to their new places
+ * (measured against the list, so the dialog's own entrance cannot skew it),
+ * and new pills fade in one after another.
  */
 function ChoiceGrid({
   label,
   choices,
   shown,
+  exiting,
   selected,
   onToggle,
   multi,
@@ -363,33 +480,57 @@ function ChoiceGrid({
   readonly label: string;
   readonly choices: readonly OnboardingChoice[];
   readonly shown?: ReadonlySet<string>;
+  readonly exiting?: ReadonlySet<string>;
   readonly selected: readonly string[];
   readonly onToggle: (id: string) => void;
   readonly multi?: boolean;
 }) {
+  const visible = shown ? choices.filter((choice) => shown.has(choice.id)) : choices;
+  const nodes = useRef(new Map<string, HTMLElement>());
+  const places = useRef(new Map<string, { x: number; y: number }>());
+  const layoutKey = visible.map((choice) => choice.id).join(",");
+  useLayoutEffect(() => {
+    const animate = !reducedMotion();
+    const next = new Map<string, { x: number; y: number }>();
+    for (const [id, node] of nodes.current) {
+      const place = { x: node.offsetLeft, y: node.offsetTop };
+      next.set(id, place);
+      const previous = places.current.get(id);
+      if (!animate || !previous || (previous.x === place.x && previous.y === place.y)) continue;
+      node.style.transition = "none";
+      node.style.transform = `translate(${previous.x - place.x}px, ${previous.y - place.y}px)`;
+      requestAnimationFrame(() => {
+        node.style.transition = "transform 280ms cubic-bezier(0.2, 0, 0, 1)";
+        node.style.transform = "";
+      });
+    }
+    places.current = next;
+  }, [layoutKey]);
   return (
-    <div role={multi ? "group" : "radiogroup"} aria-label={label} className="flex flex-wrap gap-y-2">
-      {choices.map((choice) => {
+    <div role={multi ? "group" : "radiogroup"} aria-label={label} className="relative flex flex-wrap gap-2">
+      {visible.map((choice, position) => {
         const active = selected.includes(choice.id);
-        const visible = !shown || shown.has(choice.id);
+        const leaving = exiting?.has(choice.id) ?? false;
         return (
           <span
             key={choice.id}
-            aria-hidden={visible ? undefined : true}
-            inert={!visible}
-            className={cn(
-              "inline-flex overflow-hidden rounded-full transition-[max-width,margin,opacity,transform] duration-300 ease-out motion-reduce:transition-none",
-              visible ? "mr-2 max-w-[24rem] opacity-100" : "mr-0 max-w-0 scale-90 opacity-0",
-            )}
+            ref={(node) => {
+              if (node) nodes.current.set(choice.id, node);
+              else nodes.current.delete(choice.id);
+            }}
+            className="inline-flex animate-in fade-in-0 zoom-in-95 duration-200 ease-out fill-mode-both motion-reduce:animate-none"
+            style={{ animationDelay: `${shown ? 60 + position * 20 : 0}ms` }}
           >
             <button
               type="button"
               role={multi ? "checkbox" : "radio"}
               aria-checked={active}
+              disabled={leaving}
               onClick={() => onToggle(choice.id)}
               className={cn(
-                "inline-flex items-center gap-2 whitespace-nowrap rounded-full border py-1 pr-3 pl-1 text-12 font-medium transition-[background-color,border-color,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
-                "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-input-focus",
+                "inline-flex items-center gap-2 whitespace-nowrap rounded-full border py-1 pr-3 pl-1 text-12 font-medium transition-[background-color,border-color,opacity,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
+                "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus",
+                leaving && "scale-95 opacity-0",
                 active
                   ? "border-input-focus bg-overlay-strong text-foreground"
                   : "border-hairline text-muted-foreground hover:border-hairline-strong hover:bg-overlay hover:text-foreground",

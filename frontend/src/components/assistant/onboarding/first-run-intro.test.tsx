@@ -76,13 +76,18 @@ afterEach(() => {
   globalThis.__nyxidAssistantHttpMock = undefined;
 });
 
-function renderIntro(onStart = vi.fn(), onOpenChange = vi.fn(), onTour?: () => void) {
+function renderIntro(
+  onStart = vi.fn(),
+  onOpenChange = vi.fn(),
+  onTour?: () => void,
+  entryPoint: "first_run" | "account_menu" = "account_menu",
+) {
   render(
     <QueryClientProvider client={client}>
       <FirstRunIntro
         open
         state={state()}
-        entryPoint="first_run"
+        entryPoint={entryPoint}
         onOpenChange={onOpenChange}
         onStart={onStart}
         onTour={onTour}
@@ -91,6 +96,33 @@ function renderIntro(onStart = vi.fn(), onOpenChange = vi.fn(), onTour?: () => v
   );
   return { onStart, onOpenChange };
 }
+
+it("a first-timer is greeted by name before the questions", async () => {
+  const user = userEvent.setup();
+  renderIntro(vi.fn(), vi.fn(), undefined, "first_run");
+  expect(screen.getByRole("heading", { name: "Welcome, Owner" })).toBeTruthy();
+  expect(screen.queryByLabelText(/Step 1 of/)).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
+  expect(screen.getByRole("heading", { name: "Let's set NyxBot up for you" })).toBeTruthy();
+  // The greeting is not a step to go back to.
+  expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+});
+
+it("skipping from the greeting records a skipped intro", async () => {
+  const user = userEvent.setup();
+  const { onOpenChange } = renderIntro(vi.fn(), vi.fn(), undefined, "first_run");
+  await user.click(screen.getByRole("button", { name: "Skip for now" }));
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+  await waitFor(() =>
+    expect(writes).toEqual([
+      {
+        method: "PUT",
+        endpoint: "/assistant/nyxagent/onboarding",
+        body: { outcome: "skipped", topics: [], work_style: null },
+      },
+    ]),
+  );
+});
 
 it("skipping saves the picks as a skipped intro and closes", async () => {
   const user = userEvent.setup();
@@ -155,7 +187,9 @@ it("topics follow who NyxBot is for and drop picks that no longer apply", async 
   await user.click(screen.getByRole("checkbox", { name: /Research & news/ }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
   await user.click(screen.getByRole("radio", { name: /My business/ }));
-  expect(screen.queryByRole("checkbox", { name: /Research & news/ })).toBeNull();
+  // Leaving pills fade out first, then the list settles.
+  await waitFor(() => expect(screen.queryByRole("checkbox", { name: /Research & news/ })).toBeNull());
+  expect(screen.getByRole("checkbox", { name: /Email & inbox/ })).toBeTruthy();
   await user.click(screen.getByRole("checkbox", { name: /Sales & leads/ }));
   await user.click(screen.getByRole("button", { name: "Skip intro" }));
   await waitFor(() =>

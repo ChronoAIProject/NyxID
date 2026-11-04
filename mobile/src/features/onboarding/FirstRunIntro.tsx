@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { AgentAvatar } from "../../components/AgentAvatar";
 import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
 import { onboardingApi } from "../../lib/api/onboardingApi";
 import { capture } from "../../lib/telemetry";
@@ -28,8 +29,20 @@ import {
 } from "./onboardingContracts";
 import { NextStepList } from "./NextStepList";
 
+/** The screens after the greeting; the progress bar counts these. */
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
-const LAST = STEPS.length - 1;
+type Step = "welcome" | (typeof STEPS)[number];
+
+/**
+ * Switching audience: leaving pills fade quickly, shared pills move with a
+ * soft spring, new pills fade in.
+ */
+const PILL_LAYOUT = {
+  duration: 280,
+  create: { type: LayoutAnimation.Types.easeOut, property: LayoutAnimation.Properties.opacity, duration: 200, delay: 120 },
+  update: { type: LayoutAnimation.Types.spring, springDamping: 0.9 },
+  delete: { type: LayoutAnimation.Types.easeIn, property: LayoutAnimation.Properties.opacity, duration: 120 },
+};
 
 /**
  * The first-run NyxBot intro, matching the web app: a skippable interest
@@ -39,6 +52,7 @@ export function FirstRunIntro({
   visible,
   state,
   entryPoint,
+  firstName,
   online,
   onClose,
   onStart,
@@ -46,6 +60,8 @@ export function FirstRunIntro({
   visible: boolean;
   state: Onboarding;
   entryPoint: "first_run" | "home";
+  /** Greets a first-timer by name. */
+  firstName?: string;
   /** Next steps need a connection; offline they stay visible but disabled. */
   online: boolean;
   onClose: () => void;
@@ -63,7 +79,11 @@ export function FirstRunIntro({
   const [steps, setSteps] = useState<readonly NextStep[] | null>(null);
   const saved = useRef(false);
   const openedAt = useRef(0);
-  const step = STEPS[index] ?? "interests";
+  // Only a first-timer is greeted; a replay starts at the questions.
+  const flow: readonly Step[] = entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
+  const LAST = flow.length - 1;
+  const step: Step = flow[index] ?? "interests";
+  const progress = (STEPS as readonly string[]).indexOf(step);
 
   useEffect(() => {
     if (!visible) return;
@@ -112,7 +132,7 @@ export function FirstRunIntro({
     if (index >= LAST) return;
     void capture({
       name: "ui.mobile_dialog_step_completed",
-      props: { dialog_id: "nyxbot_intro", step: index, total_steps: STEPS.length },
+      props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
     });
     const target = index + 1;
     setIndex(target);
@@ -134,7 +154,7 @@ export function FirstRunIntro({
       topicsFor(state.topics, next ?? "solo").map((topic) => topic.id),
     );
     // Pills shared by both audiences stay; only the ones that differ animate.
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    LayoutAnimation.configureNext(PILL_LAYOUT);
     setWorkStyle(next);
     setTopics((current) => current.filter((topic) => kept.has(topic)));
   }
@@ -157,30 +177,34 @@ export function FirstRunIntro({
         style={[styles.fill, { backgroundColor: colors.bg }]}
         edges={["top", "bottom"]}
       >
-        <View
-          style={styles.progress}
-          accessibilityLabel={`Step ${index + 1} of ${STEPS.length}`}
-        >
-          {STEPS.map((item, position) => (
-            <View
-              key={item}
-              style={[
-                styles.dot,
-                {
-                  width: position === index ? 24 : 12,
-                  backgroundColor:
-                    position <= index ? colors.textPrimary : colors.border,
-                },
-              ]}
-            />
-          ))}
-        </View>
+        {step === "welcome" ? null : (
+          <View
+            style={styles.progress}
+            accessibilityLabel={`Step ${progress + 1} of ${STEPS.length}`}
+          >
+            {STEPS.map((item, position) => (
+              <View
+                key={item}
+                style={[
+                  styles.dot,
+                  {
+                    width: position === progress ? 24 : 12,
+                    backgroundColor:
+                      position <= progress ? colors.textPrimary : colors.border,
+                  },
+                ]}
+              />
+            ))}
+          </View>
+        )}
         <ScrollView
           key={step}
           style={styles.fill}
           contentContainerStyle={styles.body}
         >
-          {step === "interests" ? (
+          {step === "welcome" ? (
+            <Welcome firstName={firstName} onStart={next} onSkip={skip} />
+          ) : step === "interests" ? (
             <>
               <Heading
                 title="Let's set NyxBot up for you"
@@ -257,12 +281,13 @@ export function FirstRunIntro({
             </>
           )}
         </ScrollView>
+        {step === "welcome" ? null : (
         <View style={[styles.footer, { borderColor: colors.borderSoft }]}>
           {index < LAST ? (
             <ActionButton label="Skip intro" variant="secondary" compact onPress={skip} />
           ) : null}
           <View style={styles.spacer} />
-          {index > 0 && index < LAST ? (
+          {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
             <ActionButton
               label="Back"
               variant="secondary"
@@ -274,7 +299,7 @@ export function FirstRunIntro({
             label={
               index === LAST
                 ? "Explore on my own"
-                : index === 0
+                : step === "interests"
                   ? topics.length || workStyle
                     ? "Continue"
                     : "Continue without picking"
@@ -285,8 +310,57 @@ export function FirstRunIntro({
             onPress={index === LAST ? skip : next}
           />
         </View>
+        )}
       </SafeAreaView>
     </Modal>
+  );
+}
+
+/** The greeting a first-timer sees before any question. */
+function Welcome({
+  firstName,
+  onStart,
+  onSkip,
+}: {
+  firstName?: string;
+  onStart: () => void;
+  onSkip: () => void;
+}) {
+  const { colors } = useTheme();
+  return (
+    <View style={styles.welcome}>
+      <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
+      <View style={styles.heading}>
+        <Label accessibilityRole="header" style={[styles.title, styles.center]}>
+          {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
+        </Label>
+        <Label muted style={[styles.bodyText, styles.center]}>
+          I'm NyxBot, your personal chief of staff. Give me a minute and I'll
+          show you how we'll work together.
+        </Label>
+      </View>
+      <View style={styles.points}>
+        {[
+          ["star", "A chief of staff that works across your apps"],
+          ["users", "Specialists with one job each, under your rules"],
+          ["shield", "Nothing sensitive happens without your say-so"],
+        ].map(([icon, text]) => (
+          <View
+            key={text}
+            style={[styles.pointCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+          >
+            <Feather
+              name={icon as keyof typeof Feather.glyphMap}
+              size={14}
+              color={colors.textPrimary}
+            />
+            <Label style={[styles.small, styles.fill]}>{text}</Label>
+          </View>
+        ))}
+      </View>
+      <ActionButton label="Let's get started" onPress={onStart} />
+      <ActionButton label="Skip for now" variant="secondary" compact onPress={onSkip} />
+    </View>
   );
 }
 
@@ -427,4 +501,16 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
   },
   spacer: { flex: 1 },
+  welcome: { alignItems: "center", gap: 20, paddingVertical: 32 },
+  center: { textAlign: "center" },
+  points: { alignSelf: "stretch", gap: 8 },
+  pointCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
 });
