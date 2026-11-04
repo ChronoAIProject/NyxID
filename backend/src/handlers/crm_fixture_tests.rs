@@ -101,10 +101,7 @@ impl FixtureWriter {
                     let replacement = if let Some(existing) = self.ids.get(text) {
                         existing.clone()
                     } else {
-                        let replacement = format!(
-                            "00000000-0000-4000-8000-{:012x}",
-                            self.next_id
-                        );
+                        let replacement = format!("00000000-0000-4000-8000-{:012x}", self.next_id);
                         self.next_id += 1;
                         self.ids.insert(text.clone(), replacement.clone());
                         replacement
@@ -202,7 +199,7 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     )
     .unwrap();
     let (_, private) = crate::routes::build_router_with_state(state.clone());
-    let app = private.with_state(state);
+    let app = private.with_state(state.clone());
     let mut fixtures = FixtureWriter::new();
 
     let objects = ok(&app, &token, "GET", &format!("{BASE}/objects"), None, None).await;
@@ -514,15 +511,7 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     .await;
     let view_id = created_view["id"].as_str().unwrap().to_owned();
     fixtures.assert("view_create", created_view);
-    let listed_views = ok(
-        &app,
-        &token,
-        "GET",
-        &format!("{BASE}/views"),
-        None,
-        None,
-    )
-    .await;
+    let listed_views = ok(&app, &token, "GET", &format!("{BASE}/views"), None, None).await;
     fixtures.assert("views_list", listed_views);
     let fetched_view = ok(
         &app,
@@ -567,5 +556,83 @@ async fn crm_http_contract_fixtures_match_real_routes() {
         Some("fixture-delete-view"),
     )
     .await;
-    fixtures.assert("view_delete", deleted_view);
+    fixtures.assert("view_delete", deleted_view.clone());
+    let replayed_delete = ok(
+        &app,
+        &token,
+        "DELETE",
+        &format!("{BASE}/views/{view_id}"),
+        None,
+        Some("fixture-delete-view"),
+    )
+    .await;
+    assert_eq!(replayed_delete, deleted_view);
+    let (status, deleted_read) = request(
+        &app,
+        &token,
+        "GET",
+        &format!("{BASE}/views/{view_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{deleted_read}");
+    assert_eq!(deleted_read["message"], "Not found: CRM view not found");
+
+    let missing_id = Uuid::new_v4().to_string();
+    let (missing_status, missing_record) = request(
+        &app,
+        &token,
+        "GET",
+        &format!("{BASE}/records/{missing_id}"),
+        None,
+        None,
+    )
+    .await;
+    let (hint_status, mismatched_hint) = request(
+        &app,
+        &token,
+        "GET",
+        &format!("{BASE}/records/{company_id}?owner_id={missing_id}"),
+        None,
+        None,
+    )
+    .await;
+    let foreign_owner = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_utils::test_user(&foreign_owner, UserType::Person))
+        .await
+        .unwrap();
+    crate::services::crm::objects::ensure_seeded(&state.db, &foreign_owner)
+        .await
+        .unwrap();
+    let foreign = crate::services::crm::records::create(
+        &state.db,
+        &foreign_owner,
+        crate::models::crm_record::CrmActor::human(&foreign_owner),
+        crate::services::crm::records::CreateRecordInput {
+            object: "company".into(),
+            values: [("name".into(), json!("Foreign"))].into_iter().collect(),
+            protect: vec![],
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let (foreign_status, foreign_record) = request(
+        &app,
+        &token,
+        "GET",
+        &format!("{BASE}/records/{}", foreign.id),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert_eq!(hint_status, missing_status);
+    assert_eq!(foreign_status, missing_status);
+    assert_eq!(mismatched_hint, missing_record);
+    assert_eq!(foreign_record, missing_record);
 }

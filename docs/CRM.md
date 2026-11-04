@@ -112,7 +112,7 @@ CrmTableQuery {
   object, select?: [field key],
   filters: [{ field, op, value? }],          // max 20
   sort?: { field, direction: "asc" | "desc" },   // scalar kinds only (text, number, currency, boolean, date, datetime, select); tie-break by _id
-  page_size: 1..=200 (default 50), cursor?: opaque string,
+  page_size: 1..=200 (default 50), cursor?: opaque keyset cursor bound to the query shape, direction, last sort value/null state, and _id,
   include_archived: bool (default false)
 }
 CrmAggregateQuery {
@@ -127,7 +127,7 @@ Operators by kind: text `eq neq in contains is_set is_unset` (contains is case-i
 
 Table result: `{ object: CrmObject, rows: [{ id, revision, values, links, overrides, archived }], next_cursor, total_count }`. `total_count` counts the whole filtered population, not the page.
 
-Aggregate result: `{ points: [{ key, label, value, archived }], unit: { format: "count" | "number" | "currency", currency? }, total, truncated }`. Group keys for absent values use key `null`, label "None". A group whose option or target record is archived keeps its key with `archived: true`. `total` always covers the whole filtered population. Past 50 groups the response returns the first 50 by `order`, then one `{ key: "__other__", label: "Other" }` point holding the remainder, and `truncated: true`, so points always sum to `total` for count and sum. Currency `sum`, `min`, `max` return integer minor units in the field currency; currency `avg` is rounded half-even to minor units. Filters and access apply before grouping, so hidden or archived source records never appear in totals.
+Aggregate result: `{ points: [{ key, label, value, archived }], unit: { format: "count" | "number" | "currency", currency? }, total, truncated }`. Group keys are `string | boolean | null`; absent values use key `null`, label "None". Aggregate values and `total` are nullable when no measured value exists. A group whose option or target record is archived keeps its key with `archived: true`. `total` and points come from one grouped snapshot and cover the whole filtered population. Past 50 groups the bounded response returns the first 50 by `order`, then one `{ key: "__other__", label: "Other" }` point holding the remainder, and `truncated: true`, so points always sum to `total` for count and sum. Currency `sum`, `min`, `max` return checked integer minor units in the field currency; currency `avg` is rounded half-even to minor units. Filters and access apply before grouping, so hidden or archived source records never appear in totals.
 
 Board data is a table query filtered by one stage option per lane plus one aggregate `count` grouped by the stage field for authoritative lane totals. Records in an archived stage option appear in a read-only "Archived stages" lane so lane totals add up to the object total.
 
@@ -135,7 +135,7 @@ Bounds: 20 filters, 200 rows per page, 50 aggregate groups, 10 seconds `max_time
 
 ## Saved views
 
-`crm_saved_views`: `{ _id, owner_id, title, revision, envelope, created_by, created_at, updated_at }`. `envelope` is the NyxID-owned wrapper:
+`crm_saved_views`: `{ _id, owner_id, title, revision, envelope, created_by, deleted_at?, created_at, updated_at }`. Delete is a soft delete: deleted rows are excluded from reads and validation, retained for idempotent replay, and TTL-purged after seven days. `envelope` is the NyxID-owned wrapper:
 
 ```json
 {
@@ -173,7 +173,7 @@ Components read data only through `queryId`. The renderer executes each named qu
 
 Element ids and query ids match `^[A-Za-z][A-Za-z0-9_-]{0,63}$`. `ObjectTable.columns` and `RecordForm.fields` must be live field keys of the bound object.
 
-Validation runs on save and on read, server-side, and is the authority. It checks the envelope versions, at most 60 elements, depth at most 8, at most 12 queries, element types and props against the catalog (unknown props rejected), children references (exist, no cycles, reachable from `root`), every query against current object metadata, every `queryId` exists, and the query kind and shape match the component. Errors are a list of `{ path, message }` an agent can repair, e.g. `spec.elements.chart.props.queryId`. Saving an invalid replacement fails and keeps the last valid revision. A stored view that no longer validates (for example a field was archived) still loads with `valid: false` and its errors, so the page shows what is broken instead of a blank screen.
+Validation runs on save and on read, server-side, and is the authority. It checks the envelope versions, at most 60 elements and 60 child edges, depth at most 8, at most 12 queries, element types and props against the catalog (unknown props rejected), and requires the element graph to be a tree: only `Stack`/`Grid` have children, child ids are unique, every non-root element has exactly one parent, and every element is reachable from `root`. It also checks every query against current object metadata, every `queryId` exists, and the query kind and shape match the component. Errors are a list of `{ path, message }` an agent can repair, e.g. `spec.elements.chart.props.queryId`. Saving an invalid replacement fails and keeps the last valid revision. A stored view that no longer validates (for example a field was archived) still loads with `valid: false` and its errors, so the page shows what is broken instead of a blank screen.
 
 `PUT /views/{id}` requires `expected_revision`.
 
@@ -187,7 +187,7 @@ All under `/api/v1/assistant/crm`. List and read routes accept `?owner_id=`. Wri
 - `POST /records` `{ object, values, protect? }`. `GET /records/{id}`. `PATCH /records/{id}` `{ expected_revision, values, protect?, unprotect? }`. `POST /records/{id}/archive` and `/restore` `{ expected_revision }`. `POST /records/{id}/move`.
 - `GET /records/{id}/activities?cursor=`, `POST /records/{id}/notes` `{ body }`.
 - `GET /records/{id}/related` returns reverse links grouped by `(object_key, field_key)`, access-filtered, max 50 per group with counts.
-- `GET /views`, `POST /views`, `GET /views/{id}` (envelope plus `valid` and `errors`), `PUT /views/{id}`, `DELETE /views/{id}`, `POST /views/validate`.
+- `GET /views` returns `{ views: [...] }`; `POST /views`, `GET /views/{id}` (envelope plus `valid` and `errors`), `PUT /views/{id}`, `DELETE /views/{id}`, `POST /views/validate`.
 
 ## Error codes
 

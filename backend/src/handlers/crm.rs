@@ -11,7 +11,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         crm_object::{CrmField, CrmFieldKind},
-        crm_record::CrmActor,
+        crm_record::{CrmActor, CrmRecord},
+        crm_saved_view::CrmSavedView,
     },
     mw::auth::AuthUser,
     services::{
@@ -211,6 +212,7 @@ async fn get_object(
 ) -> AppResult<Json<ObjectResponse>> {
     let actor = guard(&state, &auth).await?;
     let (owner, access) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
+    objects::ensure_seeded(&state.db, &owner).await?;
     Ok(Json(ObjectResponse {
         object: objects::get(&state.db, &owner, &key).await?.into(),
         access,
@@ -371,9 +373,7 @@ async fn get_record(
     Query(query): Query<OwnerQuery>,
 ) -> AppResult<Json<records::RecordResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(query.owner_id.as_deref(), &raw.owner_id)?;
-    owner_access(&state, &actor, Some(&raw.owner_id)).await?;
+    let (raw, _) = record_access(&state, &actor, &id, query.owner_id.as_deref()).await?;
     Ok(Json(records::get(&state.db, &raw.owner_id, &id).await?))
 }
 
@@ -385,10 +385,8 @@ async fn patch_record(
     Json(body): Json<PatchRecordBody>,
 ) -> AppResult<Json<records::RecordResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(body.owner_id.as_deref(), &raw.owner_id)?;
-    let (_, access) = owner_access(&state, &actor, Some(&raw.owner_id)).await?;
-    require_work(access)?;
+    let (raw, access) = record_access(&state, &actor, &id, body.owner_id.as_deref()).await?;
+    require_work(access).map_err(record_not_found)?;
     let receipt = mutation_receipt(
         &headers,
         &raw.owner_id,
@@ -446,10 +444,8 @@ async fn set_record_archived(
     archived: bool,
 ) -> AppResult<Json<records::RecordResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(body.owner_id.as_deref(), &raw.owner_id)?;
-    let (_, access) = owner_access(&state, &actor, Some(&raw.owner_id)).await?;
-    require_work(access)?;
+    let (raw, access) = record_access(&state, &actor, &id, body.owner_id.as_deref()).await?;
+    require_work(access).map_err(record_not_found)?;
     let action = if archived { "archive" } else { "restore" };
     let receipt = mutation_receipt(
         &headers,
@@ -494,10 +490,8 @@ async fn move_record(
     Json(body): Json<MoveBody>,
 ) -> AppResult<Json<records::RecordResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(body.owner_id.as_deref(), &raw.owner_id)?;
-    let (_, access) = owner_access(&state, &actor, Some(&raw.owner_id)).await?;
-    require_work(access)?;
+    let (raw, access) = record_access(&state, &actor, &id, body.owner_id.as_deref()).await?;
+    require_work(access).map_err(record_not_found)?;
     let receipt = mutation_receipt(
         &headers,
         &raw.owner_id,
@@ -530,9 +524,7 @@ async fn list_activities(
     Query(query): Query<ActivityQuery>,
 ) -> AppResult<Json<activities::ActivityPage>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(query.owner_id.as_deref(), &raw.owner_id)?;
-    owner_access(&state, &actor, Some(&raw.owner_id)).await?;
+    let (raw, _) = record_access(&state, &actor, &id, query.owner_id.as_deref()).await?;
     Ok(Json(
         activities::list(&state.db, &raw.owner_id, &id, query.cursor.as_deref()).await?,
     ))
@@ -546,10 +538,8 @@ async fn add_note(
     Json(body): Json<NoteBody>,
 ) -> AppResult<Json<activities::ActivityResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(body.owner_id.as_deref(), &raw.owner_id)?;
-    let (_, access) = owner_access(&state, &actor, Some(&raw.owner_id)).await?;
-    require_work(access)?;
+    let (raw, access) = record_access(&state, &actor, &id, body.owner_id.as_deref()).await?;
+    require_work(access).map_err(record_not_found)?;
     let receipt = mutation_receipt(
         &headers,
         &raw.owner_id,
@@ -579,9 +569,7 @@ async fn related_records(
     Query(query): Query<OwnerQuery>,
 ) -> AppResult<Json<links::RelatedResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = records::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(query.owner_id.as_deref(), &raw.owner_id)?;
-    owner_access(&state, &actor, Some(&raw.owner_id)).await?;
+    let (raw, _) = record_access(&state, &actor, &id, query.owner_id.as_deref()).await?;
     Ok(Json(links::related(&state.db, &raw.owner_id, &id).await?))
 }
 
@@ -635,9 +623,7 @@ async fn get_view(
     Query(query): Query<OwnerQuery>,
 ) -> AppResult<Json<views::ViewResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = views::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(query.owner_id.as_deref(), &raw.owner_id)?;
-    owner_access(&state, &actor, Some(&raw.owner_id)).await?;
+    let (raw, _) = view_access(&state, &actor, &id, query.owner_id.as_deref(), false).await?;
     Ok(Json(views::get(&state.db, &raw.owner_id, &id).await?))
 }
 
@@ -649,10 +635,8 @@ async fn update_view(
     Json(body): Json<UpdateViewBody>,
 ) -> AppResult<Json<views::ViewResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = views::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(body.owner_id.as_deref(), &raw.owner_id)?;
-    let (_, access) = owner_access(&state, &actor, Some(&raw.owner_id)).await?;
-    require_work(access)?;
+    let (raw, access) = view_access(&state, &actor, &id, body.owner_id.as_deref(), false).await?;
+    require_work(access).map_err(view_not_found)?;
     let receipt = mutation_receipt(
         &headers,
         &raw.owner_id,
@@ -686,13 +670,11 @@ async fn delete_view(
     Query(query): Query<OwnerQuery>,
 ) -> AppResult<Json<views::DeleteViewResponse>> {
     let actor = guard(&state, &auth).await?;
-    let raw = views::raw_by_id(&state.db, &id).await?;
-    ensure_owner_hint(query.owner_id.as_deref(), &raw.owner_id)?;
-    let (_, access) = owner_access(&state, &actor, Some(&raw.owner_id)).await?;
+    let (raw, access) = view_access(&state, &actor, &id, query.owner_id.as_deref(), true).await?;
     if raw.created_by.user_id == actor {
-        require_work(access)?;
+        require_work(access).map_err(view_not_found)?;
     } else {
-        require_schema(access)?;
+        require_schema(access).map_err(view_not_found)?;
     }
     let receipt = mutation_receipt(
         &headers,
@@ -763,6 +745,58 @@ async fn owner_access(
         _ => return Err(AppError::NotFound("CRM owner not found".into())),
     };
     Ok((owner.to_owned(), level))
+}
+
+async fn record_access(
+    state: &AppState,
+    actor: &str,
+    id: &str,
+    owner_hint: Option<&str>,
+) -> AppResult<(CrmRecord, AccessLevel)> {
+    let raw = records::raw_by_id(&state.db, id)
+        .await
+        .map_err(record_not_found)?;
+    ensure_owner_hint(owner_hint, &raw.owner_id).map_err(record_not_found)?;
+    let (_, access) = owner_access(state, actor, Some(&raw.owner_id))
+        .await
+        .map_err(record_not_found)?;
+    Ok((raw, access))
+}
+
+async fn view_access(
+    state: &AppState,
+    actor: &str,
+    id: &str,
+    owner_hint: Option<&str>,
+    include_deleted: bool,
+) -> AppResult<(CrmSavedView, AccessLevel)> {
+    let raw = views::raw_by_id(&state.db, id)
+        .await
+        .map_err(view_not_found)?;
+    if raw.deleted_at.is_some() && !include_deleted {
+        return Err(view_not_found(AppError::NotFound(String::new())));
+    }
+    ensure_owner_hint(owner_hint, &raw.owner_id).map_err(view_not_found)?;
+    let (_, access) = owner_access(state, actor, Some(&raw.owner_id))
+        .await
+        .map_err(view_not_found)?;
+    Ok((raw, access))
+}
+
+fn record_not_found(error: AppError) -> AppError {
+    normalize_not_found(error, "CRM record not found")
+}
+
+fn view_not_found(error: AppError) -> AppError {
+    normalize_not_found(error, "CRM view not found")
+}
+
+fn normalize_not_found(error: AppError, message: &str) -> AppError {
+    if matches!(error, AppError::NotFound(_)) {
+        AppError::NotFound(message.into())
+    } else {
+        error
+    }
 }
 
 fn require_work(access: AccessLevel) -> AppResult<()> {

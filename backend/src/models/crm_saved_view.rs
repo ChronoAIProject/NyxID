@@ -14,6 +14,8 @@ pub struct CrmSavedView {
     pub revision: i64,
     pub envelope: serde_json::Value,
     pub created_by: CrmActor,
+    #[serde(with = "super::bson_datetime::optional")]
+    pub deleted_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

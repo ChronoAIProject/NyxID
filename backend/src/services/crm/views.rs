@@ -1,9 +1,12 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::{Database, bson::doc};
+use mongodb::{
+    Database,
+    bson::{self, doc},
+};
 use regex::Regex;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -192,7 +195,7 @@ struct RecordFormProps {
 pub async fn list(db: &Database, owner_id: &str) -> AppResult<Vec<ViewResponse>> {
     let rows: Vec<CrmSavedView> = db
         .collection::<CrmSavedView>(VIEWS)
-        .find(doc! {"owner_id": owner_id})
+        .find(doc! {"owner_id": owner_id, "deleted_at": mongodb::bson::Bson::Null})
         .sort(doc! {"updated_at": -1, "_id": -1})
         .await?
         .try_collect()
@@ -207,7 +210,7 @@ pub async fn list(db: &Database, owner_id: &str) -> AppResult<Vec<ViewResponse>>
 pub async fn get(db: &Database, owner_id: &str, id: &str) -> AppResult<ViewResponse> {
     let row = db
         .collection::<CrmSavedView>(VIEWS)
-        .find_one(doc! {"_id": id, "owner_id": owner_id})
+        .find_one(doc! {"_id": id, "owner_id": owner_id, "deleted_at": mongodb::bson::Bson::Null})
         .await?
         .ok_or_else(|| AppError::NotFound("CRM view not found".into()))?;
     Ok(response(db, row).await)
@@ -244,6 +247,7 @@ pub async fn create(
         &context,
         |tx, (db, owner, actor, input, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(value) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return serde_json::from_value(value).map_err(|_| {
                         AppError::Internal("Stored CRM view response is invalid".into())
@@ -257,6 +261,7 @@ pub async fn create(
                     revision: 1,
                     envelope: input.envelope.clone(),
                     created_by: actor.clone(),
+                    deleted_at: None,
                     created_at: now,
                     updated_at: now,
                 };
@@ -298,6 +303,7 @@ pub async fn update(
         &context,
         |tx, (db, owner, id, input, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(value) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return serde_json::from_value(value).map_err(|_| {
                         AppError::Internal("Stored CRM view response is invalid".into())
@@ -305,7 +311,7 @@ pub async fn update(
                 }
                 let current = db
                     .collection::<CrmSavedView>(VIEWS)
-                    .find_one(doc! {"_id": id, "owner_id": owner})
+                    .find_one(doc! {"_id": id, "owner_id": owner, "deleted_at": mongodb::bson::Bson::Null})
                     .session(&mut *tx)
                     .await?
                     .ok_or_else(|| AppError::NotFound("CRM view not found".into()))?;
@@ -316,7 +322,7 @@ pub async fn update(
                 let updated = db
                     .collection::<CrmSavedView>(VIEWS)
                     .update_one(
-                        doc! {"_id": id, "owner_id": owner, "revision": input.expected_revision},
+                            doc! {"_id": id, "owner_id": owner, "revision": input.expected_revision, "deleted_at": mongodb::bson::Bson::Null},
                         doc! {"$set": {"title": &input.title, "envelope": bson::to_bson(&input.envelope).map_err(|error| AppError::Internal(error.to_string()))?, "updated_at": bson::DateTime::from_chrono(now)}, "$inc": {"revision": 1_i64}},
                     )
                     .session(&mut *tx)
@@ -367,20 +373,30 @@ pub async fn delete(
         &context,
         |tx, (db, owner, id, receipt)| {
             Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
                 if let Some(value) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return serde_json::from_value(value).map_err(|_| {
                         AppError::Internal("Stored CRM view response is invalid".into())
                     });
                 }
+                let now = Utc::now();
                 let deleted = db
                     .collection::<CrmSavedView>(VIEWS)
-                    .delete_one(doc! {"_id": id, "owner_id": owner})
+                    .update_one(
+                        doc! {"_id": id, "owner_id": owner, "deleted_at": mongodb::bson::Bson::Null},
+                        doc! {
+                            "$set": {
+                                "deleted_at": bson::DateTime::from_chrono(now),
+                                "updated_at": bson::DateTime::from_chrono(now),
+                            },
+                            "$inc": {"revision": 1_i64},
+                        },
+                    )
                     .session(&mut *tx)
                     .await?;
-                if deleted.deleted_count != 1 {
+                if deleted.modified_count != 1 {
                     return Err(AppError::NotFound("CRM view not found".into()));
                 }
-                let now = Utc::now();
                 let response = DeleteViewResponse {
                     id: id.clone(),
                     deleted: true,
@@ -473,6 +489,9 @@ async fn validate_spec(
     if !envelope.spec.elements.contains_key(&envelope.spec.root) {
         errors.push(issue("spec.root", "must reference an existing element"));
     }
+    let mut edge_count = 0_usize;
+    let mut parent_counts: HashMap<&str, usize> = HashMap::new();
+    let mut structural_errors = false;
     for (id, element) in &envelope.spec.elements {
         if !valid_id(id) {
             errors.push(issue(
@@ -480,35 +499,68 @@ async fn validate_spec(
                 "element ids must match ^[A-Za-z][A-Za-z0-9_-]{0,63}$",
             ));
         }
+        if !matches!(element.element_type.as_str(), "Stack" | "Grid")
+            && !element.children.is_empty()
+        {
+            structural_errors = true;
+            errors.push(issue(
+                format!("spec.elements.{id}.children"),
+                "only Stack and Grid elements may have children",
+            ));
+        }
+        edge_count = edge_count.saturating_add(element.children.len());
+        let mut children = HashSet::new();
         for (index, child) in element.children.iter().enumerate() {
+            if !children.insert(child.as_str()) {
+                structural_errors = true;
+                errors.push(issue(
+                    format!("spec.elements.{id}.children.{index}"),
+                    "child ids must not be duplicated",
+                ));
+                continue;
+            }
             if !envelope.spec.elements.contains_key(child) {
+                structural_errors = true;
                 errors.push(issue(
                     format!("spec.elements.{id}.children.{index}"),
                     "must reference an existing element",
                 ));
+            } else {
+                *parent_counts.entry(child).or_default() += 1;
             }
         }
         validate_element(db, owner_id, id, element, envelope, query_objects, errors).await;
     }
-    if envelope.spec.elements.contains_key(&envelope.spec.root) {
-        let mut reachable = HashSet::new();
-        let mut stack = HashSet::new();
-        walk(
-            &envelope.spec.root,
-            &envelope.spec.elements,
-            1,
-            &mut reachable,
-            &mut stack,
-            errors,
-        );
-        for id in envelope.spec.elements.keys() {
-            if !reachable.contains(id.as_str()) {
+    if edge_count > MAX_ELEMENTS {
+        structural_errors = true;
+        errors.push(issue(
+            "spec.elements",
+            "must contain at most 60 child edges",
+        ));
+    }
+    for id in envelope.spec.elements.keys() {
+        let parents = parent_counts.get(id.as_str()).copied().unwrap_or(0);
+        if id == &envelope.spec.root {
+            if parents != 0 {
+                structural_errors = true;
                 errors.push(issue(
                     format!("spec.elements.{id}"),
-                    "must be reachable from spec.root",
+                    "spec.root must not be a child",
                 ));
             }
+        } else if parents != 1 {
+            structural_errors = true;
+            errors.push(issue(
+                format!("spec.elements.{id}"),
+                "every non-root element must have exactly one parent",
+            ));
         }
+    }
+    if envelope.spec.elements.contains_key(&envelope.spec.root) {
+        validate_tree_reachability(envelope, errors);
+    }
+    if structural_errors {
+        return;
     }
 }
 
@@ -663,37 +715,40 @@ async fn validate_element(
     }
 }
 
-fn walk<'a>(
-    id: &'a str,
-    elements: &'a BTreeMap<String, ViewElement>,
-    depth: usize,
-    reachable: &mut HashSet<&'a str>,
-    stack: &mut HashSet<&'a str>,
-    errors: &mut Vec<CrmValidationIssue>,
-) {
-    if depth > MAX_DEPTH {
-        errors.push(issue(
-            format!("spec.elements.{id}"),
-            "element depth must not exceed 8",
-        ));
-        return;
-    }
-    if !stack.insert(id) {
-        errors.push(issue(
-            format!("spec.elements.{id}"),
-            "children must not contain a cycle",
-        ));
-        return;
-    }
-    reachable.insert(id);
-    if let Some(element) = elements.get(id) {
-        for child in &element.children {
-            if elements.contains_key(child) {
-                walk(child, elements, depth + 1, reachable, stack, errors);
+fn validate_tree_reachability(envelope: &Envelope, errors: &mut Vec<CrmValidationIssue>) {
+    let mut reachable = HashSet::new();
+    let mut pending = VecDeque::from([(envelope.spec.root.as_str(), 1_usize)]);
+    while let Some((id, depth)) = pending.pop_front() {
+        if !reachable.insert(id) {
+            errors.push(issue(
+                format!("spec.elements.{id}"),
+                "children must not contain a cycle",
+            ));
+            continue;
+        }
+        if depth > MAX_DEPTH {
+            errors.push(issue(
+                format!("spec.elements.{id}"),
+                "element depth must not exceed 8",
+            ));
+            continue;
+        }
+        if let Some(element) = envelope.spec.elements.get(id) {
+            for child in &element.children {
+                if envelope.spec.elements.contains_key(child) {
+                    pending.push_back((child, depth + 1));
+                }
             }
         }
     }
-    stack.remove(id);
+    for id in envelope.spec.elements.keys() {
+        if !reachable.contains(id.as_str()) {
+            errors.push(issue(
+                format!("spec.elements.{id}"),
+                "must be reachable from spec.root",
+            ));
+        }
+    }
 }
 
 fn props<T: DeserializeOwned>(
@@ -815,6 +870,85 @@ mod tests {
             .is_none()
         );
         assert_eq!(errors[0].path, "spec.elements.grid.props");
+    }
+
+    #[test]
+    fn aggregate_measure_rejects_unknown_fields() {
+        assert!(
+            serde_json::from_value::<query::AggregateMeasure>(json!({
+                "op": "sum",
+                "field": "amount",
+                "url": "https://example.test"
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn view_graph_must_be_a_bounded_tree_with_container_children_only() {
+        let db = crate::test_utils::connect_transaction_test_database("crm_view_tree").await;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let envelope = json!({
+            "formatVersion": 1,
+            "renderer": "json-render",
+            "rendererSpecVersion": "nyxid-crm-v1",
+            "queries": {},
+            "spec": {
+                "root": "Root",
+                "elements": {
+                    "Root": {
+                        "type": "Stack",
+                        "props": {"gap": "md"},
+                        "children": ["Leaf", "Leaf", "Shared"]
+                    },
+                    "Other": {
+                        "type": "Grid",
+                        "props": {"columns": 1},
+                        "children": ["Shared"]
+                    },
+                    "Leaf": {
+                        "type": "Text",
+                        "props": {"content": "leaf", "variant": "body"},
+                        "children": []
+                    },
+                    "Shared": {
+                        "type": "Text",
+                        "props": {"content": "shared", "variant": "body"},
+                        "children": ["Leaf"]
+                    },
+                    "Orphan": {
+                        "type": "Text",
+                        "props": {"content": "orphan", "variant": "body"},
+                        "children": []
+                    }
+                }
+            }
+        });
+        let errors = validate(&db, &owner, &envelope).await;
+        assert!(errors.iter().any(|error| {
+            error.path == "spec.elements.Root.children.1"
+                && error.message == "child ids must not be duplicated"
+        }));
+        assert!(errors.iter().any(|error| {
+            error.path == "spec.elements.Shared"
+                && error.message == "every non-root element must have exactly one parent"
+        }));
+        assert!(errors.iter().any(|error| {
+            error.path == "spec.elements.Orphan"
+                && error.message == "must be reachable from spec.root"
+        }));
+        assert!(errors.iter().any(|error| {
+            error.path == "spec.elements.Shared.children"
+                && error.message == "only Stack and Grid elements may have children"
+        }));
+
+        let mut too_many = envelope;
+        too_many["spec"]["elements"]["Root"]["children"] =
+            Value::Array((0..61).map(|_| json!("Leaf")).collect());
+        let errors = validate(&db, &owner, &too_many).await;
+        assert!(errors.iter().any(|error| {
+            error.path == "spec.elements" && error.message == "must contain at most 60 child edges"
+        }));
     }
 
     #[tokio::test]
