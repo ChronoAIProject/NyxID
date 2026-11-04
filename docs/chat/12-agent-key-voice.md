@@ -117,11 +117,12 @@ management and unrelated assistant routes remain unavailable to ordinary Keys.
 Publish the [catalog template](../examples/nyxbot-voice-service.template.json)
 through the normal catalog admin flow, host the matching
 [OpenAPI contract](../examples/nyxbot-voice.openapi.json), and configure its spec
-URL. The template, OpenAPI server and new endpoint use the same reserved
-`https://nyxid.invalid/internal/nyxbot-voice` capability marker. The native API
-and ordinary UserService proxy execute inside the current deployment; they never
-connect to this URL or forward the device Bearer to another host. Outbound-only
-executors reject this internal capability.
+URL. The template, OpenAPI server and stored endpoint retain the reserved
+`https://nyxid.invalid/internal/nyxbot-voice` compatibility placeholder. Resolved
+execution kinds come from server-owned catalog and connection metadata. The
+native API and ordinary UserService proxy execute inside the current deployment;
+they never connect to this URL or forward the device Bearer to another host.
+Outbound-only executors reject this internal capability.
 
 Upgrade **all API replicas and background workers**, then drain every old worker
 before enabling the flag. Older workers ignore the additive source fields and

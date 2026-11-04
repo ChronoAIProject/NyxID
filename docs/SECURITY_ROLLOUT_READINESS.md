@@ -48,6 +48,7 @@ feature flags requires deployment readiness:
 
 | Capability | Existing boundary retained |
 | --- | --- |
+| `assistant:voice-agent-key` | Device Voice admission requires a compatible serving fleet as well as an exact Bot Voice service grant. Queued tasks retain their initiating device authority. |
 | `channel:discord-gateway` | Relay socket ownership and gateway transport handoff; every transport writer must wait for relay shutdown before remote setup. The socket worker additionally requires live readiness at acquisition and renewal. |
 | `assistant:org-agents` | Creation/configuration and use-oriented organization-agent discovery gate (`delegation_summaries`); direct use retains live membership/resource ACLs. |
 | `assistant:operation-scopes` | Scope editing gate; stored scopes are enforced during authentication and execution with the flag off. |
@@ -74,6 +75,14 @@ Discord ingress additionally stops its socket on readiness loss. Flag resolution
 itself remains unchanged. Disable ingress and drain its socket holders before
 rolling back to writers that do not coordinate the gateway handoff; see
 [Discord relay setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).
+
+Device Voice admission also checks live readiness, including when its flag was
+already enabled. A red report blocks new device admissions without changing the
+stored grant or flag. Before binary rollback, disable device admission, end its
+calls and drain/cancel device-originated requests, descendants and async watches.
+Complete native response-token settlement before reverting native Voice readers;
+the device flag does not isolate those web Voice changes. See
+[Agent Key voice](chat/12-agent-key-voice.md#change-and-activation-boundaries).
 
 The `approval:required-web-v1` capability is **diagnostic**, not an enforced
 activation switch. Required approval is implemented by every upgraded process
