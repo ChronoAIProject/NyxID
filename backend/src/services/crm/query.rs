@@ -19,7 +19,7 @@ use crate::models::{
 };
 
 use super::records::{RecordResponse, hydrate_record};
-use super::{fields, objects, validation_result};
+use super::{fields, objects, objects::ObjectApi, validation_result};
 
 const MAX_FILTERS: usize = 20;
 const MAX_PAGE_SIZE: u32 = 200;
@@ -99,7 +99,7 @@ pub enum AggregateOrder {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TableResult {
-    pub object: CrmObject,
+    pub object: ObjectApi,
     pub rows: Vec<RecordResponse>,
     pub next_cursor: Option<String>,
     pub total_count: u64,
@@ -180,7 +180,7 @@ pub async fn table(db: &Database, owner_id: &str, query: &CrmTableQuery) -> AppR
         rows.push(row);
     }
     Ok(TableResult {
-        object: validated.object,
+        object: validated.object.into(),
         rows,
         next_cursor: has_more.then(|| encode_cursor(offset + u64::from(query.page_size))),
         total_count,

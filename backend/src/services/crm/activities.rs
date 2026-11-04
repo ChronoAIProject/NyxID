@@ -10,7 +10,7 @@ use crate::models::{
     crm_activity::{
         COLLECTION_NAME as ACTIVITIES, CrmActivity, CrmActivityKind, CrmActivitySummary,
     },
-    crm_record::{CrmActor, CrmRecord},
+    crm_record::{CrmActor, CrmActorKind, CrmRecord},
 };
 
 use super::records::{ReceiptContext, insert_receipt, receipt_in_session, recover_duplicate};
@@ -29,10 +29,46 @@ pub struct ActivityResponse {
     pub record_id: String,
     pub object_key: String,
     pub kind: CrmActivityKind,
-    pub actor: CrmActor,
-    pub summary: CrmActivitySummary,
+    pub actor: ActivityActorResponse,
+    pub summary: ActivitySummaryResponse,
     pub body: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityActorResponse {
+    pub kind: CrmActorKind,
+    pub user_id: String,
+    pub agent_id: Option<String>,
+    pub api_key_id: Option<String>,
+}
+
+impl From<CrmActor> for ActivityActorResponse {
+    fn from(actor: CrmActor) -> Self {
+        Self {
+            kind: actor.kind,
+            user_id: actor.user_id,
+            agent_id: actor.agent_id,
+            api_key_id: actor.api_key_id,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivitySummaryResponse {
+    pub changed_fields: Option<Vec<String>>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+impl From<CrmActivitySummary> for ActivitySummaryResponse {
+    fn from(summary: CrmActivitySummary) -> Self {
+        Self {
+            changed_fields: summary.changed_fields,
+            from: summary.from,
+            to: summary.to,
+        }
+    }
 }
 
 impl From<CrmActivity> for ActivityResponse {
@@ -42,8 +78,8 @@ impl From<CrmActivity> for ActivityResponse {
             record_id: activity.record_id,
             object_key: activity.object_key,
             kind: activity.kind,
-            actor: activity.actor,
-            summary: activity.summary,
+            actor: activity.actor.into(),
+            summary: activity.summary.into(),
             body: activity.body,
             created_at: activity.created_at.to_rfc3339(),
         }

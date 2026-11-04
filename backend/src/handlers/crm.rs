@@ -10,7 +10,7 @@ use crate::{
     AppState,
     errors::{AppError, AppResult},
     models::{
-        crm_object::{CrmField, CrmFieldKind, CrmObject},
+        crm_object::{CrmField, CrmFieldKind},
         crm_record::CrmActor,
     },
     mw::auth::AuthUser,
@@ -56,13 +56,18 @@ pub enum AccessLevel {
 #[derive(Debug, Serialize)]
 struct ObjectResponse {
     #[serde(flatten)]
-    object: CrmObject,
+    object: objects::ObjectApi,
     access: AccessLevel,
 }
 
 #[derive(Debug, Serialize)]
 struct ObjectListResponse {
     objects: Vec<ObjectResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct ViewListResponse {
+    views: Vec<views::ViewResponse>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -77,7 +82,6 @@ pub struct ActivityQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct AddFieldBody {
     owner_id: Option<String>,
     expected_schema_revision: i64,
@@ -102,7 +106,6 @@ struct PatchFieldBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct TableBody {
     owner_id: Option<String>,
     #[serde(flatten)]
@@ -110,7 +113,6 @@ struct TableBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct AggregateBody {
     owner_id: Option<String>,
     #[serde(flatten)]
@@ -118,7 +120,6 @@ struct AggregateBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct CreateRecordBody {
     owner_id: Option<String>,
     #[serde(flatten)]
@@ -126,7 +127,6 @@ struct CreateRecordBody {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct PatchRecordBody {
     owner_id: Option<String>,
     #[serde(flatten)]
@@ -195,7 +195,10 @@ async fn list_objects(
     let objects = objects::list(&state.db, &owner)
         .await?
         .into_iter()
-        .map(|object| ObjectResponse { object, access })
+        .map(|object| ObjectResponse {
+            object: object.into(),
+            access,
+        })
         .collect();
     Ok(Json(ObjectListResponse { objects }))
 }
@@ -209,7 +212,7 @@ async fn get_object(
     let actor = guard(&state, &auth).await?;
     let (owner, access) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
     Ok(Json(ObjectResponse {
-        object: objects::get(&state.db, &owner, &key).await?,
+        object: objects::get(&state.db, &owner, &key).await?.into(),
         access,
     }))
 }
@@ -250,7 +253,10 @@ async fn add_field(
     )
     .await?;
     audit(&state, &auth, "crm_field_added", &owner, Some(&object.id));
-    Ok(Json(ObjectResponse { object, access }))
+    Ok(Json(ObjectResponse {
+        object: object.into(),
+        access,
+    }))
 }
 
 async fn patch_field(
@@ -288,7 +294,10 @@ async fn patch_field(
     )
     .await?;
     audit(&state, &auth, "crm_field_updated", &owner, Some(&object.id));
-    Ok(Json(ObjectResponse { object, access }))
+    Ok(Json(ObjectResponse {
+        object: object.into(),
+        access,
+    }))
 }
 
 async fn table_query(
@@ -580,10 +589,12 @@ async fn list_views(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<OwnerQuery>,
-) -> AppResult<Json<Vec<views::ViewResponse>>> {
+) -> AppResult<Json<ViewListResponse>> {
     let actor = guard(&state, &auth).await?;
     let (owner, _) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
-    Ok(Json(views::list(&state.db, &owner).await?))
+    Ok(Json(ViewListResponse {
+        views: views::list(&state.db, &owner).await?,
+    }))
 }
 
 async fn create_view(

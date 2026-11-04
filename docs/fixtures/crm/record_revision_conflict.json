@@ -1,0 +1,22 @@
+{
+  "error": "crm_revision_conflict",
+  "error_code": 13400,
+  "message": "CRM record revision changed",
+  "current": {
+    "id": "00000000-0000-4000-8000-000000000006",
+    "owner_id": "00000000-0000-4000-8000-000000000002",
+    "object_key": "company",
+    "revision": 2,
+    "values": {
+      "domain": "www.acme.example",
+      "is_partner": true,
+      "name": "Acme Pte Ltd",
+      "segment": "group_00"
+    },
+    "links": {},
+    "overrides": [],
+    "archived": false,
+    "created_at": "2000-01-01T00:00:00.000Z",
+    "updated_at": "2000-01-01T00:00:00.000Z"
+  }
+}

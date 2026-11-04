@@ -1,0 +1,296 @@
+{
+  "objects": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "owner_id": "00000000-0000-4000-8000-000000000002",
+      "key": "company",
+      "label": "Company",
+      "plural_label": "Companies",
+      "schema_revision": 1,
+      "fields": [
+        {
+          "key": "name",
+          "label": "Name",
+          "required": true,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        },
+        {
+          "key": "domain",
+          "label": "Domain",
+          "required": false,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        },
+        {
+          "key": "industry",
+          "label": "Industry",
+          "required": false,
+          "archived": false,
+          "type": "select",
+          "options": []
+        },
+        {
+          "key": "owner",
+          "label": "Owner",
+          "required": false,
+          "archived": false,
+          "type": "user"
+        }
+      ],
+      "pipeline": null,
+      "default_columns": [
+        "name",
+        "domain",
+        "industry",
+        "owner"
+      ],
+      "seeded": true,
+      "created_at": "2000-01-01T00:00:00.000Z",
+      "updated_at": "2000-01-01T00:00:00.000Z",
+      "access": "schema"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "owner_id": "00000000-0000-4000-8000-000000000002",
+      "key": "contact",
+      "label": "Contact",
+      "plural_label": "Contacts",
+      "schema_revision": 1,
+      "fields": [
+        {
+          "key": "name",
+          "label": "Name",
+          "required": true,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        },
+        {
+          "key": "email",
+          "label": "Email",
+          "required": false,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        },
+        {
+          "key": "company",
+          "label": "Company",
+          "required": false,
+          "archived": false,
+          "type": "record",
+          "target": "company",
+          "cardinality": "one"
+        },
+        {
+          "key": "title",
+          "label": "Title",
+          "required": false,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        }
+      ],
+      "pipeline": null,
+      "default_columns": [
+        "name",
+        "email",
+        "company",
+        "title"
+      ],
+      "seeded": true,
+      "created_at": "2000-01-01T00:00:00.000Z",
+      "updated_at": "2000-01-01T00:00:00.000Z",
+      "access": "schema"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "owner_id": "00000000-0000-4000-8000-000000000002",
+      "key": "opportunity",
+      "label": "Opportunity",
+      "plural_label": "Opportunities",
+      "schema_revision": 1,
+      "fields": [
+        {
+          "key": "name",
+          "label": "Name",
+          "required": true,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        },
+        {
+          "key": "company",
+          "label": "Company",
+          "required": false,
+          "archived": false,
+          "type": "record",
+          "target": "company",
+          "cardinality": "one"
+        },
+        {
+          "key": "amount",
+          "label": "Amount",
+          "required": false,
+          "archived": false,
+          "type": "currency",
+          "currency": "USD"
+        },
+        {
+          "key": "stage",
+          "label": "Stage",
+          "required": true,
+          "archived": false,
+          "type": "select",
+          "options": [
+            {
+              "value": "new",
+              "label": "New",
+              "color": null,
+              "archived": false
+            },
+            {
+              "value": "qualified",
+              "label": "Qualified",
+              "color": null,
+              "archived": false
+            },
+            {
+              "value": "proposal",
+              "label": "Proposal",
+              "color": null,
+              "archived": false
+            },
+            {
+              "value": "won",
+              "label": "Won",
+              "color": null,
+              "archived": false
+            },
+            {
+              "value": "lost",
+              "label": "Lost",
+              "color": null,
+              "archived": false
+            }
+          ]
+        },
+        {
+          "key": "expected_close",
+          "label": "Expected close",
+          "required": false,
+          "archived": false,
+          "type": "date"
+        },
+        {
+          "key": "owner",
+          "label": "Owner",
+          "required": false,
+          "archived": false,
+          "type": "user"
+        }
+      ],
+      "pipeline": {
+        "stage_field": "stage",
+        "closed_stages": [
+          "won",
+          "lost"
+        ]
+      },
+      "default_columns": [
+        "name",
+        "company",
+        "amount",
+        "stage",
+        "expected_close",
+        "owner"
+      ],
+      "seeded": true,
+      "created_at": "2000-01-01T00:00:00.000Z",
+      "updated_at": "2000-01-01T00:00:00.000Z",
+      "access": "schema"
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "owner_id": "00000000-0000-4000-8000-000000000002",
+      "key": "task",
+      "label": "Task",
+      "plural_label": "Tasks",
+      "schema_revision": 1,
+      "fields": [
+        {
+          "key": "title",
+          "label": "Title",
+          "required": true,
+          "archived": false,
+          "type": "text",
+          "max_length": 1000
+        },
+        {
+          "key": "status",
+          "label": "Status",
+          "required": true,
+          "archived": false,
+          "type": "select",
+          "options": [
+            {
+              "value": "open",
+              "label": "Open",
+              "color": null,
+              "archived": false
+            },
+            {
+              "value": "done",
+              "label": "Done",
+              "color": null,
+              "archived": false
+            }
+          ]
+        },
+        {
+          "key": "due",
+          "label": "Due",
+          "required": false,
+          "archived": false,
+          "type": "date"
+        },
+        {
+          "key": "assignee",
+          "label": "Assignee",
+          "required": false,
+          "archived": false,
+          "type": "user"
+        },
+        {
+          "key": "related",
+          "label": "Related",
+          "required": false,
+          "archived": false,
+          "type": "record",
+          "target": "opportunity",
+          "cardinality": "many"
+        }
+      ],
+      "pipeline": {
+        "stage_field": "status",
+        "closed_stages": [
+          "done"
+        ]
+      },
+      "default_columns": [
+        "title",
+        "status",
+        "due",
+        "assignee",
+        "related"
+      ],
+      "seeded": true,
+      "created_at": "2000-01-01T00:00:00.000Z",
+      "updated_at": "2000-01-01T00:00:00.000Z",
+      "access": "schema"
+    }
+  ]
+}

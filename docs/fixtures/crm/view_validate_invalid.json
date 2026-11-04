@@ -1,0 +1,9 @@
+{
+  "valid": false,
+  "errors": [
+    {
+      "path": "spec.elements.CompanyTable.props.columns.0",
+      "message": "unknown field"
+    }
+  ]
+}

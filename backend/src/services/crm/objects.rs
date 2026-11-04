@@ -6,7 +6,7 @@ use mongodb::{
     Database,
     bson::{self, doc},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult, CrmValidationIssue};
@@ -16,6 +16,41 @@ use crate::models::crm_object::{
 };
 
 use super::{fields, validation_result};
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ObjectApi {
+    pub id: String,
+    pub owner_id: String,
+    pub key: String,
+    pub label: String,
+    pub plural_label: String,
+    pub schema_revision: i64,
+    pub fields: Vec<CrmField>,
+    pub pipeline: Option<CrmPipeline>,
+    pub default_columns: Vec<String>,
+    pub seeded: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<CrmObject> for ObjectApi {
+    fn from(object: CrmObject) -> Self {
+        Self {
+            id: object.id,
+            owner_id: object.owner_id,
+            key: object.key,
+            label: object.label,
+            plural_label: object.plural_label,
+            schema_revision: object.schema_revision,
+            fields: object.fields,
+            pipeline: object.pipeline,
+            default_columns: object.default_columns,
+            seeded: object.seeded,
+            created_at: object.created_at.to_rfc3339(),
+            updated_at: object.updated_at.to_rfc3339(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -247,7 +282,7 @@ fn require_schema_revision(object: &CrmObject, expected: i64) -> AppResult<()> {
 
 fn schema_conflict(object: CrmObject) -> AppError {
     AppError::CrmRevisionConflict(Box::new(
-        serde_json::to_value(object).expect("CRM object is serializable"),
+        serde_json::to_value(ObjectApi::from(object)).expect("CRM object response is serializable"),
     ))
 }
 
