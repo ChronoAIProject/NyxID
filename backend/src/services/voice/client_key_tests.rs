@@ -980,11 +980,15 @@ async fn voice_notification_dispatch_rechecks_its_own_catalog_operation_without_
             doc! {"_id":identity.service.catalog_service_id.as_deref().unwrap()},
             doc! {"$unset":{"proxy_operation_policy":""}}).await.unwrap();
         let notice = super::announcements::enqueue(&f.state.db,&call,&Uuid::new_v4().to_string(),"second").await.unwrap();
-        use crate::models::service_approval_config::{ApprovalRule,ApprovalEffect,ApprovalMode};
+        use crate::models::service_approval_config::{ApprovalRule,ApprovalEffect};
+        let deny: ApprovalRule = bson::from_document(doc! {
+            "methods": ["POST"],
+            "resource_pattern": "/voice/sessions/*/announcements",
+            "effect": "deny",
+        }).unwrap();
         crate::services::approval_service::set_service_approval_config(&f.state.db,&f.owner,
             identity.service.catalog_service_id.as_deref().unwrap(),"Voice",None,None,
-            Some(&[ApprovalRule { methods:vec!["POST".into()], resource_pattern:"/voice/sessions/*/announcements".into(),
-                verbs:vec![],effect:ApprovalEffect::Deny,mode:ApprovalMode::PerRequest }]),Some(&ApprovalEffect::AutoAllow)).await.unwrap();
+            Some(&[deny]),Some(&ApprovalEffect::AutoAllow)).await.unwrap();
         keys::revalidate(&f.state.db,&call).await.unwrap();
         assert!(super::announcements::claim(&f.state.db,&call).await.unwrap().is_none());
         let stored = f.state.db.collection::<super::announcements::Announcement>(super::announcements::COLLECTION)
