@@ -312,9 +312,11 @@ export function GroupParticipantPicker({
 function GroupFields({
   form,
   rows,
+  memberFooter,
 }: {
   readonly form: ReturnType<typeof useAppForm<AssistantGroupForm>>;
   readonly rows: readonly PickerRow[];
+  readonly memberFooter?: React.ReactNode;
 }) {
   return (
     <>
@@ -347,7 +349,12 @@ function GroupFields({
               rows={rows}
               value={field.value}
               onChange={field.onChange}
-              footer={<FormMessage className="text-11" />}
+              footer={
+                <>
+                  {memberFooter}
+                  <FormMessage className="text-11" />
+                </>
+              }
             />
           </FormItem>
         )}
@@ -588,8 +595,18 @@ export function GroupSettingsDialog({
                     <GroupedRow title={group.owner?.name} />
                   </GroupedList>
                 ) : null}
-                <fieldset disabled={!canManage} className="space-y-6">
-                  <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org ? agent.owner_id === org : true), group)} />
+                <fieldset disabled={!canManage} className="min-w-0 space-y-6">
+                  <GroupFields
+                    form={form}
+                    rows={pickerRows(agents.filter((agent) => org ? agent.owner_id === org : true), group)}
+                    memberFooter={!org ? (
+                      <p>
+                        Removing an agent stops its crew work and deletes its
+                        private crew thread. Re-adding starts a new thread.
+                        Published crew messages stay.
+                      </p>
+                    ) : undefined}
+                  />
                   {org ? (
                     <>
                       <GroupParticipantPicker org={org} value={form.watch("participant_user_ids") ?? []} onChange={(ids) => form.setValue("participant_user_ids", ids)} />

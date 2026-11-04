@@ -207,6 +207,55 @@ it("shows a destroyed member unchecked and drops it on save (the server refuses 
   });
 });
 
+it.each([false, true])("keeps crew removal reviewable and preserves a rejected draft (refused: %s)", async (refused) => {
+  const user = userEvent.setup();
+  const onOpenChange = vi.fn();
+  const group = {
+    ...GROUP,
+    members: [
+      GROUP.members[0]!,
+      { id: "agent-researcher", name: "researcher", kind: "specialist" as const, destroyed: false, working: true },
+    ],
+    working_agent_ids: ["agent-researcher"],
+  };
+  if (refused) {
+    respond = () => new Response(JSON.stringify({
+      error: "turn_active",
+      message: "A new turn started. Wait for it to finish, then try again.",
+    }), { status: 409 });
+  }
+  render(
+    <QueryClientProvider client={client}>
+      <GroupSettingsDialog group={group} agents={AGENTS} open onOpenChange={onOpenChange} onDeleted={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  const explanation = screen.getByText(/Removing an agent stops its crew work/);
+  expect(explanation.closest("[data-grouped-footer]")).not.toBeNull();
+  expect(explanation).toHaveTextContent("Re-adding starts a new thread. Published crew messages stay.");
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  const member = screen.getByRole("checkbox", { name: /researcher/ });
+  await user.click(member);
+  expect(requests.some((request) => request.method === "PATCH")).toBe(false);
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(requests).toContainEqual({
+    method: "PATCH",
+    endpoint: "/assistant/nyxagent/groups/nyxg-1",
+    body: { member_agent_ids: ["agent-nyxbot"] },
+  }));
+  if (refused) {
+    expect(await screen.findByRole("alert")).toHaveTextContent("A new turn started.");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(member).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(member).not.toBeChecked();
+  } else {
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  }
+});
+
 it("deletes only after confirmation", async () => {
   const user = userEvent.setup();
   const onDeleted = vi.fn();
