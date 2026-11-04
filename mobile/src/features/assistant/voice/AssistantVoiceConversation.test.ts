@@ -644,7 +644,8 @@ test("hold to talk is a walkie-talkie with no running call timer; hands-free is 
     "no call length while waiting to talk",
   );
   assert.ok(walkie.all().some((row) => row.type === "WalkieTalkie"));
-  assert.match(walkie.text(), /Hold to talk · release to send/);
+  assert.match(walkie.text(), /Hold to talk/);
+  assert.doesNotMatch(walkie.text(), /release to send/, "the button labels itself");
   assert.doesNotMatch(walkie.text(), /Audio is sent only/, "details stay collapsed");
   walkie.harness.unmount();
   const phone = setup({ active: true });

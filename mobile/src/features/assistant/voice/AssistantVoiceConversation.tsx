@@ -23,7 +23,6 @@ import {
   ChevronUp,
   Mic,
   MicOff,
-  Phone,
   PhoneOff,
   Volume2,
   VolumeX,
@@ -753,17 +752,6 @@ function VoiceConversation({
                       selected && { backgroundColor: main },
                     ]}
                   >
-                    {mode === "automatic" ? (
-                      <Phone
-                        size={15}
-                        color={selected ? onMain : colors.textSecondary}
-                      />
-                    ) : (
-                      <WalkieTalkieIcon
-                        size={15}
-                        color={selected ? onMain : colors.textSecondary}
-                      />
-                    )}
                     <Text
                       style={[
                         styles.modeLabel,
@@ -825,7 +813,7 @@ function VoiceConversation({
                         {
                           scale: hold.interpolate({
                             inputRange: [0, 1],
-                            outputRange: [1, 1.5],
+                            outputRange: [1, 1.25],
                           }),
                         },
                       ],
@@ -838,7 +826,7 @@ function VoiceConversation({
                       {
                         scale: hold.interpolate({
                           inputRange: [0, 1],
-                          outputRange: [1, 1.1],
+                          outputRange: [1, 1.06],
                         }),
                       },
                     ],
@@ -866,14 +854,17 @@ function VoiceConversation({
                       },
                     ]}
                     style={[
-                      styles.main,
+                      styles.talk,
                       {
                         backgroundColor: main,
                         opacity: microphoneBlocked || !voice.connected ? 0.4 : 1,
                       },
                     ]}
                   >
-                    <WalkieTalkieIcon size={30} color={onMain} />
+                    <WalkieTalkieIcon size={24} color={onMain} />
+                    <Text style={[styles.talkLabel, { color: onMain }]}>
+                      {voice.holding ? "Release to send" : "Hold to talk"}
+                    </Text>
                   </Pressable>
                 </Animated.View>
               </View>
@@ -907,15 +898,14 @@ function VoiceConversation({
           <View style={styles.footer}>
             {active ? (
               <>
-                <Text style={[styles.hint, { color: colors.textSecondary }]}>
-                  {inputMode === "automatic"
-                    ? muted
+                {/* Hold to talk labels its own button, so only Hands-free needs a hint. */}
+                {inputMode === "automatic" ? (
+                  <Text style={[styles.hint, { color: colors.textSecondary }]}>
+                    {muted
                       ? "Muted · tap the microphone to talk"
-                      : "Talk any time · NyxBot answers when you pause"
-                    : voice.holding
-                      ? "Release to send"
-                      : "Hold to talk · release to send"}
-                </Text>
+                      : "Talk any time · NyxBot answers when you pause"}
+                  </Text>
+                ) : null}
                 {pricingOpen && option ? (
                   <Text style={[styles.footnote, quiet]}>
                     {inputMode === "automatic"
@@ -1189,10 +1179,8 @@ const styles = StyleSheet.create({
     minWidth: 112,
     paddingHorizontal: 14,
     borderRadius: 17,
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 6,
   },
   modeLabel: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 18 },
   hint: {
@@ -1254,17 +1242,32 @@ const styles = StyleSheet.create({
   fadeSlice: { position: "absolute", left: 0, right: 0, overflow: "hidden" },
   transcript: { flexGrow: 0 },
   holdStage: {
-    width: 76,
+    width: 184,
     height: 76,
     alignItems: "center",
     justifyContent: "center",
   },
   halo: {
     position: "absolute",
-    width: 76,
-    height: 76,
-    borderRadius: 38,
+    width: 184,
+    height: 68,
+    borderRadius: 34,
   },
+  talk: {
+    width: 184,
+    height: 68,
+    borderRadius: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    shadowColor: "#1A1530",
+    shadowOpacity: 0.28,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  talkLabel: { fontFamily: fonts.bodySemi, fontSize: 16, lineHeight: 20 },
   transcriptContent: { gap: 14, paddingBottom: 4, paddingHorizontal: 8 },
   caption: { gap: 2, alignItems: "center" },
   captionRecent: { gap: 4 },
