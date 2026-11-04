@@ -254,7 +254,7 @@ test("settings write failures retain authoritative mode and expose the error", a
   x.h.unmount();
 });
 
-test("permissions close only after a confirmed write in every appearance", async () => {
+test("permissions automatically close after a confirmed write in every appearance", async () => {
   for (const theme of ["light", "dark", "system"]) {
     const x = setup(theme);
     x.open();
@@ -271,12 +271,6 @@ test("permissions close only after a confirmed write in every appearance", async
         (n) => n.props.children === "Saving permissions…",
       ),
     );
-    x.find("Dismiss permissions").props.onPress();
-    x.find("Close permissions").props.onPress();
-    nodes(x.h.value())
-      .find((n) => n.type === "Modal")!
-      .props.onRequestClose();
-    assert.equal(x.props.visible, true);
     wait.resolve({ access_mode: "autopilot" });
     await x.h.settle();
     assert.equal(x.props.visible, false);
@@ -289,6 +283,49 @@ test("permissions close only after a confirmed write in every appearance", async
       x.calls.findIndex((c) => c[0] === "cache") <
         x.calls.findLastIndex((c) => c[0] === "open"),
     );
+    x.h.unmount();
+  }
+});
+
+test("a stalled permissions save stays dismissible and reopening preserves its write lock until settlement", async () => {
+  for (const action of ["backdrop", "close", "back", "escape"]) {
+    const x = setup();
+    x.open();
+    const wait = deferred<any>();
+    x.writeMode(() => wait.promise);
+    const change = x.find("Full access").props.onPress;
+    change();
+    x.h.flush();
+    // No response or timeout has settled this request when the user leaves.
+    if (action === "backdrop") x.find("Dismiss permissions").props.onPress();
+    if (action === "close") x.find("Close permissions").props.onPress();
+    if (action === "back")
+      nodes(x.h.value())
+        .find((n) => n.type === "Modal")!
+        .props.onRequestClose();
+    if (action === "escape")
+      nodes(x.h.value())
+        .find((n) => n.props.accessibilityViewIsModal)!
+        .props.onAccessibilityEscape();
+    assert.equal(x.props.visible, false, action);
+    x.open();
+    assert.equal(x.find("Full access").props.disabled, true);
+    assert.equal(x.find("Dismiss permissions").props.disabled, undefined);
+    assert.equal(x.find("Close permissions").props.disabled, undefined);
+    assert.ok(
+      nodes(x.h.value()).some(
+        (n) => n.props.children === "Saving permissions…",
+      ),
+    );
+    change();
+    assert.deepEqual(
+      x.calls.filter((c) => c[0] === "PUT"),
+      [["PUT", "autopilot"]],
+    );
+    wait.resolve({ access_mode: "autopilot" });
+    await x.h.settle();
+    assert.equal(x.props.visible, false);
+    assert.ok(x.find("Permissions: Full access"));
     x.h.unmount();
   }
 });

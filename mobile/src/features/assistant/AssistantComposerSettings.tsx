@@ -108,8 +108,8 @@ export function AssistantComposerSettings(props: Props) {
     }
   }
   function close() {
-    // Keep the result visible: success closes, failure leaves a retryable error.
-    if (!lock.current) props.onOpenChange(false);
+    // Local dismissal must remain available even if a settings request stalls.
+    props.onOpenChange(false);
   }
   function row(
     value: ComposerAccessMode,
@@ -202,8 +202,6 @@ export function AssistantComposerSettings(props: Props) {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Dismiss permissions"
-            accessibilityState={{ disabled: pending }}
-            disabled={pending}
             onPress={close}
             style={StyleSheet.absoluteFill}
           />
@@ -239,8 +237,6 @@ export function AssistantComposerSettings(props: Props) {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Close ${title.toLowerCase()}`}
-                accessibilityState={{ disabled: pending }}
-                disabled={pending}
                 style={workspaceCloseControlStyle(colors.cardSoft)}
                 onPress={close}
               >
