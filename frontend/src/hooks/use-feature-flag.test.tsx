@@ -131,6 +131,7 @@ describe("feature flag catalog", () => {
       CHANNEL_MEDIA: "assistant:channel-media",
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",
+      CRM: "assistant:crm",
       SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
       ORG_AGENTS: "assistant:org-agents",
       SHARED_AGENTS: "assistant:shared-agents",
