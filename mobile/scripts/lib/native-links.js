@@ -1,9 +1,13 @@
-function buildNativeLinks({ apiBaseUrl, universalLinkHost, universalLinkPathPrefix, scheme }) {
+// Every embedded API host is associated, since the admin flag can select either at launch.
+function buildNativeLinks({ apiBaseUrls, universalLinkHost, universalLinkPathPrefix, scheme }) {
   const associatedDomains = [];
-  try {
-    associatedDomains.push(`applinks:${new URL(apiBaseUrl).host}`);
-  } catch {
-    // Invalid optional URLs do not register a native association.
+  for (const apiBaseUrl of apiBaseUrls) {
+    try {
+      const domain = `applinks:${new URL(apiBaseUrl).host}`;
+      if (!associatedDomains.includes(domain)) associatedDomains.push(domain);
+    } catch {
+      // Invalid optional URLs do not register a native association.
+    }
   }
   if (universalLinkHost) associatedDomains.push(`applinks:${universalLinkHost}`);
 

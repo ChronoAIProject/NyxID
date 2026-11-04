@@ -36,7 +36,9 @@ const DEFAULT_GRANT_EXPIRY_DAYS = 30;
 
 export function formatGrantDuration(grantExpiryDays?: number): string {
   const normalizedDays =
-    typeof grantExpiryDays === "number" && Number.isFinite(grantExpiryDays) && grantExpiryDays > 0
+    typeof grantExpiryDays === "number" &&
+    Number.isFinite(grantExpiryDays) &&
+    grantExpiryDays > 0
       ? Math.floor(grantExpiryDays)
       : DEFAULT_GRANT_EXPIRY_DAYS;
   const label = normalizedDays === 1 ? "day" : "days";
@@ -44,7 +46,7 @@ export function formatGrantDuration(grantExpiryDays?: number): string {
 }
 
 export function getChallengeActionState(
-  challenge: Pick<ChallengeDetail, "status" | "expires_at">
+  challenge: Pick<ChallengeDetail, "status" | "expires_at">,
 ): ChallengeActionState {
   // Check definitive statuses first — these take precedence over time-based expiry
   if (challenge.status === "APPROVED") {
@@ -75,7 +77,8 @@ export function getChallengeActionState(
     return {
       statusLabel: "PENDING",
       canDecide: false,
-      reason: "The request expiry could not be verified. Refresh before deciding.",
+      reason:
+        "The request expiry could not be verified. Refresh before deciding.",
     };
   }
 

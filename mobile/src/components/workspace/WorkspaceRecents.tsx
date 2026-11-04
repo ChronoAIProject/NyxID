@@ -2,6 +2,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { fonts } from "../../theme/designTokens";
+import { SkeletonRows } from "../Skeleton";
 import { useTheme } from "../../theme/ThemeContext";
 import type { WorkspaceRecent } from "./workspaceSidebarModel";
 import { useWorkspaceRecents } from "./useWorkspaceRecents";
@@ -75,15 +76,20 @@ export function WorkspaceRecents({
       {data.rows.slice(0, 8).map((item) => (
         <WorkspaceRecentRow key={item.key} item={item} onSelect={onSelect} />
       ))}
-      {!data.rows.length ? (
+      {!data.rows.length && data.online && !data.error && data.loading ? (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          detail={false}
+          accessibilityLabel="Loading recent chats"
+        />
+      ) : !data.rows.length ? (
         <Text style={[styles.notice, { color: colors.textMuted }]}>
           {!data.online
             ? "Offline · showing saved recent chats."
             : data.error
               ? "Couldn’t load recent chats."
-              : data.loading
-                ? "Loading recent chats…"
-                : "No recent chats."}
+              : "No recent chats."}
         </Text>
       ) : null}
       <Pressable

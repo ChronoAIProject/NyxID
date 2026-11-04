@@ -13,6 +13,8 @@ import {
 
 export type WorkspaceChatTarget =
   | { kind: "home" }
+  /** A new chat whose params (and so its draft key) the caller already made. */
+  | { kind: "new"; params: AssistantParams }
   | { kind: "agent"; agentId?: string; conversationId?: string }
   | { kind: "group"; groupId: string };
 
@@ -45,7 +47,9 @@ export function workspaceChatNavigationAction(
     ];
   } else {
     const params =
-      target.kind === "home"
+      target.kind === "new"
+        ? target.params
+        : target.kind === "home"
         ? assistantHomeParams()
         : target.conversationId
           ? {

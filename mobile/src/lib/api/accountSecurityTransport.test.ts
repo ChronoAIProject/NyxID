@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  createAccountSecurityApi,
-  changePasswordSchema,
-} from "./accountSecurityTransport";
+import { createAccountSecurityApi } from "./accountSecurityTransport";
 import type { RequestOptions } from "./authenticatedTransport";
 
 test("MFA disable sends a required authenticator/recovery code and only supplied passwords without invalidating a bad-code session", async () => {
@@ -51,15 +48,6 @@ test("all security writes preserve lifecycle guard and cancellation signal", asy
     return {};
   });
   await api.disableMfa({ code: "123456" }, guard);
-  await api.changePassword(
-    "owner",
-    {
-      current_password: "old",
-      new_password: "new password",
-      confirmation: "new password",
-    },
-    guard,
-  );
   await api.saveSecurityPreferences(
     "owner",
     { skip_mfa_for_approved_sign_ins: false },
@@ -69,7 +57,7 @@ test("all security writes preserve lifecycle guard and cancellation signal", asy
   await api.revokeBrokerBinding("owner", "hash", guard);
   await api.createOrganization("owner", "Team", guard);
   await api.joinOrganization("owner", "nonce", guard);
-  assert.equal(calls.length, 7);
+  assert.equal(calls.length, 6);
   for (const options of calls) {
     assert.equal(options.authorityGuard, authorityGuard);
     assert.equal(options.signal, controller.signal);
@@ -79,44 +67,9 @@ test("all security writes preserve lifecycle guard and cancellation signal", asy
   );
   assert.ok(
     calls
-      .slice(0, 3)
+      .slice(0, 2)
       .every((options) => options.invalidateSessionOnAuthFailure === false),
   );
-});
-
-test("password validation preserves whitespace/UTF-8 limits, strips confirmation and fences to the current account", async () => {
-  const calls: RequestOptions[] = [];
-  const api = createAccountSecurityApi(async (_path, options) => {
-    calls.push(options!);
-    return {};
-  });
-  assert.equal(
-    changePasswordSchema.safeParse({
-      current_password: "old",
-      new_password: "界".repeat(43),
-      confirmation: "界".repeat(43),
-    }).success,
-    false,
-  );
-  assert.equal(
-    changePasswordSchema.safeParse({
-      current_password: "old",
-      new_password: "12345678",
-      confirmation: "different",
-    }).success,
-    false,
-  );
-  await api.changePassword("owner", {
-    current_password: " old ",
-    new_password: " new password ",
-    confirmation: " new password ",
-  });
-  assert.deepEqual(calls[0]?.body, {
-    current_password: " old ",
-    new_password: " new password ",
-  });
-  assert.equal(calls[0]?.expectedAccountId, "owner");
-  assert.equal(calls[0]?.invalidateSessionOnAuthFailure, false);
 });
 
 test("authorization lists are distinct from approval grants and revoke encoded identities under the shown account", async () => {

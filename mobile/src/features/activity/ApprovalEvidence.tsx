@@ -1,64 +1,39 @@
-import { StyleSheet, Text, View } from "react-native";
+import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
 import type { ChallengeDetail } from "../../lib/api/types";
-import { useTheme } from "../../theme/ThemeContext";
-import { fonts } from "../../theme/designTokens";
 
+/** The request's expiry as the reviewer's local time, never guessed. */
+export function approvalExpiryLabel(challenge: ChallengeDetail) {
+  const expiry = Date.parse(challenge.expires_at);
+  return Number.isFinite(expiry)
+    ? new Date(expiry).toLocaleString()
+    : "Not verified";
+}
+
+/** Tool arguments pretty-printed when they are JSON, verbatim otherwise. */
+export function approvalArgumentsText(challenge: ChallengeDetail) {
+  const text = challenge.tool_arguments;
+  if (!text) return undefined;
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+/** The exact tool arguments under review, selectable for copying. */
 export function ApprovalEvidence({
   challenge,
 }: {
   challenge: ChallengeDetail;
 }) {
-  const { colors } = useTheme();
-  let argumentsText = challenge.tool_arguments;
-  if (argumentsText) {
-    try {
-      argumentsText = JSON.stringify(JSON.parse(argumentsText), null, 2);
-    } catch {
-      /* Preserve non-JSON arguments verbatim. */
-    }
-  }
-  const expiry = Date.parse(challenge.expires_at);
+  const argumentsText = approvalArgumentsText(challenge);
+  if (!argumentsText) return null;
   return (
-    <View style={styles.container}>
-      <Text style={[styles.label, { color: colors.textSecondary }]}>
-        Expires:{" "}
-        {Number.isFinite(expiry)
-          ? new Date(expiry).toLocaleString()
-          : "Not verified"}
-      </Text>
-      {challenge.is_destructive === true ? (
-        <Text style={[styles.label, { color: colors.danger }]}>
-          This operation is destructive.
-        </Text>
-      ) : null}
-      {argumentsText ? (
-        <>
-          <Text style={[styles.label, { color: colors.textSecondary }]}>
-            Tool arguments
-          </Text>
-          <Text
-            selectable
-            style={[
-              styles.code,
-              { color: colors.textPrimary, backgroundColor: colors.cardSoft },
-            ]}
-          >
-            {argumentsText}
-          </Text>
-        </>
-      ) : null}
-    </View>
+    <SettingsGroup title="Tool arguments" inset={false}>
+      <SettingsRow label={argumentsText} mono selectable />
+    </SettingsGroup>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { gap: 8, marginTop: 12 },
-  label: { fontFamily: fonts.body, fontSize: 12, lineHeight: 18 },
-  code: {
-    fontFamily: fonts.mono,
-    fontSize: 12,
-    lineHeight: 20,
-    padding: 12,
-    borderRadius: 8,
-  },
-});

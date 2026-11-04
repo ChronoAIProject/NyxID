@@ -222,6 +222,7 @@ function setup(
         scroll: (offset: number) => events.push(["fade-scroll", offset]),
       }),
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -431,7 +432,11 @@ function setup(
     "../plugins/NativeAuthoredSkillReview": {
       NativeAuthoredSkillReview: "NativeAuthoredSkillReview",
     },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyx.example" },
+    "../../lib/env": {
+      NYXID_FRONTEND_URL: "https://nyx.example",
+      NYXID_TRUSTED_FRONTEND_URLS: ["https://nyx.example"],
+      firstPartyFrontendUrls: () => ["https://nyx.example"],
+    },
     "./voice/AssistantVoiceConversation": {
       AssistantVoiceConversation: "AssistantVoiceConversation",
     },
@@ -644,28 +649,32 @@ test("saved chat opens voice directly without creating a new draft or replacing 
   x.harness.unmount();
 });
 
-test("voice and transcript retain distinct sibling identities for both adopted drafts and saved chats", async () => {
+test("voice slides up in the composer's place and closing it keeps the transcript", async () => {
   for (const initialId of [undefined, A]) {
     const x = setup(initialId);
     x.button("Open voice call")!.props.onPress();
     if (!initialId) x.draft.resolve(A);
     await x.harness.settle();
     const children = x.harness.value().props.children as Element[];
-    const keyed = children.filter((child) => child?.key != null);
-    assert.ok(keyed.some((child) => child.key === "transcript-column"));
     assert.ok(
-      keyed.some((child) => child.type === "AssistantVoiceConversation"),
+      children.some((child) => child?.key === "transcript-column"),
+      "the chat stays on screen above the call",
     );
+    assert.ok(x.voice(), "voice is mounted");
     assert.equal(
-      new Set(keyed.map((child) => child.key)).size,
-      keyed.length,
-      "a transcript and its voice surface share a conversation, but need unique sibling keys",
+      x.all().some((element) => element.props?.accessibilityLabel === "Message to assistant"),
+      false,
+      "the voice composer takes the message composer's place",
     );
     const transcript = x.all().find((element) => element.type === "FlatList")!;
     const originalTranscriptKey = transcript.key;
     x.voice()!.props.onClose();
     x.harness.flush();
     assert.equal(x.voice(), undefined);
+    assert.ok(
+      x.all().some((element) => element.props?.accessibilityLabel === "Message to assistant"),
+      "the message composer returns",
+    );
     assert.equal(
       x.all().find((element) => element.type === "FlatList")!.key,
       originalTranscriptKey,
@@ -1006,6 +1015,12 @@ test("empty primary NyxBot uses home while specialists and contextual drafts kee
   x.harness.render();
   assert.doesNotMatch(welcome(), /NyxBot/);
   assert.match(welcome(), /How can I help\?/);
+  x.assistant.loading = true;
+  x.harness.render();
+  const empty = x.all().find((node) => node.type === "FlatList")!.props
+    .ListEmptyComponent;
+  assert.equal(empty.type, "SkeletonRows");
+  assert.equal(empty.props.accessibilityLabel, "Loading messages");
   x.harness.unmount();
 });
 
@@ -1842,3 +1857,4 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
     x.harness.unmount();
   }
 });
+

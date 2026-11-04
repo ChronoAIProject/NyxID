@@ -1,7 +1,11 @@
 import type { BillingAllowance, BillingGrant, BillingWallet } from "./billingContracts";
 import { billingDate, creditUnits, decimalCredits, formatExactCredits, formatQuantity } from "./credits";
 
-export type BalanceRow = { key: string; label: string; value: string; exactValue?: string; unit?: string };
+export type BalanceRow = {
+  key: string; label: string; value: string; exactValue?: string; unit?: string;
+  /** Allowances list under their service with a short metric name. */
+  group?: string; item?: string; left?: string;
+};
 const positive = (value: string | null | undefined) => value != null && creditUnits(value) > 0n;
 const maxZero = (value: bigint) => value > 0n ? value : 0n;
 const min = (a: bigint, b: bigint) => a < b ? a : b;
@@ -57,8 +61,11 @@ export function balanceRows(wallet: BillingWallet, grants: BillingGrant[], allow
     if (!allowance.is_active || balance.remaining_quantity === 0 || Date.parse(balance.period_start) > now ||
       (balance.period_end && Date.parse(balance.period_end) <= now)) continue;
     const period = { one_time: "", daily: " today", weekly: " this week", monthly: " this month" }[allowance.recurrence];
+    const metric = allowance.metric.replaceAll("_", " ");
     rows.push({ key: `allowance:${allowance.id}`, label: `Included allowance · ${allowance.service_slug}`,
-      value: `${formatQuantity(balance.remaining_quantity)} / ${formatQuantity(allowance.quantity)} ${allowance.metric.replaceAll("_", " ")} left${period}`, unit: "" });
+      value: `${formatQuantity(balance.remaining_quantity)} / ${formatQuantity(allowance.quantity)} ${metric} left${period}`, unit: "",
+      group: `${allowance.service_slug}${period ? ` ·${period}` : ""}`, item: metric.charAt(0).toUpperCase() + metric.slice(1),
+      left: `${formatQuantity(balance.remaining_quantity)} of ${formatQuantity(allowance.quantity)} left` });
   }
   return rows;
 }

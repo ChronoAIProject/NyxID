@@ -362,6 +362,12 @@ export function useNativeVoice(
       current.current?.muteSpeaker(muted);
       setSpeakerMuted(muted);
     },
+    /** Change the listening mode of a live call; false when it cannot. */
+    setInputMode(mode: VoicePreferences["input_mode"]) {
+      if (!sameScope()) return false;
+      setHolding(false);
+      return current.current?.setInputMode(mode) ?? false;
+    },
     resumeAudio() {
       if (!sameScope()) return;
       return current.current?.resumeAudio();

@@ -10,24 +10,6 @@ export const disableMfaSchema = z.object({
   code: required.max(128),
   password: z.string().min(1).optional(),
 });
-const password = z.string().refine((value) => {
-  let length = 0;
-  for (const character of value) {
-    const point = character.codePointAt(0) ?? 0;
-    length += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
-  }
-  return length >= 8 && length <= 128;
-}, "New password must be 8–128 UTF-8 bytes");
-export const changePasswordSchema = z
-  .object({
-    current_password: z.string().min(1, "Current password is required"),
-    new_password: password,
-    confirmation: z.string(),
-  })
-  .refine(
-    (value) => value.new_password === value.confirmation,
-    "Passwords do not match",
-  );
 export const securityPreferencesSchema = z.object({
   skip_mfa_for_approved_sign_ins: z.boolean(),
 });
@@ -94,22 +76,6 @@ export function createAccountSecurityApi(request: Request) {
         body: disableMfaSchema.parse(input),
         ...credentialOptions,
       }),
-    changePassword: (
-      accountId: string,
-      input: z.infer<typeof changePasswordSchema>,
-      guard: AccountSecurityRequestGuard = {},
-    ) => {
-      const { confirmation: _, ...body } = changePasswordSchema.parse(input);
-      return request(
-        "/auth/password/change",
-        options(accountId, {
-          ...guard,
-          method: "POST",
-          body,
-          ...credentialOptions,
-        }),
-      );
-    },
     async saveSecurityPreferences(
       accountId: string,
       input: z.infer<typeof securityPreferencesSchema>,

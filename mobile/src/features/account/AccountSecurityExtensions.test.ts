@@ -5,7 +5,8 @@ import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (root: Element): Element[] => [
   root,
-  ...[root.props.children]
+  // Settings rows carry controls (switches) in their accessory slot.
+  ...[root.props.children, root.props.accessory]
     .flat(Infinity)
     .flatMap((child) =>
       child && typeof child === "object" && "props" in child
@@ -13,6 +14,7 @@ const nodes = (root: Element): Element[] => [
         : [],
     ),
 ];
+const PENDING = Symbol("pending");
 function setup(
   component: string,
   props: Record<string, unknown>,
@@ -71,10 +73,10 @@ function setup(
       },
     },
     "@tanstack/react-query": {
-      useQuery: ({ queryKey }: { queryKey: string[] }) => ({
-        data: values[queryKey.at(-1)!],
-        refetch,
-      }),
+      useQuery: ({ queryKey }: { queryKey: string[] }) =>
+        values[queryKey.at(-1)!] === PENDING
+          ? { isPending: true, refetch }
+          : { data: values[queryKey.at(-1)!], refetch },
       useQueryClient: () => ({
         invalidateQueries: async (filter: unknown) => {
           calls.push(["invalidate", filter]);
@@ -86,12 +88,21 @@ function setup(
         },
       }),
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice"].map((name) => [
-        name,
-        name,
-      ]),
+      ["ActionButton", "Card", "Field", "Label", "Notice", "Section"].map(
+        (name) => [name, name],
+      ),
     ),
+    "../../components/settings/SettingsList": Object.fromEntries(
+      [
+        "SettingsCheckRow",
+        "SettingsGroup",
+        "SettingsRow",
+        "SettingsTextField",
+      ].map((name) => [name, name]),
+    ),
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../lib/api/accountApi": { accountApi: api },
     "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
     "../../hooks/useNetworkStatus": {
@@ -139,7 +150,11 @@ function setup(
   harness.mount(() => loaded[component]!(props));
   const find = (label: string) => {
     const node = nodes(harness.value()).find(
-      (node) => node.props.label === label,
+      (node) =>
+        node.props.label === label ||
+        node.props.accessibilityHint === label ||
+        (node.type === "SettingsTextField" &&
+          node.props.accessibilityLabel === label),
     );
     assert.ok(node, `Missing ${label}`);
     return node;
@@ -181,7 +196,7 @@ function setup(
   };
 }
 
-test("password/policy controls submit live API data, request confirmation for weaker policy, and ignore stale screen actions", async () => {
+test("approved sign-in policy requests confirmation for the weaker setting and ignores stale screen actions", async () => {
   const env = setup(
     "AccountSecurityControls",
     {
@@ -194,19 +209,13 @@ test("password/policy controls submit live API data, request confirmation for we
     },
     {},
   );
-  for (const [field, value] of [
-    ["Current password for password change", "old"],
-    ["New password", "new password"],
-    ["Confirm new password", "new password"],
-  ] as const) {
-    env.find(field).props.onChangeText(value);
-    env.harness.flush();
-  }
-  env.find("Change password").props.onPress();
-  await env.harness.settle();
-  assert.equal(env.calls[0]?.[0], "changePassword");
-  assert.equal(env.calls[0]?.[1], "owner");
-  assert.equal(env.find("New password").props.value, "");
+  // Password changes are not offered in the app.
+  assert.equal(
+    nodes(env.harness.value()).some((node) =>
+      /password/i.test(String(node.props.label ?? "")),
+    ),
+    false,
+  );
   const toggle = nodes(env.harness.value()).find(
     (node) => node.type === "Switch",
   )!;
@@ -284,9 +293,9 @@ test("organizations expose native create/join and owner-specific browser actions
     { accountId: "owner", email: "person@example.test" },
     { owner: [org] },
   );
-  env.find("Team · admin").props.onPress();
+  env.find("Team").props.onPress();
   env.harness.flush();
-  env.find("Role permissions on website").props.onPress();
+  env.find("Role permissions").props.onPress();
   await env.harness.settle();
   assert.ok(
     env.calls.some(
@@ -304,13 +313,13 @@ test("organizations expose native create/join and owner-specific browser actions
   env.harness.render();
   assert.equal(
     nodes(env.harness.value()).some(
-      (node) => node.props.label === "Invitations on website",
+      (node) => node.props.label === "Invitations",
     ),
     false,
   );
   env.find("New organization name").props.onChangeText("New Team");
   env.harness.flush();
-  env.find("Create organization").props.onPress();
+  env.find("Create Organization").props.onPress();
   await env.harness.settle();
   assert.ok(
     env.calls.some(
@@ -322,7 +331,7 @@ test("organizations expose native create/join and owner-specific browser actions
   );
   env.find("Organization invitation code").props.onChangeText("nonce");
   env.harness.flush();
-  env.find("Accept organization invitation").props.onPress();
+  env.find("Accept Invitation").props.onPress();
   env.confirm();
   await env.harness.settle();
   assert.ok(
@@ -342,7 +351,7 @@ test("a created organization is reported as created even when the list cannot re
   env.failListReload();
   env.find("New organization name").props.onChangeText("New Team");
   env.harness.flush();
-  env.find("Create organization").props.onPress();
+  env.find("Create Organization").props.onPress();
   await env.harness.settle();
   const notice = nodes(env.harness.value()).find(
     (node) => node.type === "Notice",
@@ -376,63 +385,6 @@ const securityProfile = {
   mfa_enabled: true,
   profile_config: { security: { skip_mfa_for_approved_sign_ins: false } },
 };
-function fillPassword(env: ReturnType<typeof setup>) {
-  for (const [field, value] of [
-    ["Current password for password change", "old password"],
-    ["New password", "new password"],
-    ["Confirm new password", "new password"],
-  ] as const) {
-    env.find(field).props.onChangeText(value);
-    env.harness.flush();
-  }
-}
-
-test("queued password changes cannot dispatch after leaving and returning", async () => {
-  const env = setup(
-    "AccountSecurityControls",
-    { profile: securityProfile },
-    {},
-  );
-  const queued = deferred<void>();
-  env.queueDispatch(queued.promise);
-  fillPassword(env);
-  env.find("Change password").props.onPress();
-  env.setAllowed(false);
-  env.setAllowed(true);
-  queued.resolve();
-  await env.harness.settle();
-  assert.equal(env.calls.length, 0);
-  assert.equal(env.find("Change password").props.loading, false);
-  env.harness.unmount();
-});
-
-test("late password responses never display success in a new activation", async () => {
-  const env = setup(
-    "AccountSecurityControls",
-    { profile: securityProfile },
-    {},
-  );
-  const response = deferred<void>();
-  env.holdResponse(response.promise);
-  fillPassword(env);
-  env.find("Change password").props.onPress();
-  assert.equal(env.calls.length, 1);
-  env.setAllowed(false);
-  env.setAllowed(true);
-  response.resolve();
-  await env.harness.settle();
-  assert.equal(
-    env.calls.length,
-    1,
-    "old response must not invalidate fresh profile data",
-  );
-  assert.equal(
-    nodes(env.harness.value()).some((node) => node.props.tone === "success"),
-    false,
-  );
-  env.harness.unmount();
-});
-
 test("old policy confirmation and step-up retries cannot become new writes after returning", async () => {
   const env = setup(
     "AccountSecurityControls",
@@ -507,7 +459,7 @@ test("organization join confirmation and queued creation retain their originatin
   );
   env.find("Organization invitation code").props.onChangeText("nonce");
   env.harness.flush();
-  env.find("Accept organization invitation").props.onPress();
+  env.find("Accept Invitation").props.onPress();
   env.setAllowed(false);
   env.setAllowed(true);
   env.confirm();
@@ -517,11 +469,43 @@ test("organization join confirmation and queued creation retain their originatin
   env.queueDispatch(queued.promise);
   env.find("New organization name").props.onChangeText("Team");
   env.harness.flush();
-  env.find("Create organization").props.onPress();
+  env.find("Create Organization").props.onPress();
   env.setAllowed(false);
   env.setAllowed(true);
   queued.resolve();
   await env.harness.settle();
   assert.equal(env.calls.length, 0);
   env.harness.unmount();
+});
+
+test("authorizations and memberships load as skeleton groups, not loading rows", () => {
+  const access = setup(
+    "AccountAuthorizations",
+    { accountId: "owner" },
+    { apps: PENDING, bindings: PENDING },
+  );
+  const skeletons = nodes(access.harness.value()).filter(
+    (node) => node.type === "SkeletonRows",
+  );
+  assert.deepEqual(
+    skeletons.map((node) => node.props.accessibilityLabel),
+    ["Loading authorized apps", "Loading broker authorizations"],
+  );
+  assert.equal(
+    nodes(access.harness.value()).some((node) =>
+      /Loading/.test(String(node.props.label)),
+    ),
+    false,
+  );
+  access.harness.unmount();
+  const orgs = setup(
+    "AccountOrganizations",
+    { accountId: "owner", email: "person@example.test" },
+    { owner: PENDING },
+  );
+  const skeleton = nodes(orgs.harness.value()).find(
+    (node) => node.type === "SkeletonRows",
+  );
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading memberships");
+  orgs.harness.unmount();
 });
