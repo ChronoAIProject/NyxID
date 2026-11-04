@@ -1039,12 +1039,102 @@ async fn device_and_skill_cards_request_owner_review_without_arming_speech() {
         }).await.unwrap();
         let messages=received.lock().await;
         assert_eq!(messages.len(),1,"The same pending card is announced once");
-        assert!(messages[0]["content"].as_str().unwrap().contains("NyxID owner card"));
-        assert!(!messages[0]["content"].as_str().unwrap().contains("should I go ahead"));
+        let facts: Value=serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(facts["type"],"owner_review_required");
+        assert_eq!(facts["approval_surface"],"nyxid_owner_card");
+        assert_eq!(facts["speech_can_approve"],false);
+        assert!(coordinator.pending_audio.is_empty(),"Model context is not an exact spoken read-back");
         drop(messages);
         assert!(coordinator.owner_review_notices.contains(&card.id));
         server.abort();
         state.db.drop().await.unwrap();
         }
     }).await;
+}
+
+#[tokio::test]
+async fn voice_unavailable_result_preserves_task_state_and_uses_language_context() {
+    Box::pin(async {
+        let (state, thread, mut call) =
+            super::super::tests::setup("voice_result_language_context").await;
+        call.preferences.language = Some("ar".into());
+        let initial = initial_context(&state.db, &call).await.unwrap();
+        assert!(initial.contains(&json!({"language":"ar"}).to_string()));
+        call.preferences.language = None;
+        let automatic = initial_context(&state.db, &call).await.unwrap();
+        assert!(automatic.contains(&json!({"language":null}).to_string()));
+        let request = voice::enqueue(
+            &state.db,
+            &call.user_id,
+            &thread.id,
+            &call.id,
+            "oversized-result",
+            "fixture task",
+        )
+        .await
+        .unwrap();
+        let request = voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
+            .await
+            .unwrap();
+        let running = Box::pin(engine::begin_turn_with_voice(
+            &state.db,
+            &call.user_id,
+            &turn(request.task_conversation_id.as_deref(), "fixture task"),
+            &state.encryption_keys,
+            Some(&request.id),
+        ))
+        .await
+        .unwrap();
+        Box::pin(engine::finish_turn(
+            &state.db,
+            &running,
+            &running.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "é".repeat(COMMENTARY_MAX_BYTES),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        ))
+        .await
+        .unwrap();
+        let (mut socket, server, received) = fixture_socket().await;
+        let mut coordinator = Coordinator::new();
+        for _ in 0..2 {
+            assert!(
+                !task_updates(&state, &call, &mut socket, &mut coordinator)
+                    .await
+                    .unwrap()
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while received.lock().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let messages = received.lock().await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "session.commentary.append");
+        let facts: Value = serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(facts["type"], "task_result");
+        assert_eq!(facts["state"], "completed");
+        assert_eq!(facts["presentation"], "unavailable");
+        assert!(facts.get("answer").is_none());
+        assert!(
+            coordinator.pending_audio.is_empty(),
+            "Context delivery does not prove any spoken text was heard"
+        );
+        let saved = voice::get(&state.db, &call.user_id, &thread.id, &request.id)
+            .await
+            .unwrap();
+        assert_eq!(saved.state, RequestState::Completed);
+        assert!(!saved.timing.contains_key("first_audio_ms"));
+        drop(messages);
+        server.abort();
+        state.db.drop().await.unwrap();
+    })
+    .await;
 }

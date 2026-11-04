@@ -470,16 +470,20 @@ are used as progress narration.
 
 Settled hidden-task answers are copied in full through the existing transactional
 publisher, including when audio has ended. Concurrent sweeps adopt the same result
-receipt. Speech is one bounded, billed one-shot summary in the answer's language,
-with a three-second timeout and at most 160 characters, bounded by the existing
-480-byte commentary limit, followed by the normal voice surface. It states the
+receipt. Speech is one bounded, billed one-shot summary using the call's optional
+language preference, otherwise preserving the answer's language. There is no
+language allowlist. The summary has a three-second timeout and the existing
+480-byte UTF-8 commentary limit, followed by the normal voice surface. It states the
 concrete findings/failure and necessary detail directly, without mentioning saved
 answers, another chat, backend conversations or internal handoffs. If
-summarization is unavailable, use complete safe findings within that same budget,
-or explain that a reliable spoken explanation could not be produced. Complete
-Markdown list items remain findings even without terminal punctuation; remove
-their list/bold formatting without dropping their values. Unicode sentence/clause boundaries
-replace the old 64-byte fragments; never read a truncated clause. Admission-only
+summarization is unavailable, a safe successful answer may be spoken whole within
+the same byte budget. Otherwise send bounded task-state facts for the live model
+to explain naturally in the conversation language. Presentation failure does not
+change a completed task into a failed task or request its execution again. Never
+select partial findings, rewrite Markdown, infer completeness from punctuation,
+or substitute a fixed spoken sentence. Grok queues presentation separately from
+user responses and prevents presentation responses from delegating work.
+Literal confirmation read-backs retain their existing lossless chunking. Admission-only
 and async-submit acknowledgements remain distinct from settled results.
 
 Read-back uses a server presentation of the existing card, while the original
