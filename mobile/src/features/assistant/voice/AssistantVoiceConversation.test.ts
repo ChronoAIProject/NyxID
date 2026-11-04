@@ -236,6 +236,17 @@ function setup(
       ),
       StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
       useWindowDimensions: () => ({ width: 390, height: 844 }),
+      Animated: {
+        View: "Animated.View",
+        Value: class {
+          setValue() {}
+          interpolate() {
+            return 0;
+          }
+        },
+        spring: () => ({ start() {}, stop() {} }),
+        timing: () => ({ start() {}, stop() {} }),
+      },
     },
     "react-native-safe-area-context": {
       useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
@@ -502,25 +513,20 @@ test("voice never exposes source or configuration selectors, and starts with the
   f.harness.unmount();
 });
 
-test("minimizing releases push-to-talk before hiding the sheet and keeps the media owner mounted", () => {
+test("going back from an active call releases push-to-talk and ends the call", () => {
   const f = setup({ active: true });
   f.voice.holding = true;
-  const media = f.media();
-  f.button("Minimize voice call").props.onPress();
-  assert.deepEqual(f.events, [["hold", false]]);
-  assert.equal(f.modal().visible, false);
-  assert.equal(f.media().key, media.key);
-  assert.equal(f.media().props.media, media.props.media);
-  f.button("Restore voice call").props.onPress();
-  assert.equal(f.modal().visible, true);
+  f.button("End voice and go back").props.onPress();
+  assert.deepEqual(f.events, [["hold", false], ["end"], ["close"]]);
   assert.equal(
-    f.events.some(([event]) => event === "end"),
+    f.all().some((row) => row.props?.accessibilityLabel === "Restore voice call"),
     false,
+    "no minimized call bar stays behind in the chat",
   );
   f.harness.unmount();
 });
 
-test("reviewing an approval releases held audio and leaves both the call and task running", () => {
+test("reviewing an approval in chat ends the call and leaves the task running", () => {
   const f = setup({
     active: true,
     snapshot: {
@@ -540,11 +546,12 @@ test("reviewing an approval releases held audio and leaves both the call and tas
   f.button("Review in chat").props.onPress();
   assert.deepEqual(f.events, [
     ["hold", false],
+    ["end"],
+    ["close"],
     ["review", "ack-1"],
   ]);
-  assert.equal(f.modal().visible, false);
   assert.equal(
-    f.events.some(([event]) => event === "end" || event === "stopTask"),
+    f.events.some(([event]) => event === "stopTask"),
     false,
   );
   f.harness.unmount();
@@ -803,18 +810,16 @@ test("the voice page is a pastel wash with the assistant pill and three round co
   assert.match(idle.text(), /Hey, what can I do for you today\?/);
   assert.equal(idle.button("Start voice").props.disabled, false);
   idle.harness.unmount();
-  // Hands-free: chat on the left, the microphone in the middle, End on the right.
+  // Hands-free: the microphone in the middle, End on the right. Leaving the
+  // page ends the call, so there is no separate Show chat.
   const f = setup({ active: true });
-  f.button("Show chat").props.onPress();
+  assert.equal(
+    f.all().some((row) => row.props?.accessibilityLabel === "Show chat"),
+    false,
+  );
   f.button("Mute microphone").props.onPress();
   f.button("End voice and close").props.onPress();
-  assert.deepEqual(f.events, [
-    ["hold", false],
-    ["review", undefined],
-    ["mute", true],
-    ["end"],
-    ["close"],
-  ]);
+  assert.deepEqual(f.events, [["mute", true], ["end"], ["close"]]);
   f.harness.unmount();
 });
 

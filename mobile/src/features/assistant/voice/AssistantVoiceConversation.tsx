@@ -3,6 +3,7 @@ import { useReducedMotion } from "../../../lib/accessibility/useReducedMotion";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Modal,
   Pressable,
   ScrollView,
@@ -20,10 +21,8 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronUp,
-  MessageSquareText,
   Mic,
   MicOff,
-  PhoneOff,
   Volume2,
   VolumeX,
   X,
@@ -129,7 +128,15 @@ function VoiceConversation({
   const { isConnected } = useNetworkStatus();
   const voice = useNativeVoice(thread, environment, onUpdate);
   const levels = useVoiceLevels(voice.media);
-  const [minimized, setMinimized] = useState(false);
+  const [hold] = useState(() => new Animated.Value(0));
+  const [transcriptFrame, setTranscriptFrame] = useState({ x: 0, y: 0 });
+  const transcriptSize = useRef({ content: 0, visible: 0 });
+  const [transcriptOverflows, setTranscriptOverflows] = useState(false);
+  const measureTranscript = (size: Partial<typeof transcriptSize.current>) => {
+    Object.assign(transcriptSize.current, size);
+    const { content, visible } = transcriptSize.current;
+    setTranscriptOverflows(visible > 0 && content > visible + 1);
+  };
   const [tasksOpen, setTasksOpen] = useState(false);
   const [pricingOpen, setPricingOpen] = useState(false);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
@@ -224,17 +231,37 @@ function VoiceConversation({
     setShowErrorDetails(false);
   }, [voice.error]);
 
+  // Holding the microphone swells the button and lifts a soft halo around it;
+  // releasing settles it back. Reduce Motion switches without animating.
+  useEffect(() => {
+    if (reducedMotion) {
+      hold.setValue(voice.holding ? 1 : 0);
+      return;
+    }
+    const animation = voice.holding
+      ? Animated.spring(hold, {
+          toValue: 1,
+          speed: 16,
+          bounciness: 9,
+          useNativeDriver: true,
+        })
+      : Animated.timing(hold, {
+          toValue: 0,
+          duration: 220,
+          useNativeDriver: true,
+        });
+    animation.start();
+    return () => animation.stop();
+  }, [voice.holding, reducedMotion]);
+
+  /** Leaving the voice page ends the call; accepted agent tasks keep running. */
   function close() {
+    if (voice.holding) voice.hold(false);
     void voice.end();
-    if (minimized) onClose();
-    else sheet.close();
-  }
-  function minimize() {
-    voice.hold(false);
-    setMinimized(true);
+    sheet.close();
   }
   function review(acknowledgementId?: string) {
-    minimize();
+    close();
     onReview(acknowledgementId);
   }
   function preferences(
@@ -325,46 +352,13 @@ function VoiceConversation({
           origin={environment.origin}
         />
       ) : null}
-      {minimized ? (
-        <View
-          style={[
-            styles.minimized,
-            {
-              backgroundColor: colors.primaryTone.bg,
-              borderColor: colors.primaryTone.border,
-            },
-          ]}
-        >
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Restore voice call"
-            onPress={() => setMinimized(false)}
-            style={styles.restore}
-          >
-            <Mic size={20} color={colors.primaryOnTint} />
-            <Label style={styles.fill} numberOfLines={1}>
-              {status} · {agentName}
-              {active ? ` · ${duration}` : ""}
-            </Label>
-            <ChevronUp size={18} color={colors.textSecondary} />
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="End voice and close"
-            onPress={close}
-            style={styles.iconButton}
-          >
-            <PhoneOff size={20} color={colors.danger} />
-          </Pressable>
-        </View>
-      ) : null}
       {/* Opaque overFullScreen rather than fullScreen: a fullScreen
           presentation detaches the chat screen underneath, including the
           hidden media WebView, whose page would then report itself hidden
           and end the call. */}
       <Modal
         {...sheet.modalProps}
-        visible={!minimized && sheet.modalProps.visible}
+        visible={sheet.modalProps.visible}
         transparent
         animationType={reducedMotion ? "none" : "slide"}
         presentationStyle="overFullScreen"
@@ -390,9 +384,9 @@ function VoiceConversation({
           />
           <View style={styles.topBar}>
             <RoundButton
-              label={active ? "Minimize voice call" : "Close voice"}
+              label={active ? "End voice and go back" : "Back to chat"}
               surface={surface}
-              onPress={active ? minimize : close}
+              onPress={close}
             >
               <ChevronLeft size={20} color={colors.textPrimary} />
             </RoundButton>
@@ -475,14 +469,27 @@ function VoiceConversation({
               </View>
             ) : null}
           </View>
+          <View
+            style={styles.transcriptFrame}
+            onLayout={({ nativeEvent }) =>
+              setTranscriptFrame({
+                x: nativeEvent.layout.x,
+                y: nativeEvent.layout.y,
+              })
+            }
+          >
           <ScrollView
             ref={transcript}
             style={[styles.transcript, { maxHeight: dimensions.height * 0.34 }]}
             contentContainerStyle={styles.transcriptContent}
             keyboardShouldPersistTaps="handled"
             // The newest words stay in view; scroll up for the rest.
-            onContentSizeChange={() =>
-              transcript.current?.scrollToEnd?.({ animated: !reducedMotion })
+            onContentSizeChange={(_width, height) => {
+              measureTranscript({ content: height });
+              transcript.current?.scrollToEnd?.({ animated: !reducedMotion });
+            }}
+            onLayout={({ nativeEvent }) =>
+              measureTranscript({ visible: nativeEvent.layout.height })
             }
           >
             {voice.recovery ? (
@@ -620,6 +627,14 @@ function VoiceConversation({
               );
             })}
           </ScrollView>
+          {transcriptOverflows ? (
+            <WashFade
+              wash={dark ? DARK_WASH : LIGHT_WASH}
+              frame={transcriptFrame}
+              screen={dimensions}
+            />
+          ) : null}
+          </View>
           {actionCount > 0 ? (
             // What the chat is waiting on, decided without leaving the call.
             <View
@@ -749,14 +764,7 @@ function VoiceConversation({
                   )}
                 </RoundButton>
               ) : (
-                <RoundButton
-                  small
-                  label="Show chat"
-                  surface={surface}
-                  onPress={() => review()}
-                >
-                  <MessageSquareText size={20} color={colors.textPrimary} />
-                </RoundButton>
+                <View style={styles.smallSpacer} />
               )
             ) : (
               <View style={styles.smallSpacer} />
@@ -771,38 +779,73 @@ function VoiceConversation({
                 <Mic size={30} color={onMain} />
               </MainButton>
             ) : inputMode === "push_to_talk" ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Hold to talk"
-                accessibilityHint={voice.holding ? "Release to send" : undefined}
-                accessibilityState={{
-                  disabled: microphoneBlocked || !voice.connected,
-                  selected: voice.holding,
-                }}
-                disabled={microphoneBlocked || !voice.connected}
-                onPressIn={() => voice.hold(true)}
-                onPressOut={() => voice.hold(false)}
-                onAccessibilityAction={({ nativeEvent }) => {
-                  if (nativeEvent.actionName === "activate")
-                    voice.hold(!voice.holding);
-                }}
-                accessibilityActions={[
-                  {
-                    name: "activate",
-                    label: voice.holding ? "Stop talking" : "Start talking",
-                  },
-                ]}
-                style={[
-                  styles.main,
-                  {
-                    backgroundColor: voice.holding ? colors.primary : main,
-                    opacity: microphoneBlocked || !voice.connected ? 0.4 : 1,
-                    transform: [{ scale: voice.holding ? 1.08 : 1 }],
-                  },
-                ]}
-              >
-                <Mic size={30} color={voice.holding ? colors.onPrimary : onMain} />
-              </Pressable>
+              <View style={styles.holdStage}>
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.halo,
+                    {
+                      backgroundColor: main,
+                      opacity: hold.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: [0, 0.32],
+                      }),
+                      transform: [
+                        {
+                          scale: hold.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [1, 1.5],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                />
+                <Animated.View
+                  style={{
+                    transform: [
+                      {
+                        scale: hold.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [1, 1.1],
+                        }),
+                      },
+                    ],
+                  }}
+                >
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Hold to talk"
+                    accessibilityHint={voice.holding ? "Release to send" : undefined}
+                    accessibilityState={{
+                      disabled: microphoneBlocked || !voice.connected,
+                      selected: voice.holding,
+                    }}
+                    disabled={microphoneBlocked || !voice.connected}
+                    onPressIn={() => voice.hold(true)}
+                    onPressOut={() => voice.hold(false)}
+                    onAccessibilityAction={({ nativeEvent }) => {
+                      if (nativeEvent.actionName === "activate")
+                        voice.hold(!voice.holding);
+                    }}
+                    accessibilityActions={[
+                      {
+                        name: "activate",
+                        label: voice.holding ? "Stop talking" : "Start talking",
+                      },
+                    ]}
+                    style={[
+                      styles.main,
+                      {
+                        backgroundColor: main,
+                        opacity: microphoneBlocked || !voice.connected ? 0.4 : 1,
+                      },
+                    ]}
+                  >
+                    <Mic size={30} color={onMain} />
+                  </Pressable>
+                </Animated.View>
+              </View>
             ) : (
               <MainButton
                 label={muted ? "Unmute microphone" : "Mute microphone"}
@@ -901,6 +944,51 @@ function VoiceConversation({
 // The voice page's pastel wash: sky to lilac to blush, deepened for dark mode.
 const LIGHT_WASH = ["#CCDDF6", "#E6E4F4", "#F3DAEE"] as const;
 const DARK_WASH = ["#141C2A", "#1B1828", "#271B29"] as const;
+
+const FADE_HEIGHT = 56;
+const FADE_STEPS = 14;
+/**
+ * Older captions fade out toward the top of the page. React Native has no
+ * alpha mask here, so the fade stacks thin slices of the page's own wash,
+ * aligned to where it sits on screen, from opaque to clear.
+ */
+function WashFade({
+  wash,
+  frame,
+  screen,
+}: {
+  wash: readonly [string, string, string];
+  frame: { x: number; y: number };
+  screen: { width: number; height: number };
+}) {
+  const slice = FADE_HEIGHT / FADE_STEPS;
+  return (
+    <View pointerEvents="none" style={styles.fade}>
+      {Array.from({ length: FADE_STEPS }, (_, index) => (
+        <View
+          key={index}
+          style={[
+            styles.fadeSlice,
+            { top: index * slice, height: slice + 0.5, opacity: 1 - index / FADE_STEPS },
+          ]}
+        >
+          <LinearGradient
+            colors={wash}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={{
+              position: "absolute",
+              left: -frame.x,
+              top: -(frame.y + index * slice),
+              width: screen.width,
+              height: screen.height,
+            }}
+          />
+        </View>
+      ))}
+    </View>
+  );
+}
 
 /** White round button floating on the wash; selected toggles invert. */
 function RoundButton({
@@ -1083,7 +1171,28 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     textAlign: "center",
   },
+  transcriptFrame: { flexShrink: 1 },
+  fade: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: FADE_HEIGHT,
+  },
+  fadeSlice: { position: "absolute", left: 0, right: 0, overflow: "hidden" },
   transcript: { flexGrow: 0 },
+  holdStage: {
+    width: 76,
+    height: 76,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  halo: {
+    position: "absolute",
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+  },
   transcriptContent: { gap: 14, paddingBottom: 4, paddingHorizontal: 8 },
   caption: { gap: 2, alignItems: "center" },
   captionRecent: { gap: 4 },
@@ -1140,19 +1249,4 @@ const styles = StyleSheet.create({
   },
   textButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: 8 },
   footnoteLink: { textDecorationLine: "underline" },
-  minimized: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderRadius: 12,
-    marginBottom: 10,
-    paddingLeft: 12,
-  },
-  restore: {
-    flex: 1,
-    minHeight: 48,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
 });

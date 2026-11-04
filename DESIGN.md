@@ -679,17 +679,21 @@ Native support remains portrait iPhone on iOS and Android phone, with wide
 Android windows as a secondary layout. Eligible private chats expose a
 voice-conversation mode in the trailing composer button when the server enables
 `assistant:voice`: an empty composer shows the waveform, text or attachments
-show Send, and an active reply shows Stop. Voice mode is a full-screen call: a
-top bar with a minimise chevron, the agent name and status (Connecting…,
-Listening, Thinking, Speaking, Muted) with a mono call timer; a live aura in the
-centre; the live transcript under it (the two newest utterances at 19/27pt,
-earlier ones smaller, interim words in tertiary, scrolling for more); a small
-collapsible tasks tray only while tasks exist; round 64pt Mute, Speaker and red
-End controls, plus a large 88pt hold-to-talk button in Hold to talk mode; and
-the price as a quiet footnote. Minimising keeps the call in a compact bar above
-the composer. The aura is decorative and hidden from VoiceOver (see the
-2026-11-04 decision). Dictation streams microphone audio to
-the server for review before insertion, matching the web’s private-chat scope.
+show Send, and an active reply shows Stop. Voice mode is a full-screen call on
+the pastel wash: a top bar with a back chevron, the "Voice" title and a speaker
+toggle; a live aura in the centre with the agent pill, status (Connecting…,
+Listening, Thinking, Speaking, Muted) and a mono call timer; the live
+transcript under it (the two newest utterances large, earlier ones smaller,
+interim words in tertiary, scrolling for more, older lines fading out toward
+the top once they overflow); the chat's pending action cards and a small
+collapsible tasks tray only while they exist; the Hands-free / Hold to talk
+switch; round mute and red End controls around a 76pt centre button; and the
+price as a quiet footnote. Holding to talk swells the centre button and lifts
+a soft halo around it, settling back on release (no animation under Reduce
+Motion). Leaving the voice page by any route ends the call; accepted agent
+tasks keep running. The aura is decorative and hidden from VoiceOver (see the
+2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside
+the composer (see Chat composers).
 Crew chats retain the keyboard’s own dictation.
 
 The native Machines drawer supports personal machines and organization machines
