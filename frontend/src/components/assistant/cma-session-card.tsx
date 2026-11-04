@@ -1,4 +1,11 @@
-import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import {
+  useLayoutEffect,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import {
   Check,
   ChevronDown,
@@ -7,16 +14,26 @@ import {
   Maximize2,
   Minimize2,
   RefreshCw,
+  Pin,
+  ExternalLink,
+  MessageSquare,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipTrigger,
+  TooltipContent,
+} from "@/components/ui/tooltip";
 import { CmaGlyph } from "@/components/service-icons/cma";
+import { Link, useRouterState } from "@tanstack/react-router";
+import { safeCmaUrl } from "@/lib/assistant/cma-url";
+import {
+  useObservedCmaSessions,
+  type ObservedCmaSession,
+} from "./cma-session-context";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCmaSessionStore } from "@/stores/cma-session-store";
-import {
-  useActiveCmaSessions,
-  useCmaSessionStream,
-} from "@/hooks/use-cma-session";
 import type {
   CmaSessionReference,
   CmaSessionState,
@@ -41,50 +58,126 @@ export function CmaSessionCards() {
   return <CmaSessionObserver>{(cards) => cards}</CmaSessionObserver>;
 }
 
-export function CmaSessionObserver({ children }: {
+export function CmaSessionObserver({
+  children,
+}: {
   readonly children: (cards: ReactNode) => ReactNode;
 }) {
   const ownerId = useAuthStore((state) => state.user?.id);
-  return ownerId ? (
-    <OwnedCmaSessionCards key={ownerId} ownerId={ownerId}>{children}</OwnedCmaSessionCards>
-  ) : children(null);
+  const sessions = useObservedCmaSessions();
+  return children(
+    ownerId && sessions.length ? (
+      <aside
+        aria-label="CMA sessions"
+        className="flex min-h-0 shrink-0 flex-col gap-3"
+      >
+        {sessions.map((observation) => (
+          <CmaSessionCard
+            key={`${observation.session.connection.id}:${observation.session.agentId}`}
+            ownerId={ownerId}
+            observation={observation}
+          />
+        ))}
+      </aside>
+    ) : null,
+  );
 }
 
-function OwnedCmaSessionCards({ ownerId, children }: {
-  readonly ownerId: string;
-  readonly children: (cards: ReactNode) => ReactNode;
+/** Every route outside the assistant shell gets the same pinned cards. */
+export function FloatingCmaSessions() {
+  const assistant = useRouterState({
+    select: (state) =>
+      !state.matches.some(
+        (match) => match.globalNotFound || match.status === "error",
+      ) &&
+      state.matches.some(
+        (match) =>
+          [
+            "/assistant",
+            "/assistant/plugins",
+            "/assistant/approvals",
+            "/assistant/automations",
+            "/assistant/machines",
+            "/assistant/machines/new",
+            "/assistant/machines/pair",
+          ].includes(match.routeId) &&
+          match.status === "success" &&
+          match.pathname.replace(/\/$/, "") ===
+            state.location.pathname.replace(/\/$/, ""),
+      ),
+  });
+  if (assistant) return null;
+  return (
+    <CmaSessionObserver>
+      {(cards) =>
+        cards ? (
+          <div className="fixed bottom-[max(1rem,var(--sab))] right-[max(1rem,var(--sar))] z-40 max-h-[min(60dvh,560px)] w-[min(360px,calc(100vw-2rem))] overflow-y-auto rounded-xl shadow-lg">
+            {cards}
+          </div>
+        ) : null
+      }
+    </CmaSessionObserver>
+  );
+}
+
+/** Current-session activity only; pinned work from other sessions is excluded. */
+export function CmaSessionIndicator({
+  conversationId,
+}: {
+  readonly conversationId: string;
 }) {
-  const sessions = useActiveCmaSessions(ownerId);
-  if (!sessions.length) return children(null);
-  return children(
-    <aside
-      aria-label="CMA sessions"
-      className="flex min-h-0 shrink-0 flex-col gap-3"
+  const sessions = useObservedCmaSessions().filter(
+    ({ session }) => session.origin?.conversation_id === conversationId,
+  );
+  if (!sessions.length) return null;
+  const working = sessions.some(
+    ({ state }) => state.status === "working" || state.status === "starting",
+  );
+  return (
+    <span
+      role="status"
+      aria-label={
+        working
+          ? "CMA is working in this session"
+          : "CMA activity in this session"
+      }
+      title={`${sessions.length} CMA session${sessions.length === 1 ? "" : "s"}`}
+      className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-12 font-medium text-muted-foreground"
     >
-      {sessions.map((session) => (
-        <CmaSessionCard
-          key={`${session.connection.id}:${session.agentId}`}
-          ownerId={ownerId}
-          session={session}
-        />
-      ))}
-    </aside>
+      <CmaGlyph aria-hidden="true" className="h-3.5 w-3.5" /> CMA
+      <span
+        aria-hidden="true"
+        className={cn(
+          "h-1.5 w-1.5 rounded-full",
+          working ? "bg-success motion-safe:animate-pulse" : "bg-warning",
+        )}
+      />
+    </span>
   );
 }
 
 function CmaSessionCard({
   ownerId,
-  session,
+  observation,
 }: {
   readonly ownerId: string;
-  readonly session: CmaSessionReference;
+  readonly observation: ObservedCmaSession;
 }) {
+  const { session, state, reconnect } = observation;
   const key = `${session.connection.id}:${session.agentId}`;
   const collapsed = useCmaSessionStore(
     (store) => store.ownerId === ownerId && store.minimised[key] === true,
   );
   const setMinimised = useCmaSessionStore((store) => store.setMinimised);
-  const { state, reconnect } = useCmaSessionStream(ownerId, session);
+  const pinned = useCmaSessionStore(
+    (store) => store.ownerId === ownerId && store.pinned[key] === true,
+  );
+  const setPinned = useCmaSessionStore((store) => store.setPinned);
+  const cmaUrl = safeCmaUrl(
+    session.callbackUrl === undefined
+      ? session.origin?.cma_url
+      : session.callbackUrl,
+  );
   const detailsId = `cma-session-${session.connection.id}-${session.agentId}`;
   const scrollBody = useRef<HTMLDivElement>(null);
   return (
@@ -92,64 +185,155 @@ function CmaSessionCard({
       aria-label={`CMA session: ${state.title}`}
       data-private="true"
       data-ph-no-capture
-      className="flex max-h-[min(440px,40dvh)] min-h-0 shrink-0 flex-col gap-3 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-14 lg:max-h-[480px] lg:rounded-l-2xl lg:rounded-r-none lg:border-0 lg:shadow-sm"
+      className="flex max-h-[min(440px,40dvh)] min-h-0 w-full max-w-[500px] shrink-0 flex-col self-start gap-2 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-14 lg:max-h-[480px] lg:rounded-2xl lg:border-0 lg:shadow-sm"
     >
-      <div className="flex shrink-0 items-center gap-2">
-        <CmaGlyph className="h-4 w-4 text-muted-foreground" />
-        <h2 className="flex-1 font-medium">Your CMA session</h2>
-        <span className="text-12 text-text-tertiary">Across chats</span>
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label={
-            collapsed ? "Maximise CMA session" : "Minimise CMA session"
-          }
-          aria-expanded={!collapsed}
-          aria-controls={detailsId}
-          onClick={() => setMinimised(ownerId, key, !collapsed)}
-          className="h-7 w-7 shrink-0 px-0"
-        >
-          {collapsed ? <Maximize2 /> : <Minimize2 />}
-        </Button>
-      </div>
-      <div className="shrink-0 space-y-2">
-        <h3
-          className="line-clamp-2 break-words font-medium leading-relaxed"
+      <div className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1">
+        <CmaGlyph
+          aria-hidden="true"
+          className="h-4 w-4 shrink-0 text-muted-foreground"
+        />
+        <h2
+          className="min-w-0 flex-1 basis-32 line-clamp-2 break-words text-15 font-semibold leading-snug"
           title={state.title}
         >
           {state.title}
-        </h3>
+        </h2>
+        <div
+          className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1"
+          role="group"
+          aria-label="CMA session controls"
+        >
+          {session.origin ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon"
+                  className="text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                >
+                  <Link
+                    to="/assistant"
+                    search={{
+                      c: session.origin.conversation_id,
+                      agent: session.origin.specialist_id,
+                    }}
+                    aria-label="Open source chat"
+                  >
+                    <MessageSquare aria-hidden="true" />
+                  </Link>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Open source chat</TooltipContent>
+            </Tooltip>
+          ) : null}
+          {cmaUrl ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon"
+                  className="text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+                >
+                  <a
+                    href={cmaUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="View in CMA"
+                  >
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>View in CMA</TooltipContent>
+            </Tooltip>
+          ) : null}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size={pinned ? "sm" : "icon"}
+                aria-label={
+                  pinned ? "Unpin CMA session (Pinned)" : "Pin CMA session"
+                }
+                aria-pressed={pinned}
+                onClick={() => setPinned(ownerId, key, !pinned)}
+                className={cn(
+                  "h-8 shrink-0 transition-shadow focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card",
+                  pinned
+                    ? "bg-foreground px-2 text-background hover:bg-foreground hover:text-background"
+                    : "text-foreground hover:bg-overlay-strong",
+                )}
+              >
+                <Pin
+                  aria-hidden="true"
+                  className={pinned ? "fill-current" : undefined}
+                />
+                {pinned ? (
+                  <span className="whitespace-nowrap">Pinned</span>
+                ) : null}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {pinned
+                ? "Unpin: show only in the source chat"
+                : "Pin to monitor on every page"}
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={
+                  collapsed ? "Maximise CMA session" : "Minimise CMA session"
+                }
+                aria-expanded={!collapsed}
+                aria-controls={detailsId}
+                onClick={() => setMinimised(ownerId, key, !collapsed)}
+                className="shrink-0 text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+              >
+                {collapsed ? <Maximize2 /> : <Minimize2 />}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {collapsed ? "Maximise CMA session" : "Minimise CMA session"}
+            </TooltipContent>
+          </Tooltip>
+        </div>
+      </div>
+      <div ref={scrollBody} className="min-h-0 space-y-2 overflow-y-auto">
         <SessionStatus state={state} />
         {collapsed && state.actions.length ? (
           <p className="truncate text-13 text-muted-foreground">
             {state.actions.at(-1)?.title}
           </p>
         ) : null}
-      </div>
-      {state.error ? (
-        <div className="shrink-0 space-y-2 rounded-lg border border-warning/25 bg-warning/5 p-2 text-13">
-          <p role="alert">{state.error}</p>
-          {state.connection === "unavailable" ? (
-            <Button variant="outline" size="sm" onClick={reconnect}>
-              <RefreshCw /> Reconnect
-            </Button>
-          ) : null}
+        {state.error ? (
+          <div className="space-y-2 rounded-lg border border-warning/25 bg-warning/5 p-2 text-13">
+            <p role="alert">{state.error}</p>
+            {state.connection === "unavailable" ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={reconnect}
+                className="focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <RefreshCw /> Reconnect
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+        <div id={detailsId} hidden={collapsed} className="space-y-2">
+          <SessionActivity state={state} />
+          <SessionDetails
+            session={session}
+            state={state}
+            scrollBody={scrollBody}
+            visible={!collapsed}
+          />
         </div>
-      ) : null}
-      <div
-        id={detailsId}
-        ref={scrollBody}
-        className={cn(
-          "min-h-0 space-y-3 overflow-y-auto",
-          collapsed && "hidden",
-        )}
-      >
-        <SessionActivity state={state} />
-        <SessionDetails
-          session={session}
-          scrollBody={scrollBody}
-          visible={!collapsed}
-        />
       </div>
     </section>
   );
@@ -157,10 +341,12 @@ function CmaSessionCard({
 
 function SessionDetails({
   session,
+  state,
   scrollBody,
   visible,
 }: {
   readonly session: CmaSessionReference;
+  readonly state: CmaSessionState;
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
 }) {
@@ -190,7 +376,7 @@ function SessionDetails({
   }, [open, visible, scrollBody]);
 
   return (
-    <div className="border-t border-border/50 pt-1 text-12 text-text-tertiary">
+    <div className="pt-1 text-13 text-text-tertiary">
       <Button
         ref={button}
         type="button"
@@ -199,7 +385,7 @@ function SessionDetails({
         aria-expanded={open}
         aria-controls={contentId}
         onClick={() => setOpen((value) => !value)}
-        className="w-full justify-between px-1 text-14 focus-visible:ring-2 focus-visible:ring-ring"
+        className="w-full justify-between px-0 focus-visible:ring-2 focus-visible:ring-ring"
       >
         Session details
         <ChevronDown
@@ -218,6 +404,16 @@ function SessionDetails({
               {session.connection.name}
             </dd>
           </div>
+          {state.updatedAt ? (
+            <div>
+              <dt>Last activity</dt>
+              <dd className="mt-0.5 text-muted-foreground">
+                <time dateTime={state.updatedAt} aria-label="Last CMA activity">
+                  {new Date(state.updatedAt).toLocaleString()}
+                </time>
+              </dd>
+            </div>
+          ) : null}
           <div>
             <dt>Session ID</dt>
             <dd className="mt-0.5 break-all font-mono text-muted-foreground">
@@ -233,13 +429,13 @@ function SessionDetails({
 function SessionStatus({ state }: { readonly state: CmaSessionState }) {
   const live = state.connection === "live";
   return (
-    <div className="flex items-center justify-between gap-2">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
       <span
         role="status"
-        className="flex items-center gap-2 text-13 text-muted-foreground"
+        className="flex items-center gap-1.5 text-13 text-foreground"
       >
         {state.status === "working" || state.status === "starting" ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary" />
+          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text" />
         ) : (
           <Circle
             className={cn(
@@ -252,8 +448,11 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
         )}
         {STATUS_LABELS[state.status]}
       </span>
+      <span aria-hidden="true" className="text-text-tertiary">
+        ·
+      </span>
       <span
-        className="flex items-center gap-1.5 text-12 text-text-tertiary"
+        className="flex items-center gap-1.5 text-13 text-muted-foreground"
         aria-label={`Status stream ${state.connection}`}
       >
         <span
@@ -279,8 +478,11 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
 }
 
 function SessionActivity({ state }: { readonly state: CmaSessionState }) {
+  const [expanded, setExpanded] = useState(false);
+  const actions = [...state.actions].reverse();
+  const historyId = useId();
   return (
-    <div className="space-y-3">
+    <div className="space-y-1.5">
       {state.notice ? (
         <p
           role="note"
@@ -290,34 +492,35 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
         </p>
       ) : null}
       <section aria-label="CMA activity">
-        <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="mb-0.5 flex items-center justify-between gap-2">
           <h4 className="text-12 font-medium text-text-tertiary">
             Recent actions
           </h4>
-          {state.updatedAt ? (
-            <time
-              dateTime={state.updatedAt}
-              aria-label="Last CMA activity"
-              className="text-12 tabular-nums text-text-tertiary"
+          {actions.length > 3 ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="px-1"
+              aria-expanded={expanded}
+              aria-controls={historyId}
+              onClick={() => setExpanded((value) => !value)}
             >
-              {new Date(state.updatedAt).toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-                second: "2-digit",
-              })}
-            </time>
+              {expanded
+                ? "Show recent actions"
+                : `Show all ${actions.length} actions`}
+            </Button>
           ) : null}
         </div>
         {state.actions.length ? (
-          <ol className="space-y-0">
-            {[...state.actions].reverse().map((action) => (
+          <ol id={historyId}>
+            {(expanded ? actions : actions.slice(0, 3)).map((action) => (
               <li
                 key={action.id}
-                className="flex items-start gap-2 rounded-lg bg-overlay/35 px-2 py-2 text-13 [&+li]:mt-1"
+                className="flex items-start gap-1.5 py-1 text-13"
               >
                 <span className="mt-0.5 shrink-0" aria-label={action.status}>
                   {action.status === "running" ? (
-                    <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary" />
+                    <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary-text" />
                   ) : action.status === "completed" ? (
                     <Check className="h-3 w-3 text-success" />
                   ) : action.status === "failed" ? (
@@ -326,7 +529,7 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
                     <Circle className="h-3 w-3 text-text-tertiary" />
                   )}
                 </span>
-                <span className="min-w-0 break-words leading-relaxed text-muted-foreground">
+                <span className="min-w-0 break-words leading-snug text-muted-foreground">
                   {action.title}
                 </span>
               </li>

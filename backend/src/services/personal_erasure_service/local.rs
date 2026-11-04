@@ -144,6 +144,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::cma_session_origin::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::async_service_operation::QUOTAS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),

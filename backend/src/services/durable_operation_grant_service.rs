@@ -1615,6 +1615,7 @@ mod tests {
     fn scheduled_key(id: &str, owner: &str, user_service_id: &str) -> ApiKey {
         let now = Utc::now();
         ApiKey {
+            permission_policy_id: None,
             id: id.to_string(),
             user_id: owner.to_string(),
             name: "scheduler".to_string(),

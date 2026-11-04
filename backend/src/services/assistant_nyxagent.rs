@@ -5795,6 +5795,7 @@ pub(crate) async fn delete_in_session(
         }
         for collection in [
             crate::models::async_service_operation::COLLECTION_NAME,
+            crate::models::cma_session_origin::COLLECTION_NAME,
             crate::models::assistant_voice::REQUESTS,
             crate::models::assistant_voice_session::COLLECTION_NAME,
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
