@@ -1,3 +1,4 @@
+import { CompactScroll } from "@/components/ui/compact-title";
 import {
   useCallback,
   useEffect,
@@ -8,6 +9,7 @@ import {
   type RefObject,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { Search, X } from "lucide-react";
 import {
   DrawerSearchContext,
@@ -19,7 +21,6 @@ import {
   type DrawerSearchTab,
 } from "@/lib/drawer-search";
 import {
-  GroupedInput,
   GroupedList,
   GroupedRow,
 } from "@/components/ui/grouped-list";
@@ -103,12 +104,20 @@ function Match({
   return <>{parts}</>;
 }
 export function AgentDrawerSearch({
+  host,
+  open,
+  setOpen,
+  title,
   query,
   setQuery,
   selected,
   selectTab,
   container,
 }: {
+  readonly host: HTMLElement | null;
+  readonly open: boolean;
+  readonly setOpen: (open: boolean) => void;
+  readonly title: string;
   readonly query: string;
   readonly setQuery: (value: string) => void;
   readonly selected: DrawerSearchTab;
@@ -116,9 +125,13 @@ export function AgentDrawerSearch({
   readonly container: HTMLElement | null;
 }) {
   const context = useContext(DrawerSearchResultsContext)!;
+  const searchLabel = `Search ${title} agent details`;
   const input = useRef<HTMLInputElement>(null);
+  const toggle = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (open) input.current?.focus({ preventScroll: true }); }, [open]);
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const [pending, setPending] = useState<DrawerSearchEntry>();
+  const [highlighted, setHighlighted] = useState<HTMLElement>();
   const [opening, setOpening] = useState(false);
   const searching = Boolean(query.trim());
   const matches = matchDrawerEntries(context.entries, query);
@@ -152,17 +165,16 @@ export function AgentDrawerSearch({
       ) {
         event.preventDefault();
         event.stopPropagation();
+        setOpen(true);
         input.current?.focus();
       }
     }
     container.addEventListener("keydown", keydown, true);
     return () => container.removeEventListener("keydown", keydown, true);
-  }, [container, searching, setQuery]);
+  }, [container, searching, setQuery, setOpen]);
   useEffect(() => {
     if (!pending || !container || searching) return;
-    let frame = 0,
-      attempts = 0,
-      timer: ReturnType<typeof setTimeout>;
+    let frame = 0, attempts = 0;
     const focus = () => {
       const target =
         pending.target?.() ??
@@ -175,11 +187,8 @@ export function AgentDrawerSearch({
         target.scrollIntoView?.({ block: "center", behavior: "instant" });
         if (!target.hasAttribute("tabindex")) target.tabIndex = -1;
         target.focus({ preventScroll: true });
-        target.setAttribute("data-search-highlight", "");
-        timer = setTimeout(() => {
-          target.removeAttribute("data-search-highlight");
-          setPending(undefined);
-        }, 1600);
+        setHighlighted(target);
+        setPending(undefined);
       } else if (++attempts < 120) frame = requestAnimationFrame(focus);
       else {
         input.current?.focus();
@@ -189,12 +198,15 @@ export function AgentDrawerSearch({
     frame = requestAnimationFrame(focus);
     return () => {
       cancelAnimationFrame(frame);
-      clearTimeout(timer);
-      container
-        .querySelectorAll("[data-search-highlight]")
-        .forEach((element) => element.removeAttribute("data-search-highlight"));
+
     };
   }, [pending, container, searching]);
+  useEffect(() => {
+    if (!highlighted) return;
+    highlighted.setAttribute("data-search-highlight", "");
+    const timer = setTimeout(() => setHighlighted(undefined), 1600);
+    return () => { clearTimeout(timer); highlighted.removeAttribute("data-search-highlight"); };
+  }, [highlighted]);
   async function reveal(entry: DrawerSearchEntry) {
     if (opening) return;
     setOpening(true);
@@ -234,73 +246,49 @@ export function AgentDrawerSearch({
   }
   return (
     <>
-      <div
-        data-drawer-search=""
-        className="shrink-0 px-4"
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && searching) {
-            event.preventDefault();
-            event.stopPropagation();
-            setQuery("");
-            input.current?.focus();
-          }
-        }}
-      >
-        <div
-          role="search"
-          aria-label="Search this agent"
-          className="flex items-center gap-2 rounded-xl bg-overlay-strong px-3 focus-within:ring-2 focus-within:ring-input-focus"
-        >
-          <Search
-            aria-hidden
-            className="size-[1.125em] shrink-0 text-text-tertiary"
-          />
-          <GroupedInput
-            ref={input}
-            type="search"
-            role="searchbox"
-            aria-label="Search this agent"
-            placeholder="Search this agent"
-            maxLength={200}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              move(event);
-              if (event.key === "Enter" && ordered[0]) {
-                event.preventDefault();
-                void reveal(ordered[0]);
-              }
-            }}
-            className="min-h-11 min-w-0 flex-1 [&::-webkit-search-cancel-button]:appearance-none"
-          />
-          {query && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label="Clear agent search"
-              onClick={() => {
-                setQuery("");
-                input.current?.focus();
+      {host && createPortal(
+        <div data-drawer-search="" data-open={open} className="agent-header-search" role="search" aria-label={searchLabel}>
+          <button ref={toggle} data-search-toggle data-icon-button="" type="button" aria-label={searchLabel} aria-expanded={open} className="agent-header-icon" hidden={open} onClick={() => setOpen(true)}>
+            <Search aria-hidden className="size-4" />
+          </button>
+          <div className="agent-header-search-field flex min-h-8 items-center gap-1 rounded-full bg-overlay-strong px-2" inert={!open} aria-hidden={!open || undefined}>
+            <Search aria-hidden className="size-3 shrink-0 text-text-tertiary" />
+            <input
+              ref={input}
+              type="search"
+              role="searchbox"
+              aria-label={searchLabel}
+              placeholder={searchLabel}
+              maxLength={200}
+              value={query}
+              tabIndex={open ? 0 : -1}
+              onChange={(event) => setQuery(event.target.value)}
+              onBlur={(event) => {
+                if (!query.trim() && !event.currentTarget.parentElement?.contains(event.relatedTarget as Node)) setOpen(false);
               }}
-            >
-              <X aria-hidden className="size-[1.125em]" />
-            </Button>
-          )}
-        </div>
-        <p
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-          className="sr-only"
-        >
-          {searching
-            ? `${matches.length}${matches.length === 80 ? " or more" : ""} ${matches.length === 1 ? "result" : "results"} for ${query}`
-            : ""}
-        </p>
-      </div>
+              onKeyDown={(event) => {
+                move(event);
+                if (event.key === "Enter" && ordered[0]) {
+                  event.preventDefault();
+                  void reveal(ordered[0]);
+                }
+                if (event.key === "Escape" && !searching) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setOpen(false);
+                  toggle.current?.focus();
+                }
+              }}
+              className="min-h-8 min-w-0 flex-1 border-0 bg-transparent py-1 text-12 font-normal shadow-none outline-none placeholder:text-text-tertiary [&::-webkit-search-cancel-button]:appearance-none"
+            />
+            {query && <Button type="button" variant="ghost" size="icon" aria-label="Clear agent search" className="size-6" onClick={() => { setQuery(""); input.current?.focus(); }}><X aria-hidden className="size-3" /></Button>}
+          </div>
+        </div>, host)}
+      <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {searching ? `${matches.length}${matches.length === 80 ? " or more" : ""} ${matches.length === 1 ? "result" : "results"} for ${query}` : ""}
+      </p>
       {searching && (
-        <div
+        <CompactScroll level={100}
           data-drawer-search-results=""
           aria-label="Agent search results"
           className="assistant-scrollbar order-2 min-h-0 flex-1 space-y-6 overflow-y-auto px-4 pb-4"
@@ -363,7 +351,7 @@ export function AgentDrawerSearch({
               </GroupedList>
             ))
           )}
-        </div>
+        </CompactScroll>
       )}
     </>
   );

@@ -1,3 +1,12 @@
+import { useKeys } from "@/hooks/use-keys";
+import { useNodes } from "@/hooks/use-nodes";
+import { useSavedLogins } from "@/hooks/use-saved-logins";
+import { describeChanges, changeList, labelValue, recordChanges } from "@/lib/grouped-form-changes";
+import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
+import { useCompactTitle } from "@/lib/compact-title";
+import { CompactTitleProvider, CompactChrome, CompactScroll } from "@/components/ui/compact-title";
+import { FormViewport } from "@/components/ui/form-viewport";
+import { useVisualViewportBounds } from "@/lib/form-viewport";
 import { DrawerSearchProvider, AgentDrawerSearch } from "./agent-drawer-search";
 import { DrawerSearchTabContext, type DrawerSearchTab } from "@/lib/drawer-search";
 import {
@@ -21,7 +30,7 @@ import { AgentAutomations } from "./automation-preferences";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
-import { Trash2 } from "lucide-react";
+import { Trash2, X } from "lucide-react";
 import {
   GroupedList,
   GroupedRow,
@@ -65,6 +74,7 @@ import {
 import {
   Sheet,
   SheetContent,
+  SheetClose,
   SheetDescription,
   SheetHeader,
   SheetTitle,
@@ -205,7 +215,7 @@ function ReadOnlyNote({ agent }: { readonly agent: AssistantAgent }) {
  * lifecycle. Opened from the thread header.
  */
 export function AgentDetailsSheet(props: ComponentProps<typeof AgentDetailsSheetContent>) {
-  return <GroupedDraftBoundary><AgentDetailsSheetContent {...props} /></GroupedDraftBoundary>;
+  return <GroupedDraftBoundary><CompactTitleProvider><AgentDetailsSheetContent {...props} /></CompactTitleProvider></GroupedDraftBoundary>;
 }
 
 function AgentDetailsSheetContent({
@@ -225,15 +235,20 @@ function AgentDetailsSheetContent({
   readonly onOpenChange: (open: boolean) => void;
   readonly onDeleted: () => void;
 }) {
+  const compact = useCompactTitle();
+  const viewportBounds = useVisualViewportBounds();
   const [detailContainer, setDetailContainer] = useState<HTMLDivElement | null>(
     null,
   );
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchHost, setSearchHost] = useState<HTMLDivElement | null>(null);
   const session = `${agentId}:${open}`;
   const [previousSession, setPreviousSession] = useState(session);
   if (previousSession !== session) {
     setPreviousSession(session);
     setQuery("");
+    setSearchOpen(false);
   }
   const detail = useNyxBotAgent(agentId, open);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -249,13 +264,20 @@ function AgentDetailsSheetContent({
       <GroupedDraftNavigation active={open} />
       <SheetContent
         ref={setDetailContainer}
+        showCloseButton={false}
+        style={viewportBounds}
         onEscapeKeyDown={(event) => {
-          if (!query.trim()) return;
-          event.preventDefault();
-          setQuery("");
-          detailContainer?.querySelector<HTMLElement>('[role="searchbox"]')?.focus();
+          if (query.trim()) {
+            event.preventDefault();
+            setQuery("");
+            detailContainer?.querySelector<HTMLElement>('[role="searchbox"]')?.focus();
+          } else if (searchOpen) {
+            event.preventDefault();
+            setSearchOpen(false);
+            searchHost?.querySelector<HTMLButtonElement>('button[data-search-toggle]')?.focus();
+          }
         }}
-        className="flex w-full flex-col overflow-clip bg-background p-0 sm:max-w-lg"
+        className="flex w-full flex-col gap-0 overflow-clip bg-background p-0 sm:max-w-lg"
         onOpenAutoFocus={() => {
           returnFocus.current =
             document.activeElement instanceof HTMLElement
@@ -269,42 +291,30 @@ function AgentDetailsSheetContent({
           }
         }}
       >
-        <SheetHeader className="shrink-0 space-y-2 px-5 pt-6 pr-10 text-left">
-          <SheetTitle className="sr-only">Agent details</SheetTitle>
-          {agent ? (
-            <div className="flex items-center gap-3">
-              <AgentAvatar agent={agent} size="lg" />
-              <div className="min-w-0 flex-1 space-y-1">
-                <p className="break-words text-15 font-semibold">
-                  {agentTitle(agent)}
-                </p>
-                <SheetDescription className="text-11 text-text-tertiary">
-                  {[
-                    agentHandle(agent),
-                    agent.kind === "nyxbot" ? "Personal agent" : "Specialist",
-                    AGENT_STATUS_LABEL[agent.status],
-                    `${agent.memory_count} ${agent.memory_count === 1 ? "memory" : "memories"}`,
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                  {agent.kind === "specialist" ? (
-                    <span className="block">
-                      Created by{" "}
-                      {agent.created_by === "nyxbot" ? "NyxBot" : "you"}
-                    </span>
-                  ) : null}
-                </SheetDescription>
-              </div>
+        <CompactChrome data-agent-header="" className="relative z-30 px-4 pb-2 pt-3">
+          <SheetHeader className="space-y-0 text-left">
+            <SheetTitle className="sr-only">Agent details</SheetTitle>
+            <div className="flex min-h-8 items-center gap-2">
+              {agent ? <>
+                <span className="agent-header-avatar flex size-8 shrink-0 items-center justify-center"><AgentAvatar agent={agent} size="lg" /></span>
+                <p title={agentTitle(agent)} className={`agent-header-name min-w-0 truncate text-15 font-semibold ${searchOpen ? "max-w-[30%] shrink" : "flex-1"}`}>{agentTitle(agent)}</p>
+              </> : <span className="min-w-0 flex-1 text-13 font-semibold">Agent details</span>}
+              <div ref={setSearchHost} className={searchOpen ? "min-w-0 flex-1" : "shrink-0"} />
+              <SheetClose asChild>
+                <button type="button" aria-label="Close agent details" data-icon-button="" className="agent-header-icon"><X aria-hidden className="size-4" /></button>
+              </SheetClose>
             </div>
-          ) : (
-            <SheetDescription>
-              {noAccess
-                ? "This agent is not available to you."
-                : "Loading agent..."}
-            </SheetDescription>
-          )}
-          {agent ? <ReadOnlyNote agent={agent} /> : null}
-        </SheetHeader>
+            <div className={`agent-header-subtitle pl-10 pt-1 ${compact ? "pointer-events-none absolute left-4 right-4 top-11" : ""}`} aria-hidden={compact || undefined}>
+              {agent ? <>
+                <SheetDescription className="text-11 text-text-tertiary">
+                  {[agentHandle(agent), agent.kind === "nyxbot" ? "Personal agent" : "Specialist", AGENT_STATUS_LABEL[agent.status], `${agent.memory_count} ${agent.memory_count === 1 ? "memory" : "memories"}`].filter(Boolean).join(" · ")}
+                  {agent.kind === "specialist" ? <span className="block">Created by {agent.created_by === "nyxbot" ? "NyxBot" : "you"}</span> : null}
+                </SheetDescription>
+                <ReadOnlyNote agent={agent} />
+              </> : <SheetDescription>{noAccess ? "This agent is not available to you." : "Loading agent..."}</SheetDescription>}
+            </div>
+          </SheetHeader>
+        </CompactChrome>
         {detail.error ? (
           <div className="px-5 py-4">
             {noAccess ? (
@@ -333,6 +343,9 @@ function AgentDetailsSheetContent({
         {agent ? (
           <AgentDetailsContent
             key={agent.id}
+            searchHost={searchHost}
+            searchOpen={searchOpen}
+            setSearchOpen={setSearchOpen}
             query={query}
             setQuery={setQuery}
             agent={agent}
@@ -361,6 +374,9 @@ const DRAWER_TABS = [
 ] as const;
 
 function AgentDetailsContent({
+  searchHost,
+  searchOpen,
+  setSearchOpen,
   query,
   setQuery,
   agent,
@@ -378,6 +394,9 @@ function AgentDetailsContent({
   readonly proposalId?: string;
   readonly tab?: AgentDetailsTab;
   readonly requestMode?: "denied" | "routed_to_nyxbot";
+  readonly searchHost: HTMLElement | null;
+  readonly searchOpen: boolean;
+  readonly setSearchOpen: (open: boolean) => void;
   readonly query: string;
   readonly setQuery: (query: string) => void;
   readonly memory: readonly AssistantAgentMemoryNote[];
@@ -425,24 +444,25 @@ function AgentDetailsContent({
       ?.scrollTo?.({ top: 0 });
   }, [selected]);
   return (
-    <DrawerSearchProvider query={query}>
-    <GroupedFormScope>
+    <DrawerSectionInfoContext value={true}><DrawerSearchProvider query={query}>
+    <GroupedFormScope viewport>
+    <FormViewport className="flex min-h-0 flex-1 flex-col">
     <SegmentedControl
       value={selected}
       onValueChange={(value) => setActive(value as DrawerSearchTab)}
-      className="flex min-h-0 flex-1 flex-col gap-4"
+      className="flex min-h-0 flex-1 flex-col gap-0"
     >
-      <AgentDrawerSearch query={query} setQuery={setQuery} selected={selected} selectTab={setActive} container={detailContainer} />
-      <div ref={setPageContainer} className={`relative order-1 flex min-h-0 flex-col gap-4 ${searching ? "shrink-0" : "flex-1"}`}>
-      <div className="shrink-0 px-4">
-        <SegmentedControlList aria-label="Agent details sections">
+      <AgentDrawerSearch host={searchHost} open={searchOpen} setOpen={setSearchOpen} title={agentTitle(agent)} query={query} setQuery={setQuery} selected={selected} selectTab={setActive} container={detailContainer} />
+      <div ref={setPageContainer} className={`relative order-1 flex min-h-0 flex-col gap-2 ${searching ? "shrink-0" : "flex-1"}`}>
+      <CompactChrome className="px-4">
+        <SegmentedControlList aria-label="Agent details sections" className="gap-0.5 p-0.5">
           {tabs.map(([value, label]) => (
-            <SegmentedControlTrigger key={value} value={value}>
+            <SegmentedControlTrigger key={value} value={value} className="min-h-6 px-1.5 py-1 text-12 [[data-compact=true]_&]:py-0.5">
               {label}
             </SegmentedControlTrigger>
           ))}
         </SegmentedControlList>
-      </div>
+      </CompactChrome>
       <div
         ref={panels}
         hidden={searching}
@@ -469,7 +489,7 @@ function AgentDetailsContent({
               }}
             >
               <GroupedFormScope collect>
-                <div data-panel-scroll="" className="assistant-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto pb-6">
+                <CompactScroll data-panel-scroll="" active={selected === value && !searching} className="assistant-scrollbar flex-1 space-y-6 pb-6">
                   {value === "overview" ? (
                     <>
                       {agent.share_role ? (
@@ -598,7 +618,7 @@ function AgentDetailsContent({
                   ) : (
                     <ChannelBotsManager agents={agents} agent={agent} />
                   )}
-                </div>
+                </CompactScroll>
                 <GroupedFormBar />
               </GroupedFormScope>
             </GroupedDetailContext.Provider>
@@ -607,10 +627,11 @@ function AgentDetailsContent({
         ))}
       </div>
       </div>
-      {searching && <div className="order-3"><GroupedFormBar /></div>}
     </SegmentedControl>
+    </FormViewport>
+    <GroupedFormBar viewport />
     </GroupedFormScope>
-    </DrawerSearchProvider>
+    </DrawerSearchProvider></DrawerSectionInfoContext>
   );
 }
 
@@ -702,11 +723,9 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                           }
                         />
                       </FormControl>
-                      <GroupedFooter>
-                        <FormDescription className="text-11">
+                      <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
                           The @handle used in groups and by NyxBot.
                         </FormDescription>
-                      </GroupedFooter>
                       <GroupedFooter>
                         <FormMessage />
                       </GroupedFooter>
@@ -731,12 +750,10 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <GroupedFooter>
-                      <FormDescription className="text-11">
+                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
                         Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}.
                         Leave empty to use it.
                       </FormDescription>
-                    </GroupedFooter>
                     <GroupedFooter>
                       <FormMessage />
                     </GroupedFooter>
@@ -759,12 +776,10 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         disabled={readOnly}
                         onChange={field.onChange}
                       />
-                      <GroupedFooter>
-                        <FormDescription className="text-11">
+                      <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
                           Used by this agent's new threads. Each thread can
                           switch from its composer.
                         </FormDescription>
-                      </GroupedFooter>
                       <GroupedFooter>
                         <FormMessage />
                       </GroupedFooter>
@@ -815,15 +830,13 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         ))}
                       </SelectContent>
                     </Select>
-                    <GroupedFooter>
-                      <FormDescription className="text-11">
+                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
                         {
                           ACCESS_MODE_DESCRIPTION[
                             effectiveAccessMode(workspaceMode, field.value)
                           ]
                         }
                       </FormDescription>
-                    </GroupedFooter>
                     <GroupedFooter>
                       <FormMessage />
                     </GroupedFooter>
@@ -849,14 +862,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         />
                       </FormControl>
                     </div>
-                    <GroupedFooter>
-                      <FormDescription className="text-11">
+                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
                         After five seconds, send “Got it, let me check and get
                         back to you.” if an external check is needed. Attached
                         skill reads and tool discovery do not trigger it. The
                         completed answer follows in the same chat.
                       </FormDescription>
-                    </GroupedFooter>
                   </FormItem>
                 </GroupedRow>
               )}
@@ -904,12 +915,10 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                         {...field}
                       />
                     </FormControl>
-                    <GroupedFooter>
-                      <FormDescription className="text-11">
+                    <FormDescription className="basis-full text-11 font-normal text-text-tertiary">
                         Personality and tone only; it never changes what the
                         agent may do.
                       </FormDescription>
-                    </GroupedFooter>
                     <GroupedFooter>
                       <FormMessage />
                     </GroupedFooter>
@@ -920,6 +929,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
           </GroupedList>
           {readOnly ? null : (
             <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }, { key: "display_name", label: "Display name" }, { key: "description", label: "Role / description" }, { key: "persona", label: "Persona" }, { key: "channel_checking_notice", label: "Channel progress reply" }, { key: "model", label: "Model", format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : String(value || "Default model") }, { key: "access_mode_override", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL, "Workspace setting") }])}
               label="profile"
               dirty={form.formState.isDirty}
               pending={update.isPending}
@@ -946,6 +956,10 @@ function GrantsForm({
 }) {
   const readiness = useGuestReadiness(agent.id, agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
   const grants = useSetNyxBotAgentGrants();
+  const inventory = useKeys();
+  const nodes = useNodes();
+  const logins = useSavedLogins("all");
+  const serviceName = (id: string) => { const key = inventory.data?.find((key) => key.id === id || key.slug === id); return key?.name || key?.label || id; };
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
     resolver: zodResolver(assistantAgentGrantsSchema),
@@ -1106,6 +1120,7 @@ function GrantsForm({
           ) : null}
           {readOnly ? null : (
             <GroupedFormActions
+          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "services", label: "Services", list: (value) => changeList(value).map(serviceName) }, { key: "machines", label: "Machines", list: (value) => changeList(value).map((id) => nodes.data?.find((node) => node.id === id)?.name ?? id) }, { key: "logins", label: "Saved logins", list: (value) => changeList(value).map((id) => logins.data?.find((login) => login.id === id)?.label ?? id) }, { key: "account_read", label: "Read my account" }]), ...recordChanges(form.formState.defaultValues?.guest_access, form.getValues("guest_access"), (key) => `Guest access · ${serviceName(key)}`, labelValue(GUEST_ACCESS_LABEL, "Use but not change or delete"))]}
               label="grants"
               dirty={form.formState.isDirty}
               pending={grants.isPending}
@@ -1299,6 +1314,7 @@ function MemoryList({
             </GroupedRow>
           </GroupedList>
           <GroupedFormActions
+            changes={() => describeChanges(memoryForm.formState.defaultValues, memoryForm.getValues(), [{ key: "text", label: "Note" }])}
             label="memory note"
             dirty={memoryForm.formState.isDirty}
             pending={remember.isPending}
@@ -1426,6 +1442,7 @@ function Lifecycle({
 
   return (
     <GroupedList
+      title="Danger zone"
       aria-label="Danger zone"
       footer={
         destroyed

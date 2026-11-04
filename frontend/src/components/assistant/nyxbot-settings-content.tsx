@@ -1,3 +1,6 @@
+import { CompactScroll } from "@/components/ui/compact-title";
+import { FormViewport } from "@/components/ui/form-viewport";
+import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
 import { useAuthStore } from "@/stores/auth-store";
 import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { ChannelAdapterBindings } from "./channel-adapter-bindings";
@@ -61,8 +64,9 @@ export function NyxBotSettingsContent() {
   const settings = useNyxBotSettings();
   const adaptersEnabled = useAuthStore(s=>userHasFeature(s.user,FEATURE_FLAG.NYXBOT_ADAPTERS));
   return (
-    <GroupedFormScope>
-      <section aria-label="NyxBot settings" className="space-y-6">
+    <GroupedFormScope viewport>
+      <section aria-label="NyxBot settings" className="flex min-h-0 flex-1 flex-col">
+      <FormViewport className="flex min-h-0 flex-1 flex-col"><CompactScroll className="flex-1 space-y-6 pb-4">
         {settings.isPending ? (
           <GroupedList title="General">
             <GroupedRow title="Loading settings..." role="status" />
@@ -86,7 +90,8 @@ export function NyxBotSettingsContent() {
         </div>
         {adaptersEnabled && <ChannelAdapterBindings />}
         <PlatformPersonalBindings />
-        <GroupedFormBar />
+        </CompactScroll></FormViewport>
+        <GroupedFormBar viewport />
       </section>
     </GroupedFormScope>
   );
@@ -165,10 +170,6 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                 <FormLabel className="flex-1 text-12 font-medium">
                   Access mode
                 </FormLabel>
-                <FormDescription className="text-12">
-                  When NyxBot and your specialists ask you before acting. An agent can
-                  have its own mode in its details.
-                </FormDescription>
                 <Select value={field.value} onValueChange={field.onChange}>
                   <FormControl>
                     <SelectTrigger aria-label="Access mode">
@@ -183,9 +184,8 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     ))}
                   </SelectContent>
                 </Select>
-                <GroupedFooter>
-                  <p>{ACCESS_MODE_DESCRIPTION[mode]}</p>
-                </GroupedFooter>
+                <FormDescription>When NyxBot and your specialists ask you before acting. An agent can have its own mode in its details.</FormDescription>
+                <FormDescription>{ACCESS_MODE_DESCRIPTION[mode]}</FormDescription>
                 {mode === "autopilot" ? (
                   <GroupedFooter>
                     <div
@@ -303,10 +303,6 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                 <FormLabel className="flex-1 text-12 font-medium">
                   Specialist access requests
                 </FormLabel>
-                <FormDescription className="text-12">
-                  Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists
-                  cannot grant themselves or each other anything.
-                </FormDescription>
                 <Select value={field.value} onValueChange={field.onChange}>
                   <FormControl>
                     <SelectTrigger aria-label="Specialist access requests">
@@ -318,18 +314,18 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
                     <SelectItem value="routed_to_nyxbot">Route to NyxBot</SelectItem>
                   </SelectContent>
                 </Select>
-                <GroupedFooter>
-                  <p>
+                <FormDescription>Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists cannot grant themselves or each other anything.</FormDescription>
+                <FormDescription>
                     {field.value === "denied"
                       ? "A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details. Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead."
                       : "For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead. A specialist you talk to directly still tells you what it is missing."}
-                  </p>
-                </GroupedFooter>
+                </FormDescription>
               </FormItem>
             )}
           />
         </GroupedList>
         <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "max_auto_continuations", label: "Automatic continuations" }, { key: "max_live_subagents", label: "Live subagents" }, { key: "max_concurrent_subagent_turns", label: "Concurrent subagent turns" }, { key: "max_group_handoffs", label: "Handoffs per turn" }, { key: "max_group_handoffs_per_hour", label: "Handoffs per hour" }, { key: "access_mode", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL) }, { key: "specialist_access_requests", label: "Specialist access requests", format: labelValue({ denied: "Deny requests", routed_to_nyxbot: "Route to NyxBot" }) }])}
           label="NyxBot preferences"
           dirty={form.formState.isDirty}
           pending={update.isPending}

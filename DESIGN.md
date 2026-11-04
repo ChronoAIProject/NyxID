@@ -239,7 +239,7 @@ and accessories, and a hairline before adjacent rows inset by `left-4` (or `left
 Optional leading icons use `1.125em`. Use `asChild` to retain the native
 button, link, label or form-item element. Only interactive rows receive hover and pressed styles. Keyboard focus uses an inset
 `input-focus` ring on the whole row, with the card’s corner radius on first and last
-rows; focus within adds a subtle `bg-overlay`. Borderless fields have no inner ring. `GroupedDisclosure` is a native button with
+rows; focus within adds a subtle `bg-overlay`. Text-field rows use only this background and the caret, with no field or row ring. Action and disclosure rows keep the inset ring. `GroupedDisclosure` is a native button with
 a trailing chevron; buttons and links must keep accessible names.
 
 Groups never contain another group, card or outlined control. Use borderless
@@ -247,17 +247,17 @@ Groups never contain another group, card or outlined control. Use borderless
 Short fields can pair a leading label and trailing value; longer fields grow
 under their label. Validation text is destructive and linked with
 `aria-describedby` (the shared Form primitives provide these links). Put
-explanations below the group, never in another bordered box. Destructive
+field-specific explanations directly below their field in `text-11 text-text-tertiary`; reserve the group footer for shared context, warnings and errors. Never concatenate unrelated field help in a footer. Destructive
 actions are destructive-colored rows in their own neutral group.
 
 Single on/off settings and acknowledgments use Switch; Checkbox is reserved for
 multi-select lists. Selection lists use checkmark or switch rows, search when there are more than
-eight items, and scroll internally only for long lists. `GroupedFormScope` gives
-each tab one dirty-only `GroupedFormBar`, naming its unsaved forms. Save runs each
+eight items, and scroll internally only for long lists. `GroupedFormScope viewport` gives
+the whole drawer or inline settings surface one dirty-only `GroupedFormBar viewport`, naming its unsaved forms across tabs and drill-ins. Put this bar outside the scrolling `FormViewport` as a flex sibling, pinned to the viewport bottom. It remains available during search and detail navigation. Mobile sheets track `visualViewport` resize/offset changes so the actions stay above the keyboard; menus use the editing viewport as their collision boundary and scroll their own content above the actions. Save runs each
 dirty form in order with its own validation, payload and revision fence. A failed
 form keeps its draft and local error; successful forms stay saved. Discard resets
 all dirty forms in that scope. Save uses `variant="primary"`; Discard uses ghost
-or outline. The sticky bar has an opaque `bg-background` and a top hairline
+or outline. The pinned bar has an opaque `bg-background` and a top hairline
 `border-border/50` so scrolled footer text cannot show through. Each save pass
 reads current registrations and attempts each eligible form at most once; a form
 that becomes dirty while an earlier request awaits is included in that pass.
@@ -265,9 +265,8 @@ Removed forms are skipped. Changes after a form's attempt remain dirty for the
 next pass. Closing the drawer or leaving a detail page with its own dirty forms
 asks “Discard unsaved changes?” with Keep editing and Discard actions. Drawer
 closure checks all tabs; detail Back checks only that page and its descendants.
-Drill-ins share the tab scope and preserve each
-operation editor's revision fence. Covered save bars leave interaction and
-accessibility navigation. Immediate controls remain immediate only where their
+Drill-ins share the drawer scope and preserve each
+operation editor's revision fence. Inner bars are suppressed when a viewport bar owns the forms. Immediate controls remain immediate only where their
 existing behavior requires it.
 
 `grouped-fields.tsx` retains the shared Form field IDs while placing labels,
@@ -286,6 +285,16 @@ they preserve the existing acceptance, idempotency and revision checks.
 Light-theme destructive text uses the darker semantic red so field errors in
 footers meet 4.5:1 contrast against the page background as well as cards.
 
+Every edit Save first opens `Review changes`. Register a `changes()` describer
+with each form: compare its defaults with current values using an explicit
+allowlist of fields. Show human select labels, On/Off booleans, before → after
+text and + added / − removed list values. Long text can be expanded. Never
+enumerate arbitrary form values or expose secret/token fields; sensitive
+destinations are described as changed without showing their contents. Keep
+editing returns to the draft. Save changes runs the existing callbacks and
+fences, reports successful section names in a toast, and retains failed drafts
+and local errors. Create dialogs keep their direct Create action.
+
 `components/ui/segmented-control.tsx` wraps Radix Tabs: a `bg-muted` track,
 raised `bg-card shadow-sm` selected segment, `text-12` labels, arrow-key
 navigation and associated tab panels. Segments size to their labels and wrap
@@ -297,9 +306,15 @@ desktop. All spacing, text and icons follow the assistant display scale.
 
 ### Agent drawer search
 
-The agent details drawer places a filled iOS search field below its header and
-above its segmented tabs, with a leading search icon, a clear action and the
-accessible name/placeholder “Search this agent”. Nonempty searches replace the
+The agent details drawer has matching circular Search and Close header icon
+buttons, using eight spacing units (about 32px), `bg-overlay`, a stronger neutral
+hover fill and a visible keyboard focus ring. Search is named “Search {agent title}
+agent details” and exposes `aria-expanded`; Close is named “Close agent details”
+and retains Sheet dismissal semantics. Search expands into a compact inline field
+between the agent name and Close, with autofocus, a leading icon, a clear action
+and the same accessible name/placeholder. Empty blur collapses it to its icon;
+a nonempty query keeps it open. Search and tabs use compact spacing (`text-12`, minimum 24px targets)
+and scale with the assistant reading setting. Nonempty searches replace the
 visible panels with inset result groups named for their tabs. Results are native
 buttons with a title, a breadcrumb subtitle and emphasized matching text; a polite
 live region announces the result count. No matches reads `No results for “…”`.
@@ -326,7 +341,28 @@ away from someone already typing in search.
 Inside the drawer, `/` and Cmd/Ctrl+F focus search unless an editable control owns
 focus. Arrow keys move through results and Enter reveals the selected result
 (or the first result from the search field). The first Escape clears a nonempty
-query; the next Escape follows normal sheet dismissal and dirty-draft guards.
+query; Escape on an empty open field collapses it to the Search button; the next
+Escape follows normal sheet dismissal and dirty-draft guards.
+
+Every drawer group heading and drill-in title includes a small `SectionInfo`
+button through its optional `info` prop. Explicit plain-language copy explains
+the section in one or two sentences and joins its search keywords. The named
+“About {section}” button opens the same controlled help surface on hover,
+keyboard focus or touch, supports Escape, and keeps content within about 280px.
+Required warnings and instructions remain visible in the form.
+
+Drawer and settings headers use `CompactTitleProvider`, `CompactChrome` and
+`CompactScroll`. IntersectionObserver watches separate collapse and expand
+sentinels (24 and 8 spacing-adjusted pixels) for hysteresis; measured chrome
+height is replaced with an equal scroll inset so content does not jump. Transform
+and opacity transitions ease over 240ms, including a measured translate animation
+for the segmented control as the chrome changes height. No per-frame scroll
+handlers or layout animations. At the top the drawer shows its full identity and
+subtitle, with circular Search and Close aligned to the name, followed by compact
+tabs. When collapsed it has only two rows: small avatar/name and the same header
+controls, then compact tabs. Keep the same input mounted and focused across both
+states; opening search reveals it inline with a 200ms clip/opacity transition.
+The Close button stays fixed in place. Reduced motion switches instantly.
 
 ### Assistant workspace pages
 
@@ -336,6 +372,13 @@ wrapping action slots share one scale. Automations and Approvals headers and con
 share `max-w-2xl`; Plugins keeps its wide grid. Approvals use Pending/History segments and
 local-day history groups; the workspace wrapper adapts the existing approval
 block without changing its decision handling or transcript presentation.
+
+On desktop, `StickyTitle` observes the large heading inside its scroll owner.
+Once that heading leaves view, an opaque compact title and primary-action bar
+appears without taking layout space. Keep one accessible heading; the compact
+title is a presentation mirror. The original action container becomes inert
+while the mirror action is available, avoiding duplicate tab stops. Mobile
+retains the page header. Reduced motion disables the short fade/slide.
 
 Plugin catalog cards share `PluginCard` and a `10.5rem` height in every section,
 including skill search results. Rem sizing follows the assistant text setting.
@@ -636,6 +679,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-04 | Compact titles, explicit change review and viewport save actions | Observer-driven headers retain search focus and compensate their height in the scroll content. One bar outside the scrolling viewport preserves access to dirty forms across tabs, detail pages and mobile keyboards. Allowlisted field diffs make edit saves reviewable without exposing credentials; section help adds searchable context. |
 | 2026-11-04 | Agent drawer search uses explicit live section registrations | Search groups results by tab and reveals exact rows or retained detail pages, preserving dirty drafts, save fences and dismissal guards. Search stays above the content region; keyboard and reduced-motion behavior are part of the pattern. |
 | 2026-11-04 | Remaining workspace forms share grouped editing and dismissal guards | Automation, agent, crew, settings and machine editors use sibling groups, field-linked footer errors and primary submit actions. Dialog footers stay visible; inline settings bars appear while dirty. Dialogs isolate save scopes; route guards follow each active form. Existing paid quote acceptance and saved-request recovery stay explicit. Shared Studio controls retain their default presentation through opt-in grouped variants. |
 | 2026-11-04 | Workspace page family and equal-size plugin cards | Shared headers and segmented status views align workspace pages. Connectors and skill results share a text-scaled card size with native full-card actions and contained secondary controls; attached skills remain grouped rows. |

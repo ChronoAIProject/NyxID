@@ -1,3 +1,4 @@
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { ChevronRight } from "lucide-react";
 import {
   GroupedList,
@@ -218,6 +219,7 @@ function AutomationPreferencesForm({
         </GroupedFooter>
       </GroupedList>
       <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "timezone", label: "Timezone" }, { key: "schedule_minimum_minutes", label: "Minimum interval (minutes)" }, { key: "trigger_runs_per_hour", label: "Runs per hour" }, { key: "trigger_runs_per_day", label: "Runs per day" }])}
         label="automation preferences"
         dirty={form.formState.isDirty}
         pending={form.formState.isSubmitting}

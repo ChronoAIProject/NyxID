@@ -1,3 +1,6 @@
+import { CompactScroll } from "@/components/ui/compact-title";
+import { FormViewport } from "@/components/ui/form-viewport";
+import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { machineSettingsFormSchema } from "@/schemas/machines";
 import {
@@ -135,7 +138,7 @@ export function MachineSettings({
         onSubmit={form.handleSubmit(save)}
         className="flex min-h-0 min-w-0 flex-1 flex-col text-12"
       >
-        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto px-5 pb-5 [overflow-wrap:anywhere]">
+        <FormViewport className="flex min-h-0 flex-1 flex-col"><CompactScroll className="flex-1 space-y-6 px-5 pb-5 [overflow-wrap:anywhere]">
           {update && (
             <>
               <MachineUpdate grouped name={node.name} status={update} />
@@ -441,9 +444,17 @@ export function MachineSettings({
               </Link>
             </GroupedRow>
           </GroupedList>
-        </div>
+        </CompactScroll></FormViewport>
         {canManage && (
           <GroupedFormActions
+            changes={() => [
+              ...describeChanges(form.formState.defaultValues, form.getValues(), [
+                { key: "confirm", label: "Confirmations", format: labelValue({ none: "No confirmation", changes: "Confirm changes", all: "Confirm every operation" }) },
+                { key: "allow", label: "Allow saved logins on single-user machines" },
+              ]),
+              ...describeChanges({ automatic: update?.automatic ?? false }, { automatic }, [{ key: "automatic", label: "Update automatically when idle" }]),
+              ...grantChanges.map((agent) => ({ label: `Specialist access · ${agent.display_name || agent.name}`, before: agent.machines?.includes(node.id) ? "On" : "Off", after: draftGrants[agent.id] ? "On" : "Off" })),
+            ]}
             label="machine settings"
             dirty={Boolean(changed)}
             pending={saving}
@@ -452,7 +463,7 @@ export function MachineSettings({
             }
             save={form.handleSubmit(save)}
             discard={discard}
-            saveLabel="Save machine settings"
+            saveLabel="Save changes"
           />
         )}
       </form>

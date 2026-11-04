@@ -1,4 +1,7 @@
-import { useDrawerSearching, useDrawerSearchPage } from "@/lib/drawer-search";
+import { SectionInfo } from "./section-info";
+import { drawerSectionInfo, DrawerSectionInfoContext } from "@/lib/drawer-section-info";
+import { CompactScroll } from "./compact-title";
+import { DrawerSearchRevealContext, useDrawerSearching, useDrawerSearchPage } from "@/lib/drawer-search";
 import {
   useCallback,
   useContext,
@@ -23,6 +26,8 @@ export function GroupedDetail({
   open,
   searchPage,
   title,
+  info,
+  onReveal,
   backLabel,
   onBack,
   children,
@@ -31,11 +36,15 @@ export function GroupedDetail({
   readonly open: boolean;
   readonly searchPage?: string;
   readonly title: string;
+  readonly info?: string;
+  readonly onReveal?: () => void;
   readonly backLabel: string;
   readonly onBack: () => void;
   readonly children: ReactNode;
   readonly level?: number;
 }) {
+  const drawer = useContext(DrawerSectionInfoContext);
+  const help = info ?? (drawer ? drawerSectionInfo(title) : undefined);
   const context = useContext(GroupedDetailContext);
   const parentOwner = useContext(GroupedDraftOwnerContext);
   const id = useId();
@@ -83,7 +92,7 @@ export function GroupedDetail({
       if (parent === boundary) break;
       current = parent;
     }
-    if (!page.current.inert)
+    if (!page.current.inert && !document.activeElement?.matches('[role="searchbox"]'))
       page.current
         .querySelector<HTMLElement>("h2")
         ?.focus({ preventScroll: true });
@@ -113,21 +122,22 @@ export function GroupedDetail({
           {backLabel}
         </Button>
         <h2
+          aria-label={title}
           tabIndex={-1}
-          className="mt-3 break-words px-4 text-15 font-semibold outline-none"
+          className="mt-3 flex items-center gap-1 break-words px-4 text-15 font-semibold outline-none"
         >
-          {title}
+          <span>{title}</span>{help && <SectionInfo title={title}>{help}</SectionInfo>}
         </h2>
       </div>
-      <div className="assistant-scrollbar min-h-0 flex-1 space-y-6 overflow-y-auto">
+      <CompactScroll active={active} level={level} className="assistant-scrollbar flex-1 space-y-6">
         <GroupedDetailContext.Provider
           value={{ container, visible: active, level }}
         >
           <GroupedDraftOwnerContext.Provider value={owner}>
-            {children}
+            <DrawerSearchRevealContext value={searchPage ? { pages: [searchPage], reveal: onReveal } : null}>{children}</DrawerSearchRevealContext>
           </GroupedDraftOwnerContext.Provider>
         </GroupedDetailContext.Provider>
-      </div>
+      </CompactScroll>
       <GroupedFormBar />
     </section>
   ) : null;

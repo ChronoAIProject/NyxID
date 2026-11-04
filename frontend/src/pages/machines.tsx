@@ -1,3 +1,4 @@
+import { CompactChrome } from "@/components/ui/compact-title";
 import {
   GroupedPage,
   GroupedSheet as Sheet,
@@ -356,12 +357,12 @@ function MachinesContent() {
         }}
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
-          <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>{selected?.name} settings</SheetTitle>
-            <SheetDescription>
+          <CompactChrome><SheetHeader className="shrink-0 p-5 pr-10 [[data-compact=true]_&]:py-2">
+            <SheetTitle className="[[data-compact=true]_&]:text-13">{selected?.name} settings</SheetTitle>
+            <SheetDescription className="[[data-compact=true]_&]:hidden">
               Control confirmations, saved-login typing and specialist access.
             </SheetDescription>
-          </SheetHeader>
+          </SheetHeader></CompactChrome>
           {selected ? (
             <MachineSettings
               key={selected.id}

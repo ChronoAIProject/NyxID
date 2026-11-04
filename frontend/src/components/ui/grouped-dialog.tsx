@@ -1,3 +1,5 @@
+import { CompactTitleProvider } from "./compact-title";
+import { useVisualViewportBounds } from "@/lib/form-viewport";
 import type { ComponentProps, ReactNode } from "react";
 import { Dialog, DialogContent, DialogClose } from "./dialog";
 import { Sheet, SheetContent } from "./sheet";
@@ -41,11 +43,12 @@ export function GroupedDialogContent({
   className,
   ...props
 }: ComponentProps<typeof DialogContent>) {
+  const bounds = useVisualViewportBounds();
   return (
-    <DialogContent {...props} className={cn("bg-background", className)}>
+    <CompactTitleProvider><DialogContent {...props} style={{ ...bounds, ...props.style }} className={cn("bg-background", props.scrollMode === "body" && "[&>div]:min-h-0", className)}>
       {children}
       <GroupedDraftDialog />
-    </DialogContent>
+    </DialogContent></CompactTitleProvider>
   );
 }
 
@@ -91,11 +94,12 @@ export function GroupedSheetContent({
   className,
   ...props
 }: ComponentProps<typeof SheetContent>) {
+  const bounds = useVisualViewportBounds();
   return (
-    <SheetContent {...props} className={cn("bg-background", className)}>
+    <CompactTitleProvider><SheetContent {...props} style={{ ...bounds, ...props.style }} className={cn("bg-background", className)}>
       {children}
       <GroupedDraftDialog />
-    </SheetContent>
+    </SheetContent></CompactTitleProvider>
   );
 }
 

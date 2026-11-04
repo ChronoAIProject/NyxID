@@ -1,3 +1,4 @@
+import { describeChanges, changeLines, labelValue, recordChanges } from "@/lib/grouped-form-changes";
 import { GroupedDialog as Dialog, GroupedDialogContent as DialogContent } from "@/components/ui/grouped-dialog";
 import {
   GroupedFormActions,
@@ -281,6 +282,7 @@ function SharingEditor({
           )}
         </GroupedList>
         <GroupedFormActions
+          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "enabled", label: "Sharing enabled" }, { key: "audience", label: "People and organizations", list: (value) => Array.isArray(value) ? value.map((person: SharingForm["audience"][number]) => `${audienceLabel(person)} · ${person.role === "manager" ? "Manager" : "User"}`) : [] }]), ...recordChanges(form.formState.defaultValues?.shared_access, form.getValues("shared_access"), (key) => `Service access · ${policy.services.find((service) => service.id === key)?.name ?? key}`, labelValue({ read: "Read", use: "Use", all: "All granted actions" }, "Withheld"))]}
           disabled={!form.formState.isValid}
           label="sharing"
           dirty={form.formState.isDirty}
@@ -455,6 +457,7 @@ function NotesEditor({
           </GroupedRow>
         </GroupedList>
         <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "text", label: "Notes", list: changeLines }])}
           disabled={!form.formState.isValid}
           label={kind === "private-notes" ? "private notes" : "team memory"}
           dirty={form.formState.isDirty}
@@ -645,6 +648,7 @@ export function SharedAgentProfile({
           )}
         </GroupedList>
         <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "display_name", label: "Display name" }, { key: "description", label: "Description" }, { key: "persona", label: "Persona" }])}
           label="profile"
           dirty={form.formState.isDirty}
           pending={update.isPending}

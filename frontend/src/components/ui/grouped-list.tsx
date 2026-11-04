@@ -1,3 +1,5 @@
+import { DrawerSectionInfoContext, drawerSectionInfo } from "@/lib/drawer-section-info";
+import { SectionInfo } from "./section-info";
 import { useDrawerSearchTarget, type DrawerSearchMetadata } from "@/lib/drawer-search";
 import {
   createContext,
@@ -27,18 +29,23 @@ export function GroupedFooter({ children }: { readonly children: ReactNode }) {
 /** A single inset card. Compose groups as siblings, with explanatory text outside the card. */
 export function GroupedList({
   title,
+  info,
   search,
   footer,
   children,
   className,
   ...props
 }: ComponentProps<"section"> & {
+  readonly info?: string;
   readonly search?: DrawerSearchMetadata;
   readonly title?: string;
   readonly footer?: ReactNode;
 }) {
-  const searchTarget = useDrawerSearchTarget(search);
+  const drawer = useContext(DrawerSectionInfoContext);
+  const help = info ?? (drawer && title ? drawerSectionInfo(title) : undefined);
   const id = useId();
+  const metadata = search ?? (drawer && title ? { id: `section-${id}`, title } : undefined);
+  const searchTarget = useDrawerSearchTarget(metadata ? { ...metadata, keywords: `${metadata.keywords ?? ""} ${help ?? ""}` } : undefined);
   const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(
     null,
   );
@@ -46,17 +53,19 @@ export function GroupedList({
     <FooterContext.Provider value={footerContainer}>
       <section
         ref={searchTarget}
-        data-drawer-search-target={search?.id}
+        data-drawer-search-target={metadata?.id}
         aria-labelledby={title ? id : undefined}
         className={cn("space-y-2", className)}
         {...props}
       >
         {title && (
           <h3
+            aria-label={title}
             id={id}
-            className="break-words px-4 text-12 font-medium text-text-tertiary"
+            className="flex items-center gap-1 break-words px-4 text-12 font-medium text-text-tertiary"
           >
-            {title}
+            <span>{title}</span>
+            {help && <SectionInfo title={title} >{help}</SectionInfo>}
           </h3>
         )}
         {children != null && (

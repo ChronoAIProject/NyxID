@@ -1,3 +1,4 @@
+import { describeChanges, changeList } from "@/lib/grouped-form-changes";
 import { GroupedFormActions } from "@/components/ui/grouped-form";
 import {
   GroupedList,
@@ -168,7 +169,7 @@ function ConnectionGroups({
         const editing = order?.groupId === group.id;
         const rows = editing ? order.connections : group.connections;
         return (
-          <GroupedList key={group.id} title={group.name}>
+          <GroupedList key={group.id} title={group.name} info="Accounts connected to this service. Choose which account this agent should try first.">
             <div className="space-y-0">
               <ol aria-label={`${group.name} connections`}>
                 {rows.map((key, index) => (
@@ -353,6 +354,7 @@ function ConnectionOrderForm({
         </button>
       </GroupedRow>
       <GroupedFormActions
+        changes={() => describeChanges({ order: order.groupId ? order.savedOrder(order.groupId) : [] }, { order: order.ordered }, [{ key: "order", label: "Account order", list: (value) => changeList(value).map((id) => { const key = order.inventory.find((key) => key.id === id); return key?.name || key?.label || "Unavailable account"; }) }])}
         label="connection order"
         dirty={order.dirty}
         pending={order.busy}

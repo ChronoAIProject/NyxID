@@ -1,3 +1,4 @@
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -208,6 +209,7 @@ export function RemoteMachineJobs({
             </GroupedRow>
           </GroupedList>
           <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "status", label: "Status", format: (value) => String(value).replace(/^./, (letter) => letter.toUpperCase()) }, { key: "from", label: "From" }, { key: "to", label: "To" }])}
             label="job filters"
             dirty={form.formState.isDirty}
             pending={query.isFetching}

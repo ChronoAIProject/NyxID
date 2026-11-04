@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -166,6 +167,7 @@ it("saves only what changed", async () => {
   await user.clear(name);
   await user.type(name, "Release crew");
   await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  await confirmChanges();
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   expect(requests).toContainEqual({
     method: "PATCH",
@@ -199,6 +201,7 @@ it("shows a destroyed member unchecked and drops it on save (the server refuses 
   });
   expect(save).toBeEnabled();
   await user.click(save);
+  await confirmChanges();
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   expect(requests).toContainEqual({
     method: "PATCH",
@@ -237,6 +240,7 @@ it.each([false, true])("keeps crew removal reviewable and preserves a rejected d
   await user.click(member);
   expect(requests.some((request) => request.method === "PATCH")).toBe(false);
   await user.click(screen.getByRole("button", { name: "Save" }));
+  await confirmChanges();
   await waitFor(() => expect(requests).toContainEqual({
     method: "PATCH",
     endpoint: "/assistant/nyxagent/groups/nyxg-1",

@@ -1,15 +1,19 @@
+import { flushSync } from "react-dom";
 import {
   useCallback,
   useContext,
   useRef,
+  useLayoutEffect,
   useState,
   type ReactNode,
 } from "react";
 import {
   useGroupedForm,
+  afterGroupedFormCommit,
   GroupedFormContext,
   type GroupedFormEntry,
 } from "@/lib/grouped-form";
+import { ChangeReview } from "./change-review";
 import { GroupedSaveBar } from "./grouped-list";
 import { Button } from "./button";
 import { GroupedDialogCancel } from "./grouped-dialog";
@@ -19,10 +23,12 @@ export function GroupedFormScope({
   children,
   inherit = false,
   collect = false,
+  viewport = false,
 }: {
   readonly children: ReactNode;
   readonly inherit?: boolean;
   readonly collect?: boolean;
+  readonly viewport?: boolean;
 }) {
   const parent = useContext(GroupedFormContext);
   const [entries, setEntries] = useState<ReadonlyMap<string, GroupedFormEntry>>(
@@ -46,9 +52,10 @@ export function GroupedFormScope({
     parentRemove?.(id);
   }, [parentRemove]);
   async function save() {
-    if (lock.current || (collect && parent?.saving)) return;
+    if (lock.current || (collect && parent?.saving)) return [];
     lock.current = true;
     setSaving(true);
+    const saved: string[] = [];
     try {
       const attempted = new Set<string>();
       while (true) {
@@ -61,6 +68,10 @@ export function GroupedFormScope({
         // A failure belongs to its form. Continue so independent forms can still succeed.
         try {
           await entry.save();
+          flushSync(() => {});
+          await afterGroupedFormCommit();
+          const current = currentEntries.current.get(id);
+          if (!current || !(current.isDirty?.() ?? current.dirty)) saved.push(entry.label);
         } catch {
           /* The form renders its own request error. */
         }
@@ -69,26 +80,28 @@ export function GroupedFormScope({
       lock.current = false;
       setSaving(false);
     }
+    return saved;
   }
   if (inherit && parent) return children;
   return (
-    <GroupedFormContext.Provider
-      value={{ entries, register, remove, saving: saving || Boolean(collect && parent?.saving), save }}
+    <ChangeReview entries={[...entries.values()]} save={save} disabled={saving || [...entries.values()].some((entry) => entry.dirty && (entry.disabled || entry.pending))}>{(requestReview) => <GroupedFormContext.Provider
+      value={{ entries, register, remove, requestReview: collect && parent?.viewport ? parent.requestReview : requestReview, viewport: viewport || Boolean(collect && parent?.viewport), saving: saving || Boolean(collect && parent?.saving), save }}
     >
       {children}
-    </GroupedFormContext.Provider>
+    </GroupedFormContext.Provider>}</ChangeReview>
   );
 }
 
-export function GroupedFormBar({ dialog = false }: { readonly dialog?: boolean }) {
+export function GroupedFormBar({ dialog = false, viewport = false }: { readonly dialog?: boolean; readonly viewport?: boolean }) {
   const context = useContext(GroupedFormContext);
   const dirty = [...(context?.entries.values() ?? [])].filter(
     (entry) => entry.dirty,
   );
-  if (!context || (!dialog && !dirty.length)) return null;
+  if (!context || (context.viewport && !viewport) || (!dialog && !dirty.length)) return null;
   const busy = context.saving || dirty.some((entry) => entry.pending);
   return (
     <GroupedSaveBar
+      data-viewport-save-bar={viewport ? "" : undefined}
       role="region"
       aria-label={dialog ? "Form actions" : "Unsaved changes"}
     >
@@ -116,7 +129,7 @@ export function GroupedFormBar({ dialog = false }: { readonly dialog?: boolean }
         type="button"
         variant="primary"
         disabled={busy || !dirty.length || dirty.some((entry) => entry.disabled)}
-        onClick={() => void context.save()}
+        onClick={context.requestReview}
       >
         Save changes
       </Button>
@@ -138,10 +151,12 @@ export function GroupedDialogActions({
   readonly saveVariant?: "primary" | "destructive";
 }) {
   const coordinated = useGroupedForm(entry);
+  const context = useContext(GroupedFormContext);
   const guard = useGroupedDraftGuard();
-  if (coordinated) return null;
   return (
-    <GroupedSaveBar role="region" aria-label="Form actions">
+    <ChangeReview entries={[entry]} save={entry.save} disabled={entry.disabled || entry.pending}>{(review) => <>
+      {intent === "edit" && <ReviewSubmit review={context?.requestReview ?? review} />}
+      {!coordinated && <GroupedSaveBar role="region" aria-label="Form actions">
       {cancel ? (
         <Button
           type="button"
@@ -163,15 +178,17 @@ export function GroupedDialogActions({
         type="button"
         variant={saveVariant}
         disabled={entry.disabled || entry.pending || (intent === "edit" && !entry.dirty)}
-        onClick={() => void entry.save()}
+        onClick={() => { if (intent === "create") void entry.save(); else review(); }}
       >
         {saveLabel}
       </Button>
-    </GroupedSaveBar>
+    </GroupedSaveBar>}
+    </>}</ChangeReview>
   );
 }
 
 export function GroupedFormActions({
+  changes,
   label,
   dirty,
   pending,
@@ -185,6 +202,7 @@ export function GroupedFormActions({
   readonly saveVariant?: "primary" | "destructive";
 }) {
   const coordinated = useGroupedForm({
+    changes,
     label,
     dirty,
     pending,
@@ -192,9 +210,11 @@ export function GroupedFormActions({
     save,
     discard,
   });
-  if (coordinated || !dirty) return null;
+  const context = useContext(GroupedFormContext);
   return (
-    <GroupedSaveBar role="region" aria-label="Unsaved changes">
+    <ChangeReview entries={[{label, dirty, pending, disabled, save, discard, changes}]} save={save} disabled={disabled || pending}>{(review) => <>
+    <ReviewSubmit review={context?.requestReview ?? review} />
+    {!coordinated && dirty && <GroupedSaveBar role="region" aria-label="Unsaved changes">
       <p className="mr-auto basis-full text-11 text-text-tertiary">
         Unsaved: {label}
       </p>
@@ -210,10 +230,28 @@ export function GroupedFormActions({
         type="button"
         variant={saveVariant}
         disabled={disabled || pending}
-        onClick={() => void save()}
+        onClick={review}
       >
         {saveLabel}
       </Button>
-    </GroupedSaveBar>
+    </GroupedSaveBar>}
+    </>}</ChangeReview>
   );
+}
+
+/** Route native Enter submissions through the same review as the visible action. */
+function ReviewSubmit({ review }: { readonly review: () => void }) {
+  const marker = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const form = marker.current?.closest("form");
+    if (!form) return;
+    const intercept = (event: Event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      review();
+    };
+    form.addEventListener("submit", intercept, true);
+    return () => form.removeEventListener("submit", intercept, true);
+  }, [review]);
+  return <span ref={marker} hidden data-review-submit=""><button type="submit" tabIndex={-1} aria-hidden /></span>;
 }

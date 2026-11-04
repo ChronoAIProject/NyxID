@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -565,6 +566,7 @@ it("reports the loaded job page and filters finished results with the real API s
   ).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("option", { name: "finished" }));
   await userEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(
       http.get.mock.calls.some(([path]) =>

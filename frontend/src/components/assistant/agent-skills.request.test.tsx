@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { GroupedFormScope, GroupedFormBar } from "@/components/ui/grouped-form";
 import type { ComponentProps } from "react";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
@@ -116,6 +117,7 @@ it("saves preload files with the observed revision and displays the persisted si
   const save = screen.getByRole("button", { name: "Save preload settings" });
   expect(save).toBeEnabled();
   await user.click(save);
+  await confirmChanges();
   await waitFor(() =>
     expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(1),
   );
@@ -149,6 +151,7 @@ it("keeps unsaved preload files after a conflict and rejects unsafe paths locall
   await user.click(
     screen.getByRole("button", { name: "Save preload settings" }),
   );
+  await confirmChanges();
   expect(
     await screen.findByText(
       "Use unique relative .md or .txt paths, one per line.",
@@ -160,6 +163,7 @@ it("keeps unsaved preload files after a conflict and rejects unsafe paths locall
   await user.click(
     screen.getByRole("button", { name: "Save preload settings" }),
   );
+  await confirmChanges();
   expect(
     await screen.findByText("Skills changed; reload the current revision"),
   ).toBeVisible();
@@ -194,6 +198,7 @@ it("turns preloading off without removing or re-pinning the skill", async () => 
   await user.click(
     screen.getByRole("button", { name: "Save preload settings" }),
   );
+  await confirmChanges();
   await waitFor(() =>
     expect(calls("PUT", `${api}/skills/skill-id/preload`)).toHaveLength(1),
   );

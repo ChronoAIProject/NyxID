@@ -1,3 +1,7 @@
+import { DrawerSearchRevealContext } from "@/lib/drawer-search";
+import { SectionInfo } from "@/components/ui/section-info";
+import { describeChanges, changeList } from "@/lib/grouped-form-changes";
+import { CompactScroll } from "@/components/ui/compact-title";
 import { useDrawerSearchEntries, useDrawerSearchPage } from "@/lib/drawer-search";
 import {
   GroupedFormActions,
@@ -240,15 +244,17 @@ export function AgentOperationScopes({
               </Button>
               <h2
                 tabIndex={-1}
-                className="mt-3 break-words px-4 text-15 font-semibold outline-none"
+                className="mt-3 flex items-center gap-1 break-words px-4 text-15 font-semibold outline-none"
               >
                 {service.service_name}
                 {guests ? " · Guest operations" : " · Operations"}
+                <SectionInfo title={`${service.service_name} · ${guests ? "Guest operations" : "Operations"}`}>Choose the allowed operations for this service. Permissions remain limited by the agent’s grant and save against the current service revision.</SectionInfo>
               </h2>
             </div>
-            <div className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto">
+            <CompactScroll active={visible && active === service.service_id} level={1} className="assistant-scrollbar flex-1">
               <GroupedFormScope inherit>
                 <GroupedDraftOwnerContext.Provider value={`${owner}/${service.service_id}`}>
+                <DrawerSearchRevealContext value={{ pages: [searchId(service.service_id)], reveal: () => setActive(service.service_id) }}>
                 <ServiceOperationForm
                   key={`${service.service_id}:${service.revision}`}
                   agentId={agentId}
@@ -256,10 +262,10 @@ export function AgentOperationScopes({
                   service={service}
                   disabled={disabled}
                 />
-                </GroupedDraftOwnerContext.Provider>
+                </DrawerSearchRevealContext></GroupedDraftOwnerContext.Provider>
                 <GroupedFormBar />
               </GroupedFormScope>
-            </div>
+            </CompactScroll>
           </section>
         );
         return detailContainer
@@ -616,6 +622,7 @@ export function OperationSelectionForm({
         </>
       ) : null}
       <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "all_operations", label: "Allow all operations" }, { key: "endpoint_ids", label: "Allowed operations", list: (value) => changeList(value).map((id) => { const op = service.operations.find((op) => op.endpoint_id === id); return op ? `${op.method} ${op.path}` : id; }) }, { key: "rules", label: "Custom operations", list: (value) => Array.isArray(value) ? value.map((rule: { method: string; path_template: string }) => `${rule.method} ${rule.path_template}`) : [] }])}
         label={guests ? "guest operations" : "operations"}
         dirty={form.formState.isDirty}
         pending={isSaving}

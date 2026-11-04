@@ -1,3 +1,4 @@
+import { CompactChrome } from "@/components/ui/compact-title";
 import {
   GroupedDialog,
   GroupedDialogContent,
@@ -45,6 +46,7 @@ export function AssistantAccountPanel() {
   if (!render || !current.panel) return null;
   const panel = panels[current.panel];
   const PanelDialog = current.panel === "nyxbot" ? GroupedDialog : Dialog;
+  const PanelBody = current.panel === "nyxbot" ? "div" : DialogBody;
   const PanelContent =
     current.panel === "nyxbot" ? GroupedDialogContent : DialogContent;
   return (
@@ -60,18 +62,18 @@ export function AssistantAccountPanel() {
           restorePanelFocus(opener());
         }}
       >
-        <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>{panel.title}</DialogTitle>
-          <DialogDescription>{panel.description}</DialogDescription>
-        </DialogHeader>
-        <DialogBody style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
+        <CompactChrome className="[[data-compact=true]]:border-b [[data-compact=true]]:border-border/50"><DialogHeader className="shrink-0 pr-6">
+          <DialogTitle className="[[data-compact=true]_&]:text-13">{panel.title}</DialogTitle>
+          <DialogDescription className="[[data-compact=true]_&]:hidden">{panel.description}</DialogDescription>
+        </DialogHeader></CompactChrome>
+        <PanelBody className={current.panel === "nyxbot" ? "flex min-h-0 flex-1 flex-col" : undefined} style={{ paddingBottom: "max(.25rem, var(--sab))" }}>
           <DialogFocusReturnContext value={true}>
           <Suspense fallback={<p role="status" className="text-12 text-text-tertiary">Loading {panel.title}...</p>}>
             {current.panel === "settings" ? <Settings presentation="panel" /> :
               current.panel === "billing" ? <Billing presentation="panel" /> : <NyxBot />}
           </Suspense>
           </DialogFocusReturnContext>
-        </DialogBody>
+        </PanelBody>
       </PanelContent>
     </PanelDialog>
   );

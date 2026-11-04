@@ -1,5 +1,8 @@
 import { useGroupedDraft } from "@/lib/grouped-drafts";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
+import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
+import { describeChanges, changeList } from "@/lib/grouped-form-changes";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useFieldArray, type FieldPath } from "react-hook-form";
@@ -191,13 +194,14 @@ export function LearningDraftEditor({
   readonly validate: Review["validate"];
   readonly onSaved?: () => void;
 }) {
+  const drawer = useContext(DrawerSectionInfoContext);
   const draft = proposal.draft;
   const form = useAppForm<SkillDraftForm>({
     resolver: zodResolver(skillDraftFormSchema),
     defaultValues: formValues(draft),
   });
   useGroupedDraft({
-    dirty: form.formState.isDirty,
+    dirty: !drawer && form.formState.isDirty,
     pending: edit.isPending,
     discard: () => form.reset(formValues(draft)),
   });
@@ -263,7 +267,7 @@ export function LearningDraftEditor({
     };
   };
 
-  const save = form.handleSubmit((values) => {
+  const save = form.handleSubmit(async (values) => {
     setBanner(undefined);
     setValidBytes(undefined);
     const variables = {
@@ -271,7 +275,8 @@ export function LearningDraftEditor({
       revision: proposal.revision,
       draft: body(values),
     };
-    if (onSaved) edit.mutate(variables, { onSuccess: onSaved });
+    if (drawer) await new Promise<void>((resolve, reject) => edit.mutate(variables, { onSuccess: () => { form.reset(values); onSaved?.(); resolve(); }, onError: reject }));
+    else if (onSaved) edit.mutate(variables, { onSuccess: onSaved });
     else edit.mutate(variables);
   });
 
@@ -468,7 +473,7 @@ export function LearningDraftEditor({
             >
               Validate
             </Button>
-            {form.formState.isDirty ? (
+            {!drawer && form.formState.isDirty ? (
               <Button
                 type="submit"
                 size="sm"
@@ -493,6 +498,22 @@ export function LearningDraftEditor({
             their confirmation card in the conversation.
           </p>
         ) : null}
+        {drawer && !readOnly && <GroupedFormActions
+          label={`skill draft · ${draft.name}`}
+          dirty={form.formState.isDirty}
+          pending={edit.isPending}
+          save={save}
+          discard={() => form.reset(formValues(draft))}
+          changes={() => {
+            const previous = form.formState.defaultValues;
+            const current = form.getValues();
+            return [
+              ...describeChanges(previous, current, [{ key: "name", label: "Skill name" }, { key: "description", label: "Description" }, { key: "skill_md", label: "Instructions" }, { key: "rationale", label: "Rationale" }, { key: "safety_notes", label: "Safety notes" }, { key: "kind", label: "Skill kind", format: (value) => value === "improve" ? "Improve an attached skill" : value === "new" ? "New skill" : "No skill proposed" }, { key: "base_skill_id", label: "Base skill", format: (value) => base.pins.find((pin) => pin.skill_id === value)?.name || "None" }]),
+              ...describeChanges({ paths: previous?.files?.map((file) => file?.path) }, { paths: current.files.map((file) => file.path) }, [{ key: "paths", label: "Files", list: changeList }]),
+              ...current.files.flatMap((file) => { const old = previous?.files?.find((item) => item?.path === file.path); return describeChanges({ content: old?.content ?? "" }, { content: file.content }, [{ key: "content", label: `File · ${file.path || "Untitled"}` }]); }),
+            ];
+          }}
+        />}
       </form>
     </Form>
   );

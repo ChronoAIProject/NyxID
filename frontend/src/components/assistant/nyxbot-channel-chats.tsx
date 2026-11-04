@@ -145,6 +145,7 @@ function ChatRow({
     <div className="space-y-3">
       <GroupedList
         data-drawer-search-target={`channel-chat-${chat.id}`}
+        info="Control who answers in this chat, who may talk to the bot and whether it may post on its own. Guest service permissions still apply."
         title={`${title} · ${kindLabel}${chat.last_message_at ? ` · ${formatRelativeTime(chat.last_message_at)}` : ""}`}
         footer={
           <>
@@ -321,6 +322,8 @@ export function ChannelChats({
         searchPage={searchId}
         open={open}
         title={`${channel.bot_label} · Chats`}
+        info="Manage private-chat access and the bot’s behavior in each connected chat. Changes to these controls apply immediately."
+        onReveal={() => setOpen(true)}
         backLabel="Back to Channels"
         onBack={() => setOpen(false)}
       >

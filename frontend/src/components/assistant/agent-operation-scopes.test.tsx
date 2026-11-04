@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import userEvent from "@testing-library/user-event";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -100,6 +101,7 @@ describe("agent operation scopes", () => {
       screen.getByRole("checkbox", { name: "DELETE /items/{id}" }),
     ).not.toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     await waitFor(() => expect(save).toHaveBeenCalledWith({
       serviceId: "svc",
       selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
@@ -118,6 +120,7 @@ describe("agent operation scopes", () => {
       screen.getByRole("checkbox", { name: "DELETE /items/{id}" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -136,6 +139,7 @@ describe("agent operation scopes", () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
     fireEvent.click(screen.getByRole("checkbox", { name: "GET /items" }));
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "reload its revision",
     );
@@ -151,6 +155,7 @@ describe("agent operation scopes", () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
     fireEvent.click(screen.getByRole("checkbox", { name: "GET /items" }));
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "This setting is unavailable until an administrator completes the security rollout",
     );
@@ -173,6 +178,7 @@ describe("agent operation scopes", () => {
       target: { value: "/status/{id}" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -210,6 +216,7 @@ it("withholds a service from guests without changing the owner operation selecti
   await user.click(screen.getByRole("combobox", { name: "Example guest operation access" }));
   await user.click(screen.getByRole("option", { name: "No guest access" }));
   await user.click(screen.getByRole("button", { name: "Save guest operations" }));
+  await confirmChanges();
   await waitFor(() => expect(save).toHaveBeenCalledWith({
     serviceId: "svc",
     selection: { expected_revision: 4, all_operations: false, endpoint_ids: [], rules: [] },
@@ -229,6 +236,7 @@ it("saves a guest-only catalog selection and preserves its revision", async () =
   render(<ServiceOperationForm agentId="agent" service={service} guests />);
   fireEvent.click(screen.getByRole("button", { name: "Select all reads" }));
   fireEvent.click(screen.getByRole("button", { name: "Save guest operations" }));
+  await confirmChanges();
   await waitFor(() => expect(save).toHaveBeenCalledWith({
     serviceId: "svc",
     selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
@@ -250,6 +258,7 @@ it("pushes a service editor, preserves its draft on Back and restores disclosure
   await user.click(disclosure);
   expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
   await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() => expect(save).toHaveBeenCalledWith({ serviceId: "svc", selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["write", "read"], rules: [] } }));
 });
 

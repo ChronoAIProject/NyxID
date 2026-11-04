@@ -81,7 +81,8 @@ function Registry() {
       <DrawerSearchTabContext value="overview">
         {show && <Entries title={title} />}
       </DrawerSearchTabContext>
-      <AgentDrawerSearch
+      <AgentDrawerSearch host={null} open={false} setOpen={() => {}}
+        title="NyxBot"
         query={query}
         setQuery={setQuery}
         selected="overview"

@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   cleanup,
   fireEvent,
@@ -76,7 +77,7 @@ it("requires the owner to acknowledge the single-user warning before enabling fi
     }),
   );
   expect(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   ).toBeDisabled();
   fireEvent.click(
     screen.getByRole("switch", {
@@ -84,8 +85,9 @@ it("requires the owner to acknowledge the single-user warning before enabling fi
     }),
   );
   fireEvent.click(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   );
+  await confirmChanges();
   await waitFor(() =>
     expect(save).toHaveBeenCalledWith({
       machine_confirm: "none",
@@ -98,7 +100,7 @@ it("does not expose owner settings to a reader", () => {
   render(<MachineSettings node={node} canManage={false} />);
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Save machine settings" }),
+    screen.queryByRole("button", { name: "Save changes" }),
   ).not.toBeInTheDocument();
 });
 
@@ -143,8 +145,9 @@ it("changes one machine grant while preserving the specialist services and other
   fireEvent.click(screen.getByRole("checkbox", { name: "Coder" }));
   expect(grant).not.toHaveBeenCalled();
   fireEvent.click(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   );
+  await confirmChanges();
   await waitFor(() =>
     expect(grant).toHaveBeenCalledWith({
       id: "specialist",
@@ -180,8 +183,9 @@ it("keeps a failed grant dirty after settings save, and retries only that grant"
     }),
   );
   fireEvent.click(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   );
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent("Grant revision changed");
   expect(save).toHaveBeenCalledTimes(1);
   expect(grant).toHaveBeenCalledTimes(1);
@@ -189,8 +193,9 @@ it("keeps a failed grant dirty after settings save, and retries only that grant"
   expect(screen.getByRole("checkbox", { name: "Coder" })).not.toBeChecked();
   grant.mockResolvedValueOnce(undefined);
   fireEvent.click(
-    screen.getByRole("button", { name: "Save machine settings" }),
+    screen.getByRole("button", { name: "Save changes" }),
   );
+  await confirmChanges();
   await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
   expect(save).toHaveBeenCalledTimes(1);
   expect(grant).toHaveBeenCalledTimes(2);

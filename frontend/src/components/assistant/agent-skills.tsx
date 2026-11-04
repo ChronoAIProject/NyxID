@@ -206,6 +206,8 @@ function AttachedSkill({
         searchPage={searchId}
         open={open}
         title={skill.name}
+        info="Review this attached skill, its pinned version and preloaded files. The attached version stays active until you change it."
+        onReveal={() => onOpenChange(true)}
         backLabel="Back to Skills"
         onBack={() => onOpenChange(false)}
       >
@@ -490,6 +492,7 @@ export function AgentSkills({
         searchPage="skill-history"
         open={historyOpen}
         title="Skill history"
+        onReveal={() => setHistoryOpen(true)}
         backLabel="Back to Skills"
         onBack={() => setHistoryOpen(false)}
       >
@@ -598,6 +601,8 @@ export function AgentSkills({
             open={Boolean(selected)}
             level={activeSkill ? 2 : 1}
             title={selected?.name ?? "Choose version"}
+            info="Review a published skill version before attaching it to this agent."
+            onReveal={() => { if (selected) choose(selected.id, selected.name); }}
             backLabel={activeSkill ? "Back to skill" : "Back to Skills"}
             onBack={() => {
               setSelected(undefined);

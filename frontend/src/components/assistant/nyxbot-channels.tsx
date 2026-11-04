@@ -377,6 +377,7 @@ export function ChannelBotsManager({
         searchPage="available-bots"
         open={availableOpen}
         title="Connect another bot"
+        onReveal={() => setAvailableOpen(true)}
         backLabel="Back to Channels"
         onBack={() => setAvailableOpen(false)}
       >

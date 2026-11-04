@@ -1,3 +1,4 @@
+import { describeChanges, changeLines } from "@/lib/grouped-form-changes";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { z } from "zod";
 import { GroupedFormActions } from "@/components/ui/grouped-form";
@@ -119,6 +120,7 @@ export function SkillPreloadSettings({
         ) : null}
       </GroupedList>
       <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "enabled", label: "Preload for every turn" }, { key: "paths", label: "Files to preload", list: changeLines }])}
         label={`${name} preload`}
         dirty={form.formState.isDirty}
         pending={save.isPending}

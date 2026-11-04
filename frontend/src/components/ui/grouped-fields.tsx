@@ -40,12 +40,10 @@ export function GroupedDescription(
   props: ComponentProps<typeof FormDescription>,
 ) {
   return (
-    <GroupedFooter>
       <FormDescription
         {...props}
-        className={cn("text-11 text-text-tertiary", props.className)}
+        className={cn("basis-full text-11 font-normal text-text-tertiary", props.className)}
       />
-    </GroupedFooter>
   );
 }
 

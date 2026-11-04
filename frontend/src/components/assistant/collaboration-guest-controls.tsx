@@ -84,6 +84,7 @@ export function CollaborationGuestControls({
         <GroupedList
           key={row.group_id}
           title={`Group ${row.group_id}`}
+          info="Allow people in this group to use this agent under your guest service policy. This does not give you access to the group’s transcript or participants."
           footer={
             <>
               <p>

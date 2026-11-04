@@ -1,3 +1,4 @@
+import { describeChanges, changeList } from "@/lib/grouped-form-changes";
 import { flushSync } from "react-dom";
 import { useCollaborationAvailable } from "@/hooks/use-collaboration-groups";
 import { useEffect, useState } from "react";
@@ -39,6 +40,7 @@ import {
   GroupedDialogContent,
 } from "@/components/ui/grouped-dialog";
 import { GroupedDialogActions } from "@/components/ui/grouped-form";
+import { ChangeReview } from "@/components/ui/change-review";
 import {
   Select,
   SelectContent,
@@ -524,6 +526,12 @@ export function GroupSettingsDialog({
   });
   const members = form.watch("member_agent_ids");
   const busy = update.isPending || remove.isPending;
+  const changes = () => describeChanges({ ...form.formState.defaultValues, member_agent_ids: group.members.map((member) => member.id) }, form.getValues(), [
+    { key: "name", label: "Name" },
+    { key: "member_agent_ids", label: "Agents", list: (value) => changeList(value).map((id) => { const agent = agents.find((agent) => agent.id === id); return agent ? agentTitle(agent) : group.members.find((member) => member.id === id)?.name || "Unavailable agent"; }) },
+    { key: "participant_user_ids", label: "People", list: (value) => changeList(value).map((id) => { const person = group.participants?.find((person) => person.id === id); return person?.display_name || person?.handle || id; }) },
+    { key: "lead_agent_id", label: "Lead agent", format: (value) => agents.find((agent) => agent.id === value)?.name || String(value || "None") },
+  ]);
 
   async function save(values: AssistantGroupForm) {
     setError(undefined);
@@ -540,8 +548,10 @@ export function GroupSettingsDialog({
       });
       form.reset(values);
       onOpenChange(false);
+      return true;
     } catch (cause) {
       setError(errorMessage(cause, "Could not save the group. Try again."));
+      return false;
     }
   }
 
@@ -632,15 +642,19 @@ export function GroupSettingsDialog({
                     title="Unavailable agents"
                     footer="Unavailable agents will be removed on the next save."
                   >
-                    <GroupedRow asChild interactive>
+                    <ChangeReview entries={[{ label: "group settings", dirty: true, changes, save: form.handleSubmit(save), discard: () => {} }]} disabled={busy || !members.length} save={async () => {
+                      let saved = false;
+                      await form.handleSubmit(async (values) => { saved = await save(values); })();
+                      return saved ? ["group settings"] : [];
+                    }}>{(review) => <GroupedRow asChild interactive>
                       <button
                         type="button"
                         disabled={busy || !members.length}
-                        onClick={() => void form.handleSubmit(save)()}
+                        onClick={review}
                       >
                         Remove unavailable agents
                       </button>
-                    </GroupedRow>
+                    </GroupedRow>}</ChangeReview>
                   </GroupedList>
                 )}
                 <GroupedList
@@ -705,6 +719,7 @@ export function GroupSettingsDialog({
                 ) : null}
               </DialogBody>
               <GroupedDialogActions
+                changes={changes}
                 label="group settings"
                 dirty={form.formState.isDirty}
                 pending={busy}

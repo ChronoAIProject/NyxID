@@ -1,3 +1,4 @@
+import { describeChanges, changeList, recordChanges } from "@/lib/grouped-form-changes";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import {
   GroupedList,
@@ -138,6 +139,8 @@ function MachineCapabilityPage(
         searchPage={searchId}
         open={open}
         title={machine.name}
+        info="Review this agent’s workspace separation and allowed tools on this machine. Machine support and permissions still apply."
+        onReveal={() => setOpen(true)}
         backLabel="Back to Access"
         onBack={() => setOpen(false)}
       >
@@ -401,6 +404,7 @@ export function MachineCapabilityForm({
         </fieldset>
       </GroupedList>
       <GroupedFormActions
+          changes={() => [...recordChanges(form.formState.defaultValues?.capabilities, form.getValues("capabilities"), (key) => labels[key as keyof typeof labels] ?? key), ...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "saved_login_ids", label: "Saved logins", list: changeList }])]}
         label="machine access"
         dirty={form.formState.isDirty}
         pending={mutation.isPending}

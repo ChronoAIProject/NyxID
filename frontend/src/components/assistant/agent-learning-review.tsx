@@ -403,6 +403,8 @@ export function AgentLearningReview({
               searchPage={`learning-${proposal.id}`}
               open={isOpen}
               title={draft?.name ?? "Learning proposal"}
+              info="Review this proposed skill and its supporting evidence before publishing or dismissing it."
+              onReveal={() => setOpen(proposal.id)}
               backLabel="Back to Skills"
               onBack={() => setOpen(undefined)}
             >

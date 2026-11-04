@@ -139,6 +139,7 @@ frontend/src/components/ui/input.tsx
 frontend/src/components/ui/label.tsx
 frontend/src/components/ui/overlay-layer.tsx
 frontend/src/components/ui/popover.tsx
+frontend/src/components/ui/section-info.tsx
 frontend/src/components/ui/select.tsx
 frontend/src/components/ui/skeleton.tsx
 frontend/src/components/ui/switch.tsx
@@ -157,7 +158,9 @@ frontend/src/lib/assistant/identity.ts
 frontend/src/lib/assistant/shell-routes.ts
 frontend/src/lib/credits-denial.ts
 frontend/src/lib/drawer-search.ts
+frontend/src/lib/drawer-section-info.ts
 frontend/src/lib/form-errors.ts
+frontend/src/lib/form-viewport.ts
 frontend/src/lib/http-origin.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/overlay-layer.ts

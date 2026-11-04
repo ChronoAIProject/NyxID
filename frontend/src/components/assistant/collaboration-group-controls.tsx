@@ -1,3 +1,4 @@
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { flushSync } from "react-dom";
 import { useState } from "react";
 import { Switch } from "@/components/ui/switch";
@@ -166,6 +167,7 @@ function Rename({
           />
         </GroupedList>
         <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }])}
           disabled={!form.formState.isValid}
           label="group name"
           dirty={form.formState.isDirty}

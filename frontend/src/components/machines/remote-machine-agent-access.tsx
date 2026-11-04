@@ -1,3 +1,4 @@
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -276,6 +277,7 @@ function AgentAssignment({
               </GroupedRow>
             </GroupedList>
             <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "assigned", label: "Machine membership" }])}
               label="machine membership"
               dirty={form.formState.isDirty}
               pending={mutation.isPending}

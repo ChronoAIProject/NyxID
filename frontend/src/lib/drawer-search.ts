@@ -1,3 +1,4 @@
+import { drawerSectionInfo } from "./drawer-section-info";
 import {
   createContext,
   useCallback,
@@ -117,6 +118,7 @@ export const DrawerSearchContext = createContext<{
   readonly registerPage: (owner: string, page: DrawerSearchPage | null) => void;
   readonly searching: boolean;
 } | null>(null);
+export const DrawerSearchRevealContext = createContext<{ readonly pages: readonly string[]; readonly reveal?: () => void } | null>(null);
 export const DrawerSearchTabContext = createContext<DrawerSearchTab | null>(
   null,
 );
@@ -127,13 +129,15 @@ export function useDrawerSearchEntries(
 ) {
   const context = useContext(DrawerSearchContext);
   const tab = useContext(DrawerSearchTabContext);
+  const inherited = useContext(DrawerSearchRevealContext);
+  const currentEntries = entries.map((entry) => ({ ...inherited, ...entry, keywords: `${entry.keywords ?? ""} ${[entry.title, ...(entry.breadcrumb?.split(" › ") ?? [])].map((title) => drawerSectionInfo(title) ?? "").join(" ")}` }));
   const id = useId();
-  const latest = useRef(entries);
+  const latest = useRef(currentEntries);
   useLayoutEffect(() => {
-    latest.current = entries;
+    latest.current = currentEntries;
   });
   const signature = JSON.stringify(
-    entries.map(({ id, title, breadcrumb, keywords, pages }) => ({
+    currentEntries.map(({ id, title, breadcrumb, keywords, pages }) => ({
       id,
       title,
       breadcrumb,

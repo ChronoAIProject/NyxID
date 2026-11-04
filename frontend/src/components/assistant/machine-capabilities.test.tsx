@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MachineCapabilities, MachineCapabilityForm } from "./machine-capabilities";
@@ -71,6 +72,7 @@ describe("machine capability editor", () => {
     for (const box of screen.getAllByRole("checkbox")) expect(box).not.toBeChecked();
     fireEvent.click(screen.getByRole("checkbox", { name: "File tools" }));
     fireEvent.click(screen.getByRole("button", { name: "Save capabilities" }));
+  await confirmChanges();
     await waitFor(() => expect(save).toHaveBeenCalledWith({ node: "node", selection: { expected_revision: 3, capabilities: { ...off, files: true }, saved_login_ids: null } }));
   });
   it("computer and developer browser require the browser grant", () => {
@@ -148,6 +150,7 @@ describe("machine capability editor", () => {
     expect(screen.getByRole("checkbox", { name: /Shell commands/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("checkbox", { name: "File tools" }));
     fireEvent.click(screen.getByRole("button", { name: "Save capabilities" }));
+  await confirmChanges();
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Reload if access changed"));
   });
   it("requests separated mode through the owner card with an explicit login list", async () => {

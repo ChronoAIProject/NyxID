@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   Dialog,
   DialogBody,
@@ -347,6 +348,7 @@ it("confirms destructive actions by default and saves only a changed access mode
   const save = within(page).getByRole("button", { name: "Save changes" });
   expect(save).toBeEnabled();
   await user.click(save);
+  await confirmChanges();
   await waitFor(() =>
     expect(writes).toEqual([
       {
@@ -407,6 +409,7 @@ it("asks before every change in Ask every time and explains the specialist reque
     ),
   ).toBeVisible();
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({
       access_mode: "ask_every_time",
@@ -426,11 +429,13 @@ it("validates specialist limits against the server limits before saving", async 
   await user.clear(live);
   await user.type(live, "40");
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(await within(page).findByText("Must be at most 32")).toBeVisible();
   expect(writes).toEqual([]);
   await user.clear(live);
   await user.type(live, "12");
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({ max_live_subagents: 12 }),
   );
@@ -451,6 +456,7 @@ it("saves group hand-off limits within the server's bounds", async () => {
   await user.clear(perMessage);
   await user.type(perMessage, "30");
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(await within(page).findByText("Must be at most 24")).toBeVisible();
   expect(writes).toEqual([]);
   await user.clear(perMessage);
@@ -458,6 +464,7 @@ it("saves group hand-off limits within the server's bounds", async () => {
   await user.clear(perHour);
   await user.type(perHour, "120");
   await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({
       max_group_handoffs: 0,
@@ -685,6 +692,7 @@ it("keeps dirty values and reports a failed General save inline", async () => {
   await user.clear(live);
   await user.type(live, "12");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "NyxBot is temporarily unavailable. Try again shortly.",
   );
@@ -716,6 +724,7 @@ it("saves dirty General and Automation forms in order through one bar with indep
     [...document.forms].every((form) => !form.parentElement?.closest("form")),
   ).toBe(true);
   await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.map((write) => write.body)).toEqual([
       { max_live_subagents: 12 },
@@ -750,6 +759,7 @@ it("keeps failed General changes dirty while Automation preferences succeed", as
   await user.clear(hourly);
   await user.type(hourly, "4");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() => expect(writes).toHaveLength(2));
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "NyxBot is temporarily unavailable",
@@ -761,6 +771,7 @@ it("keeps failed General changes dirty while Automation preferences succeed", as
   ).not.toBeInTheDocument();
   saveError = false;
   await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(
       screen.queryByRole("region", { name: "Unsaved changes" }),

@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   cleanup,
   render,
@@ -124,6 +125,7 @@ it("updates specialist membership through existing grants while preserving servi
   });
   await userEvent.click(within(form).getByRole("switch"));
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setGrants).toHaveBeenCalledWith({
       id: "agent-1",
@@ -145,6 +147,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
   });
   await userEvent.click(within(membership).getByRole("switch"));
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() => expect(state.setGrants).toHaveBeenCalled());
   // The real grants mutation invalidates and refreshes the Agent list.
   state.assigned = true;
@@ -158,6 +161,7 @@ it("keeps a successful assignment when the separate capability save fails", asyn
     within(capabilities).getByRole("checkbox", { name: "Shell commands" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(
     await screen.findByText(
       /Assignment succeeded, but capability changes failed/,
@@ -225,6 +229,7 @@ it("uses the observed revision and live capability ceiling for shell/file edits"
     within(form).getByRole("checkbox", { name: "Shell commands" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -273,6 +278,7 @@ it("preserves existing Browser, Computer, developer browser and saved-login gran
     within(form).getByRole("checkbox", { name: "Shell commands" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -304,6 +310,7 @@ it("lets the owner explicitly grant Browser then Computer within the Node ceilin
     within(form).getByRole("checkbox", { name: "Full computer control" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -336,6 +343,7 @@ it("removes Computer explicitly without revoking Browser or developer browser", 
     within(form).getByRole("checkbox", { name: "Full computer control" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",
@@ -380,6 +388,7 @@ it("removes only Browser-dependent capability grants when Browser is unchecked",
     within(form).getByRole("checkbox", { name: "Developer browser" }),
   ).not.toBeChecked();
   await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(state.setCapabilities).toHaveBeenCalledWith({
       node: "machine-1",

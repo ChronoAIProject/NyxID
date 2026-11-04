@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   act,
   fireEvent,
@@ -360,6 +361,7 @@ it("edits a schedule without changing its source", async () => {
     target: { value: "Summarise unread notifications" },
   });
   await user.click(screen.getByRole("button", { name: "Save automation" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(mocks.update).toHaveBeenCalledWith({
       id: trigger.id,
@@ -502,6 +504,7 @@ it("shows preference validation errors and keeps invalid timezones unsaved", asy
     "4",
   );
   await user.click(screen.getByRole("button", { name: "Save preferences" }));
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent("IANA timezone");
   expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAttribute("aria-invalid", "true");
   expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAccessibleDescription(/IANA timezone/);
