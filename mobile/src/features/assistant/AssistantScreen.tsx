@@ -760,24 +760,21 @@ export function AssistantScreen({
     ]
       .filter(Boolean)
       .join(" · ");
-    return (
-      <View
-        style={[
-          styles.message,
-          isUser && styles.userMessage,
-          isUser && {
-            backgroundColor: bubble.background,
-          },
-        ]}
-      >
+    // Notes about the transcript itself, never inside anyone's bubble.
+    const notes = (
+      <>
         {index > 0 && item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
           <Notice message="Messages between these pages haven't loaded yet. Load missing messages to restore them." />
         ) : null}
         {resetHere ? (
-          <Label muted accessibilityLabel="Conversation context reset" style={isUser && { color: bubble.foreground }}>
+          <Label muted accessibilityLabel="Conversation context reset">
             {contextResetCopy(conversation?.context_reset_reason)}
           </Label>
         ) : null}
+      </>
+    );
+    const body = (
+      <>
         {attribution ? (
           <Label muted style={[styles.messageLabel, isUser && { color: bubble.foreground }]}>
             {attribution}
@@ -917,12 +914,16 @@ export function AssistantScreen({
             onPress={() => void perform(() => assistant.checkRecovery(item.id))}
           />
         ) : null}
+      </>
+    );
+    // Your own messages: the bubble holds only what you sent; the time and
+    // copy control sit under it in the page's quiet colour.
+    const footer = (
         <AssistantMessageFooter
           key={`${assistant.conversationId}:${item.id}`}
           text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
           timestamp={item.created_at}
           user={isUser}
-          foreground={isUser ? bubble.foreground : undefined}
           report={
             item.role === "assistant" &&
             item.status === "completed" &&
@@ -936,6 +937,30 @@ export function AssistantScreen({
               : undefined
           }
         />
+    );
+    if (isUser)
+      return (
+        <View style={styles.userTurn}>
+          {notes}
+          <View style={styles.userRow}>
+          <View
+            style={[
+              styles.message,
+              styles.userMessage,
+              { backgroundColor: bubble.background },
+            ]}
+          >
+            {body}
+          </View>
+          {footer}
+          </View>
+        </View>
+      );
+    return (
+      <View style={styles.message}>
+        {notes}
+        {body}
+        {footer}
       </View>
     );
   }
@@ -1189,6 +1214,7 @@ export function AssistantScreen({
                   <View
                     style={[
                       styles.message,
+                      styles.userRow,
                       styles.userMessage,
                       {
                         backgroundColor: bubble.background,
@@ -1807,11 +1833,18 @@ const styles = StyleSheet.create({
   transcriptHeader: { marginBottom: 20 },
   transcriptSeparator: { height: 20 },
   message: { gap: 8, paddingVertical: 10 },
-  userMessage: {
-    padding: 14,
-    ...userBubbleCorners,
-    marginLeft: 38,
+  userTurn: { gap: 8 },
+  userRow: {
     alignSelf: "flex-end",
+    alignItems: "flex-end",
+    marginLeft: 38,
+    gap: 2,
+    paddingVertical: 6,
+  },
+  userMessage: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    ...userBubbleCorners,
   },
   messageLabel: { fontSize: 11, fontFamily: fonts.bodySemi },
   messageText: { fontFamily: fonts.bodyRegular, fontSize: 14, lineHeight: 23 },

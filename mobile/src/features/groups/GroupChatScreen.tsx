@@ -1109,18 +1109,8 @@ function GroupMessage({
         <GroupMachineReceipts groupId={group?.id} message={message} />
       </View>
     );
-  return (
-    <View
-      style={[
-        styles.message,
-        user && {
-          backgroundColor: bubble.background,
-          ...userBubbleCorners,
-          marginLeft: 38,
-          alignSelf: "flex-end",
-        },
-      ]}
-    >
+  const header = (
+    <>
       <Pressable
         accessibilityRole={message.agent && onOpenAgent ? "button" : "text"}
         disabled={!message.agent || !onOpenAgent}
@@ -1134,7 +1124,7 @@ function GroupMessage({
           ) : null}
           <Label
             muted
-            style={[styles.small, user && { color: bubble.foreground }]}
+            style={styles.small}
           >
             {user
               ? (message.author?.display_name ?? "You")
@@ -1156,7 +1146,7 @@ function GroupMessage({
         </Label>
       )}
       {user && !!message.recipient_agent_ids?.length && (
-        <Label style={[styles.small, { color: bubble.foreground }]}>
+        <Label muted style={styles.small}>
           to{" "}
           {message.recipient_agent_ids
             .map((id) => {
@@ -1166,8 +1156,40 @@ function GroupMessage({
             .join(", ")}
         </Label>
       )}
-      {user ? (
-        <>
+    </>
+  );
+  const footer = (
+      <AssistantMessageFooter
+        text={
+          user ? message.text : sanitizeAssistantMessageContent(message.text)
+        }
+        timestamp={message.created_at}
+        user={user}
+        report={
+          message.role === "agent" && group
+            ? {
+                kind: "group",
+                id: group.id,
+                messageId: message.id,
+                reported: isReported(message.feedback),
+              }
+            : undefined
+        }
+      />
+  );
+  // Your own messages: name and recipients above, time and copy below, and
+  // only what you sent inside the bubble.
+  if (user)
+    return (
+      <View style={styles.userTurn}>
+        {header}
+        <View
+          style={[
+            styles.message,
+            styles.userBubble,
+            { backgroundColor: bubble.background, ...userBubbleCorners },
+          ]}
+        >
           <Label selectable style={{ color: bubble.foreground }}>
             {message.text}
           </Label>
@@ -1176,8 +1198,14 @@ function GroupMessage({
             message={message}
             foreground={bubble.foreground}
           />
-        </>
-      ) : (
+        </View>
+        {footer}
+      </View>
+    );
+  return (
+    <View style={styles.message}>
+      {header}
+      {(
         <AssistantReplyBody
           variant="crew"
           text={sanitizeAssistantMessageContent(message.text)}
@@ -1194,24 +1222,7 @@ function GroupMessage({
           }
         />
       )}
-      <AssistantMessageFooter
-        text={
-          user ? message.text : sanitizeAssistantMessageContent(message.text)
-        }
-        timestamp={message.created_at}
-        user={user}
-        foreground={user ? bubble.foreground : undefined}
-        report={
-          message.role === "agent" && group
-            ? {
-                kind: "group",
-                id: group.id,
-                messageId: message.id,
-                reported: isReported(message.feedback),
-              }
-            : undefined
-        }
-      />
+      {footer}
     </View>
   );
 }
@@ -1278,6 +1289,14 @@ const styles = StyleSheet.create({
   historyHeader: { marginBottom: 16 },
   empty: { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
   message: { gap: 6, padding: 12, maxWidth: "100%" },
+  userTurn: {
+    alignSelf: "flex-end",
+    alignItems: "flex-end",
+    marginLeft: 38,
+    gap: 4,
+    maxWidth: "100%",
+  },
+  userBubble: { paddingVertical: 10, paddingHorizontal: 14 },
   notice: { textAlign: "center", fontSize: 11 },
   working: {
     flexDirection: "row",
