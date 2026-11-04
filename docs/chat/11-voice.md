@@ -428,8 +428,9 @@ creates one server continuation through ordinary admission. Audio end does not
 remove a pending card or imply denial.
 
 While work runs, translate allowlisted activity identifiers into short facts:
-"Checking your calendar", "Waiting for approval", "The specialist is working".
-Unknown labels become a generic service-stage description. Never narrate arguments, URLs,
+"Checking issue progress" or a server-authored approval read-back.
+Unknown activities, tool discovery, planning and internal resource waits stay
+silent; finished-step counts are telemetry, never spoken progress. Never narrate arguments, URLs,
 tool output, secrets or chain-of-thought. Send quiet state changes immediately;
 speak the first meaningful progress after about 2 s, then coalesce to at most
 one useful update per 8 s. Avoid repetitive reassurance. Activity status
@@ -439,8 +440,8 @@ Only durable settlement produces a final result announcement. Persist the full
 backend answer; send a bounded, factual speech summary (one/two coherent chunks,
 each <=500 tokens for Live) and leave details/cards/attachments on screen.
 Do not announce a provider effect as successful from a text delta or a completed
-activity alone. If no safe bounded summary is available, say the result is ready
-in the chat. Suppress duplicate or superseded announcements using task version
+activity alone. If no safe bounded summary is available, explain the
+presentation failure without redirecting the user to another conversation. Suppress duplicate or superseded announcements using task version
 and session generation. Append acknowledgement is not proof the user heard it;
 reconnect should show "Result ready" rather than blindly replaying speech.
 
@@ -448,21 +449,24 @@ reconnect should show "Result ready" rather than blindly replaying speech.
 
 The coordinator projects durable request state and matching live-turn activities
 into an additive `progress` snapshot: stage, a closed human-readable label, the
-last finished step, finished-step count and update time. A stale execution
-heartbeat reports that a fresh update is awaited. A tool error is a failed step,
-not successful completion. The first useful update is eligible after two seconds;
+last finished step, finished-step count and update time. Counts and technical
+stages remain observable without generic narration. A tool error is a failed
+step, not successful completion. The first useful update is eligible after two seconds;
 later changed evidence coalesces to one update per eight seconds across the call.
-User speech and a pending read-back defer narration; unchanged evidence is silent.
+User speech and a pending read-back defer narration; empty details, unchanged
+actions and changes to counts alone are silent.
 The UI displays the same projection. No arguments, outputs or raw operation names
 are used as progress narration.
 
 Settled hidden-task answers are copied in full through the existing transactional
 publisher, including when audio has ended. Concurrent sweeps adopt the same result
 receipt. Speech is one bounded, billed one-shot summary in the answer's language,
-with a two-second timeout and at most 100 characters, followed by the normal
-voice surface. It must state the finding/failure and point to the full chat answer.
-If summarization is unavailable, use only a complete safe sentence/clause or a
-fixed notice pointing to the saved answer. Unicode sentence/clause boundaries
+with a three-second timeout and at most 160 characters, bounded by the existing
+480-byte commentary limit, followed by the normal voice surface. It states the
+concrete findings/failure and necessary detail directly, without mentioning saved
+answers, another chat, backend conversations or internal handoffs. If
+summarization is unavailable, use complete safe findings within that same budget,
+or explain that a reliable spoken explanation could not be produced. Unicode sentence/clause boundaries
 replace the old 64-byte fragments; never read a truncated clause. Admission-only
 and async-submit acknowledgements remain distinct from settled results.
 
@@ -489,8 +493,8 @@ separate `last_work_at` idle reference. The three-minute user-idle warning resum
 after work finishes; it never requires speech while accepted work is pending.
 The 30-minute deadline, 30-second heartbeat, live authority and funding checks
 still apply. On audio closure the call receipt explains why audio ended and
-that accepted tasks continue subject to their own limits, with answers/failures
-delivered to this chat. An available transport also receives this notice.
+that work already started continues subject to its own limits. It does not
+redirect the user to a backend conversation or saved answer. An available transport also receives this notice.
 Expiry, denied access, interrupted workers and service errors retain explicit
 failure explanations; call closure itself is not a task result.
 

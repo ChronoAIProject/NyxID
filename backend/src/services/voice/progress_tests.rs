@@ -261,11 +261,11 @@ async fn voice_2083_chinese_github_work_progress_idle_close_and_exact_result_del
         db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&r.id},doc!{"$set":{"created_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(4))}}).await.unwrap();
         let (mut socket,server,events)=fixture_socket().await;
         let mut c=Coordinator::new();
-        let activity=engine::activity_started_for_turn(db,&call.user_id,&running.id,&r.turn_id,"api-github-pat__get_authenticated_user").await.unwrap().unwrap();
+        let activity=engine::activity_started_for_turn(db,&call.user_id,&running.id,&r.turn_id,"api-github-pat__search_issues").await.unwrap().unwrap();
         let busy=task_updates(&state,&call,&mut socket,&mut c).await.unwrap();
         assert!(busy);
         let saved=voice::get(db,&call.user_id,&thread.id,&r.id).await.unwrap();
-        assert_eq!(saved.progress.as_ref().unwrap().detail,"Reading account identity");
+        assert_eq!(saved.progress.as_ref().unwrap().detail,"Checking issue progress");
         assert!(saved.timing.contains_key("first_activity_ms"));
         assert!(saved.timing.contains_key("first_progress_ms"));
         // A slow service exceeds three minutes. Only user-idle is suspended;
@@ -286,7 +286,7 @@ async fn voice_2083_chinese_github_work_progress_idle_close_and_exact_result_del
         // the background continuation, then the full Chinese answer arrives once.
         session::close(db,&call,"client_lost",true).await.unwrap();
         let receipt=db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{"turn_id":&call.id,"via":"voice"}).await.unwrap().unwrap();
-        assert!(receipt.text.contains("continue in the background"));
+        assert!(receipt.text.contains("Work already started will continue"));
         assert!(!receipt.text.contains("unless you speak"));
         let answer=format!("最近七天你提交的 issue：\n- [登录失败](https://github.com/example/project/issues/1)：已关闭，昨日修复。\n- [同步延迟](https://github.com/example/project/issues/2)：仍开放，正在审核，重试策略尚未解决。\n{}", "补充背景与已核实进展。".repeat(1500));
         Box::pin(engine::finish_turn(db,&running,&running.credential_api_key_id,&Uuid::new_v4().to_string(),&engine::TurnResult{text:answer.clone(),session_id:None,response_id:None,error:None})).await.unwrap();
@@ -322,7 +322,10 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
         let mut c = super::super::progress::Coalescer::default();
         r.progress = Some(super::super::progress::project(&r, None, Utc::now()));
         assert!(!c.due(&r, 1000, 1000));
-        assert!(c.due(&r, 2000, 2000));
+        assert!(
+            !c.due(&r, 2000, 2000),
+            "Queued work has no concrete progress to narrate"
+        );
         assert!(!c.due(&r, 20_000, 20_000), "No repeated empty reassurance");
         r.state = RequestState::Claimed;
         let mut active = thread.active_turn.clone().unwrap();
@@ -354,7 +357,39 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
         assert_eq!(r.progress.as_ref().unwrap().stage, "tool_error");
         assert_eq!(r.progress.as_ref().unwrap().completed_steps, 0);
         assert!(!c.due(&r, 3000, 3000));
-        assert!(c.due(&r, 10_000, 10_000));
+        assert!(
+            !c.due(&r, 10_000, 10_000),
+            "Unknown failed steps are not useful progress"
+        );
+        active.activities[0].label = "api-github-pat__search_issues".into();
+        active.activities[0].status = "running".into();
+        active.activities[0].failure = None;
+        r.progress = Some(super::super::progress::project(
+            &r,
+            Some(&active),
+            Utc::now(),
+        ));
+        assert_eq!(
+            r.progress.as_ref().unwrap().detail,
+            "Checking issue progress"
+        );
+        assert!(c.due(&r, 11_000, 11_000));
+        r.progress.as_mut().unwrap().completed_steps = 3;
+        assert!(
+            !c.due(&r, 21_000, 21_000),
+            "A count change is not new spoken information"
+        );
+        active.activities[0].status = "completed".into();
+        r.progress = Some(super::super::progress::project(
+            &r,
+            Some(&active),
+            Utc::now(),
+        ));
+        assert!(r.progress.as_ref().unwrap().detail.is_empty());
+        assert!(
+            !c.due(&r, 31_000, 31_000),
+            "Finished steps are silent until there is a finding"
+        );
         r.state = RequestState::AwaitingConfirmation;
         r.progress = Some(super::super::progress::project(&r, None, Utc::now()));
         assert!(
