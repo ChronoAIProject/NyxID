@@ -219,6 +219,7 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
                     <AssistantConnectButton
                       key={href}
                       label={label}
+                      href={href}
                       onPress={(trigger) => openHref(href, trigger)}
                     />
                   ))}
@@ -236,13 +237,18 @@ export const AssistantMarkdownBody = memo(function AssistantMarkdownBody({
         const label = node.children
           .map((child) => child.content ?? "")
           .join("");
-        // The body renders connector actions as buttons; the sentence keeps its words.
-        if (target?.kind === "connect" || target?.kind === "service")
+        // The body renders connector actions as buttons; the sentence keeps
+        // meaningful words, but a bare URL or "Connect service" would only
+        // repeat the button under it.
+        if (target?.kind === "connect" || target?.kind === "service") {
+          const words = assistantLinkLabel(target, label);
+          if (/^connect service$/i.test(words)) return null;
           return (
             <Text key={node.key} style={{ fontFamily: fonts.bodySemi }}>
-              {assistantLinkLabel(target, label)}
+              {words}
             </Text>
           );
+        }
         return (
           <Text
             key={node.key}

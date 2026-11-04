@@ -319,6 +319,7 @@ test("hosted connect links render one button under their block and keep plain wo
     "Connect another GitHub account",
     "add-service links are connector buttons too",
   );
+  assert.equal(buttons(blocks[0])[0].props.href, href, "the button follows its link's live state");
   buttons(blocks[0])[0].props.onPress(42);
   assert.equal(
     JSON.stringify(opened),
@@ -329,10 +330,15 @@ test("hosted connect links render one button under their block and keep plain wo
     { key: "l", attributes: { href }, children: [{ content: href }] },
     [href],
   );
-  assert.equal(inline.type, "Text");
-  assert.equal(inline.props.children, "Connect service");
-  assert.equal(inline.props.onPress, undefined);
-  assert.equal(inline.props.accessibilityRole, undefined);
+  assert.equal(inline, null, "a bare connect URL would only repeat its button");
+  const named = rules.link(
+    { key: "n", attributes: { href }, children: [{ content: "GitHub" }] },
+    ["GitHub"],
+  );
+  assert.equal(named.type, "Text");
+  assert.equal(named.props.children, "Connect GitHub");
+  assert.equal(named.props.onPress, undefined);
+  assert.equal(named.props.accessibilityRole, undefined);
   const ordinary = rules.link(
     {
       key: "o",
