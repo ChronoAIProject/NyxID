@@ -93,6 +93,15 @@ export function AssistantVoiceConversation(props: Props) {
 }
 
 /** The task a collapsed tray shows: what needs you first, then live work. */
+// The same plain words as the web voice panel.
+const TASK_STATE: Record<Task["state"], string> = {
+  queued: "Queued",
+  claimed: "Running",
+  awaiting_confirmation: "Needs your OK",
+  completed: "Done",
+  cancelled: "Cancelled",
+};
+
 function headlineTask(tasks: readonly Task[]) {
   return (
     tasks.find((task) => task.state === "awaiting_confirmation") ??
@@ -321,8 +330,9 @@ function VoiceConversation({
       <View key={task.id} style={styles.taskRow}>
         <View style={styles.fill}>
           <Label numberOfLines={1}>{task.title || "Agent task"}</Label>
-          <Label muted style={styles.taskState}>
-            {task.state.replaceAll("_", " ")}
+          <Label muted style={styles.taskState} numberOfLines={2}>
+            {TASK_STATE[task.state]}
+            {task.progress?.detail ? ` · ${task.progress.detail}` : ""}
           </Label>
         </View>
         {task.state === "awaiting_confirmation" ? (
