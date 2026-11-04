@@ -133,14 +133,14 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
     if (entry) onNavigate(entry.messageIndex);
   }
   return (
-    <div ref={container} className="pointer-events-none absolute top-0 right-[var(--assistant-scrollbar-width,0px)] z-30 hidden w-7 items-center justify-end md:flex" style={{ bottom: `var(--assistant-composer-inset, ${bottomInset}px)` }}>
-      <span ref={pitchMeasure} aria-hidden="true" data-chat-index-pitch="" className="pointer-events-none absolute w-0" style={{ height: "calc(0.875rem / 0.85)" }} />
+    <div ref={container} data-chat-index-gutter="" className="pointer-events-none absolute top-0 right-[var(--assistant-scrollbar-width,0px)] z-30 hidden w-[var(--chat-index-gutter-width)] items-center justify-end border-l border-border/50 bg-sidebar md:flex" style={{ bottom: `var(--assistant-composer-inset, ${bottomInset}px)` }}>
+      <span ref={pitchMeasure} aria-hidden="true" data-chat-index-pitch="" className="pointer-events-none absolute w-0" style={{ height: "var(--chat-index-pitch)" }} />
       <nav
         ref={rail}
         data-chat-index-rail=""
         data-scroll-edges={[first > 0 && "top", first < maxFirst && "bottom"].filter(Boolean).join(" ")}
         aria-label="Conversation index"
-        className="pointer-events-auto flex h-full w-full touch-none select-none flex-col items-end justify-center overflow-hidden border-l border-border/50"
+        className="pointer-events-auto flex h-full w-full touch-none select-none flex-col items-end justify-center overflow-hidden"
         onPointerLeave={() => { if (!dragging.current) setHover(null); }}
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -202,16 +202,16 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
                 aria-label={`Jump to message ${index + 1}: ${entry.author} — ${entry.title}`}
                 aria-current={selected ? "location" : undefined}
                 tabIndex={index === focusIndex ? 0 : -1}
-                className="group flex w-full cursor-pointer items-center justify-end pr-1 outline-none"
+                className="group flex w-full cursor-pointer items-center justify-end pr-[calc(var(--chat-index-pitch)*2/7)] outline-none focus-visible:rounded-sm focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 style={{ height: layout.pitch }}
                 onPointerEnter={(event) => { if (event.pointerType !== "touch" && !dragging.current) preview(index, event.currentTarget); }}
                 onFocus={(event) => preview(index, event.currentTarget)}
                 onClick={(event) => { if (event.detail === 0) navigate(index); }}
               >
                 <span aria-hidden="true" className={cn(
-                  "h-0.5 origin-right rounded-full transition-[transform,background-color] duration-150 group-focus-visible:scale-x-150 group-active:scale-x-150 motion-reduce:transition-none",
-                  entry.role === "user" ? "w-2" : "w-4",
-                  selected ? "bg-success" : "bg-text-tertiary/80 group-focus-visible:bg-foreground group-active:bg-foreground",
+                  "h-[calc(var(--chat-index-pitch)/7)] shrink-0 rounded-full bg-current transition-colors duration-150 motion-reduce:transition-none",
+                  selected || entry.role === "assistant" ? "w-[var(--chat-index-tick-width)]" : "w-[calc(var(--chat-index-tick-width)/2)]",
+                  selected ? "text-success" : "text-text-tertiary group-hover:text-muted-foreground group-focus-visible:text-muted-foreground group-active:text-muted-foreground",
                 )} />
               </button>
             );

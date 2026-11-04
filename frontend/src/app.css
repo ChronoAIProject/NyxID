@@ -1403,6 +1403,12 @@ html.theme-dark .assistant-halo--visible {
 
 /* The index is a dense graphical navigator, not a row of text controls.
    Its measured pitch must also be its rendered pitch at every reading size. */
+:root {
+  --chat-index-pitch: calc(0.875rem / 0.85);
+  --chat-index-tick-width: calc(var(--chat-index-pitch) * 2.25);
+  --chat-index-gutter-width: calc(var(--chat-index-tick-width) + var(--chat-index-pitch));
+}
+
 html.assistant-display [data-chat-index-target] {
   min-height: 0;
   min-width: 0;
@@ -1422,7 +1428,7 @@ html.assistant-display [data-chat-index-target] {
 
 @media (min-width: 768px) {
   [data-chat-content-layout]:has([data-chat-index-rail]) {
-    --chat-index-width: calc(var(--spacing) * 7);
+    --chat-index-width: var(--chat-index-gutter-width);
   }
 }
 
