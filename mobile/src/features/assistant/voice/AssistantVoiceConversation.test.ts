@@ -319,7 +319,7 @@ function setup(
         return levels;
       },
     },
-    "./VoiceAura": { VoiceAura: "VoiceAura" },
+    "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
     "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
   });
   const component = harness.load(
@@ -859,7 +859,7 @@ test("voice is a composer with the animated bubble on top, not a page over the c
   assert.equal(idle.all().some((row) => row.type === "Modal"), false);
   const frame = idle.all().find((row) => row.type === "ComposerFrame")!;
   assert.ok(frame, "it takes the message composer's place");
-  assert.ok(idle.all().some((row) => row.type === "VoiceAura"), "the animated bubble");
+  assert.ok(idle.all().some((row) => row.type === "VoiceAura"), "the aura around the composer");
   assert.match(idle.text(), /我的助手/);
   assert.equal(idle.button("Start voice").props.disabled, false);
   idle.harness.unmount();

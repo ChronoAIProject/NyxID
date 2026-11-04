@@ -682,7 +682,13 @@ show Send, and an active reply shows Stop. Voice mode is a composer, not a
 page: it slides up in place of the message composer (immediately under Reduce
 Motion), so the chat above, with its action cards, approvals and connector
 links, stays on screen and usable during the call. The voice composer uses the
-composer frame: an animated aura bubble on top with the agent name, status and
+composer frame wrapped in an animated pastel aura (soft blush and mint glows
+and a thin gradient edge) that brightens and swells with the agent's voice,
+follows yours while listening and breathes while thinking (still under Reduce
+Motion). It keeps one size whether idle or in a call and in either mode: a
+fixed middle area holds the greeting, the live conversation or the task list
+and call notes, the mode row is always reserved, and every centre control has
+the same hint line beneath it. Its header shows the agent name, status and
 timer, a task chip (count, spinner while running, amber "Needs your OK") and,
 in a call, speaker and ⋯ (call notes, No sound? Resume audio) controls; the
 task list and call notes open inside the composer, never over the chat; the
@@ -695,7 +701,7 @@ running call timer and an End that hangs up. Hold to talk is a walkie-talkie:
 the instruction ("Hold to talk", "Release to send" while held, "Muted") sits
 under the microphone, the left control is always the mute symbol, no call
 timer runs, and the timer counts only the current transmission. Holding swells
-the microphone and lifts a soft halo (no animation under Reduce Motion). The
+the microphone and lifts a soft halo (no animation under Reduce Motion). The page
 aura's orbits scale with its size. Closing voice ends the call; leaving the
 chat does too; accepted agent tasks keep running. The aura is decorative and
 hidden from VoiceOver (see the 2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside

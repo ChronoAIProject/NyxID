@@ -8,7 +8,6 @@ import {
   StyleSheet,
   Text,
   View,
-  useWindowDimensions,
 } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
@@ -39,7 +38,7 @@ import { fonts } from "../../../theme/designTokens";
 import { ChatComposerFrame } from "../ChatComposer";
 import { useNativeVoice } from "./useNativeVoice";
 import { useVoiceLevels } from "./useVoiceLevels";
-import { VoiceAura } from "./VoiceAura";
+import { VoiceComposerAura } from "./VoiceComposerAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
 import { voiceAuraPhase, voiceAuraStatus } from "./voiceAuraState";
 import { chooseVoiceOption, voiceElapsed, voiceTariff } from "./voiceSelection";
@@ -55,8 +54,11 @@ type Props = {
 };
 type Task = VoiceSnapshot["tasks"][number];
 
-/** The animated bubble at the top of the voice composer. */
-const BUBBLE = 44;
+/**
+ * The voice composer keeps one size whether a call is idle or live and in
+ * either mode: the middle area and the hint line are always reserved.
+ */
+const BODY_HEIGHT = 136;
 
 /**
  * Voice mode is a composer: it slides up in place of the message composer,
@@ -104,7 +106,6 @@ function VoiceConversation({
   environment: ReturnType<typeof nativeVoiceEnvironment>;
 }) {
   const { colors, mode } = useTheme();
-  const dimensions = useWindowDimensions();
   const reducedMotion = useReducedMotion();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
@@ -364,18 +365,16 @@ function VoiceConversation({
           opacity: rise.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
         }}
       >
+        {/* The aura around the composer says it is in voice mode and moves
+            with NyxBot's voice and yours. */}
+        <VoiceComposerAura
+          phase={phase}
+          input={levels.input}
+          output={levels.output}
+          reducedMotion={reducedMotion}
+        >
         <ChatComposerFrame style={styles.frame}>
-          {/* The animated bubble on top says this composer is in voice mode. */}
           <View style={styles.header}>
-            <View style={styles.bubble}>
-              <VoiceAura
-                phase={phase}
-                input={levels.input}
-                output={levels.output}
-                reducedMotion={reducedMotion}
-                size={BUBBLE}
-              />
-            </View>
             <View style={styles.headerText}>
               <Text numberOfLines={1} style={[styles.title, { color: colors.textPrimary }]}>
                 {agentName}
@@ -445,8 +444,12 @@ function VoiceConversation({
             ) : null}
           </View>
           {/* Task list and call options open inside the composer, never over the chat. */}
+          <View style={styles.body}>
           {tray ? (
-            <View style={[styles.tray, { backgroundColor: surface }]}>
+            <ScrollView
+              style={[styles.tray, { backgroundColor: surface }]}
+              contentContainerStyle={styles.trayContent}
+            >
               {tasksOpen ? (
                 <>
                   <Label style={styles.trayTitle}>{`Agent tasks · ${tasks.length}`}</Label>
@@ -479,13 +482,16 @@ function VoiceConversation({
                   />
                 </>
               )}
-            </View>
-          ) : null}
+            </ScrollView>
+          ) : (
           <View style={styles.transcriptFrame}>
             <ScrollView
               ref={transcript}
-              style={{ maxHeight: Math.round(dimensions.height * 0.28) }}
-              contentContainerStyle={styles.transcriptContent}
+              style={styles.fill}
+              contentContainerStyle={[
+                styles.transcriptContent,
+                !active && !captions.length && styles.idleContent,
+              ]}
               keyboardShouldPersistTaps="handled"
               scrollEventThrottle={32}
               onLayout={(event) =>
@@ -608,6 +614,21 @@ function VoiceConversation({
                 ) : null}
               </>
             ) : null}
+            {!active && !captions.length ? (
+              <View style={styles.idle}>
+                <Text style={[styles.idleTitle, { color: colors.textPrimary }]}>
+                  Hey, what can I do for you today?
+                </Text>
+                {option ? (
+                  <Text style={[styles.footnote, styles.center, quiet]}>
+                    {voiceLabel ? `${voiceLabel} voice · ` : ""}
+                    {isGrok ? "Hold to talk · " : ""}
+                    Change in Settings › Voice{"\n"}
+                    {voiceTariff(option)}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             {captions.map((caption, index) => {
                 const user = caption.speaker === "user";
                 // Like chat: your words in a bubble, the agent's as plain text.
@@ -645,14 +666,8 @@ function VoiceConversation({
             </ScrollView>
             <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.composerBg} />
           </View>
-          {!active && !captions.length && option ? (
-            <Text style={[styles.footnote, styles.center, quiet]}>
-              {voiceLabel ? `${voiceLabel} voice · ` : ""}
-              {isGrok ? "Hold to talk · " : ""}
-              Change in Settings › Voice{"\n"}
-              {voiceTariff(option)}
-            </Text>
-          ) : null}
+          )}
+          </View>
           {/* Grok runs on explicit holds only, so it has no mode to choose. */}
           {option && !isGrok ? (
             <View
@@ -698,7 +713,15 @@ function VoiceConversation({
                 );
               })}
             </View>
-          ) : null}
+          ) : (
+            <View style={styles.modesPlaceholder}>
+              {isGrok ? (
+                <Text style={[styles.modeLabel, { color: colors.textSecondary }]}>
+                  Hold to talk
+                </Text>
+              ) : null}
+            </View>
+          )}
           <View style={styles.controls}>
             {active && inputMode === "push_to_talk" ? (
               <IconButton
@@ -715,14 +738,19 @@ function VoiceConversation({
               <View style={styles.sideSpacer} />
             )}
             {!active ? (
-              <MainButton
-                label={voice.error ? "Try again" : "Start voice"}
-                fill={main}
-                disabled={!canStart}
-                onPress={() => void start()}
-              >
-                <Mic size={26} color={onMain} />
-              </MainButton>
+              <View style={styles.holdColumn}>
+                <MainButton
+                  label={voice.error ? "Try again" : "Start voice"}
+                  fill={main}
+                  disabled={!canStart}
+                  onPress={() => void start()}
+                >
+                  <Mic size={26} color={onMain} />
+                </MainButton>
+                <Text style={[styles.holdHint, { color: colors.textSecondary }]}>
+                  {voice.error ? "Try again" : "Tap to start"}
+                </Text>
+              </View>
             ) : inputMode === "push_to_talk" ? (
               <View style={styles.holdColumn}>
                 <View style={styles.holdStage}>
@@ -789,18 +817,28 @@ function VoiceConversation({
                 </Text>
               </View>
             ) : (
-              <MainButton
-                label={muted ? "Unmute microphone" : "Mute microphone"}
-                fill={muted ? colors.danger : main}
-                disabled={voice.starting}
-                onPress={() => void voice.mute(!muted)}
-              >
-                {muted ? (
-                  <MicOff size={26} color={colors.onPrimary} />
-                ) : (
-                  <Mic size={26} color={onMain} />
-                )}
-              </MainButton>
+              <View style={styles.holdColumn}>
+                <MainButton
+                  label={muted ? "Unmute microphone" : "Mute microphone"}
+                  fill={muted ? colors.danger : main}
+                  disabled={voice.starting}
+                  onPress={() => void voice.mute(!muted)}
+                >
+                  {muted ? (
+                    <MicOff size={26} color={colors.onPrimary} />
+                  ) : (
+                    <Mic size={26} color={onMain} />
+                  )}
+                </MainButton>
+                {/* The same line as Hold to talk's instruction keeps one size. */}
+                <Text
+                  accessibilityElementsHidden
+                  importantForAccessibility="no"
+                  style={[styles.holdHint, { color: colors.textSecondary }]}
+                >
+                  {muted ? "Muted" : ""}
+                </Text>
+              </View>
             )}
             <IconButton
               large
@@ -815,6 +853,7 @@ function VoiceConversation({
             </IconButton>
           </View>
         </ChatComposerFrame>
+        </VoiceComposerAura>
       </Animated.View>
     </>
   );
@@ -893,8 +932,13 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   center: { textAlign: "center" },
   frame: { gap: 10, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 10 },
-  header: { flexDirection: "row", alignItems: "center", gap: 10 },
-  bubble: { width: BUBBLE, height: BUBBLE, alignItems: "center", justifyContent: "center" },
+  header: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 36, paddingLeft: 4 },
+  body: { height: BODY_HEIGHT },
+  idle: { alignItems: "center", gap: 8 },
+  idleContent: { flexGrow: 1, justifyContent: "center" },
+  idleTitle: { fontFamily: fonts.displaySemi, fontSize: 18, lineHeight: 24, textAlign: "center" },
+  trayContent: { padding: 12, gap: 10 },
+  modesPlaceholder: { minHeight: 38, alignItems: "center", justifyContent: "center" },
   headerText: { flex: 1, minWidth: 0 },
   title: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 20 },
   status: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
@@ -910,11 +954,11 @@ const styles = StyleSheet.create({
   chipText: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 16 },
   icon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
   iconLarge: { width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" },
-  tray: { borderRadius: 14, padding: 12, gap: 10 },
+  tray: { flex: 1, borderRadius: 14 },
   trayTitle: { fontFamily: fonts.bodySemi, fontSize: 14 },
   taskRow: { flexDirection: "row", alignItems: "center", gap: 10 },
   taskState: { fontSize: 12 },
-  transcriptFrame: { position: "relative" },
+  transcriptFrame: { flex: 1, position: "relative" },
   transcriptContent: { gap: 10, paddingHorizontal: 2, paddingBottom: 2 },
   userBubble: {
     alignSelf: "flex-end",
@@ -958,5 +1002,5 @@ const styles = StyleSheet.create({
   holdColumn: { alignItems: "center", gap: 6 },
   holdStage: { width: 64, height: 64, alignItems: "center", justifyContent: "center" },
   halo: { position: "absolute", width: 64, height: 64, borderRadius: 32 },
-  holdHint: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 16 },
+  holdHint: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 16, minHeight: 16 },
 });
