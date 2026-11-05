@@ -638,6 +638,7 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 | `TRIGGER_RATE_LIMIT_BURST` | `20` | Per-trigger token bucket capacity. |
 | `TRIGGER_PAYLOAD_MAX_BYTES` | `262144` | Maximum raw trigger request body size. |
 | `TRIGGER_DELIVERY_RETENTION_HOURS` | `72` | Hours to retain encrypted webhook-target envelopes for durable dedup and replay. `0` disables payload storage/replay while metadata remains bounded to 72 hours. |
+| `AUTOMATION_CONTINUATION_V2_ENABLED` | `false` | Enroll new assistant automation runs in coordinator completion only when every declared, drained replica advertises `automation:coordinator-completion-v2`. Unready runs use legacy behavior; disabling preserves enrolled work. No migration/startup mode. Inspect `GET /api/v1/admin/automation-continuations/readiness` (admin/operator). Disable and drain all v2 work before binary downgrade; see [Automations](NYXBOT_SCHEDULES.md#coordinator-completion-v2). |
 
 Webhook-target dedup uses durable delivery records. Agent and notification targets use fenced claims in the shared MongoDB coordination collection. `CHANNEL_EVENT_DEDUP_TTL_SECS` controls how long a successful event ID remains deduplicated.
 
