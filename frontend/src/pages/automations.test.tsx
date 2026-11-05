@@ -617,6 +617,7 @@ it("shows a waiting coordinator deadline and sends exact run cancellation", asyn
               coordinator_deadline: "2026-10-01T01:00:00Z",
               can_cancel: true,
               reason: "coordinator_pending",
+              wait_kind: "coordinator",
             },
           ],
         },
@@ -628,7 +629,14 @@ it("shows a waiting coordinator deadline and sends exact run cancellation", asyn
     screen.getAllByRole("button", { name: "Morning summary" })[0]!,
   );
   expect(screen.getByText(/Completion deadline/)).toBeInTheDocument();
+  expect(screen.getByText("Waiting for delegated work to finish")).toBeInTheDocument();
+  expect(screen.queryByText("coordinator pending")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Cancel run" }));
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Keep run" }));
+  expect(mocks.cancel).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Cancel run" }));
+  await user.click(screen.getByRole("button", { name: "Confirm cancellation" }));
   expect(mocks.cancel).toHaveBeenCalledWith({
     triggerId: trigger.id,
     runId: "waiting-run",
@@ -663,6 +671,7 @@ it("shows the coordinator timeout reason after expiry", async () => {
   expect(
     screen.getByText("Coordinator deadline expired (coordinator_timeout)."),
   ).toBeInTheDocument();
+  expect(screen.queryByText("coordinator timeout")).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "Cancel run" }),
   ).not.toBeInTheDocument();
