@@ -1,9 +1,13 @@
 pub mod activities;
 pub mod fields;
+pub mod generation;
 pub mod links;
 pub mod objects;
+pub mod people;
 pub mod query;
 pub mod records;
+pub mod tools;
+pub mod transfer;
 pub mod views;
 
 use crate::errors::{AppError, AppResult, CrmValidationIssue};
@@ -15,7 +19,8 @@ pub(crate) async fn fence_owner(
     owner_id: &str,
     tx: &mut mongodb::ClientSession,
 ) -> AppResult<()> {
-    crate::services::erasure_admission::fence_in_session(db, owner_id, tx).await
+    crate::services::erasure_admission::fence_in_session(db, owner_id, tx).await?;
+    tools::fence_admission(db, owner_id, tx).await
 }
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()> {
@@ -104,6 +109,15 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> mongodb::error::Result<()
             IndexModel::builder().keys(doc! {"owner_id": 1}).build(),
         ])
         .await?;
+    db.collection::<Document>("crm_generation_jobs")
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+            IndexModel::builder().keys(doc! {"owner_id": 1}).build(),
+        ])
+        .await?;
     Ok(())
 }
 
@@ -121,3 +135,6 @@ pub fn validation_result(errors: Vec<CrmValidationIssue>) -> AppResult<()> {
         Err(AppError::CrmValidationFailed(errors))
     }
 }
+
+#[cfg(test)]
+mod regression_tests;

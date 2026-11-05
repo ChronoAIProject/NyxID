@@ -6158,6 +6158,7 @@ async fn turn_snapshot_is_decided_at_admission_and_copied_to_the_settled_reply()
         keys,
         &owner,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "worker".into(),
@@ -6387,6 +6388,7 @@ async fn ineligible_skill_events_are_drained_transactionally_without_a_turn() {
         keys,
         &owner,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "worker".into(),

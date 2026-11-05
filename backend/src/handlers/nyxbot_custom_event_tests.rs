@@ -79,6 +79,7 @@ async fn custom_provider_key_isolated_for_two_channels_on_one_specialist() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "custom-events".into(),

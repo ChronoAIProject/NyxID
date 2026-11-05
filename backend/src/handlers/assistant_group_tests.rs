@@ -116,6 +116,7 @@ async fn specialist_for(state: &AppState, owner: &str, name: &str) -> AssistantA
         OWNER,
         owner,
         CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: name.into(),
@@ -1608,6 +1609,7 @@ async fn shared_researcher(state: &AppState) -> AssistantAgent {
         &state.encryption_keys,
         &publisher,
         CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "researcher".into(),

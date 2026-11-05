@@ -399,6 +399,7 @@ async fn external_bot_mentions_start_only_bounded_guest_turns_without_sender_oau
             &state.encryption_keys,
             OWNER,
             team::CreateRequest {
+                crm: vec![],
                 machines: None,
                 logins: None,
                 name: "community".into(),

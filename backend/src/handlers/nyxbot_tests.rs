@@ -1033,6 +1033,7 @@ async fn relinking_a_bot_to_a_specialist_starts_that_agents_own_thread() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "support".into(),
@@ -3411,6 +3412,7 @@ async fn chat_posting_is_opt_in_and_chat_agents_survive_relinks() {
         .await
         .unwrap();
     let specialist = |name: &str| crate::services::assistant_team_service::CreateRequest {
+        crm: vec![],
         machines: None,
         logins: None,
         name: name.into(),
@@ -5111,6 +5113,7 @@ async fn org_group_bots_moved_to_a_specialist_keep_answering() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "chronoai-office-agent".into(),
@@ -5568,6 +5571,7 @@ async fn watch_completions_are_bound_from_the_causing_turns_snapshot() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "connector".into(),
@@ -5924,6 +5928,7 @@ async fn delayed_hosted_watch_preserves_newer_manual_specialist_choice() {
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "manual-choice".into(),
@@ -6055,6 +6060,7 @@ async fn simultaneous_auto_and_manual_creation_fences_stale_preflight_at_insert(
         &state.encryption_keys,
         OWNER,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "simultaneous-manual-choice".into(),

@@ -1622,6 +1622,8 @@ async fn dispatch_specialists(
             ))
             .await?;
             let request = team::CreateRequest {
+                crm: serde_json::from_value(args.get("crm").cloned().unwrap_or(json!([])))
+                    .map_err(|_| AppError::BadRequest("Invalid CRM grants".into()))?,
                 machines: args.get("machines").map(|_| string_list(args, "machines")),
                 logins: args.get("logins").map(|_| string_list(args, "logins")),
                 name: text_arg(args, "name").to_owned(),
@@ -1670,7 +1672,7 @@ async fn dispatch_specialists(
                     };
                     (
                         json!({"subagent": {"id": agent.id, "name": agent.name,
-                            "services": targets.slugs, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids, "account_read": agent.grants.account_read},
+                            "services": targets.slugs, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids, "account_read": agent.grants.account_read, "crm": agent.grants.crm},
                             "task": task}),
                         false,
                     )
@@ -1759,6 +1761,7 @@ async fn dispatch_specialists(
                 && targets.service_ids.is_empty()
                 && targets.platform_service_ids.is_empty()
                 && args.get("account_read").is_none()
+                && args.get("crm").is_none()
             {
                 return Ok((
                     json!({"error": unchanged, "subagent": agent.name, unchanged: refused}),
@@ -1766,6 +1769,8 @@ async fn dispatch_specialists(
                 ));
             }
             let targets = AgentGrants {
+                crm: serde_json::from_value(args.get("crm").cloned().unwrap_or(json!([])))
+                    .map_err(|_| AppError::ValidationError("Invalid CRM grants".into()))?,
                 service_ids: targets.service_ids,
                 platform_service_ids: targets.platform_service_ids,
                 account_read: args["account_read"].as_bool().unwrap_or(false),
@@ -1803,7 +1808,7 @@ async fn dispatch_specialists(
                 .find(|summary| summary.id == agent.id);
             let mut result = json!({"subagent": agent.name,
                 "services": summary.as_ref().map(|s| s.services.clone()),
-                "account_read": agent.grants.account_read, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids});
+                "account_read": agent.grants.account_read, "crm": agent.grants.crm, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids});
             if !refused.is_empty() {
                 result[unchanged] = json!(refused);
             }
@@ -3111,6 +3116,8 @@ pub async fn list_agents(
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentRequest {
     #[serde(default)]
+    crm: Vec<crate::models::assistant_agent::CrmGrant>,
+    #[serde(default)]
     org: Option<String>,
     #[serde(default)]
     machines: Option<Vec<String>>,
@@ -3150,6 +3157,7 @@ pub async fn create_agent(
     ))
     .await?;
     let request = team::CreateRequest {
+        crm: body.crm,
         machines: body.machines,
         logins: body.logins,
         name: body.name,
@@ -3357,6 +3365,8 @@ pub struct GrantsRequest {
     logins: Option<Vec<String>>,
     services: Vec<String>,
     account_read: bool,
+    #[serde(default)]
+    crm: Option<Vec<crate::models::assistant_agent::CrmGrant>>,
     /// What guests may do with each of `services` (by the same name or ID);
     /// services left out keep their current level.
     #[serde(default)]
@@ -3402,7 +3412,9 @@ pub async fn set_agent_grants(
                 service_ids: targets.service_ids,
                 platform_service_ids: targets.platform_service_ids,
                 account_read: body.account_read,
+                ..Default::default()
             },
+            crm: body.crm,
             guests: guest_access,
         },
         team::MachineGrantMode::Replace,
@@ -3410,7 +3422,7 @@ pub async fn set_agent_grants(
     .await?;
     let agent = Box::pin(team::set_grants(&state.db, &owner, &id, change)).await?;
     Ok(Json(json!({"id": agent.id, "services": targets.slugs,
-        "account_read": agent.grants.account_read})))
+        "account_read": agent.grants.account_read, "crm": agent.grants.crm})))
 }
 
 pub async fn destroy_agent_route(

@@ -382,6 +382,7 @@ async fn agent_skill_stale_revision_and_other_owner_refused() {
         &f.chat.agent_id,
         team::GrantChange::Replace {
             grants: Default::default(),
+            crm: Some(vec![]),
             guests: Default::default(),
         },
     )

@@ -266,6 +266,7 @@ pub fn schema(name: &str) -> Value {
                     "description": "Short unique name, e.g. github-analyst"},
                 "description": {"type": "string", "minLength": 1, "maxLength": 2048,
                     "description": "The specialist's role and scope, reused for future work"},
+                "crm": {"type":"array","maxItems":16,"items":{"type":"object","required":["owner_id","object","capabilities"],"properties":{"owner_id":{"type":"string","format":"uuid"},"object":{"type":"string","maxLength":48},"capabilities":{"type":"array","maxItems":3,"items":{"type":"string","enum":["read","write","schema"]}}},"additionalProperties":false}},
                 "services": services(),
                 "machines": {"type":"array","maxItems":64,"items":string(200)},
                 "logins": {"type":"array","maxItems":64,"items":string(200)},
@@ -303,7 +304,8 @@ pub fn schema(name: &str) -> Value {
             json!({"subagent": subagent, "services": services(),
                 "machines": {"type":"array","maxItems":64,"items":string(200)},
                 "logins": {"type":"array","maxItems":64,"items":string(200)},
-                "account_read": {"type": "boolean"}}),
+                "crm": {"type": "array", "maxItems": 16, "items": {"type":"object", "required":["owner_id","object","capabilities"], "properties":{"owner_id":{"type":"string"},"object":{"type":"string"},"capabilities":{"type":"array","items":{"type":"string","enum":["read","write","schema"]}}},"additionalProperties":false}},
+            "account_read": {"type": "boolean"}}),
             vec!["subagent"],
         ),
         "search_agent_skills" => (

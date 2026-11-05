@@ -1660,6 +1660,7 @@ mod tests {
             &state.encryption_keys,
             ACTOR,
             team::CreateRequest {
+                crm: vec![],
                 machines: None,
                 logins: None,
                 name: "learner".into(),

@@ -1443,6 +1443,7 @@ mod tests {
             &state.encryption_keys,
             &owner,
             crate::services::assistant_team_service::CreateRequest {
+                crm: vec![],
                 machines: None,
                 logins: None,
                 name: "reader".into(),

@@ -2168,6 +2168,11 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                     if !eligible {continue;}
                     ("group", json!({"type":"group","id":id}))
                 }
+                Ok(LiveEvent::Crm { owner_id, user_id: recipient }) if recipient == user_id => {
+                    if !crate::services::org_service::resolve_owner_access(&state.db,&user_id,&owner_id).await.is_ok_and(|access|access.can_read()) {continue;}
+                    if !crate::services::feature_flag_service::personal_flag_enabled(&state.db,&user_id,crate::services::crm::FLAG_KEY).await.unwrap_or(false) {continue;}
+                    ("crm",json!({"type":"crm","owner_id":owner_id}))
+                }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {
                     ("group", json!({"type": "group", "id": id}))
                 }

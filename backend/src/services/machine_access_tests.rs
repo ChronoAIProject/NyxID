@@ -302,6 +302,7 @@ async fn machine_access_new_specialist_machine_selection_stores_explicit_denial(
         &f.state.encryption_keys,
         &f.owner,
         super::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: Some(vec![n.id.clone()]),
             logins: None,
             name: "new-worker".into(),
@@ -1336,6 +1337,7 @@ async fn machine_access_flag_off_new_specialist_creation_snapshots_legacy() {
         &f.state.encryption_keys,
         &f.owner,
         super::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: Some(vec![n.id.clone()]),
             logins: None,
             name: "legacy-worker".into(),

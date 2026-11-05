@@ -558,6 +558,7 @@ pub async fn agent_for_conversation(
                 agent.saved_login_ids.clear();
                 agent.guest_access.clear();
                 agent.grants.account_read = false;
+                agent.grants.crm.clear();
                 agent.home_conversation_id = None;
                 agent.access_mode_override = None;
             }
@@ -1084,6 +1085,7 @@ pub struct CreateRequest {
     pub persona: Option<String>,
     pub targets: GrantTargets,
     pub account_read: bool,
+    pub crm: Vec<crate::models::assistant_agent::CrmGrant>,
     pub specialty: Option<String>,
     /// `user` or `nyxbot`.
     pub created_by: &'static str,
@@ -1153,6 +1155,7 @@ pub(crate) async fn create_approved_specialist(
         ));
     }
     if request.account_read
+        || !request.crm.is_empty()
         || !request.targets.service_ids.is_empty()
         || !request.targets.platform_service_ids.is_empty()
         || !request.targets.slugs.is_empty()
@@ -1293,6 +1296,7 @@ async fn create_specialist_inner(
         description,
         specialty: request.specialty.clone(),
         grants: AgentGrants {
+            crm: request.crm.clone(),
             service_ids: request.targets.service_ids.clone(),
             platform_service_ids: request.targets.platform_service_ids.clone(),
             account_read: request.account_read,
@@ -1325,6 +1329,7 @@ async fn create_specialist_inner(
         created_at: now,
         updated_at: now,
     };
+    super::crm::tools::validate_grants(db, owner, &agent.grants.crm).await?;
     Box::pin(super::org_agent_service::validate_grants(db, actor, &agent)).await?;
     let authority = authority.cloned();
     let claimed_step = claimed_step.cloned();
@@ -1418,6 +1423,7 @@ async fn create_specialist_inner(
                 "service_ids": &agent.grants.service_ids,
                 "platform_service_ids": &agent.grants.platform_service_ids,
                 "account_read": agent.grants.account_read,
+                "crm": &agent.grants.crm,
             }),
         )
         .await;
@@ -1709,9 +1715,11 @@ pub enum GrantChange {
         mode: MachineGrantMode,
     },
     /// The owner's full replacement of services and account access, with
-    /// the guest access levels it names (others are kept).
+    /// the guest access levels it names (others are kept). CRM is independently
+    /// optional so an older client cannot revoke grants it never received.
     Replace {
         grants: AgentGrants,
+        crm: Option<Vec<crate::models::assistant_agent::CrmGrant>>,
         guests: BTreeMap<String, GuestAccess>,
     },
     /// Add these targets, and account access when `account_read` is set.
@@ -1744,9 +1752,11 @@ impl GrantChange {
         match self {
             Self::Replace {
                 grants: replacement,
+                crm,
                 guests: levels,
             } => {
                 grants = replacement.clone();
+                grants.crm = crm.clone().unwrap_or_else(|| current.crm.clone());
                 guests.extend(levels.clone());
             }
             Self::Add(add) => {
@@ -1761,6 +1771,21 @@ impl GrantChange {
                     }
                 }
                 grants.account_read |= add.account_read;
+                for grant in &add.crm {
+                    if let Some(current) = grants
+                        .crm
+                        .iter_mut()
+                        .find(|g| g.owner_id == grant.owner_id && g.object == grant.object)
+                    {
+                        for capability in &grant.capabilities {
+                            if !current.capabilities.contains(capability) {
+                                current.capabilities.push(*capability);
+                            }
+                        }
+                    } else {
+                        grants.crm.push(grant.clone());
+                    }
+                }
             }
             Self::Remove(remove) => {
                 grants
@@ -1770,6 +1795,18 @@ impl GrantChange {
                     .platform_service_ids
                     .retain(|id| !remove.platform_service_ids.contains(id));
                 grants.account_read &= !remove.account_read;
+                for grant in &remove.crm {
+                    if let Some(current) = grants
+                        .crm
+                        .iter_mut()
+                        .find(|g| g.owner_id == grant.owner_id && g.object == grant.object)
+                    {
+                        current
+                            .capabilities
+                            .retain(|c| !grant.capabilities.contains(c));
+                    }
+                }
+                grants.crm.retain(|g| !g.capabilities.is_empty());
             }
             Self::Guests(levels) => guests.extend(levels.clone()),
             Self::Machine { .. } | Self::GuestOperations { .. } => unreachable!("handled above"),
@@ -1840,6 +1877,7 @@ pub(crate) async fn sync_thread_authority(
             KeyAuthority::ModelSetup(agent.user_id.clone())
         } else if row.shared_agent_thread {
             let grants = crate::models::assistant_agent::AgentGrants {
+                crm: vec![],
                 service_ids: agent
                     .grants
                     .service_ids
@@ -1941,6 +1979,7 @@ pub async fn apply_grants_in_session(
         .filter(|id| !grants.service_ids.contains(id) && !grants.platform_service_ids.contains(id))
         .cloned()
         .collect();
+    super::crm::tools::validate_grants(db, &agent.user_id, &grants.crm).await?;
     let lost_account = agent.grants.account_read && !grants.account_read;
     super::shared_agent_service::remove_grants_in_session(db, &agent.id, &removed, session).await?;
     agent.grants = grants;
@@ -2088,6 +2127,7 @@ pub async fn set_grants_as(
             "service_ids": &agent.grants.service_ids,
             "platform_service_ids": &agent.grants.platform_service_ids,
             "account_read": agent.grants.account_read,
+            "crm": &agent.grants.crm,
             "guest_access": &agent.guest_access,
             "guest_scoped_service_ids": agent.guest_operation_scopes.keys().collect::<Vec<_>>(),
             "guest_operation_count": agent.guest_operation_scopes.values().map(|scope| scope.operations.len()).sum::<usize>(),
@@ -2478,6 +2518,7 @@ pub struct AgentSummary {
     pub status: &'static str,
     pub services: Vec<String>,
     pub account_read: bool,
+    pub crm: Vec<crate::models::assistant_agent::CrmGrant>,
     /// What guests may do with each granted service, by the name in
     /// `services`: `read`, `use` or `all`.
     pub guest_access: BTreeMap<String, &'static str>,
@@ -2766,6 +2807,7 @@ pub async fn summaries(
                 })
                 .collect(),
             account_read: agent.grants.account_read,
+            crm: agent.grants.crm.clone(),
             guest_access: agent
                 .grants
                 .service_ids
@@ -2949,8 +2991,34 @@ pub async fn roster_note(db: &Database, owner: &str) -> AppResult<String> {
         } else {
             identifier(&row.name)
         };
+        let crm = if row.crm.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; CRM {}",
+                row.crm
+                    .iter()
+                    .take(16)
+                    .map(|grant| format!(
+                        "{} [{}]",
+                        identifier(&grant.object),
+                        grant
+                            .capabilities
+                            .iter()
+                            .map(|capability| match capability {
+                                crate::models::assistant_agent::CrmCapability::Read => "read",
+                                crate::models::assistant_agent::CrmCapability::Write => "write",
+                                crate::models::assistant_agent::CrmCapability::Schema => "schema",
+                            })
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            )
+        };
         note.push_str(&format!(
-            "\n- {} [{}] services: {}{}{}",
+            "\n- {} [{}] services: {}{}{}{}",
             name,
             row.status,
             if row.services.is_empty() {
@@ -2967,6 +3035,7 @@ pub async fn roster_note(db: &Database, owner: &str) -> AppResult<String> {
             } else {
                 ""
             },
+            crm,
             if row.pending_requests.is_empty() {
                 String::new()
             } else {

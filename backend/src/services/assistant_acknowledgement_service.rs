@@ -424,6 +424,9 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             Sensitive
         });
     }
+    if let Some(class) = super::crm::tools::action_class(name) {
+        return Some(class);
+    }
     if !team::TOOL_NAMES.contains(&name) && !team::AGENT_TOOL_NAMES.contains(&name) {
         return None;
     }
@@ -464,7 +467,7 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
             | "update_schedule"
             | "machine_pair"
     ) || (name == "spawn_subagent"
-        && grants(&["services", "account_read", "machines", "logins"]))
+        && grants(&["services", "crm", "account_read", "machines", "logins"]))
         || (name == "update_subagent" && grants(&["model"]))
         || (name == "decide_permission" && args["decision"].as_str() == Some("allow"))
     {

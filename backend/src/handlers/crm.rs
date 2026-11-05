@@ -22,8 +22,16 @@ use crate::{
     },
 };
 
+const EXPORT_MAX_RECORDS: u32 = 100;
+
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/people", get(list_people))
+        .route("/people/lookup", post(lookup_people))
+        .route("/people/{id}", get(get_person))
+        .route("/import/preview", post(preview_import))
+        .route("/import/commit", post(commit_import))
+        .route("/export", post(export_table))
         .route("/objects", get(list_objects))
         .route("/objects/{key}", get(get_object))
         .route("/objects/{key}/fields", post(add_field))
@@ -44,6 +52,7 @@ pub fn router() -> Router<AppState> {
             get(get_view).put(update_view).delete(delete_view),
         )
         .route("/views/validate", post(validate_view))
+        .route("/views/generate", post(generate_view))
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -69,6 +78,7 @@ struct ObjectListResponse {
 #[derive(Debug, Serialize)]
 struct ViewListResponse {
     views: Vec<views::ViewResponse>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -308,11 +318,45 @@ async fn table_query(
     headers: HeaderMap,
     Json(body): Json<TableBody>,
 ) -> AppResult<Json<query::TableResult>> {
-    let actor = guard(&state, &auth).await?;
-    let (owner, _) = owner_access(&state, &actor, body.owner_id.as_deref()).await?;
-    let receipt = mutation_receipt(&headers, &owner, &actor, "POST", "/query", &[], &body)?;
+    execute_table(&state, &auth, &headers, body, "/query", None).await
+}
+
+async fn export_table(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<TableBody>,
+) -> AppResult<Json<query::TableResult>> {
+    execute_table(
+        &state,
+        &auth,
+        &headers,
+        body,
+        "/export",
+        Some(EXPORT_MAX_RECORDS),
+    )
+    .await
+}
+
+async fn execute_table(
+    state: &AppState,
+    auth: &AuthUser,
+    headers: &HeaderMap,
+    body: TableBody,
+    route_template: &str,
+    max_page_size: Option<u32>,
+) -> AppResult<Json<query::TableResult>> {
+    let actor = guard(state, auth).await?;
+    let (owner, _) = owner_access(state, &actor, body.owner_id.as_deref()).await?;
+    let receipt = mutation_receipt(headers, &owner, &actor, "POST", route_template, &[], &body)?;
     if let Some(response) = records::lookup_receipt(&state.db, receipt.as_ref()).await? {
         return Ok(Json(response));
+    }
+    if max_page_size.is_some_and(|maximum| !(1..=maximum).contains(&body.query.page_size)) {
+        return Err(crm::validation_error(
+            "page_size",
+            "exports require between 1 and 100 records",
+        ));
     }
     let response = query::table(&state.db, &owner, &body.query).await?;
     Ok(Json(
@@ -576,12 +620,14 @@ async fn related_records(
 async fn list_views(
     State(state): State<AppState>,
     auth: AuthUser,
-    Query(query): Query<OwnerQuery>,
+    Query(query): Query<ActivityQuery>,
 ) -> AppResult<Json<ViewListResponse>> {
     let actor = guard(&state, &auth).await?;
     let (owner, _) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
+    let page = views::list_page(&state.db, &owner, query.cursor.as_deref()).await?;
     Ok(Json(ViewListResponse {
-        views: views::list(&state.db, &owner).await?,
+        views: page.views,
+        next_cursor: page.next_cursor,
     }))
 }
 
@@ -720,6 +766,84 @@ async fn validate_view(
     ))
 }
 
+async fn list_people(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ActivityQuery>,
+) -> AppResult<Json<crm::people::PeoplePage>> {
+    let actor = guard(&state, &auth).await?;
+    let (owner, _) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
+    Ok(Json(
+        crm::people::list(&state.db, &owner, query.cursor.as_deref()).await?,
+    ))
+}
+async fn get_person(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<OwnerQuery>,
+) -> AppResult<Json<crm::people::Person>> {
+    let actor = guard(&state, &auth).await?;
+    let (owner, _) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
+    Ok(Json(crm::people::get(&state.db, &owner, &id).await?))
+}
+#[derive(Serialize, Deserialize)]
+struct ImportBody {
+    owner_id: Option<String>,
+    #[serde(flatten)]
+    input: crm::transfer::ImportInput,
+}
+async fn preview_import(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<ImportBody>,
+) -> AppResult<Json<crm::transfer::ImportResult>> {
+    let actor = guard(&state, &auth).await?;
+    let (owner, access) = owner_access(&state, &actor, body.owner_id.as_deref()).await?;
+    require_work(access)?;
+    Ok(Json(
+        crm::transfer::import(
+            &state.db,
+            &owner,
+            CrmActor::human(actor),
+            body.input,
+            false,
+            None,
+        )
+        .await?,
+    ))
+}
+async fn commit_import(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<ImportBody>,
+) -> AppResult<Json<crm::transfer::ImportResult>> {
+    let actor = guard(&state, &auth).await?;
+    let (owner, access) = owner_access(&state, &actor, body.owner_id.as_deref()).await?;
+    require_work(access)?;
+    let receipt = mutation_receipt(
+        &headers,
+        &owner,
+        &actor,
+        "POST",
+        "/import/commit",
+        &[],
+        &body,
+    )?;
+    let result = crm::transfer::import(
+        &state.db,
+        &owner,
+        CrmActor::human(actor),
+        body.input,
+        true,
+        receipt,
+    )
+    .await?;
+    audit(&state, &auth, "crm_import_committed", &owner, None);
+    Ok(Json(result))
+}
+
 async fn guard(state: &AppState, auth: &AuthUser) -> AppResult<String> {
     super::login_client_context::require_first_party_human(auth)?;
     let actor = auth.user_id.to_string();
@@ -727,6 +851,45 @@ async fn guard(state: &AppState, auth: &AuthUser) -> AppResult<String> {
         return Err(AppError::NotFound("CRM not found".into()));
     }
     Ok(actor)
+}
+
+#[derive(Deserialize, Serialize)]
+struct GenerateBody {
+    owner_id: Option<String>,
+    #[serde(flatten)]
+    input: crm::generation::GenerateInput,
+}
+
+async fn generate_view(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    headers: HeaderMap,
+    Json(body): Json<GenerateBody>,
+) -> AppResult<Json<crm::generation::GenerateResponse>> {
+    let actor = guard(&state, &auth).await?;
+    let (owner, access) = owner_access(&state, &actor, body.owner_id.as_deref()).await?;
+    require_work(access)?;
+    let receipt = mutation_receipt(
+        &headers,
+        &owner,
+        &actor,
+        "POST",
+        "/views/generate",
+        &[],
+        &body,
+    )?;
+    let receipt = receipt.ok_or_else(|| {
+        crm::validation_error("Idempotency-Key", "is required for paid generation")
+    })?;
+    let response = Box::pin(crm::generation::generate_once(
+        &state, &actor, &owner, body.input, receipt,
+    ))
+    .await?;
+    // A generation grants no lasting access, and saving remains a separate human action.
+    let (_, live_access) = owner_access(&state, &actor, Some(&owner)).await?;
+    require_work(live_access)?;
+    audit(&state, &auth, "crm_view_generated", &owner, None);
+    Ok(Json(response))
 }
 
 async fn owner_access(
@@ -914,4 +1077,22 @@ mod tests {
             Err(AppError::NotFound(_))
         ));
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LookupPeopleInput {
+    owner_id: Option<String>,
+    ids: Vec<String>,
+}
+async fn lookup_people(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<LookupPeopleInput>,
+) -> AppResult<Json<serde_json::Value>> {
+    let actor = guard(&state, &auth).await?;
+    let (owner, _) = owner_access(&state, &actor, body.owner_id.as_deref()).await?;
+    Ok(Json(
+        serde_json::json!({"people":crm::people::lookup(&state.db,&owner,&body.ids).await?}),
+    ))
 }

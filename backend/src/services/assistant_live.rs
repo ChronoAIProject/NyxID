@@ -40,6 +40,7 @@ const CAPACITY: usize = 1024;
 /// Per-owner buffer for browser streams.
 const OWNER_CAPACITY: usize = 64;
 const ORG_QUEUE_CAPACITY: usize = 256;
+const CRM_QUEUE_CAPACITY: usize = 256;
 const ORG_COALESCE_WINDOW: Duration = Duration::from_millis(250);
 /// Live browser streams one owner may hold open at once (tabs, devices).
 pub const MAX_STREAMS_PER_OWNER: usize = 8;
@@ -115,6 +116,11 @@ pub enum LiveEvent {
         user_id: String,
         watch_id: String,
     },
+    /// CRM owner changed; contains no record, field, or activity content.
+    Crm {
+        owner_id: String,
+        user_id: String,
+    },
     /// Changes may have been missed (the stream restarted or a receiver
     /// fell behind): re-read state instead of trusting the event history.
     Resync,
@@ -124,7 +130,8 @@ impl LiveEvent {
     /// The owner the event concerns; `None` for `Resync`.
     pub fn user_id(&self) -> Option<&str> {
         match self {
-            Self::Conversation { user_id, .. }
+            Self::Crm { user_id, .. }
+            | Self::Conversation { user_id, .. }
             | Self::Group { user_id, .. }
             | Self::OrgGroup { user_id, .. }
             | Self::ConnectLink { user_id, .. }
@@ -267,6 +274,55 @@ impl AssistantLive {
     }
 
     pub(crate) async fn publish_resolved(&self, db: &Database, event: LiveEvent) {
+        if let LiveEvent::Crm { owner_id, .. } = &event {
+            if db
+                .collection::<Document>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id":owner_id,"user_type":"person","is_active":true})
+                .projection(doc! {"_id":1})
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                self.publish(LiveEvent::Crm {
+                    owner_id: owner_id.clone(),
+                    user_id: owner_id.clone(),
+                });
+                return;
+            }
+            // Only current subscribers are candidates. Recheck membership at delivery.
+            let candidates: Vec<String> = self
+                .owners
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .keys()
+                .cloned()
+                .collect();
+            use futures::TryStreamExt;
+            for chunk in candidates.chunks(200) {
+                let members: Result<Vec<Document>, _> = async {
+                    db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
+                        .find(doc! {"org_user_id":owner_id,"member_user_id":{"$in":chunk},"revoked_at":mongodb::bson::Bson::Null})
+                        .projection(doc! {"member_user_id":1}).limit(200).max_time(Duration::from_secs(5)).await?.try_collect().await
+                }.await;
+                if let Ok(members) = members {
+                    for member in members {
+                        if let Ok(user_id) = member.get_str("member_user_id") {
+                            self.publish(LiveEvent::Crm {
+                                owner_id: owner_id.clone(),
+                                user_id: user_id.into(),
+                            });
+                        }
+                    }
+                }
+            }
+            self.publish(LiveEvent::Crm {
+                owner_id: owner_id.clone(),
+                user_id: owner_id.clone(),
+            });
+            return;
+        }
+
         let LiveEvent::OrgGroup { id, .. } = &event else {
             self.publish(event);
             return;
@@ -323,11 +379,18 @@ impl AssistantLive {
         }
     }
 
-    /// Never wait for organization reads in the replica-wide stream. A full
-    /// queue drops an identifier; browser polling and the worker sweep repair
-    /// missed notifications. Personal events always take the direct path.
-    fn route(&self, org_groups: &mpsc::Sender<String>, event: LiveEvent) {
-        if let LiveEvent::OrgGroup { id, .. } = event {
+    /// Never wait for owner-resolution reads in the replica-wide stream. CRM
+    /// and org groups have independent budgets so a CRM import cannot consume
+    /// admission capacity or worker time needed by an existing group event.
+    fn route(
+        &self,
+        org_groups: &mpsc::Sender<String>,
+        crm_owners: &mpsc::Sender<String>,
+        event: LiveEvent,
+    ) {
+        if let LiveEvent::Crm { owner_id, .. } = event {
+            let _ = crm_owners.try_send(owner_id);
+        } else if let LiveEvent::OrgGroup { id, .. } = event {
             let _ = org_groups.try_send(id);
         } else {
             self.publish(event);
@@ -337,17 +400,32 @@ impl AssistantLive {
     /// Follow the database's change stream until the process exits,
     /// reopening it (resuming where possible) after any error.
     pub async fn run(&self, db: Database) {
-        let (org_groups, pending) = mpsc::channel(ORG_QUEUE_CAPACITY);
-        // JoinSet aborts the sole worker when run is cancelled (including tests).
+        let (org_groups, pending_org_groups) = mpsc::channel(ORG_QUEUE_CAPACITY);
+        let (crm_owners, pending_crm_owners) = mpsc::channel(CRM_QUEUE_CAPACITY);
+        // JoinSet aborts both workers when run is cancelled (including tests).
         let mut workers = tokio::task::JoinSet::new();
         let live = self.clone();
         let worker_db = db.clone();
         workers.spawn(async move {
-            org_group_worker(pending, |id| {
+            coalescing_worker(pending_org_groups, ORG_QUEUE_CAPACITY, |id| {
                 live.publish_resolved(
                     &worker_db,
                     LiveEvent::OrgGroup {
                         id,
+                        user_id: String::new(),
+                    },
+                )
+            })
+            .await;
+        });
+        let live = self.clone();
+        let worker_db = db.clone();
+        workers.spawn(async move {
+            coalescing_worker(pending_crm_owners, CRM_QUEUE_CAPACITY, |owner_id| {
+                live.publish_resolved(
+                    &worker_db,
+                    LiveEvent::Crm {
+                        owner_id,
                         user_id: String::new(),
                     },
                 )
@@ -359,7 +437,7 @@ impl AssistantLive {
         loop {
             let mut opened = false;
             let outcome = self
-                .follow(&db, &org_groups, &mut resume, &mut opened)
+                .follow(&db, &org_groups, &crm_owners, &mut resume, &mut opened)
                 .await;
             self.open.send_replace(false);
             if opened {
@@ -384,6 +462,7 @@ impl AssistantLive {
         &self,
         db: &Database,
         org_groups: &mpsc::Sender<String>,
+        crm_owners: &mpsc::Sender<String>,
         resume: &mut Option<ResumeToken>,
         opened: &mut bool,
     ) -> mongodb::error::Result<()> {
@@ -403,7 +482,7 @@ impl AssistantLive {
             let change = change?;
             *resume = Some(change.id.clone());
             if let Some(event) = decode(&change) {
-                self.route(org_groups, event);
+                self.route(org_groups, crm_owners, event);
             }
         }
         Ok(())
@@ -413,15 +492,18 @@ impl AssistantLive {
 /// One bounded worker, with one eligibility resolution per distinct group in
 /// each batch. Even a continuously busy group cannot extend the coalescing
 /// window or grow the batch beyond the queue capacity plus the first item.
-async fn org_group_worker<F, Fut>(mut pending: mpsc::Receiver<String>, mut resolve: F)
-where
+async fn coalescing_worker<F, Fut>(
+    mut pending: mpsc::Receiver<String>,
+    capacity: usize,
+    mut resolve: F,
+) where
     F: FnMut(String) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     while let Some(first) = pending.recv().await {
         tokio::time::sleep(ORG_COALESCE_WINDOW).await;
         let mut groups = HashSet::from([first]);
-        for _ in 0..ORG_QUEUE_CAPACITY {
+        for _ in 0..capacity {
             let Ok(id) = pending.try_recv() else { break };
             groups.insert(id);
         }
@@ -450,6 +532,7 @@ fn pipeline() -> Vec<Document> {
                         1,
                     ]}},
                 ]},
+                {"ns.coll": {"$in": ["crm_records", "crm_objects", "crm_activities", "crm_saved_views"]}},
                 {"ns.coll": {"$in": [GROUPS, GROUP_MESSAGES]}},
                 {"ns.coll": CHANNEL_THREADS,"$or":[
                     {"operationType":{"$in":["insert","replace"]}},
@@ -481,7 +564,7 @@ fn pipeline() -> Vec<Document> {
         }},
         doc! {"$project": {
             "operationType": 1, "ns": 1, "documentKey": 1,
-            "fullDocument.user_id": 1, "fullDocument.group_id": 1,
+            "fullDocument.user_id": 1, "fullDocument.owner_id": 1, "fullDocument.group_id": 1,
             "fullDocument.collaboration": 1, "fullDocument.created_by_user_id": 1, "fullDocument.org_group": 1,
             "fullDocument.group_request_id": 1,
             "fullDocument.assistant_group.group_id": 1,
@@ -506,6 +589,15 @@ fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
     }
     let collection = change.ns.as_ref()?.coll.as_deref()?;
     let full = change.full_document.as_ref()?;
+    if matches!(
+        collection,
+        "crm_records" | "crm_objects" | "crm_activities" | "crm_saved_views"
+    ) {
+        return Some(LiveEvent::Crm {
+            owner_id: full.get_str("owner_id").ok()?.into(),
+            user_id: String::new(),
+        });
+    }
     let user_id = full.get_str("user_id").ok()?.to_owned();
     let key = change
         .document_key
@@ -608,10 +700,11 @@ mod tests {
         let live = AssistantLive::new();
         let mut owner = live.subscribe_owner("person").unwrap();
         let (queue, pending) = mpsc::channel(ORG_QUEUE_CAPACITY);
+        let (crm, _pending_crm) = mpsc::channel(CRM_QUEUE_CAPACITY);
         let (started, mut resolutions) = mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Notify::new());
         let blocker = release.clone();
-        let worker = tokio::spawn(org_group_worker(pending, move |id| {
+        let worker = tokio::spawn(coalescing_worker(pending, ORG_QUEUE_CAPACITY, move |id| {
             let started = started.clone();
             let blocker = blocker.clone();
             async move {
@@ -623,6 +716,7 @@ mod tests {
         for _ in 0..ORG_QUEUE_CAPACITY * 2 {
             live.route(
                 &queue,
+                &crm,
                 LiveEvent::OrgGroup {
                     id: "group".into(),
                     user_id: "org".into(),
@@ -644,7 +738,7 @@ mod tests {
             messages: 1,
             title_changed: false,
         };
-        live.route(&queue, personal.clone());
+        live.route(&queue, &crm, personal.clone());
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), owner.events.recv())
                 .await
@@ -663,6 +757,42 @@ mod tests {
             resolutions.recv().await.is_none(),
             "all duplicate group ids coalesced into one resolution"
         );
+    }
+
+    #[tokio::test]
+    async fn crm_queue_saturation_never_occupies_org_group_queue() {
+        let live = AssistantLive::new();
+        let (org_groups, mut pending_org_groups) = mpsc::channel(1);
+        let (crm_owners, mut pending_crm_owners) = mpsc::channel(1);
+
+        for owner_id in ["crm-owner-first", "crm-owner-overflow"] {
+            live.route(
+                &org_groups,
+                &crm_owners,
+                LiveEvent::Crm {
+                    owner_id: owner_id.into(),
+                    user_id: String::new(),
+                },
+            );
+        }
+        live.route(
+            &org_groups,
+            &crm_owners,
+            LiveEvent::OrgGroup {
+                id: "org-group-must-not-drop".into(),
+                user_id: "org-owner".into(),
+            },
+        );
+
+        assert_eq!(
+            pending_org_groups.recv().await.as_deref(),
+            Some("org-group-must-not-drop")
+        );
+        assert_eq!(
+            pending_crm_owners.recv().await.as_deref(),
+            Some("crm-owner-first")
+        );
+        assert!(pending_crm_owners.try_recv().is_err());
     }
 
     #[test]
@@ -832,5 +962,113 @@ mod tests {
             ]
         );
         runner.abort();
+    }
+}
+
+#[cfg(test)]
+mod crm_tests {
+    use super::*;
+    #[test]
+    fn crm_projection_never_contains_record_note_or_view_payloads() {
+        let stages = pipeline();
+        let project = stages.last().unwrap().get_document("$project").unwrap();
+        assert_eq!(project.get_i32("fullDocument.owner_id"), Ok(1));
+        for private in [
+            "values",
+            "refs",
+            "body",
+            "envelope",
+            "actor",
+            "field_sources",
+        ] {
+            assert!(!project.contains_key(&format!("fullDocument.{private}")));
+        }
+        for collection in [
+            "crm_records",
+            "crm_objects",
+            "crm_activities",
+            "crm_saved_views",
+        ] {
+            let change:ChangeStreamEvent<Document>=mongodb::bson::from_document(doc!{"_id":{"_data":"token"},"operationType":"insert","ns":{"db":"test","coll":collection},"documentKey":{"_id":"private-id"},"fullDocument":{"owner_id":"owner","values":{"name":"Secret"},"body":"Private note"}}).unwrap();
+            assert_eq!(
+                decode(&change),
+                Some(LiveEvent::Crm {
+                    owner_id: "owner".into(),
+                    user_id: String::new()
+                })
+            );
+        }
+    }
+    #[tokio::test]
+    async fn crm_live_coalesces_owner_changes_and_resolves_only_current_member_recipients() {
+        let db = crate::test_utils::connect_transaction_test_database("crm_live_recipients").await;
+        let personal = uuid::Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &personal,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let org = uuid::Uuid::new_v4().to_string();
+        let live = AssistantLive::new();
+        let mut person = live.subscribe_owner(&personal).unwrap();
+        let mut member = live.subscribe_owner("member").unwrap();
+        let mut revoked = live.subscribe_owner("revoked").unwrap();
+        let mut unrelated = live.subscribe_owner("unrelated").unwrap();
+        db.collection::<Document>(crate::models::org_membership::COLLECTION_NAME).insert_many([doc!{"_id":"active","org_user_id":&org,"member_user_id":"member","revoked_at":mongodb::bson::Bson::Null},doc!{"_id":"revoked","org_user_id":&org,"member_user_id":"revoked","revoked_at":mongodb::bson::DateTime::now()}]).await.unwrap();
+        live.publish_resolved(
+            &db,
+            LiveEvent::Crm {
+                owner_id: personal.clone(),
+                user_id: String::new(),
+            },
+        )
+        .await;
+        assert!(
+            matches!(person.events.try_recv(),Ok(LiveEvent::Crm{owner_id,..})if owner_id==personal)
+        );
+        assert!(member.events.try_recv().is_err());
+        assert!(unrelated.events.try_recv().is_err());
+        let (org_groups, _pending_org_groups) = mpsc::channel(ORG_QUEUE_CAPACITY);
+        let (crm_owners, pending_crm_owners) = mpsc::channel(CRM_QUEUE_CAPACITY);
+        let worker_live = live.clone();
+        let worker_db = db.clone();
+        let worker = tokio::spawn(coalescing_worker(
+            pending_crm_owners,
+            CRM_QUEUE_CAPACITY,
+            move |owner_id| {
+                let live = worker_live.clone();
+                let db = worker_db.clone();
+                async move {
+                    live.publish_resolved(
+                        &db,
+                        LiveEvent::Crm {
+                            owner_id,
+                            user_id: String::new(),
+                        },
+                    )
+                    .await;
+                }
+            },
+        ));
+        for _ in 0..20 {
+            live.route(
+                &org_groups,
+                &crm_owners,
+                LiveEvent::Crm {
+                    owner_id: org.clone(),
+                    user_id: String::new(),
+                },
+            );
+        }
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(5),member.events.recv()).await.unwrap().unwrap(),LiveEvent::Crm{owner_id,..}if owner_id==org)
+        );
+        assert!(member.events.try_recv().is_err());
+        assert!(revoked.events.try_recv().is_err());
+        assert!(unrelated.events.try_recv().is_err());
+        worker.abort();
+        db.drop().await.unwrap();
     }
 }

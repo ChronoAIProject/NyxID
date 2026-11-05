@@ -461,6 +461,7 @@ async fn channel_model_turns_for(
         &state.encryption_keys,
         OWNER,
         CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "channel-specialist".into(),

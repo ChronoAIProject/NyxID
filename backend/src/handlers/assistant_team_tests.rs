@@ -814,6 +814,7 @@ async fn owners_create_specialists_within_limits_and_grants_resolve_only_visible
         State(state.clone()),
         test_auth_user(OWNER),
         Json(CreateAgentRequest {
+            crm: vec![],
             org: None,
             machines: None,
             logins: None,
@@ -1475,6 +1476,7 @@ async fn loop_guards_and_direct_chats_never_wake_nyxbot() {
 fn grant_changes_merge_against_the_current_grants() {
     let ids = |ids: &[&str]| ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
     let current = AgentGrants {
+        crm: vec![],
         service_ids: ids(&["a", "b"]),
         platform_service_ids: ids(&["p"]),
         account_read: true,
@@ -1491,6 +1493,7 @@ fn grant_changes_merge_against_the_current_grants() {
     assert_eq!(added.platform_service_ids, ids(&["p"]));
     assert!(added.account_read);
     let (removed, _) = team::GrantChange::Remove(AgentGrants {
+        crm: vec![],
         service_ids: ids(&["a"]),
         platform_service_ids: ids(&["p"]),
         account_read: false,
@@ -1509,6 +1512,7 @@ fn grant_changes_merge_against_the_current_grants() {
     assert_eq!(
         team::GrantChange::Replace {
             grants: AgentGrants::default(),
+            crm: Some(vec![]),
             guests: Default::default(),
         }
         .apply(&current, &no_guests)
@@ -1554,6 +1558,7 @@ fn grant_changes_merge_against_the_current_grants() {
             service_ids: ids(&["a", "c"]),
             ..Default::default()
         },
+        crm: Some(vec![]),
         guests: levels(&[("c", GuestAccess::Read)]),
     }
     .apply(&removed, &kept);
@@ -1563,6 +1568,7 @@ fn grant_changes_merge_against_the_current_grants() {
     );
     let (_, reset) = team::GrantChange::Replace {
         grants: replaced.clone(),
+        crm: Some(replaced.crm.clone()),
         guests: levels(&[("a", GuestAccess::Use)]),
     }
     .apply(&replaced, &kept);
@@ -1575,6 +1581,52 @@ fn grant_changes_merge_against_the_current_grants() {
     })
     .apply(&current, &levels(&[("z", GuestAccess::All)]));
     assert_eq!(regranted, none);
+}
+
+#[test]
+fn grants_request_and_transaction_distinguish_omitted_from_empty_crm() {
+    let omitted: GrantsRequest = serde_json::from_value(json!({
+        "services": ["slack"],
+        "account_read": true
+    }))
+    .unwrap();
+    let revoked: GrantsRequest = serde_json::from_value(json!({
+        "services": ["slack"],
+        "account_read": true,
+        "crm": []
+    }))
+    .unwrap();
+    assert!(omitted.crm.is_none());
+    assert_eq!(revoked.crm, Some(vec![]));
+
+    let company = crate::models::assistant_agent::CrmGrant {
+        owner_id: "owner-literal".into(),
+        object: "company".into(),
+        capabilities: vec![crate::models::assistant_agent::CrmCapability::Read],
+    };
+    let current = AgentGrants {
+        crm: vec![company.clone()],
+        ..Default::default()
+    };
+    let replacement = |crm| team::GrantChange::Replace {
+        grants: AgentGrants {
+            service_ids: vec!["slack-literal".into()],
+            ..Default::default()
+        },
+        crm,
+        guests: Default::default(),
+    };
+    assert_eq!(
+        replacement(None).apply(&current, &Default::default()).0.crm,
+        vec![company]
+    );
+    assert!(
+        replacement(Some(vec![]))
+            .apply(&current, &Default::default())
+            .0
+            .crm
+            .is_empty()
+    );
 }
 
 async fn event_budget_used(state: &AppState) -> i64 {

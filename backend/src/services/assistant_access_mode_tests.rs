@@ -106,6 +106,7 @@ async fn sharing_agent(f: &Fixture) -> (String, String, String) {
         &f.state.encryption_keys,
         &f.owner,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "shared-researcher".into(),
@@ -1148,6 +1149,7 @@ async fn full_access_set_agent_operations_widens_with_receipt_while_auto_asks() 
             &f.state.encryption_keys,
             &f.owner,
             team::CreateRequest {
+                crm: vec![],
                 machines: None,
                 logins: None,
                 name: "scope-worker".into(),

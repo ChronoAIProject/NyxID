@@ -4289,6 +4289,7 @@ async fn http_turns_inherit_specialist_model_and_preserve_explicit_and_existing_
         &state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "faq".into(),

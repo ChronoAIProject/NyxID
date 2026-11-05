@@ -426,6 +426,7 @@ async fn management_fixture(
         &state.encryption_keys,
         &base_bot.user_id,
         team::CreateRequest {
+            crm: vec![],
             name: "foreign-helper".into(),
             description: "Foreign private specialist".into(),
             display_name: None,

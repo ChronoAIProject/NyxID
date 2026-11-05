@@ -2267,6 +2267,7 @@ async fn channel_media_first_photo_org_bot_and_specialist_thread_bind_to_correct
                 &state.encryption_keys,
                 OWNER,
                 crate::services::assistant_team_service::CreateRequest {
+                    crm: vec![],
                     name: "receipts".into(),
                     description: "Receipts".into(),
                     display_name: None,

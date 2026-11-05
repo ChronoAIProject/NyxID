@@ -578,6 +578,7 @@ async fn specialist(state: &AppState) -> crate::models::assistant_agent::Assista
         &state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "schedule-researcher".into(),

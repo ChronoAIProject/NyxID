@@ -189,6 +189,7 @@ async fn specialist_fixture(name: &str, assigned: bool) -> Fixture {
         &state.encryption_keys,
         &owner,
         super::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "worker".into(),

@@ -790,6 +790,7 @@ async fn shared_transports_managed_actor_funding_once_consent_and_pre_dispatch_r
             &f.state.encryption_keys,
             &publisher,
             team::CreateRequest {
+                crm: vec![],
                 name: "managed-specialist".into(),
                 description: "Managed service".into(),
                 display_name: None,

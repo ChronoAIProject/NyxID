@@ -971,6 +971,7 @@ async fn org_review_fixture(
         &fixture.owner,
         &org,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "learning-worker".into(),

@@ -353,6 +353,19 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{validation}");
     fixtures.assert("record_validation_error", validation);
+    for (index, blank) in ["", " \t\n"].into_iter().enumerate() {
+        let (status, validation) = request(
+            &app,
+            &token,
+            "POST",
+            &format!("{BASE}/records"),
+            Some(json!({"object": "contact", "values": {"name": blank}})),
+            Some(&format!("fixture-blank-required-text-{index}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{validation}");
+        fixtures.assert("record_blank_required_text", validation);
+    }
 
     let moved = ok(
         &app,
@@ -450,6 +463,54 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     )
     .await;
     fixtures.assert("table_page_2", table_second);
+
+    let route_identity_body = json!({
+        "object": "company",
+        "filters": [],
+        "page_size": 1,
+        "include_archived": false
+    });
+    ok(
+        &app,
+        &token,
+        "POST",
+        &format!("{BASE}/query"),
+        Some(route_identity_body.clone()),
+        Some("fixture-query-versus-export"),
+    )
+    .await;
+    let (route_status, route_error) = request(
+        &app,
+        &token,
+        "POST",
+        &format!("{BASE}/export"),
+        Some(route_identity_body),
+        Some("fixture-query-versus-export"),
+    )
+    .await;
+    assert_eq!(route_status, StatusCode::CONFLICT);
+    assert_eq!(route_error["error"], "crm_idempotency_mismatch");
+
+    let (bound_status, bound_error) = request(
+        &app,
+        &token,
+        "POST",
+        &format!("{BASE}/export"),
+        Some(json!({
+            "object": "company",
+            "filters": [],
+            "page_size": 101,
+            "include_archived": false
+        })),
+        Some("fixture-export-101-records"),
+    )
+    .await;
+    assert_eq!(bound_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(bound_error["errors"][0]["path"], "page_size");
+    assert_eq!(
+        bound_error["errors"][0]["message"],
+        "exports require between 1 and 100 records"
+    );
 
     let boolean_groups = ok(
         &app,

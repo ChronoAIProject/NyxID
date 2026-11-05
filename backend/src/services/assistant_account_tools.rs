@@ -324,6 +324,12 @@ pub async fn virtual_service_for(
                 .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
         );
     }
+    if super::crm::tools::available(db, chat)
+        .await
+        .unwrap_or(false)
+    {
+        service.endpoints.extend(super::crm::tools::endpoints());
+    }
     service
 }
 
@@ -496,12 +502,14 @@ fn error_result_inner(
                 value,
             };
         }
-        AppError::SkillDraftValidation(_) => {
+        AppError::SkillDraftValidation(_)
+        | AppError::CrmValidationFailed(_)
+        | AppError::CrmViewInvalid(_)
+        | AppError::CrmRevisionConflict(_) => {
             return ToolResult {
                 permission_request: None,
                 is_error: true,
-                value: json!({"error": body.error, "error_code": body.error_code,
-                    "message": body.message, "details": body.details}),
+                value: serde_json::to_value(&body).unwrap_or_else(|_| json!({"error":"internal_error","message":"Could not serialize validation result"})),
             };
         }
         AppError::NotFound(_) | AppError::NodeNotFound(_) | AppError::ChannelBotNotFound(_) => {

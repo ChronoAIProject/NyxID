@@ -807,6 +807,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
         crate::models::crm_record::COLLECTION_NAME,
         crate::models::crm_link::COLLECTION_NAME,
         crate::models::crm_activity::COLLECTION_NAME,
+        "crm_generation_jobs",
         crate::models::crm_saved_view::COLLECTION_NAME,
         crate::models::crm_mutation_receipt::COLLECTION_NAME,
     ] {

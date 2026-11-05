@@ -1636,6 +1636,7 @@ pub async fn summaries(
             .iter()
             .find(|r| r.agent_id.as_deref() == Some(&a.id));
         result.push(super::assistant_team_service::AgentSummary {
+            crm: vec![],
             share_role: Some(access.role()),
             owner_id: a.user_id.clone(),
             owner_name: None,
@@ -1685,6 +1686,7 @@ pub async fn summaries(
             continue;
         }
         result.push(super::assistant_team_service::AgentSummary {
+            crm: vec![],
             id: id.into(), share_role: Some(ShareRole::User), owner_id: thread.agent_owner_id.clone().unwrap_or_default(),
             owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_maintain: false,
             machines: Vec::new(), logins: Vec::new(), services: Vec::new(), account_read: false,

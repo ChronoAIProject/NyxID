@@ -2975,6 +2975,7 @@ pub async fn scoped_specialist_auth(
         &state.encryption_keys,
         owner,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "scoped-worker".into(),

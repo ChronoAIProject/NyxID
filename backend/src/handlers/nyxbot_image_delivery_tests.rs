@@ -3240,6 +3240,7 @@ async fn shared_post_fixture(
         &f.state.encryption_keys,
         &publisher,
         team::CreateRequest {
+            crm: vec![],
             name: "shared-publisher".into(),
             description: "Specialist".into(),
             display_name: None,
