@@ -88,6 +88,7 @@ pub(crate) enum TextCaller {
     Title,
     Learning,
     Voice,
+    Crm,
 }
 impl TextCaller {
     fn as_str(self) -> &'static str {
@@ -95,6 +96,7 @@ impl TextCaller {
             Self::Title => "title",
             Self::Learning => "learning",
             Self::Voice => "voice",
+            Self::Crm => "crm_view",
         }
     }
 }
@@ -170,6 +172,17 @@ pub(crate) struct TextLimits {
     pub max_output_chars: usize,
     pub max_output_tokens: u16,
     pub timeout: Duration,
+}
+
+tokio::task_local! { static CRM_DISPATCHED: std::sync::Arc<std::sync::atomic::AtomicBool>; }
+/// Tracks the irreversible dispatch boundary without changing existing caller semantics.
+pub(crate) async fn track_crm_dispatch<F: std::future::Future>(work: F) -> (F::Output, bool) {
+    let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let result = CRM_DISPATCHED.scope(dispatched.clone(), work).await;
+    (
+        result,
+        dispatched.load(std::sync::atomic::Ordering::Acquire),
+    )
 }
 
 pub(crate) async fn one_shot_text(
@@ -365,7 +378,12 @@ async fn infer(
     if person.user_type != UserType::Person {
         return Ok(None);
     }
-    let utility = super::utility_inference_service::load(&state.db).await?;
+    let utility = if matches!(limits.caller, TextCaller::Crm) {
+        let settings = super::platform_settings_service::load_settings(&state.db).await?;
+        settings.crm_inference.or(settings.utility_inference)
+    } else {
+        super::utility_inference_service::load(&state.db).await?
+    };
     if let Some(config) = &utility {
         let service = state.db.collection::<DownstreamService>(COLLECTION_NAME)
             .find_one(doc! {"is_active": true, "service_type": "http", "inference.model_list": true, "slug": {"$eq": &config.service_slug, "$ne": "llm-nyx"}}).await?;
@@ -417,6 +435,9 @@ async fn infer(
             .await
             .ok());
         }
+    }
+    if matches!(limits.caller, TextCaller::Crm) {
+        return Ok(None);
     }
     // Absent/cleared config retains the legacy service-selection path. An
     // unavailable configured platform service is excluded even if personal BYOK exists.
@@ -551,13 +572,20 @@ async fn infer_route(
         if let Some(model) = configured {
             if let Some(i) = models.iter().position(|id| id == model) {
                 let preferred = models.remove(i);
-                models.retain(|id| reasoning_effort(id).is_none());
-                models.insert(0, preferred);
+                if matches!(limits.caller, TextCaller::Crm) {
+                    models = vec![preferred];
+                } else {
+                    models.retain(|id| reasoning_effort(id).is_none());
+                    models.insert(0, preferred);
+                }
             } else {
                 if valid_model_id(model) && !route.reflects_credential(model) {
                     attempt.model = model.into();
                 }
                 attempt.refuse("no_model");
+                if matches!(limits.caller, TextCaller::Crm) {
+                    return Err(true);
+                }
                 if *attempts >= MAX_ATTEMPTS {
                     return Err(true);
                 }
@@ -596,7 +624,13 @@ async fn infer_route(
             &model,
             prompt,
             input,
-            limits.max_output_tokens.min(1024),
+            limits
+                .max_output_tokens
+                .min(if matches!(limits.caller, TextCaller::Crm) {
+                    4096
+                } else {
+                    1024
+                }),
             !reasoning_disabled(&service.id, &model),
         );
         let result = Box::pin(request(
@@ -1071,6 +1105,10 @@ async fn request_inner(
         inference.wire_protocol == InferenceWireProtocol::AnthropicMessages
     }) {
         extra_headers.push(("anthropic-version".into(), "2023-06-01".into()));
+    }
+    if body.is_some() {
+        let _ = CRM_DISPATCHED
+            .try_with(|dispatched| dispatched.store(true, std::sync::atomic::Ordering::Release));
     }
     let response = Box::pin(proxy_service::forward_request_with_extra_outbound_headers(
         client,

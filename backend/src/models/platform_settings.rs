@@ -26,6 +26,8 @@ pub struct PlatformSettings {
     #[serde(default)]
     pub utility_inference_admin_modified: bool,
     #[serde(default)]
+    pub crm_inference: Option<UtilityInference>,
+    #[serde(default)]
     pub billing: Option<BillingSettings>,
 }
 
@@ -55,6 +57,7 @@ impl PlatformSettings {
             broker_policy_revision: 0,
             utility_inference: None,
             utility_inference_admin_modified: false,
+            crm_inference: None,
             billing: None,
         }
     }

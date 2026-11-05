@@ -59,6 +59,41 @@ pub async fn put(
     get(State(state), auth).await
 }
 
+pub async fn get_crm(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<Option<UtilityResponse>>> {
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    Ok(Json(
+        crate::services::platform_settings_service::load_settings(&state.db)
+            .await?
+            .crm_inference
+            .map(|c| UtilityResponse {
+                service_slug: c.service_slug,
+                model: c.model,
+            }),
+    ))
+}
+
+pub async fn put_crm(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<Option<UtilityRoute>>,
+) -> AppResult<Json<Option<UtilityResponse>>> {
+    super::admin_helpers::require_admin(&state, &auth).await?;
+    utility::set_route(
+        &state.db,
+        body.map(|c| UtilityInference {
+            service_slug: c.service_slug,
+            model: c.model,
+        }),
+        true,
+    )
+    .await?;
+    audit_service::log_for_user(state.db.clone(), &auth, "admin_crm_inference_updated", None);
+    get_crm(State(state), auth).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +142,77 @@ mod tests {
         );
         utility::seed(&state.db).await.unwrap();
         assert!(get(State(state), auth).await.unwrap().0.is_none());
+    }
+}
+
+#[cfg(test)]
+mod crm_tests {
+    use super::*;
+    use crate::services::assistant_oneshot_inference::tests::{ACTOR, utility_fixture};
+    use mongodb::bson::{Document, doc};
+    #[tokio::test]
+    async fn crm_inference_admin_authoring_validates_platform_route_and_persists_clear() {
+        let (state, _, _) = utility_fixture().await;
+        let auth = crate::test_utils::test_auth_user(ACTOR);
+        assert!(get_crm(State(state.clone()), auth.clone()).await.is_err());
+        assert!(
+            put_crm(State(state.clone()), auth.clone(), Json(None))
+                .await
+                .is_err()
+        );
+        crate::services::role_service::seed_system_roles(&state.db)
+            .await
+            .unwrap();
+        let roles = crate::services::role_service::get_platform_role_ids(&state.db)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<Document>("users")
+            .update_one(doc! {"_id":ACTOR}, doc! {"$set":{"role_ids":[roles.admin]}})
+            .await
+            .unwrap();
+        assert!(
+            put_crm(
+                State(state.clone()),
+                auth.clone(),
+                Json(Some(UtilityRoute {
+                    service_slug: "not-a-route".into(),
+                    model: "gpt-6-luna".into()
+                }))
+            )
+            .await
+            .is_err()
+        );
+        let saved = put_crm(
+            State(state.clone()),
+            auth.clone(),
+            Json(Some(UtilityRoute {
+                service_slug: "chrono-llm-public".into(),
+                model: "gpt-6-luna".into(),
+            })),
+        )
+        .await
+        .unwrap()
+        .0
+        .unwrap();
+        assert_eq!(saved.model, "gpt-6-luna");
+        assert!(
+            put_crm(State(state.clone()), auth.clone(), Json(None))
+                .await
+                .unwrap()
+                .0
+                .is_none()
+        );
+        utility::seed(&state.db).await.unwrap();
+        assert!(
+            get_crm(State(state.clone()), auth)
+                .await
+                .unwrap()
+                .0
+                .is_none()
+        );
+        assert!(utility::load(&state.db).await.unwrap().is_some());
+        state.db.drop().await.unwrap();
     }
 }

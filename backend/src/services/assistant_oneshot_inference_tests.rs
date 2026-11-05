@@ -977,13 +977,13 @@ fn assistant_oneshot_openai_list_selects_live_non_reasoning_chat() {
 }
 
 #[tokio::test]
-async fn assistant_oneshot_utility_and_learning_use_platform_model_and_acting_person_billing() {
+async fn assistant_oneshot_utility_learning_and_crm_use_platform_model_and_acting_person_billing() {
     let (mut state, service, mock) = utility_fixture().await;
     // A personal connection must not override this server-selected platform route.
     binding(&state, &service, ACTOR, "user").await;
     billed(&mut state, &service).await;
     utility_completion(&mock).await;
-    for caller in [TextCaller::Title, TextCaller::Learning] {
+    for caller in [TextCaller::Title, TextCaller::Learning, TextCaller::Crm] {
         let mut bounds = limits();
         bounds.caller = caller;
         assert!(
@@ -995,7 +995,7 @@ async fn assistant_oneshot_utility_and_learning_use_platform_model_and_acting_pe
     let requests = mock.received_requests().await.unwrap();
     assert_eq!(
         requests.len(),
-        4,
+        6,
         "Utility model availability is live on each call"
     );
     assert!(
@@ -1004,7 +1004,7 @@ async fn assistant_oneshot_utility_and_learning_use_platform_model_and_acting_pe
             .all(|r| r.headers["authorization"] == format!("Bearer {PLATFORM}"))
     );
     let rows = crate::services::channel_x_tests::billing::settled(&state).await;
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 6);
     for row in rows {
         assert_eq!(row.billing_owner_id, ACTOR);
         assert_eq!(row.credential_class, CredentialClass::NyxidManagedMaster);
@@ -1310,4 +1310,35 @@ async fn assistant_oneshot_available_utility_model_list_failure_does_not_escape_
     );
     assert_eq!(mock.received_requests().await.unwrap().len(), 1);
     assert!(other.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn crm_caller_never_falls_back_to_an_unrelated_personal_credential() {
+    let (state, service, platform) = utility_fixture().await;
+    let personal = other_service(&state, &service).await;
+    binding(&state, &service, ACTOR, "user").await;
+    let bounds = TextLimits {
+        caller: TextCaller::Crm,
+        ..limits()
+    };
+    super::super::utility_inference_service::set(&state.db, None)
+        .await
+        .unwrap();
+    assert!(
+        Box::pin(one_shot_text(&state, ACTOR, "CRM", "Input", bounds))
+            .await
+            .is_none()
+    );
+    assert!(personal.received_requests().await.unwrap().is_empty());
+    assert!(platform.received_requests().await.unwrap().is_empty());
+    // An explicitly selected but unavailable CRM route must not fall through to utility.
+    state.db.collection::<Document>(crate::models::platform_settings::COLLECTION_NAME).update_one(doc!{"_id":crate::models::platform_settings::PLATFORM_SETTINGS_ID},doc!{"$set":{"crm_inference":{"service_slug":"missing-route","model":"text-mini"},"utility_inference":{"service_slug":&service.slug,"model":"text-mini"}}}).await.unwrap();
+    assert!(
+        Box::pin(one_shot_text(&state, ACTOR, "CRM", "Input", bounds))
+            .await
+            .is_none()
+    );
+    assert!(personal.received_requests().await.unwrap().is_empty());
+    assert!(platform.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
 }
