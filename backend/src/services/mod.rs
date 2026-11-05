@@ -321,6 +321,7 @@ pub mod assistant_team_tools;
 pub mod channel_image_audience;
 pub mod channel_image_delivery;
 pub mod channel_retry_ingress;
+pub(crate) mod channel_turn_context;
 pub mod channel_turn_delivery;
 pub mod collaboration_group_service;
 pub mod provider_link_service;

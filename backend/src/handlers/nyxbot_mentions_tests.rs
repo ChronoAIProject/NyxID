@@ -115,6 +115,15 @@ async fn external_signed_telegram_channel_post_keeps_guest_delivery_without_owne
         .replace_one(doc! {"_id": &row.id}, &row)
         .await
         .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.channel_bot_id},
+            doc! {"$set": {"platform": "telegram", "platform_bot_id": "123", "platform_bot_username": "helper_bot"}},
+        )
+        .await
+        .unwrap();
     let chat = chats::record_chat(
         &state,
         &row,
@@ -1679,6 +1688,15 @@ async fn external_lark_human_mentions_require_receiver_identity_but_all_mode_sti
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.channel_bot_id},
+            doc! {"$set":{"platform":"lark","platform_bot_id":"cli_app"}},
+        )
         .await
         .unwrap();
     put_binding(

@@ -603,6 +603,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if let Some(task) = &w.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let event = AgentEvent {
                 execution_task: w.execution_task.clone(),
+                channel_contexts: Vec::new(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,

@@ -3,6 +3,9 @@ use super::*;
 use crate::services::assistant_team_service as team;
 use crate::services::{feature_flag_service as flags, org_channel_service as org};
 
+#[path = "nyxbot_org_context_tests.rs"]
+mod context_2187;
+
 #[tokio::test]
 async fn org_channel_transport_moves_wait_for_member_and_guest_execution_actors() {
     let (state, _, server) = setup("org_channel_move_active_actors").await;
@@ -509,7 +512,9 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
                 .header("authorization",bearer).header("content-type","application/json").header("accept","*/*")
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
-            sink.lock().await.push(json!({"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes)}));
+            sink.lock().await.push(json!({"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
+                "contexts":turn_context_tests::contexts(&body),"input":body["input"],
+                "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
                 "conversation":{"id":session},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
@@ -557,6 +562,29 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
     );
     assert_eq!(seen[0]["setup"], true);
     assert_eq!(seen[1]["guest"], true);
+    assert!(seen[0]["contexts"].as_array().unwrap().is_empty());
+    let contexts = seen[1]["contexts"].as_array().unwrap();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0]["identity"]["platform"], row.platform);
+    assert_eq!(
+        contexts[0]["identity"]["channel_bot_id"],
+        row.channel_bot_id
+    );
+    assert_eq!(contexts[0]["sender"]["classification"], "org_guest");
+    assert_eq!(contexts[0]["conversation"]["kind"], "private");
+    assert_eq!(
+        seen[1]["persisted_context"]["channel_bot_id"],
+        row.channel_bot_id
+    );
+    let input = seen[1]["input"].as_str().unwrap();
+    assert!(input.contains("The linking administrator supplies transport only"));
+    assert!(input.contains("Guest model and tool use is charged to the organization"));
+    assert!(
+        input.contains(
+            "Guest execution cannot use account tools, machines, saved logins or approvals"
+        )
+    );
+    assert!(!input.contains("NyxID verified this sender as the owner."));
     for call in &seen {
         assert_eq!(call["actor"], org_id);
         assert_eq!(call["status"], 200, "{call:?}");
@@ -658,6 +686,24 @@ async fn org_channel_native_discord_recovery_keeps_member_identity_and_refuses_r
     let answer = body_text(response).await;
     assert!(answer.contains("Here is your answer"), "{answer}");
     assert_eq!(calls.lock().await.len(), 1);
+    {
+        let observed = calls.lock().await;
+        let contexts = turn_context_tests::contexts(&observed[0]);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["identity"]["platform"], "discord");
+        assert_eq!(
+            contexts[0]["identity"]["channel_bot_id"],
+            row.channel_bot_id
+        );
+        assert_eq!(contexts[0]["sender"]["classification"], "org_member");
+        assert_eq!(contexts[0]["sender"]["kind"], "human");
+        assert!(
+            !observed[0]["input"]
+                .as_str()
+                .unwrap()
+                .contains("NyxID verified this sender as the owner.")
+        );
+    }
     let stored = state
         .db
         .collection::<AssistantConversation>(CONVERSATIONS)
@@ -873,6 +919,24 @@ async fn org_channel_signed_relay_uses_verified_actor_and_deduplicates() {
         .unwrap()
         .unwrap();
     assert_eq!(reply.get_str("text").unwrap(), "Here is your answer");
+    {
+        let observed = calls.lock().await;
+        let contexts = turn_context_tests::contexts(&observed[0]);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0]["identity"]["platform"], "lark");
+        assert_eq!(
+            contexts[0]["identity"]["channel_bot_id"],
+            row.channel_bot_id
+        );
+        assert_eq!(contexts[0]["sender"]["classification"], "org_member");
+        assert_eq!(contexts[0]["sender"]["kind"], "human");
+        assert!(
+            observed[0]["input"]
+                .as_str()
+                .unwrap()
+                .contains("The linking administrator supplies transport only")
+        );
+    }
     server.abort();
     state.db.drop().await.unwrap();
 }

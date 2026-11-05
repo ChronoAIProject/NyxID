@@ -349,6 +349,9 @@ pub async fn filter_events(
                 }
             }
             event.media_event_ids.retain(|id| sources.contains(id));
+            event
+                .channel_contexts
+                .retain(|context| sources.contains(&context.source_event_id));
             event.source_event_ids = sources;
             event.reply_to = origins;
             if !event.source_event_ids.is_empty() {

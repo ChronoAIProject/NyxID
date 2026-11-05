@@ -426,6 +426,7 @@ pub async fn admit(
             let start=engine::TurnStart{
         execution_enrollment: false,
         execution_parent: None,
+        channel_context: None,
         owner_instruction_source: None,channel_uploads:Vec::new(),invocation_id:None,
                 media_event_ids: Vec::new(),acknowledgement_id:None,retry_of:None,channel_event_id:None,org_access:None,attachment_ids:vec![],group_attachments:vec![],group_request_id:None,trigger:None,conversation_id:existing.then(||s.conversation_id.clone()),text:text.clone(),model:None,origin:TurnOrigin::Channel,channel:Some(ChannelOrigin{org_execution:None,native_event_id:None,thread:None,nyxbot_channel_id:b.id.clone(),partition:s.id.clone(),platform:super::profiles::id(b.profile).into()}),title:Some("External guest conversation".into()),note:None,new_id:Some(s.conversation_id.clone()),agent_id:Some(b.agent_id.clone()),report_to:None,group_id:None,guest:true,question_key:None,question:Some(text.clone()),reply_channel:None};
             // Provider playback differs from model generation. Rebuild context from

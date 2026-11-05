@@ -1277,6 +1277,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         active_turn: Some(ActiveTurn {
             artifact_watch_id: None,
             execution_task: None,
+            channel_context: None,
             business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),

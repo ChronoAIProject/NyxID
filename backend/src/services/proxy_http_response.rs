@@ -42,7 +42,29 @@ pub(crate) fn relay_response<'a>(
     context: HttpResponseContext,
     downstream_response: reqwest::Response,
 ) -> futures::future::BoxFuture<'a, AppResult<Response>> {
-    Box::pin(relay_response_inner(state, context, downstream_response))
+    if context
+        .model_request
+        .as_ref()
+        .is_some_and(|request| request.is_setup())
+    {
+        // Publishing acceptance lets hidden setup stop its engine request. Give
+        // this relay an owner first so that stop cannot drop settlement work.
+        // Its own client token still cancels response IO, followed by settlement.
+        let state = state.clone();
+        let mut context = context;
+        // Setup requests have a server-enforced 16-token output bound. Buffer
+        // non-SSE bodies with an explicit cap/deadline, including chunked JSON.
+        context.should_stream = context.is_sse;
+        Box::pin(async move {
+            tokio::spawn(async move {
+                Box::pin(relay_response_inner(&state, context, downstream_response)).await
+            })
+            .await
+            .map_err(|_| AppError::Internal("Assistant setup response task failed".into()))?
+        })
+    } else {
+        Box::pin(relay_response_inner(state, context, downstream_response))
+    }
 }
 
 async fn relay_response_inner(
@@ -68,6 +90,9 @@ async fn relay_response_inner(
     } = context;
     let service_id = service_id.as_str();
     let path = path.as_str();
+    let setup_model = model_request
+        .as_ref()
+        .is_some_and(|request| request.is_setup());
     let bounded_admission_body = nyxagent_admission && matches!(status.as_u16(), 409 | 503);
     if status.is_success()
         && let Some(request) = &model_request
@@ -454,47 +479,64 @@ async fn relay_response_inner(
             .and_then(|value| value.to_str().ok())
             .unwrap_or("unknown")
             .to_string();
-        let mut admission_response_len = 0_i64;
+        let mut observed_response_len = 0_i64;
         let response_body = match until_client_disconnect(&downstream_cancellation, async {
-            if bounded_admission_body {
-                let mut stream = downstream_response.bytes_stream();
-                let mut captured = bytes::BytesMut::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|_| {
-                        AppError::Internal("Invalid assistant admission response".into())
-                    })?;
-                    admission_response_len =
-                        admission_response_len.saturating_add(chunk.len() as i64);
-                    if captured.len().saturating_add(chunk.len())
-                        > crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES
-                    {
-                        return Err(AppError::Internal(
-                            "Assistant admission response too large".into(),
-                        ));
+            let read_body = async {
+                if bounded_admission_body || setup_model {
+                    let limit = if bounded_admission_body {
+                        crate::services::assistant_engine_policy::ADMISSION_ERROR_BODY_MAX_BYTES
+                    } else {
+                        USAGE_CAPTURE_MAX_BYTES
+                    };
+                    let mut stream = downstream_response.bytes_stream();
+                    let mut captured = bytes::BytesMut::new();
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.map_err(|_| {
+                            AppError::Internal("Invalid assistant response body".into())
+                        })?;
+                        observed_response_len =
+                            observed_response_len.saturating_add(chunk.len() as i64);
+                        if captured.len().saturating_add(chunk.len()) > limit {
+                            return Err(AppError::Internal(
+                                "Assistant response body too large".into(),
+                            ));
+                        }
+                        captured.extend_from_slice(&chunk);
                     }
-                    captured.extend_from_slice(&chunk);
+                    Ok(captured.freeze())
+                } else {
+                    downstream_response.bytes().await.map_err(|e| {
+                        AppError::Internal(format!("Failed to read downstream response: {e}"))
+                    })
                 }
-                Ok(captured.freeze())
+            };
+            if setup_model {
+                // Bound only IO: settlement and cleanup run after timeout or
+                // disconnect, outside the cancellable/deadline-bound future.
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs),
+                    read_body,
+                )
+                .await
+                .map_err(|_| AppError::Internal("Assistant setup response timed out".into()))?
             } else {
-                downstream_response.bytes().await.map_err(|e| {
-                    AppError::Internal(format!("Failed to read downstream response: {e}"))
-                })
+                read_body.await
             }
         })
         .await
         {
             Err(_) => {
                 exchange_diagnostics.emit("client_disconnect");
-                if bounded_admission_body {
+                if bounded_admission_body || setup_model {
                     settle_meter_async(
                         state.billing.clone(),
                         metered,
-                        llm_platform_usage(None, request_body_len + admission_response_len),
+                        llm_platform_usage(None, request_body_len + observed_response_len),
                         resale_metric.and_then(|metric| {
                             resale_usage_from_optional_reported(
                                 metric,
                                 None,
-                                request_body_len + admission_response_len,
+                                request_body_len + observed_response_len,
                             )
                         }),
                         None,
@@ -505,16 +547,16 @@ async fn relay_response_inner(
             }
             Ok(Err(e)) => {
                 exchange_diagnostics.emit("body_error");
-                if bounded_admission_body {
+                if bounded_admission_body || setup_model {
                     settle_meter_async(
                         state.billing.clone(),
                         metered,
-                        llm_platform_usage(None, request_body_len + admission_response_len),
+                        llm_platform_usage(None, request_body_len + observed_response_len),
                         resale_metric.and_then(|metric| {
                             resale_usage_from_optional_reported(
                                 metric,
                                 None,
-                                request_body_len + admission_response_len,
+                                request_body_len + observed_response_len,
                             )
                         }),
                         None,

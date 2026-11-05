@@ -1491,6 +1491,29 @@ mod durability_tests {
         let (clients, _server) = crate::telemetry::erasure::test_support::clients().await;
         let user = uuid::Uuid::new_v4().to_string();
         db.collection::<Document>("users").insert_one(doc! {"_id":&user,"is_active":true,"profile_config":{"analytics":{"enabled":true,"revision":"revision"}}}).await.unwrap();
+        // Startup initializes these collections and indexes before admission.
+        // Keep cold catalog creation outside the production 250 ms bound.
+        let ready_db = super::super::transaction_service::durable_database(&weak);
+        for (collection, keys) in [
+            (
+                super::super::analytics_dispatch_service::COLLECTION,
+                doc! {"status":1,"created_at":1},
+            ),
+            (
+                super::super::analytics_dispatch_service::COLLECTION,
+                doc! {"user_id":1,"status":1,"_id":1},
+            ),
+            (
+                super::super::analytics_dispatch_service::ACCOUNTS,
+                doc! {"updated_at":1},
+            ),
+        ] {
+            ready_db
+                .collection::<Document>(collection)
+                .create_index(mongodb::IndexModel::builder().keys(keys).build())
+                .await
+                .unwrap();
+        }
         commands.lock().unwrap().clear();
         register_destinations(&weak, &clients).await.unwrap();
         let dispatch = super::super::analytics_dispatch_service::begin(&weak, &user, "revision")

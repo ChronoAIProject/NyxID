@@ -2557,7 +2557,8 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
                 .unwrap();
         assert!(error);
         assert_eq!(retry["error"], "acknowledgement_denied");
-        f.state.db.drop().await.unwrap();
+        // Registered cleanup drops this database after runtime teardown stops
+        // its readiness heartbeat; dropping it here races that live writer.
     }
 }
 

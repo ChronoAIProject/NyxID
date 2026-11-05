@@ -1574,6 +1574,41 @@ Scoped to the bot owner's account -- only resolves identities linked to the user
 
 Return `202 Accepted` with an empty body, then POST the reply asynchronously. Inline HTTP 200 response bodies are not sent to the platform (ADR-013). `reply.text` is optional when declared media attachments or supported platform metadata carry the content.
 
+NyxBot also supplies structured, server-derived channel context in the current
+turn's input for Direct and gateway delivery, personal owner/guest and verified
+org member/guest messages, and followed children. `identity.platform` is
+canonical, `identity.channel_bot_id` is the stable internal Bot identity, and
+`identity.bot_username` is the current platform username/mailbox address when
+available. Usernames remain complete through 1,024 bytes; oversized values are
+omitted with `bot_username_omitted=true`. Editable labels/names are JSON-escaped
+display data bounded to 80 characters before encoding. Conversation kind, follow
+status, verified sender kind/classification and original-message eligibility are
+separate structured fields. This context grants no authority or ACL changes.
+
+Provenance is stored on the active turn, separately from the bounded prose note,
+and resolved again from the bound channel/Bot for model preparation.
+Forwarded/quoted reference and guest guidance therefore cannot be truncated by
+long labels. Guest model-setup waits preserve the same structured source.
+Verified member and personal owner questions queued while busy retain
+independently scoped context per `source_event_id`; coalescing never transfers
+one Bot's identity to another source. Pruning removes only the revoked source's
+context. Runtime notes name both queued `event_id` and source ID, and a required
+identity lookup failure fails preparation before sending a bare question to the
+model. Joining an already running repeated question adds only a reply recipient.
+An unrelated app turn inherits no channel identity from a saved reply
+destination.
+
+Org sources retain their exact server-authored origin and are revalidated
+against live org, specialist, Bot, sender-link and transport authority.
+`sender.classification` distinguishes `org_member` and `org_guest` from personal
+`owner` and `guest`; the linking administrator supplies transport only. A
+private member home can receive queued questions from different bound bots, with
+each source validated independently of the latest reply preference. Different
+org bindings do not coalesce. Matching sources retain their individual source
+IDs; group transcript and privacy guidance appear once per validated
+channel/partition per turn. Guest constraints and org billing guidance remain
+part of required source context, outside the prose-note budget.
+
 ### Agent -> NyxID (Async, HTTP 202 then POST later)
 
 If the agent needs more time (LLM inference, tool calls, etc.), it returns `202 Accepted` with an empty body, then calls back when ready. The reply endpoint accepts either the agent's API key or the per-callback reply token minted with the inbound payload:
