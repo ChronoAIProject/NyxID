@@ -617,10 +617,42 @@ async fn catalog_identity_drift_and_expired_quote_do_not_admit_usage() {
         .await
         .unwrap();
     assert!(matches!(
+        f.billing
+            .reserve_sandbox_window(&f.producer, input.clone())
+            .await,
+        Err(AppError::Conflict(_))
+    ));
+    // A replacement under the stable slug must not retarget the old quote.
+    let mut replacement = f.service.clone();
+    replacement.id = Uuid::new_v4().to_string();
+    f.db.collection::<DownstreamService>("downstream_services")
+        .insert_one(replacement)
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.billing
+            .reserve_sandbox_window(&f.producer, input.clone())
+            .await,
+        Err(AppError::Conflict(_))
+    ));
+    f.db.collection::<Document>("downstream_services")
+        .delete_one(doc! {"_id":&f.service.id})
+        .await
+        .unwrap();
+    assert!(matches!(
         f.billing.reserve_sandbox_window(&f.producer, input).await,
         Err(AppError::Conflict(_))
     ));
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    for collection in [WINDOW_COLLECTION, USAGE] {
+        assert_eq!(
+            f.db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }
 
 mod admission;

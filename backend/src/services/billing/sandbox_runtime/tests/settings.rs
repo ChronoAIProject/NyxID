@@ -1,6 +1,9 @@
 use super::*;
 use crate::{
-    models::sandbox_billing_settings::COLLECTION_NAME as SETTINGS,
+    models::{
+        audit_log::COLLECTION_NAME as AUDIT_LOG,
+        sandbox_billing_settings::COLLECTION_NAME as SETTINGS,
+    },
     services::{audit_service::AuditActor, billing::sandbox_settings},
 };
 use futures::TryStreamExt;
@@ -51,7 +54,7 @@ async fn producer_settings_are_audited_protected_and_revision_fenced() {
             .unwrap();
     assert!(account.get_bool("platform_protected").unwrap());
     let audits: Vec<Document> =
-        f.db.collection::<Document>("audit_logs")
+        f.db.collection::<Document>(AUDIT_LOG)
             .find(doc! {"event_type":"sandbox_billing_producer_updated"})
             .await
             .unwrap()
@@ -155,8 +158,11 @@ async fn producer_settings_fail_closed_and_audit_failure_rolls_back() {
             .await
             .unwrap();
     }
-    f.db.run_command(doc! {"collMod":"audit_logs","validator":{"event_type":{"$ne":"sandbox_billing_producer_updated"}}}).await.unwrap();
-    assert!(set_producer(&f, Some(&f.producer.id), 0).await.is_err());
+    f.db.run_command(doc! {"collMod":AUDIT_LOG,"validator":{"event_type":{"$ne":"sandbox_billing_producer_updated"}}}).await.unwrap();
+    assert!(matches!(
+        set_producer(&f, Some(&f.producer.id), 0).await,
+        Err(AppError::DatabaseError(_))
+    ));
     assert!(
         sandbox_settings::load(&f.db, &f.producer.service_id)
             .await
@@ -170,6 +176,13 @@ async fn producer_settings_fail_closed_and_audit_failure_rolls_back() {
             .unwrap()
             .unwrap();
     assert!(!account.get_bool("platform_protected").unwrap_or(false));
+    assert_eq!(
+        f.db.collection::<Document>(AUDIT_LOG)
+            .count_documents(doc! {"event_type":"sandbox_billing_producer_updated"})
+            .await
+            .unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
