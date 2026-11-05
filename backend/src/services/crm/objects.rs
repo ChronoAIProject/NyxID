@@ -534,12 +534,12 @@ fn validate_option_edit(
 }
 
 fn seeded_objects(owner_id: &str, now: chrono::DateTime<Utc>) -> Vec<CrmObject> {
-    let text = |key: &str, label: &str, required: bool| CrmField {
+    let text = |key: &str, label: &str, required: bool, max_length| CrmField {
         key: key.into(),
         label: label.into(),
         required,
         archived: false,
-        kind: CrmFieldKind::Text { max_length: 1000 },
+        kind: CrmFieldKind::Text { max_length },
     };
     let user = |key: &str, label: &str| CrmField {
         key: key.into(),
@@ -607,8 +607,8 @@ fn seeded_objects(owner_id: &str, now: chrono::DateTime<Utc>) -> Vec<CrmObject> 
             "Company",
             "Companies",
             vec![
-                text("name", "Name", true),
-                text("domain", "Domain", false),
+                text("name", "Name", true, 200),
+                text("domain", "Domain", false, 253),
                 select("industry", "Industry", false, &[]),
                 user("owner", "Owner"),
             ],
@@ -620,10 +620,10 @@ fn seeded_objects(owner_id: &str, now: chrono::DateTime<Utc>) -> Vec<CrmObject> 
             "Contact",
             "Contacts",
             vec![
-                text("name", "Name", true),
-                text("email", "Email", false),
+                text("name", "Name", true, 200),
+                text("email", "Email", false, 254),
                 record("company", "Company", "company", CrmCardinality::One),
-                text("title", "Title", false),
+                text("title", "Title", false, 200),
             ],
             None,
             vec!["name", "email", "company", "title"],
@@ -633,7 +633,7 @@ fn seeded_objects(owner_id: &str, now: chrono::DateTime<Utc>) -> Vec<CrmObject> 
             "Opportunity",
             "Opportunities",
             vec![
-                text("name", "Name", true),
+                text("name", "Name", true, 200),
                 record("company", "Company", "company", CrmCardinality::One),
                 CrmField {
                     key: "amount".into(),
@@ -677,7 +677,7 @@ fn seeded_objects(owner_id: &str, now: chrono::DateTime<Utc>) -> Vec<CrmObject> 
             "Task",
             "Tasks",
             vec![
-                text("title", "Title", true),
+                text("title", "Title", true, 200),
                 select(
                     "status",
                     "Status",

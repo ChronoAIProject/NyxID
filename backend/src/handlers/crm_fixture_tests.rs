@@ -212,12 +212,14 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     .unwrap();
     for (method, path, body) in [
         ("GET", "/objects", None),
-        ("GET", "/views/count", None),
+        ("GET", "/artifacts/count", None),
         ("GET", "/people", None),
         (
             "POST",
             "/objects",
-            Some(json!({"key":"asset","label":"Asset","plural_label":"Assets","fields":[]})),
+            Some(
+                json!({"owner_id":owner.to_string(),"key":"asset","label":"Asset","plural_label":"Assets","fields":[]}),
+            ),
         ),
         ("POST", "/query", Some(json!({"object":"company"}))),
         ("POST", "/views/validate", Some(json!({"envelope":{}}))),
@@ -729,7 +731,36 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     assert_eq!(foreign_status, missing_status);
     assert_eq!(mismatched_hint, missing_record);
     assert_eq!(foreign_record, missing_record);
-    let custom = ok(&app,&token,"POST",&format!("{BASE}/objects"),Some(json!({"key":"asset","label":"Asset","plural_label":"Assets","fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]})),Some("create-object")).await;
+    let invalid = json!({"owner_id":owner.to_string(),"key":"asset","label":"Asset","plural_label":"Assets","surprise":true,"fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]});
+    let (status, _) = request(
+        &app,
+        &token,
+        "POST",
+        &format!("{BASE}/objects"),
+        Some(invalid),
+        None,
+    )
+    .await;
+    assert!(matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+    ));
+    let custom = ok(&app,&token,"POST",&format!("{BASE}/objects"),Some(json!({"owner_id":owner.to_string(),"key":"asset","label":"Asset","plural_label":"Assets","fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]})),Some("create-object")).await;
     assert_eq!(custom["key"], "asset");
     assert_eq!(custom["seeded"], false);
+    assert_eq!(custom["owner_id"], owner.to_string());
+    let counts = ok(
+        &app,
+        &token,
+        "GET",
+        &format!("{BASE}/artifacts/count"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(counts["objects"], 1);
+    assert_eq!(
+        counts["count"].as_u64().unwrap(),
+        counts["views"].as_u64().unwrap() + 1
+    );
 }

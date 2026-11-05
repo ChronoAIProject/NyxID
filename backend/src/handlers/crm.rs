@@ -47,7 +47,7 @@ pub fn router() -> Router<AppState> {
         .route("/records/{id}/notes", post(add_note))
         .route("/records/{id}/related", get(related_records))
         .route("/views", get(list_views).post(create_view))
-        .route("/views/count", get(view_count))
+        .route("/artifacts/count", get(artifact_count))
         .route(
             "/views/{id}",
             get(get_view).put(update_view).delete(delete_view),
@@ -197,21 +197,30 @@ struct ValidateViewResponse {
     errors: Vec<crate::errors::CrmValidationIssue>,
 }
 
-async fn view_count(
+async fn artifact_count(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<OwnerQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = guard(&state, &auth).await?;
     let (owner, _) = owner_access(&state, &actor, query.owner_id.as_deref()).await?;
-    let count = state
+    let views = state
         .db
         .collection::<CrmSavedView>(crate::models::crm_saved_view::COLLECTION_NAME)
         .count_documents(
-            mongodb::bson::doc! {"owner_id":owner,"deleted_at":mongodb::bson::Bson::Null},
+            mongodb::bson::doc! {"owner_id":&owner,"deleted_at":mongodb::bson::Bson::Null},
         )
         .await?;
-    Ok(Json(serde_json::json!({"count":count})))
+    let objects = state
+        .db
+        .collection::<crate::models::crm_object::CrmObject>(
+            crate::models::crm_object::COLLECTION_NAME,
+        )
+        .count_documents(mongodb::bson::doc! {"owner_id":&owner,"seeded":false})
+        .await?;
+    Ok(Json(
+        serde_json::json!({"count":views + objects,"views":views,"objects":objects}),
+    ))
 }
 
 async fn list_objects(
@@ -233,10 +242,14 @@ async fn list_objects(
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct CreateObjectBody {
     owner_id: Option<String>,
-    #[serde(flatten)]
-    input: objects::CreateObjectInput,
+    key: String,
+    label: String,
+    plural_label: String,
+    fields: Vec<crate::models::crm_object::CrmField>,
+    pipeline: Option<crate::models::crm_object::CrmPipeline>,
 }
 
 async fn create_object(
@@ -248,6 +261,13 @@ async fn create_object(
     let actor = guard(&state, &auth).await?;
     let (owner, access) = owner_access(&state, &actor, body.owner_id.as_deref()).await?;
     require_schema(access)?;
+    let input = objects::CreateObjectInput {
+        key: body.key,
+        label: body.label,
+        plural_label: body.plural_label,
+        fields: body.fields,
+        pipeline: body.pipeline,
+    };
     let receipt = mutation_receipt(
         &headers,
         &owner,
@@ -255,10 +275,10 @@ async fn create_object(
         "POST",
         "/objects",
         &[],
-        &serde_json::to_value(&body.input)
+        &serde_json::to_value(&input)
             .map_err(|_| AppError::Internal("CRM object serialization failed".into()))?,
     )?;
-    let object = objects::create(&state.db, &owner, body.input, receipt).await?;
+    let object = objects::create(&state.db, &owner, input, receipt).await?;
     audit(
         &state,
         &auth,

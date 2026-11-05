@@ -802,7 +802,9 @@ async fn crm_artifacts_atomic_deduplication_bound_and_link_delivery() {
     )
     .await
     .unwrap();
-    super::super::artifacts::record(&f.state.db, &f.chat, make(9, CrmArtifactRole::Created)).await.unwrap();
+    super::super::artifacts::record(&f.state.db, &f.chat, make(9, CrmArtifactRole::Created))
+        .await
+        .unwrap();
     let mut presented = make(9, CrmArtifactRole::Presented);
     *presented.title_mut() = "Updated title".into();
     super::super::artifacts::record(&f.state.db, &f.chat, presented)
@@ -935,3 +937,5 @@ async fn crm_custom_object_validation_and_owner_cap_are_transactional() {
     f.state.db.drop().await.unwrap();
 }
 
+#[path = "tools_review_tests.rs"]
+mod review;
