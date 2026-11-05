@@ -2093,7 +2093,8 @@ endpoint never includes message text.
 Admins and Operators can separately request
 `GET /api/v1/admin/assistant/feedback/{id}/thread?cursor=...`. Usage Viewer
 permission alone returns 403. The server resolves the conversation or group from
-the feedback row and reads feedback, parent, anchor and messages in one snapshot.
+the feedback row and reads feedback, parent, anchor and messages in one snapshot,
+pinned by a short read-only transaction even when snapshot history retention is low.
 It returns up to six human-visible text excerpts, chronological and ending at the
 rated message on the first page. `rated` identifies that reply. A bounded cursor
 binds feedback ID, anchor ID and boundary message ID; every boundary is resolved

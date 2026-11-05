@@ -57,14 +57,35 @@ pub async fn preview(db: &Database, feedback_id: &str, cursor: Option<&str>) -> 
     .map_err(|_| AppError::AdminUsageQueryTimeout)?
 }
 async fn read(db: &Database, feedback_id: &str, cursor: Option<&str>) -> AppResult<Page> {
-    // Every page observes feedback, parent, anchor and messages in one snapshot.
-    let mut session = db.client().start_session().snapshot(true).await?;
+    // Pin the page's snapshot until all reads finish. A snapshot session alone
+    // can lose its timestamp between commands when history retention is short.
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .max_commit_time(DEADLINE)
+        .await?;
+    let result = read_page(db, feedback_id, cursor, &mut session).await;
+    if result.is_ok() {
+        session.commit_transaction().await?;
+    } else {
+        let _ = session.abort_transaction().await;
+    }
+    result
+}
+
+async fn read_page(
+    db: &Database,
+    feedback_id: &str,
+    cursor: Option<&str>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Page> {
     let feedback = db
         .collection::<Document>(FEEDBACK)
         .find_one(doc! {"_id": feedback_id})
         .projection(doc! {"conversation_id": 1, "group_id": 1, "message_id": 1})
         .max_time(DEADLINE)
-        .session(&mut session)
+        .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("feedback not found".into()))?;
     let anchor_id = feedback
@@ -95,7 +116,7 @@ async fn read(db: &Database, feedback_id: &str, cursor: Option<&str>) -> AppResu
         .find_one(doc! {"_id": scope_id})
         .projection(doc! {"_id": 1})
         .max_time(DEADLINE)
-        .session(&mut session)
+        .session(&mut *session)
         .await?
         .is_none()
     {
@@ -116,7 +137,7 @@ async fn read(db: &Database, feedback_id: &str, cursor: Option<&str>) -> AppResu
         .find_one(anchor_filter)
         .projection(doc! {"seq": 1})
         .max_time(DEADLINE)
-        .session(&mut session)
+        .session(&mut *session)
         .await?
     else {
         return Ok(missing());
@@ -137,7 +158,7 @@ async fn read(db: &Database, feedback_id: &str, cursor: Option<&str>) -> AppResu
             .find_one(filter)
             .projection(doc! {"seq": 1})
             .max_time(DEADLINE)
-            .session(&mut session)
+            .session(&mut *session)
             .await?
             .ok_or_else(invalid)?;
         let pos = position(&row)?;
@@ -163,10 +184,10 @@ async fn read(db: &Database, feedback_id: &str, cursor: Option<&str>) -> AppResu
         .projection(doc! {"seq": 1, "role": 1, "text": 1, "created_at": 1})
         .limit((PAGE_SIZE + 1) as i64)
         .max_time(DEADLINE)
-        .session(&mut session)
+        .session(&mut *session)
         .await?;
     let mut docs = Vec::new();
-    while rows.advance(&mut session).await? {
+    while rows.advance(&mut *session).await? {
         docs.push(rows.deserialize_current()?);
     }
     let more = docs.len() > PAGE_SIZE;
