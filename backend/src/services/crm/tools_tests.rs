@@ -769,14 +769,10 @@ async fn crm_saved_views_are_created_then_presented_artifacts() {
     .await
     .unwrap();
     assert_eq!(
-        super::super::artifacts::settled(
-            &f.state.db,
-            &f.owner,
-            &f.row.id,
-            f.chat.turn_id.as_deref().unwrap()
-        )
-        .await
-        .unwrap(),
+        f.state.db.collection::<crate::models::assistant_message::AssistantMessage>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        ).find_one(doc! {"user_id":&f.owner,"conversation_id":&f.row.id,"turn_id":f.chat.turn_id.as_deref().unwrap(),"role":"assistant"})
+            .await.unwrap().unwrap().crm_artifacts,
         artifacts
     );
     f.state.db.drop().await.unwrap();

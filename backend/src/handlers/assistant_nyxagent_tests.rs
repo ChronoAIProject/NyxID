@@ -1925,7 +1925,7 @@ async fn panicking_turn_execution_settles_without_sweep_and_keeps_diagnostics_co
 }
 
 #[tokio::test]
-async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() {
+async fn crm_settlement_recovers_saved_reply_and_artifacts_after_an_ambiguous_finish() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(
         &state.db,
@@ -1960,6 +1960,21 @@ async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() 
     )
     .await
     .unwrap();
+    let artifact = crate::models::assistant_crm_artifact::TurnCrmArtifact::View {
+        id: "saved-view".into(),
+        owner_id: OWNER.into(),
+        title: "Saved view".into(),
+        role: crate::models::assistant_crm_artifact::CrmArtifactRole::Created,
+    };
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&saved_id},
+            doc! {"$set":{"crm_artifacts":bson::to_bson(&vec![artifact.clone()]).unwrap()}},
+        )
+        .await
+        .unwrap();
     let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
     let (sender, _receiver) = broadcast::channel(256);
     let settled = complete_turn(
@@ -1981,7 +1996,7 @@ async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() 
     )
     .await;
     assert!(
-        matches!(settled, SettledExecution::Saved { message_id, error: None } if message_id == saved_id)
+        matches!(settled, SettledExecution::Saved { message_id, error: None, crm_artifacts } if message_id == saved_id && crm_artifacts == vec![artifact])
     );
     server.abort();
     state.db.drop().await.unwrap();

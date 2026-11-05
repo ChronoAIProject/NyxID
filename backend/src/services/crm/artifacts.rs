@@ -105,23 +105,6 @@ pub async fn channel_text(
     }
 }
 
-pub async fn settled(
-    db: &Database,
-    owner: &str,
-    conversation: &str,
-    turn: &str,
-) -> AppResult<Vec<TurnCrmArtifact>> {
-    let message = db
-        .collection::<crate::models::assistant_message::AssistantMessage>(
-            crate::models::assistant_message::COLLECTION_NAME,
-        )
-        .find_one(
-            doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,"role":"assistant"},
-        )
-        .await?;
-    Ok(message.map(|m| m.crm_artifacts).unwrap_or_default())
-}
-
 pub async fn publish_group(
     db: &Database,
     conversation: &crate::models::assistant_conversation::AssistantConversation,
@@ -133,7 +116,7 @@ pub async fn publish_group(
     let Some(turn) = conversation.active_turn.as_ref() else {
         return Ok(());
     };
-    let artifacts = settled(db, &conversation.user_id, &conversation.id, &turn.turn_id).await?;
+    let artifacts = &turn.crm_artifacts;
     if !artifacts.is_empty() {
         db.collection::<bson::Document>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
             .update_one(doc! {"_id":&message.id,"group_id":&message.group_id,"role":"agent"}, doc! {"$set":{"crm_artifacts":bson::to_bson(&artifacts).map_err(|_| AppError::Internal("CRM artifact serialization failed".into()))?}}).await?;

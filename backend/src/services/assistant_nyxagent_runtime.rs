@@ -216,6 +216,7 @@ pub(crate) enum SettledExecution {
     Saved {
         message_id: String,
         error: Option<TurnError>,
+        crm_artifacts: Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>,
     },
     Deleted,
     Unconfirmed,
@@ -242,12 +243,13 @@ where
 {
     let deadline = tokio::time::Instant::now() + settle_for;
     let mut attempt = 0u32;
-    let settled = loop {
+    let mut settled = loop {
         match tokio::time::timeout_at(deadline, persist()).await {
             Ok(Ok(error)) => {
                 break SettledExecution::Saved {
                     message_id: message_id.to_owned(),
                     error,
+                    crm_artifacts: Vec::new(),
                 };
             }
             // A forced stop or orphan reclaim may already have saved this turn.
@@ -267,6 +269,7 @@ where
                         break SettledExecution::Saved {
                             message_id: message.id,
                             error: message.error_code.as_deref().map(TurnError::new),
+                            crm_artifacts: message.crm_artifacts,
                         };
                     }
                     Ok(Ok(None)) => return SettledExecution::Deleted,
@@ -318,6 +321,9 @@ where
     let artifacts = saved_message
         .map(|message| message.crm_artifacts)
         .unwrap_or_default();
+    if let SettledExecution::Saved { crm_artifacts, .. } = &mut settled {
+        *crm_artifacts = artifacts.clone();
+    }
     let mut terminal =
         json!({"turn_id": turn_id, "status": status, "error": error, "turn_metadata": metadata});
     if !row.guest_turn
@@ -681,6 +687,7 @@ pub(crate) struct OwnerTurnSettlement {
     pub message_id: String,
     pub text: String,
     pub error: Option<TurnError>,
+    pub crm_artifacts: Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>,
 }
 
 pub(crate) fn owner_context(
@@ -1004,9 +1011,14 @@ pub(crate) async fn run_owner_turn(
     let _ = heartbeat_stop.send(());
     let _ = heartbeat_task.await;
     match settled {
-        SettledExecution::Saved { message_id, error } => Some(OwnerTurnSettlement {
+        SettledExecution::Saved {
             message_id,
             error,
+            crm_artifacts,
+        } => Some(OwnerTurnSettlement {
+            message_id,
+            error,
+            crm_artifacts,
             text: result.text,
         }),
         SettledExecution::Deleted | SettledExecution::Unconfirmed => None,

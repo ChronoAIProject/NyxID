@@ -2219,7 +2219,7 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
 pub(crate) async fn run_turn(
     state: AppState,
     auth: AuthUser,
-    row: AssistantConversation,
+    mut row: AssistantConversation,
     text: String,
     credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
@@ -2251,6 +2251,9 @@ pub(crate) async fn run_turn(
     )
     .await;
     if let Some(settled) = settled {
+        if let Some(turn) = row.active_turn.as_mut() {
+            turn.crm_artifacts = settled.crm_artifacts;
+        }
         tracing::debug!(conversation_id = %row.id, message_id = %settled.message_id, "Assistant reply settled");
         if settled.error.is_none()
             && row.message_count == 1

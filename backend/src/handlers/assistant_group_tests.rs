@@ -76,6 +76,7 @@ async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
     .await
     .unwrap();
     let mut row = f.row.clone();
+    row.active_turn.as_mut().unwrap().crm_artifacts = vec![artifact.clone()];
     row.group_id = Some(group.id.clone());
     member_settled(&f.state, &row, "", None).await;
     let messages = groups::messages(&f.state.db, &f.owner, &group.id, 10, None)

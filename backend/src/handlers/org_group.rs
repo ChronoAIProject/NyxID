@@ -241,17 +241,10 @@ pub(crate) async fn member_settled(
         let request = groups::request(&state.db, &access, id).await?;
         let agent =
             crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await?;
-        let has_artifacts = match row.active_turn.as_ref() {
-            Some(turn) => !crate::services::crm::artifacts::settled(
-                &state.db,
-                &row.user_id,
-                &row.id,
-                &turn.turn_id,
-            )
-            .await?
-            .is_empty(),
-            None => false,
-        };
+        let has_artifacts = row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.crm_artifacts.is_empty());
         if error.is_none() && (!text.trim().is_empty() || has_artifacts) {
             let attachments = match row.active_turn.as_ref() {
                 Some(turn) => {

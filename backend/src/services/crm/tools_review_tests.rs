@@ -74,6 +74,7 @@ async fn crm_matched_revision_one_is_not_created_and_committed_result_survives_t
 
 #[tokio::test]
 async fn crm_empty_delivery_never_reads_the_database() {
+    let f = fixture().await;
     let client =
         mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=5000")
             .await
@@ -88,6 +89,19 @@ async fn crm_empty_delivery_never_reads_the_database() {
         .unwrap()
         .unwrap()
     );
+    let message = bson::from_document(doc! {
+        "_id":"message", "group_id":"group", "user_id":&f.owner, "seq":1_i64,
+        "role":"agent", "text":"No artifacts", "created_at":bson::DateTime::now(),
+    })
+    .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        super::super::artifacts::publish_group(&db, &f.row, &message),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
