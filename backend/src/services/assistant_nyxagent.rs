@@ -4074,7 +4074,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
-crm_artifacts: settled_turn.as_ref().map(|t| t.crm_artifacts.clone()).unwrap_or_default(),
+            crm_artifacts: settled_turn.as_ref().map(|t| t.crm_artifacts.clone()).unwrap_or_default(),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,

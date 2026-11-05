@@ -1,9 +1,4 @@
-import {
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import type {
   AssistantAgent,
@@ -14,38 +9,22 @@ import type {
   NyxAgentChannelChatSettings,
   NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
-import {
-  livePollInterval,
-  useNyxAgentLiveConnected,
-} from "@/hooks/use-nyxagent-live-status";
+import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 
 export const nyxBotQueryKeys = {
-  root: (userId: string | undefined) =>
-    ["assistant", "nyxagent", userId] as const,
+  root: (userId: string | undefined) => ["assistant", "nyxagent", userId] as const,
   /** Prefix of the agent list and every agent detail. */
-  agents: (userId: string | undefined) =>
-    ["assistant", "nyxagent", userId, "agents"] as const,
+  agents: (userId: string | undefined) => ["assistant", "nyxagent", userId, "agents"] as const,
   agent: (userId: string | undefined, agentId: string | undefined) =>
     ["assistant", "nyxagent", userId, "agents", "detail", agentId] as const,
-  guestReadiness: (
-    userId: string | undefined,
-    agentId?: string,
-    conversationId?: string,
-  ) =>
+  guestReadiness: (userId: string | undefined, agentId?: string, conversationId?: string) =>
     agentId === undefined
-      ? (["assistant", "nyxagent", userId, "guest-readiness"] as const)
-      : ([
-          "assistant",
-          "nyxagent",
-          userId,
-          "guest-readiness",
-          agentId,
-          conversationId ?? null,
-        ] as const),
+      ? ["assistant", "nyxagent", userId, "guest-readiness"] as const
+      : ["assistant", "nyxagent", userId, "guest-readiness", agentId, conversationId ?? null] as const,
   /** Prefix of every agent's thread list. */
   threads: (userId: string | undefined, agentId?: string) =>
     agentId === undefined
@@ -53,35 +32,21 @@ export const nyxBotQueryKeys = {
       : (["assistant", "nyxagent", userId, "threads", agentId] as const),
   settings: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "settings"] as const,
-  models: (userId: string | undefined) =>
-    ["assistant", "nyxagent", userId, "models"] as const,
+  models: (userId: string | undefined) => ["assistant", "nyxagent", userId, "models"] as const,
   /** Prefix of the channel list and every channel's chats. */
   channels: (userId: string | undefined) =>
     ["assistant", "nyxagent", userId, "channels"] as const,
   channelChats: (userId: string | undefined, channelAgentId: string) =>
-    [
-      "assistant",
-      "nyxagent",
-      userId,
-      "channels",
-      channelAgentId,
-      "chats",
-    ] as const,
-  history: (
-    userId: string | undefined,
-    conversationId: string | null | undefined,
-  ) => ["assistant", "nyxagent", userId, "history", conversationId] as const,
+    ["assistant", "nyxagent", userId, "channels", channelAgentId, "chats"] as const,
+  history: (userId: string | undefined, conversationId: string | null | undefined) =>
+    ["assistant", "nyxagent", userId, "history", conversationId] as const,
 };
 
 const RUNNING_POLL_MS = 3000;
 
 /** Agents are re-read while any of them is working, so statuses follow. */
-export function agentsPollInterval(
-  list: AssistantAgentList | undefined,
-): number | false {
-  return list?.agents.some((agent) => agent.status === "running")
-    ? RUNNING_POLL_MS
-    : false;
+export function agentsPollInterval(list: AssistantAgentList | undefined): number | false {
+  return list?.agents.some((agent) => agent.status === "running") ? RUNNING_POLL_MS : false;
 }
 
 export function nyxBotOf(agents: readonly AssistantAgent[] | undefined) {
@@ -97,8 +62,7 @@ export function useNyxBotAgents(enabled = true) {
     queryFn: () => nyxBotApi.agents(true),
     enabled: enabled && Boolean(userId),
     retry: false,
-    refetchInterval: (query) =>
-      livePollInterval(agentsPollInterval(query.state.data), live),
+    refetchInterval: (query) => livePollInterval(agentsPollInterval(query.state.data), live),
   });
 }
 
@@ -114,17 +78,12 @@ export function useNyxBotAgent(agentId: string | undefined, enabled = true) {
 }
 
 /** Settings-only; visible rows share one agent query unless their route differs. */
-export function useGuestReadiness(
-  agentId: string | undefined,
-  enabled: boolean,
-  conversationId?: string,
-) {
+export function useGuestReadiness(agentId: string | undefined, enabled: boolean, conversationId?: string) {
   const userId = useAuthStore((state) => state.user?.id);
   return useQuery({
     queryKey: nyxBotQueryKeys.guestReadiness(userId, agentId, conversationId),
     queryFn: () => nyxBotApi.guestReadiness(agentId!, conversationId),
-    refetchInterval: (query) =>
-      query.state.data?.status === "setting_up" ? 2_000 : false,
+    refetchInterval: (query) => query.state.data?.status === "setting_up" ? 2_000 : false,
     enabled: enabled && Boolean(userId && agentId),
     staleTime: 30_000,
     retry: false,
@@ -141,18 +100,10 @@ function useAgentsMutation<TVariables, TResult>(
     mutationFn,
     onSettled: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.agents(userId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.guestReadiness(userId),
-        }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
         ...(alsoChannels
-          ? [
-              queryClient.invalidateQueries({
-                queryKey: nyxBotQueryKeys.channels(userId),
-              }),
-            ]
+          ? [queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) })]
           : []),
       ]);
     },
@@ -169,9 +120,8 @@ export function useCreateNyxBotAgent() {
 }
 
 export function useUpdateNyxBotAgent() {
-  return useAgentsMutation(
-    ({ id, ...body }: AssistantAgentUpdate & { id: string }) =>
-      nyxBotApi.updateAgent(id, body),
+  return useAgentsMutation(({ id, ...body }: AssistantAgentUpdate & { id: string }) =>
+    nyxBotApi.updateAgent(id, body),
   );
 }
 
@@ -198,8 +148,7 @@ export function useSetNyxBotAgentGrants() {
         guard,
       );
     },
-    onSettled: (owner) =>
-      client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
+    onSettled: (owner) => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
   });
 }
 
@@ -213,9 +162,8 @@ export function useDeleteNyxBotAgent() {
 }
 
 export function useForgetNyxBotMemory() {
-  return useAgentsMutation(
-    ({ agentId, noteId }: { agentId: string; noteId: string }) =>
-      nyxBotApi.forget(agentId, noteId),
+  return useAgentsMutation(({ agentId, noteId }: { agentId: string; noteId: string }) =>
+    nyxBotApi.forget(agentId, noteId),
   );
 }
 
@@ -233,8 +181,7 @@ export function useUpdateNyxBotSettings() {
   const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (update: NyxAgentSettingsUpdate) =>
-      nyxBotApi.updateSettings(update),
+    mutationFn: (update: NyxAgentSettingsUpdate) => nyxBotApi.updateSettings(update),
     onSuccess: (settings) => {
       queryClient.setQueryData(nyxBotQueryKeys.settings(userId), settings);
     },
@@ -262,13 +209,8 @@ export function useConnectNyxBotChannel() {
 
 export function useLinkNyxBotChannel() {
   return useAgentsMutation(
-    ({
-      channelAgentId,
-      agentId,
-    }: {
-      channelAgentId: string;
-      agentId: string;
-    }) => nyxBotApi.linkChannel(channelAgentId, agentId),
+    ({ channelAgentId, agentId }: { channelAgentId: string; agentId: string }) =>
+      nyxBotApi.linkChannel(channelAgentId, agentId),
     true,
   );
 }
@@ -288,16 +230,9 @@ export function useSetNyxBotPrivateChats() {
 
 export function useSetNyxBotPrivateChatPosts() {
   return useAgentsMutation(
-    ({
-      channelAgentId,
-      enabled,
-      applyToExisting,
-    }: {
-      channelAgentId: string;
-      enabled: boolean;
-      applyToExisting: boolean;
-    }) =>
-      nyxBotApi.setPrivateChatPosts(channelAgentId, enabled, applyToExisting),
+    ({ channelAgentId, enabled, applyToExisting }: {
+      channelAgentId: string; enabled: boolean; applyToExisting: boolean;
+    }) => nyxBotApi.setPrivateChatPosts(channelAgentId, enabled, applyToExisting),
     true,
   );
 }
@@ -329,15 +264,9 @@ export function useUpdateNyxBotChannelChat() {
     }) => nyxBotApi.updateChannelChat(channelAgentId, chatId, settings),
     onSettled: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.channels(userId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.threads(userId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.guestReadiness(userId),
-        }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.channels(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
       ]);
     },
   });
@@ -360,10 +289,7 @@ export function selectedAgentOf(
   searchAgentId: string | undefined,
 ): AssistantAgent | undefined {
   const id = conversationAgentId ?? searchAgentId;
-  return (
-    (id ? agents?.find((agent) => agent.id === id) : undefined) ??
-    nyxBotOf(agents)
-  );
+  return (id ? agents?.find((agent) => agent.id === id) : undefined) ?? nyxBotOf(agents);
 }
 
 export function useRememberNyxBotMemory() {
@@ -380,44 +306,23 @@ export function useRememberNyxBotMemory() {
   );
 }
 
-export function useNyxBotChannelThreads(
-  channelId: string,
-  chatId: string,
-  state: "active" | "all",
-  enabled: boolean,
-) {
+
+export function useNyxBotChannelThreads(channelId: string, chatId: string, state: "active" | "all", enabled: boolean) {
   const userId = useAuthStore((s) => s.user?.id);
   const live = useNyxAgentLiveConnected();
   return useInfiniteQuery({
-    queryKey: [
-      ...nyxBotQueryKeys.channelChats(userId, channelId),
-      chatId,
-      "threads",
-      state,
-    ],
-    queryFn: ({ pageParam }) =>
-      nyxBotApi.channelThreads(channelId, chatId, state, pageParam),
+    queryKey: [...nyxBotQueryKeys.channelChats(userId, channelId), chatId, "threads", state],
+    queryFn: ({ pageParam }) => nyxBotApi.channelThreads(channelId, chatId, state, pageParam),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
-    enabled: enabled && Boolean(userId),
-    retry: false,
+    enabled: enabled && Boolean(userId), retry: false,
     refetchInterval: livePollInterval(15_000, live),
   });
 }
 
 export function useStopNyxBotChannelThread() {
-  return useAgentsMutation(
-    ({
-      channelId,
-      chatId,
-      threadId,
-    }: {
-      channelId: string;
-      chatId: string;
-      threadId: string;
-    }) => nyxBotApi.stopChannelThread(channelId, chatId, threadId),
-    true,
-  );
+  return useAgentsMutation(({ channelId, chatId, threadId }: { channelId: string; chatId: string; threadId: string }) =>
+    nyxBotApi.stopChannelThread(channelId, chatId, threadId), true);
 }
 
 /** The models NyxAgent offers this owner. */
@@ -437,24 +342,13 @@ export function useChangeNyxAgentModel() {
   const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      conversationId,
-      model,
-    }: {
-      conversationId: string;
-      model: string;
-    }) => nyxBotApi.changeModel(conversationId, model),
+    mutationFn: ({ conversationId, model }: { conversationId: string; model: string }) =>
+      nyxBotApi.changeModel(conversationId, model),
     onSettled: async (_data, _error, { conversationId }) => {
       await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.history(userId, conversationId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.threads(userId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: nyxBotQueryKeys.guestReadiness(userId),
-        }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.history(userId, conversationId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.threads(userId) }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.guestReadiness(userId) }),
       ]);
     },
   });

@@ -1,5 +1,4 @@
 import { accessAuthorityCopy } from "@/lib/assistant/access-authority-copy";
-
 import { CollaborationGuestControls } from "./collaboration-guest-controls";
 import { GuestReadiness } from "./guest-readiness";
 import {

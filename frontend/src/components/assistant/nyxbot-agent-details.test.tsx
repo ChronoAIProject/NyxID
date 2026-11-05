@@ -912,10 +912,12 @@ it("clears an agent's own access mode back to the workspace setting", async () =
 
 it("hides the agent model selector without the internal model-controls flag", async () => {
   const owner = useAuthStore.getState().user!;
-  useAuthStore.getState().setUser({
-    ...owner,
-    capabilities: { billing_available: false, enabled_features: [] },
-  });
+  useAuthStore
+    .getState()
+    .setUser({
+      ...owner,
+      capabilities: { billing_available: false, enabled_features: [] },
+    });
   renderSheet();
   const profile = await screen.findByRole("form", { name: "Profile" });
   expect(
