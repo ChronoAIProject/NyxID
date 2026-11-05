@@ -1656,8 +1656,12 @@ authorize execution or cause publication to rerun when a receipt is missing.
 Group review remains a full card without exposing hidden member context.
 
 Normal and group message renderers share an accessible Copy action. Assistants
-copy the sanitized Markdown displayed in the message; users copy the original
-body. Hidden tool markup, thinking, controls and receipts are excluded. Blank,
+copy readable text matching the rendered body, with rich HTML preserving emphasis,
+paragraphs and link labels/destinations when the clipboard supports it. Plain-text
+targets receive visible link labels without Markdown syntax or expanded URLs;
+code and literal content retain their text. Both formats use the message renderer's
+sanitization and link policy. Users copy the original body literally. Hidden tool
+markup, thinking, controls and receipts are excluded. Blank,
 image-only and streaming assistant messages have no Copy action. Clipboard
 success is reported only after the write resolves; a failure remains retryable.
 

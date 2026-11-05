@@ -1,17 +1,27 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, LoaderCircle } from "lucide-react";
+import { copyMessage, type MessageCopyFormat } from "@/lib/assistant/message-clipboard";
+import type { InlineMention } from "@/lib/assistant/group-mentions";
 
 /** Copies only the renderer's body value, never DOM controls or hidden blocks. */
-export function MessageCopyAction({ text }: { readonly text: string }) {
-  const [result, setResult] = useState<{ text: string; state: "idle" | "copying" | "copied" | "failed" }>({ text, state: "idle" });
-  const state = result.text === text ? result.state : "idle";
-  const setState = (state: typeof result.state) => setResult({ text, state });
+export function MessageCopyAction({ text, format = "plain", mentions }: {
+  readonly text: string;
+  readonly format?: MessageCopyFormat;
+  readonly mentions?: readonly InlineMention[];
+}) {
+  if (!text.trim()) return null;
+  // A body/format change owns a fresh attempt, even A → B → A. Old promises
+  // cannot update the replacement control or resurrect an earlier success.
+  return <CopyButton key={JSON.stringify([format, text, mentions])} text={text} format={format} mentions={mentions} />;
+}
+
+function CopyButton({ text, format, mentions }: { readonly text: string; readonly format: MessageCopyFormat; readonly mentions?: readonly InlineMention[] }) {
+  const [state, setState] = useState<"idle" | "copying" | "copied" | "failed">("idle");
   const attempt = useRef(0);
   useEffect(() => {
     attempt.current += 1;
     return () => { attempt.current += 1; };
-  }, [text]);
-  if (!text.trim()) return null;
+  }, []);
   const label = state === "copied" ? "Copied" : state === "copying" ? "Copying…" : "Copy message";
   const Icon = state === "copied" ? Check : state === "copying" ? LoaderCircle : Copy;
   return (
@@ -23,7 +33,7 @@ export function MessageCopyAction({ text }: { readonly text: string }) {
           setState("copying");
           void (async () => {
             try {
-              await navigator.clipboard.writeText(text);
+              await copyMessage(text, format, mentions);
               if (attempt.current === current) setState("copied");
             } catch {
               if (attempt.current === current) setState("failed");
