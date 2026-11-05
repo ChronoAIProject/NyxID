@@ -5,7 +5,8 @@ import {
 import { requestJson, refreshAccessTokenIfNeeded } from "./http";
 import { getAuthEpoch } from "../auth/authEpoch";
 import { loadStoredAuthSession } from "../auth/sessionStore";
-import { NYXID_API_BASE_URL, NYXID_FRONTEND_URL } from "../env";
+import { getFrontendUrl } from "../env";
+import { getApiBaseUrl } from "./baseUrl";
 import { createVoiceSocketFactory } from "../../features/assistant/voice/voiceSocket";
 import { voiceIdentitySchema } from "../../features/assistant/voice/voiceContracts";
 
@@ -18,7 +19,7 @@ export async function assistantVoiceFeatures(signal?: AbortSignal) {
 
 /** Bind every request to the account that opened this voice surface. */
 export function nativeVoiceEnvironment() {
-  const configured = new URL(NYXID_FRONTEND_URL);
+  const configured = new URL(getFrontendUrl());
   if (configured.username || configured.password)
     throw new Error("Voice requires a trusted NyxID frontend address.");
   const origin = trustedVoiceOrigin(configured.origin);
@@ -35,7 +36,7 @@ export function nativeVoiceEnvironment() {
     origin,
     epoch,
     createSocket: createVoiceSocketFactory({
-      apiBaseUrl: NYXID_API_BASE_URL,
+      getApiBaseUrl,
       origin,
       epoch,
       getEpoch: getAuthEpoch,
