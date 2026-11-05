@@ -9,12 +9,9 @@ import type {
   ComposerDictationButton,
   ComposerDictationReview,
 } from "./ComposerDictation";
-import type { AssistantDictationClient } from "./voice/AssistantDictationClient";
 
-type Element = { type: string; props: Record<string, any> };
-type DictationClientOptions = ConstructorParameters<
-  typeof AssistantDictationClient
->[0];
+type Element = { type: unknown; props: Record<string, any> };
+type Listener = (event?: any) => void;
 const CHAT = `nyxa-${"a".repeat(32)}`;
 const agent = {
   id: "nyxbot",
@@ -24,7 +21,8 @@ const agent = {
   model: "nyxagent/chat",
 };
 
-function elements(element: Element): Element[] {
+function elements(element: Element | null): Element[] {
+  if (!element) return [];
   return [
     element,
     ...[element.props.children]
@@ -37,16 +35,58 @@ function elements(element: Element): Element[] {
   ];
 }
 
+// Expand local components in their own snapshot harness, keeping their hooks
+// separate from the assistant/dictation lifecycle under test.
+function expand(node: any): any {
+  if (Array.isArray(node)) return node.map(expand);
+  if (!node || typeof node !== "object" || !("props" in node)) return node;
+  if (typeof node.type === "function") return expand(node.type(node.props));
+  const children =
+    typeof node.props.children === "function"
+      ? node.props.children({ pressed: false })
+      : node.props.children;
+  return { ...node, props: { ...node.props, children: expand(children) } };
+}
+
 async function setup(saved: boolean, waitForInitialHistory = false) {
   let appState = "active";
   let refreshing = false;
   let loadingInitial = waitForInitialHistory;
   let focused = true;
+  let epoch = 1;
+  let generation = 0;
   const listeners = new Set<(state: string) => void>();
+  const nativeListeners = new Map<string, Set<Listener>>();
   const permission = deferred<{ granted: boolean }>();
-  const refresh = deferred<ReturnType<typeof historySchema.parse>>();
+  const pendingHistory: ReturnType<
+    typeof deferred<ReturnType<typeof historySchema.parse>>
+  >[] = [];
   const events: string[] = [];
   const inserted: string[] = [];
+  const emit = (name: string, event?: unknown) => {
+    for (const listener of [...(nativeListeners.get(name) ?? [])])
+      listener(event);
+  };
+  const native = {
+    requestPermissionsAsync: () => {
+      events.push("permission");
+      return permission.promise;
+    },
+    getSupportedLocales: async () => ({ locales: ["en-US"] }),
+    supportsOnDeviceRecognition: () => true,
+    addListener: (name: string, listener: Listener) => {
+      const set = nativeListeners.get(name) ?? new Set();
+      nativeListeners.set(name, set);
+      set.add(listener);
+      return { remove: () => set.delete(listener) };
+    },
+    start: () => events.push("start"),
+    stop: () => events.push("stop"),
+    abort: () => {
+      events.push("abort");
+      emit("end");
+    },
+  };
   const page = historySchema.parse({
     conversation: {
       id: CHAT,
@@ -63,12 +103,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     waiting: [],
     before_seq: null,
   });
-  const h = hookHarness<{
-    assistant: ReturnType<typeof useAssistant>;
-    dictation: ReturnType<typeof useComposerDictation>;
-    button: Element;
-    review: Element | null;
-  }>({
+  const mocks = {
     "react/jsx-runtime": Object.fromEntries(
       ["jsx", "jsxs"].map((key) => [
         key,
@@ -91,7 +126,10 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
         },
       },
       ActivityIndicator: "ActivityIndicator",
+      Keyboard: { dismiss() {} },
       Pressable: "Pressable",
+      ScrollView: "ScrollView",
+      Text: "Text",
       View: "View",
       StyleSheet: { create: (styles: unknown) => styles },
     },
@@ -100,7 +138,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     "@tanstack/react-query": {
       useQuery: () => ({ data: { agents: [agent] }, refetch: async () => {} }),
     },
-    "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/accessibility/workspaceAccessibility": {
       useWorkspaceAccessibility: () => ({ sheetOpen: false }),
     },
@@ -109,68 +147,28 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     "../../lib/api/assistantApi": {
       assistantApi: {
         history: async () => {
-          if (refreshing || loadingInitial) return refresh.promise;
+          if (refreshing || loadingInitial) {
+            const request = deferred<ReturnType<typeof historySchema.parse>>();
+            pendingHistory.push(request);
+            return request.promise;
+          }
           return page;
         },
         list: async () => ({ conversations: [], next_cursor: null }),
       },
     },
-    "expo-camera": {
-      Camera: {
-        requestMicrophonePermissionsAsync: () => {
-          events.push("permission");
-          return permission.promise;
-        },
-      },
+    "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
+    "./voice/dictationLanguage": {
+      savedDictationLanguage: async () => "en-US",
     },
-    "expo-crypto": { randomUUID: () => "id" },
-    "../../lib/api/assistantVoiceApi": {
-      nativeVoiceEnvironment: () => ({
-        epoch: 1,
-        origin: "https://nyx.example",
-        api: {
-          dictationOptions: async () => {
-            events.push("options");
-            return {
-              options: [
-                {
-                  available: true,
-                  default_model: true,
-                  service_id: "service",
-                  model: "transcribe",
-                },
-              ],
-            };
-          },
-        },
-        createSocket: () => {},
-      }),
+    "lucide-react-native": {
+      Check: "Check",
+      Mic: "Mic",
+      Square: "Square",
+      X: "X",
     },
-    "./voice/AssistantDictationClient": {
-      AssistantDictationClient: class {
-        constructor(private options: DictationClientOptions) {}
-        async start() {
-          events.push("start");
-          this.options.onPhase("listening");
-        }
-        stop() {
-          this.options.onPhase("review");
-        }
-        cancel() {
-          events.push("cancel");
-        }
-      },
-    },
-    "./voice/VoiceMediaBridge": {
-      NativeVoiceMedia: class {
-        close() {
-          events.push("media-close");
-        }
-      },
-      VoiceMediaBridge: "VoiceMediaBridge",
-    },
-    "lucide-react-native": { Mic: "Mic", Square: "Square" },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../../theme/designTokens": { fonts: {} },
     "../../components/workspace/WorkspaceUI": {
       ActionButton: "ActionButton",
       Label: "Label",
@@ -178,7 +176,12 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     "../../components/workspace/ScrollEdgeFades": {
       OverflowScrollView: "OverflowScrollView",
     },
-  });
+  };
+  const h = hookHarness<{
+    assistant: ReturnType<typeof useAssistant>;
+    dictation: ReturnType<typeof useComposerDictation>;
+    button: Element;
+  }>(mocks);
   const assistantHook = h.load(
     fileURLToPath(new URL("./useAssistant.ts", import.meta.url)),
   ).useAssistant as typeof useAssistant;
@@ -199,12 +202,8 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       !assistant.sending &&
       !assistant.history?.conversation.active_turn;
     const dictation = dictationHook({
-      scope: `${assistant.agentId}:${assistant.conversationId ?? "new"}:0`,
+      scope: `${assistant.agentId}:${assistant.conversationId ?? "new"}:${generation}`,
       enabled,
-      getThread: async () => {
-        events.push("thread");
-        return assistant.conversationId ?? CHAT;
-      },
       onInsert: (text) => inserted.push(text),
     });
     return {
@@ -214,9 +213,6 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
         dictation,
         disabled: !enabled,
       }) as unknown as Element,
-      review: components.ComposerDictationReview({
-        dictation,
-      }) as unknown as Element | null,
     };
   };
   h.mount(render);
@@ -226,6 +222,20 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     events,
     inserted,
     permission,
+    feedback: () => {
+      const ui = hookHarness<Element | null>(mocks);
+      const review = ui.load(
+        fileURLToPath(new URL("./ComposerDictation.tsx", import.meta.url)),
+      ).ComposerDictationReview as typeof ComposerDictationReview;
+      ui.mount(() => expand(review({ dictation: h.value().dictation })));
+      const nodes = elements(ui.value());
+      ui.unmount();
+      return nodes;
+    },
+    emit: (name: string, event?: unknown) => {
+      emit(name, event);
+      h.flush();
+    },
     refresh: () => {
       refreshing = true;
     },
@@ -238,13 +248,43 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       focused = false;
       h.render();
     },
+    account: () => {
+      epoch++;
+      h.render();
+    },
+    scope: () => {
+      generation++;
+      h.render();
+    },
     reopen: () => {
       loadingInitial = true;
       h.value().assistant.openConversation(CHAT);
       h.flush();
     },
-    release: async () => {
-      refresh.resolve(page);
+    releaseOldest: async () => {
+      assert.ok(pendingHistory.length);
+      pendingHistory.shift()!.resolve(page);
+      await h.settle();
+    },
+    release: async (activeTurn = false) => {
+      const response = activeTurn
+        ? historySchema.parse({
+            ...page,
+            conversation: {
+              ...page.conversation,
+              active_turn: {
+                turn_id: "active-turn",
+                started_at: "2026-11-02T00:00:00Z",
+              },
+            },
+          })
+        : page;
+      for (const request of pendingHistory.splice(0)) request.resolve(response);
+      await h.settle();
+    },
+    failHistory: async () => {
+      for (const request of pendingHistory.splice(0))
+        request.reject(new Error("History refresh failed."));
       await h.settle();
     },
   };
@@ -258,9 +298,14 @@ test("saved and new chat microphone taps retain pending permission and start aft
     x.h.flush();
     assert.equal(x.h.value().dictation.phase, "permission");
     assert.ok(
-      elements(x.h.value().review!).some(
-        (node) => node.props.children === "Waiting for microphone permission…",
-      ),
+      x
+        .feedback()
+        .some((node) => node.props.children === "Waiting for microphone…"),
+    );
+    assert.ok(
+      x
+        .feedback()
+        .some((node) => node.props.accessibilityLabel === "Discard dictation"),
     );
     x.app("inactive");
     x.permission.resolve({ granted: true });
@@ -274,9 +319,11 @@ test("saved and new chat microphone taps retain pending permission and start aft
       false,
       saved ? "saved history refresh must not cancel dictation" : "new chat",
     );
+    assert.equal(x.h.value().dictation.phase, "connecting");
+    assert.deepEqual(x.events, ["permission", "start"]);
+    x.emit("start");
     assert.equal(x.h.value().dictation.phase, "listening");
     assert.equal(x.h.value().button.props.accessibilityLabel, "Stop dictation");
-    assert.deepEqual(x.events, ["permission", "thread", "options", "start"]);
     assert.deepEqual(x.inserted, []);
     await x.release();
     assert.equal(x.h.value().dictation.phase, "listening");
@@ -284,25 +331,31 @@ test("saved and new chat microphone taps retain pending permission and start aft
   }
 });
 
-test("saved chat permission denial remains visible while its foreground history refresh is pending", async () => {
-  const x = await setup(true);
-  x.h.value().button.props.onPress();
-  x.app("inactive");
-  x.permission.resolve({ granted: false });
-  await x.h.settle();
-  x.refresh();
-  x.app("active");
-  await x.h.settle();
-  assert.equal(x.h.value().dictation.permissionDenied, true);
-  assert.match(x.h.value().dictation.error!, /Allow microphone access/);
-  const settings = elements(x.h.value().review!).find(
-    (node) => node.props.label === "Open Settings",
-  )!;
-  settings.props.onPress();
-  assert.deepEqual(x.events, ["permission", "settings"]);
-  await x.release();
-  assert.equal(x.h.value().dictation.permissionDenied, true);
-  x.h.unmount();
+test("saved and new chat permission denial remains actionable during a foreground history refresh", async () => {
+  for (const saved of [true, false]) {
+    const x = await setup(saved);
+    x.h.value().button.props.onPress();
+    x.app("inactive");
+    x.permission.resolve({ granted: false });
+    await x.h.settle();
+    x.refresh();
+    x.app("active");
+    await x.h.settle();
+    assert.equal(x.h.value().dictation.permissionDenied, true);
+    assert.match(
+      x.h.value().dictation.error!,
+      /Allow microphone and speech recognition access/,
+    );
+    const settings = x
+      .feedback()
+      .find((node) => node.props.label === "Open Settings")!;
+    settings.props.onPress();
+    assert.deepEqual(x.events, ["permission", "settings"]);
+    await x.release();
+    assert.equal(x.h.value().dictation.permissionDenied, true);
+    assert.deepEqual(x.inserted, []);
+    x.h.unmount();
+  }
 });
 
 test("already granted microphone permission starts saved and new chat dictation on the first tap", async () => {
@@ -311,8 +364,9 @@ test("already granted microphone permission starts saved and new chat dictation 
     x.permission.resolve({ granted: true });
     x.h.value().button.props.onPress();
     await x.h.settle();
+    assert.deepEqual(x.events, ["permission", "start"]);
+    x.emit("start");
     assert.equal(x.h.value().dictation.phase, "listening");
-    assert.deepEqual(x.events, ["permission", "thread", "options", "start"]);
     assert.deepEqual(x.inserted, []);
     x.h.unmount();
   }
@@ -332,33 +386,74 @@ test("initial saved-history loading and explicit thread reopen still block dicta
   }
 });
 
-test("foreground restoration keeps an explicit saved-thread reopen blocked until history settles", async () => {
-  const x = await setup(true);
-  x.reopen();
-  assert.equal(x.h.value().assistant.loading, true);
-  x.app("inactive");
-  x.app("active");
-  await x.h.settle();
-  assert.equal(x.h.value().assistant.loading, true);
-  assert.equal(x.h.value().button.props.disabled, true);
-  await x.h.value().dictation.start();
-  assert.deepEqual(x.events, []);
-  await x.release();
-  assert.equal(x.h.value().assistant.loading, false);
-  assert.equal(x.h.value().button.props.disabled, false);
-  x.h.unmount();
+test("foreground restoration keeps initial history and an explicit saved-thread reopen blocked until history settles", async () => {
+  for (const initial of [true, false]) {
+    const x = await setup(true, initial);
+    if (!initial) x.reopen();
+    assert.equal(x.h.value().assistant.loading, true);
+    x.app("inactive");
+    x.app("active");
+    await x.h.settle();
+    assert.equal(x.h.value().assistant.loading, true);
+    assert.equal(x.h.value().button.props.disabled, true);
+    await x.h.value().dictation.start();
+    assert.deepEqual(x.events, []);
+    // The original reopen response is superseded by foreground restoration.
+    // It cannot release the latest foreground request's blocking state.
+    await x.releaseOldest();
+    assert.equal(x.h.value().assistant.loading, true);
+    assert.equal(x.h.value().button.props.disabled, true);
+    await x.release();
+    assert.equal(x.h.value().assistant.loading, false);
+    assert.equal(x.h.value().button.props.disabled, false);
+    x.h.unmount();
+  }
 });
 
-test("background and navigation blur still cancel a saved chat's pending permission", async () => {
-  for (const action of ["background", "blur"]) {
+test("background, navigation, account and scope changes still cancel a saved chat's pending permission", async () => {
+  for (const action of ["background", "blur", "account", "scope"]) {
     const x = await setup(true);
     x.h.value().button.props.onPress();
     if (action === "background") x.app("background");
-    else x.blur();
+    if (action === "blur") x.blur();
+    if (action === "account") x.account();
+    if (action === "scope") x.scope();
     x.permission.resolve({ granted: true });
     await x.h.settle();
     assert.equal(x.h.value().dictation.phase, "idle");
     assert.deepEqual(x.events, ["permission"]);
     x.h.unmount();
   }
+});
+
+test("a failed explicit reopen refresh releases loading and reports the failure", async () => {
+  const x = await setup(true);
+  x.reopen();
+  x.app("inactive");
+  x.app("active");
+  await x.failHistory();
+  assert.equal(x.h.value().assistant.loading, false);
+  assert.equal(
+    x.h.value().assistant.error,
+    "Could not reach the assistant. Try again.",
+  );
+  assert.equal(x.h.value().button.props.disabled, false);
+  assert.deepEqual(x.events, []);
+  x.h.unmount();
+});
+
+test("a foreground history response with an active turn cancels pending permission", async () => {
+  const x = await setup(true);
+  x.h.value().button.props.onPress();
+  x.app("inactive");
+  x.refresh();
+  x.app("active");
+  await x.release(true);
+  assert.equal(x.h.value().dictation.phase, "idle");
+  assert.equal(x.h.value().button.props.disabled, true);
+  x.permission.resolve({ granted: true });
+  await x.h.settle();
+  assert.deepEqual(x.events, ["permission"]);
+  assert.deepEqual(x.inserted, []);
+  x.h.unmount();
 });
