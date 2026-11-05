@@ -2,22 +2,27 @@
 
 This checklist tracks the approved 4 November 2026
 [CRM and dynamic artifacts proposal](https://gist.github.com/ctkm-aelf/f0928ec823b8cb408df38bb24c4bcd34)
-and the parent's personal review. The local proposal copy is
+and the parent's personal review. The baseline evidence below predates the
+5 November CMS/artifact completion pass; G2 evidence is recorded separately
+below and in the external G2 implementer report.
+The local proposal copy is
 `/tmp/nyxid-crm-implementation-approved-plan.md`.
 The work stays on the existing `feat/crm-records` checkout, original HEAD
-`5f45ccd69`. No additional agents, provider sessions, commits, pushes, deployments or
-production flag changes were created.
+`5f45ccd69`. Phase 0 of the CMS/artifact pass preserved the inherited work in
+nine ordered commits before implementation changes. No additional agents,
+worktrees, pushes, deployments, or production flag changes were created.
 
-The six initial dirty files remain part of the working tree:
+The six files that were dirty before the inherited baseline were preserved:
 `errors/mod.rs`, `errors/voice_start.rs`, `models/crm_saved_view.rs`,
 `services/crm/query.rs`, `services/crm/records.rs`, `services/crm/views.rs` (under
 `backend/src`). Their original contents are captured in
 `/tmp/nyxid-crm-review-baseline/working-tree.patch`. They include prior work;
 this document does not attribute their whole diff to the completion pass.
 
-## Status
+## Inherited baseline status
 
-Implementation and review fixes are present. The corrected serial backend build
+The following results describe the earlier baseline, not the current checkout.
+Implementation and review fixes were present. The corrected serial backend build
 passed in 44m 25s, and real HTTP fixture regeneration passed (1/1, 0 ignored).
 The final CRM run passed **55/55, 0 ignored** including no-update fixture parity.
 The independent backend rerun also passed **55/55**, and the full frontend
@@ -76,7 +81,7 @@ not manufacture history from current values.
 | Option color parity | Empty color accepted consistently; client and native color strings bounded to 64. Schema regression. |
 | Frontend regressions and formatting | Updated mocks retain real behavior assertions; generation payload retry state/mock isolation fixed; activity waits for Query notification; changed CRM modules/tests formatted with installed Prettier. Unrelated Router/assistant-schema formatting was restored. |
 
-## Executed verification
+## Inherited baseline verification
 
 Logs below are under `/tmp/nyxid-crm-implementation-logs/` unless an absolute
 parent-review path is given. Counts are per suite, with overlapping filters
@@ -225,7 +230,7 @@ session, commit or push was performed. This evidence covers the approved CRM
 baseline and impacted paths; it is not a claim that every repository test or
 external-provider/browser combination was executed.
 
-## Verification gates
+## Inherited baseline verification gates
 
 - [x] Compile final Rust source/tests and record the actual binary/build evidence.
 - [x] Pass CRM Mongo/fixture/generation/native/admin/live tests on the replica set.
@@ -237,7 +242,7 @@ external-provider/browser combination was executed.
 
 ## Changed-file manifest
 
-This is the **147-file checkout diff: 69 backend, 60 frontend and 18 documentation/
+This was the **147-file inherited checkout diff: 69 backend, 60 frontend and 18 documentation/
 fixture files**, including the six preserved initial dirty files.
 Small additions in existing non-CRM test modules initialize the new typed grant/source fields; they do not represent new subsystem implementations.
 
@@ -396,3 +401,120 @@ Small additions in existing non-CRM test modules initialize the new typed grant/
 - `docs/fixtures/crm/view_validate_invalid.json`
 - `docs/fixtures/crm/views_list.json`
 - `docs/plans/crm-implementation-completion.md`
+
+## CMS/artifact verification (5–6 November 2026)
+
+The G pass first preserved the inherited tree in nine subsystem commits, then
+implemented the default-off `cms:poc-v1` gate, bounded live conversation artifact
+references, custom objects, `crm_present`, channel links, and a grouped artifact catalog for custom datasets and saved
+views. D1's selected relationship labels and D2's text controls/table headers
+are corrected. The contract and rollout decisions are in [CRM.md](../CRM.md).
+
+The inherited G frontend verification below predates the G2 merge and its final
+fixes. It is historical evidence, not verification of the current tree. It used
+`PATH=/opt/homebrew/bin:$PATH` in `frontend/`:
+
+| Command | Result | G log |
+| --- | --- | --- |
+| `npx tsc -b` | Passed | `G-review-tsc-3.log` |
+| `npx vitest run` | 670 files, 7,215 tests passed; 0 failed | `G-review-vitest-2.log` |
+| `npm run lint` | 0 errors; 33 existing warnings, no new warnings | `G-review-lint-3.log` |
+| `npm run build` | Passed, including typecheck and build postchecks | `G-review-frontend-build-2.log` |
+
+The production output separates `artifacts-CQHHt4o1.js` (3.66 kB, gzip 1.44 kB),
+`crm-page-CItcE_PA.js` (40.03 kB, gzip 11.81 kB),
+`renderer-BVpmmJit.js` (133.24 kB, gzip 39.66 kB), and
+`grant-picker-CgMs19tI.js` (2.56 kB, gzip 1.24 kB).
+`assistant-BSo52A09.js` dynamically imports artifacts and has no static import of
+the artifact or renderer chunks. `G-review-frontend-chunking-1.json` records that check.
+
+G logs live under
+`/Users/chronoai/.heca/plans/dynamic-crm-artifacts/logs/`; the external G2 report records the merge, review maps, current cheap checks and
+explicit verification limits.
+
+
+## G2 merge and review continuation (6 November 2026)
+
+Merged `origin/main` at `e5153f6c85b8acefafcb1873f329175dc7596ac6` in
+`4eac272da`. The 26 conflict resolutions preserve main's generated Sandbox
+artifacts, execution tasks, artifact recovery and channel identity fields while
+keeping CRM references, routes and lazy components distinct. Generated files
+and CRM cards can coexist in a reply; artifact-only group replies render in the
+agent branch. The redesigned main grants sheet sends CRM only after an explicit
+CRM edit while enabled. New org-channel fixtures preserve existing CRM grants.
+CRM typography now follows main's shared roles and shared Label implementation,
+including its current text-12 table-header role.
+
+The R1 fixes use a tagged reference enum, one atomic bounded/deduplicating update
+with sticky Created roles, best-effort optional recording after committed
+mutations, explicit transactional creation results, bounded metadata/scalar
+summaries, and an empty-reference fast path before any flag read. Custom-object
+caps and unique keys use the owner fence; prospective schema grants are exact
+keys. The grouped Artifacts catalog counts custom datasets and saved views.
+Chat queries inherit a no-poll context; 401 follows session expiry, resource
+refusals mask cached values, and Open uses Router links. The external report maps
+every R1 item to commits, test names and source evidence. Test presence or type
+checking is not a claim that Mongo-backed regressions executed in this pass.
+
+### Stack boundaries (R2-1)
+
+Historical G binaries overflowed during personal/shared group admission, guest
+model setup, Lark attachment/discovery dispatch and async automation tests. The
+logs identify the failing CRM-branch tests but provide no controlled comparison
+against main and do not prove which future caused the growth. G2 does not
+attribute those failures to main. Rebuilding/running main and the full test
+binary would exceed this continuation's cheap-local-verification scope.
+
+The broad wrapping changes introduced by eight boxing commits (`029253913`,
+`3d3dc35c4`, `df8554d6b`, `fd3d45679`, `4b7b24d6c`, `b125e79cf`,
+`ed7d7320d`, `d6cb32a8a`) are removed from existing authority, credential,
+shared-access, HTTP-proof, async-poll,
+group-admission and guest-model call sites. Main's own existing boundaries,
+including `for_key` boxing `for_key_with_access`, remain intact. New CRM calls
+are isolated instead: virtual-service availability, specialist grant validation,
+settled-turn flag resolution, and personal/org group artifact publication (plus
+the existing boxed CRM MCP execution). No nextest stack exemption was added
+without proof that a failure is test-only. The report gives each old commit's
+observed test/log and the removal decision.
+
+This narrows the implementation change but does not establish normal-stack
+runtime safety or main-versus-CRM causality. CI must execute the named historical
+regressions and CRM tests; a passing `cargo check --tests` cannot prove 2 MiB
+Tokio worker behavior. Any remaining overflow needs a measured future boundary
+at the growing CRM call rather than another broad speculative wrapper.
+
+### Current G2 local verification
+
+All commands use the default stable toolchain and normal build flags. Cargo
+checks are detached, logged and polled, with one cargo process at a time. Frontend
+commands run in `frontend/` with `PATH=/opt/homebrew/bin:$PATH`.
+
+| Check | G2 result | Log under the external logs directory |
+| --- | --- | --- |
+| First `cargo check -p nyxid --tests` | Six merge initializer errors reported; stale process stopped after source repairs (not a successful check) | `G2-check-1.log` |
+| `cargo fmt --all -- --check` | Passed, exit 0 | `G2-fmt-final.log`, `G2-backend-final.log` |
+| Final `cargo check -p nyxid --tests` | Passed, exit 0, 22m 27s | `G2-check-2.log`, `G2-backend-final.log` |
+| `npx tsc -b` | Passed | `G2-tsc-4.log` |
+| `npm run lint` | Passed, zero errors, 34 existing main warnings; typography guard passed | `G2-lint-2.log` |
+| Main ESLint warning baseline | Same 34 warnings on the 21 warned main source files | `G2-lint-main-baseline.log` |
+| Full `npx vitest run --maxWorkers=2` after merge | 717 files / 7,769 tests passed; one typography-policy test failed | `G2-vitest-1.log` |
+| CRM/assistant/hooks/schema/flag suites plus typography policy after fixes | 226 files / 2,549 tests passed, zero failures | `G2-vitest-2.log` |
+
+The full run covered all merged frontend files. The focused repeat covers the
+files changed afterward and the failed typography guard. Earlier type-check
+failures (refreshed dependency and new test typing) and initial lint failure are
+retained in the logs, not counted as passes. `npm ci` refreshed dependencies from
+the merged lockfile. No dependency source changes were necessary.
+
+External report:
+`/Users/chronoai/.heca/plans/dynamic-crm-artifacts/reports/G2-implementer.md`.
+Logs:
+`/Users/chronoai/.heca/plans/dynamic-crm-artifacts/logs/`.
+
+The original heavy verification requirements are superseded by G2's explicit
+cheap-check instructions. No backend test codegen/runtime, clippy, full backend
+suite, production build, POC rebuild/restart, browser screenshot run or live
+NyxBot model loop was run in G2. Old browser screenshots and chunk sizes above
+must not be used as current evidence. All replicas and grant writers must be
+upgraded and old writers drained before enabling `cms:poc-v1` or authoring
+nonempty CRM grants. Nothing was pushed, deployed or enabled by this pass.
