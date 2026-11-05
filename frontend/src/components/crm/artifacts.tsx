@@ -4,6 +4,8 @@ import { useCrmAggregate, useCrmObject, useCrmRecord } from "@/hooks/use-crm";
 import { useCrmView } from "@/hooks/use-crm-views";
 import { CrmViewRenderer } from "./workspace/renderer";
 import type { TurnCrmArtifact } from "@/schemas/assistant-nyxagent";
+import { renderCrmCell } from "@/lib/crm/field-kinds";
+import { CrmOwnerContext } from "@/lib/crm/owner-context";
 
 function Frame({
   title,
@@ -103,32 +105,23 @@ function RecordArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
         {object.data.label}
         {record.data.archived ? " · Archived" : ""}
       </p>
-      <dl className="space-y-2 text-12">
-        {fields.map((f) => (
-          <div key={f.key} className="grid grid-cols-2 gap-3">
-            <dt className="text-text-secondary">{f.label}</dt>
-            <dd className="break-words">
-              {display(record.data!.values[f.key])}
-            </dd>
-          </div>
-        ))}
-      </dl>
+      <CrmOwnerContext.Provider value={artifact.owner_id}>
+        <dl className="space-y-2 text-12">
+          {fields.map((f) => (
+            <div key={f.key} className="grid grid-cols-2 gap-3">
+              <dt className="text-text-secondary">{f.label}</dt>
+              <dd className="line-clamp-3 break-words">
+                {renderCrmCell(f, record.data!.values[f.key])}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </CrmOwnerContext.Provider>
       {fields.length === 0 ? (
         <p className="text-12 text-text-secondary">No key fields to display.</p>
       ) : null}
     </Frame>
   );
-}
-function display(value: unknown): string {
-  if (value === null || value === undefined || value === "") return "Empty";
-  if (typeof value === "boolean") return value ? "Yes" : "No";
-  if (
-    typeof value === "object" &&
-    "amount_minor" in value &&
-    "currency" in value
-  )
-    return `${Number(value.amount_minor) / 100} ${String(value.currency)}`;
-  return String(value).slice(0, 500);
 }
 function ObjectArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
   const object = useCrmObject(

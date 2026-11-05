@@ -236,6 +236,67 @@ async fn committed_stream_is_never_late_sent_even_after_deadline() {
 }
 
 #[tokio::test]
+async fn crm_artifact_channel_links_cover_stream_late_delivery_and_flag_off() {
+    use crate::models::assistant_crm_artifact::{
+        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
+    };
+    use crate::services::feature_flag_service::{self, FlagTarget};
+    let f = fixture("crm_channel_artifacts").await;
+    settled(&f, false).await;
+    let artifact = TurnCrmArtifact {
+        kind: CrmArtifactKind::View,
+        id: Uuid::new_v4().to_string(),
+        owner_id: OWNER.into(),
+        object_key: None,
+        title: "Private title".into(),
+        role: CrmArtifactRole::Created,
+    };
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"turn_id":&f.event.turn_id},
+            doc! {"$set":{"crm_artifacts":bson::to_bson(&vec![artifact.clone()]).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    assert_eq!(
+        late_delivery::stream_images(&f.state, &f.event.id, "Useful answer", deadline).await,
+        "Useful answer"
+    );
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        crate::services::crm::FLAG_KEY,
+        &FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let link = crate::services::assistant_links::AssistantPage::CrmView {
+        owner: OWNER,
+        id: &artifact.id,
+    }
+    .url(&f.state.config.frontend_url);
+    let streamed =
+        late_delivery::stream_images(&f.state, &f.event.id, "Useful answer", deadline).await;
+    assert!(streamed.ends_with(&link));
+    assert!(!streamed.contains("Private title"));
+    assert_eq!(
+        late_delivery::stream_images(&f.state, &f.event.id, &streamed, deadline).await,
+        streamed
+    );
+    delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+    late_delivery::sweep(&f.state).await.unwrap();
+    let requests = sends(&f).await;
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["text"], streamed);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn partial_failure_survives_both_stream_and_late_delivery() {
     let f = fixture("channel_late_partial").await;
     settled(&f, true).await;

@@ -10,8 +10,17 @@ export function CrmArtifactBlock({
 }: {
   readonly artifacts?: readonly TurnCrmArtifact[];
 }) {
+  if (!artifacts?.length) return null;
+  return <EnabledCrmArtifactBlock artifacts={artifacts} />;
+}
+
+function EnabledCrmArtifactBlock({
+  artifacts,
+}: {
+  readonly artifacts: readonly TurnCrmArtifact[];
+}) {
   const enabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
-  if (!enabled || !artifacts?.length) return null;
+  if (!enabled) return null;
   return (
     <Suspense
       fallback={

@@ -1553,6 +1553,81 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
 }
 
 #[tokio::test]
+async fn crm_history_masks_active_and_settled_artifacts_when_flag_is_off() {
+    use crate::models::assistant_crm_artifact::{
+        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
+    };
+    use crate::services::feature_flag_service::{self, FlagTarget};
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("crm_history_flag").await;
+    let artifact = TurnCrmArtifact {
+        kind: CrmArtifactKind::Object,
+        id: Uuid::new_v4().to_string(),
+        owner_id: f.owner.clone(),
+        object_key: Some("asset".into()),
+        title: "Assets".into(),
+        role: CrmArtifactRole::Created,
+    };
+    crate::services::crm::artifacts::record(&f.state.db, &f.chat, artifact.clone())
+        .await
+        .unwrap();
+    for settled in [false, true] {
+        if settled {
+            engine::finish_turn(
+                &f.state.db,
+                &f.row,
+                &f.chat.api_key_id,
+                &Uuid::new_v4().to_string(),
+                &TurnResult {
+                    text: "Created".into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for enabled in [false, true] {
+            feature_flag_service::set_platform_override(
+                &f.state.db,
+                crate::services::crm::FLAG_KEY,
+                &FlagTarget::User(f.owner.clone()),
+                enabled,
+                &f.owner,
+            )
+            .await
+            .unwrap();
+            let Json(page) = history(
+                State(f.state.clone()),
+                test_auth_user(&f.owner),
+                Path(f.row.id.clone()),
+                Query(HistoryQuery::default()),
+            )
+            .await
+            .unwrap();
+            let value = serde_json::to_value(page).unwrap();
+            let row = if settled {
+                value["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["role"] == "assistant")
+                    .unwrap()
+            } else {
+                &value["conversation"]["active_turn"]
+            };
+            if enabled {
+                assert_eq!(row["crm_artifacts"], json!([artifact]));
+            } else {
+                assert!(row.get("crm_artifacts").is_none());
+            }
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_fences_are_hidden_in_index_and_history_dtos() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(

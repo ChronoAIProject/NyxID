@@ -572,7 +572,12 @@ pub(super) async fn stream_images(
             "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
         }).await? else { return Ok(bounded_reply(text)); };
         let report = event_images(state, &event, delivery, &channel, &thread, &conversation, &message, Some(deadline)).await;
-        Ok(super::images::append_failure(&bounded_reply(text), &report))
+        let text = super::images::append_failure(&bounded_reply(text), &report);
+        Ok(if crate::services::crm::enabled(&state.db, &message.user_id).await? {
+            crate::services::crm::artifacts::append_links(&text, &message.crm_artifacts, &state.config.frontend_url)
+        } else {
+            text
+        })
     }.await;
     match result {
         Ok(text) => text,

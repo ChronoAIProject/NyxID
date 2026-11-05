@@ -23,6 +23,19 @@ use uuid::Uuid;
 
 const OWNER: &str = "12345678-1234-4123-8123-1234567890cd";
 
+#[test]
+fn crm_group_message_dto_omits_artifacts_for_flag_off_viewers() {
+    let row: GroupMessage = mongodb::bson::from_document(doc! {
+        "_id":"message", "group_id":"group", "user_id":OWNER, "seq":1_i64,
+        "role":"agent", "text":"Created", "created_at":mongodb::bson::DateTime::now(),
+        "crm_artifacts":[{"kind":"object","id":"object","owner_id":OWNER,"object_key":"asset","title":"Assets","role":"created"}],
+    }).unwrap();
+    let off = serde_json::to_value(message_response(row.clone(), &[], false)).unwrap();
+    assert!(off.get("crm_artifacts").is_none());
+    let on = serde_json::to_value(message_response(row, &[], true)).unwrap();
+    assert_eq!(on["crm_artifacts"][0]["object_key"], "asset");
+}
+
 type Calls = Arc<Mutex<Vec<Value>>>;
 
 /// A NyxAgent stand-in that answers as whichever member is speaking.

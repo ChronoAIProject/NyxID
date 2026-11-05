@@ -659,6 +659,7 @@ export function ChatMessageBubble({
     message.toolCalls?.length ||
     message.images?.length ||
     message.artifacts?.length ||
+    message.crmArtifacts?.length ||
     message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
@@ -723,7 +724,7 @@ export function ChatMessageBubble({
         {capacityNote ? (
           <p role="note" className="text-12 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
-        <CrmArtifactBlock artifacts={message.crmArtifacts} />
+        {interactiveCards && <CrmArtifactBlock artifacts={message.crmArtifacts} />}
         {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
@@ -1184,6 +1185,7 @@ export function ChatMessageList({
         terminalAssistant.images?.length
       ) &&
       !(terminalAssistant.artifacts?.length ||
+        terminalAssistant.crmArtifacts?.length ||
         terminalAssistant.authorizationBlockers?.length),
   );
   useEffect(() => {
