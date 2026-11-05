@@ -1472,19 +1472,19 @@ it.each([
 
 
 describe("message body copy integration", () => {
-  it("copies sanitized assistant Markdown without thinking, activities or controls", async () => {
+  it("copies readable assistant text without thinking, activities or controls", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const markdown = "**回答**\n\n```rust\n    let n = 1;\n```";
     render(<ChatMessageBubble message={{ ...BASE, content: `${markdown}\n<function_calls><invoke>private-tool-input</invoke></function_calls>`, thinking: "private-thought" }} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
-    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("回答\n\n    let n = 1;\n");
     expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible();
   });
   it("copies the user's original body including literal markup and whitespace", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const original = "  <function_calls>example</function_calls>\n```js\n  x()\n```  ";
+    const original = "  **literal** <function_calls>example</function_calls>\n```js\n  x()\n```  ";
     render(<ChatMessageBubble message={{ ...BASE, role: "user", content: original }} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
     expect(writeText).toHaveBeenCalledExactlyOnceWith(original);

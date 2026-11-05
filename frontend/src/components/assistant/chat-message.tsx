@@ -895,7 +895,7 @@ export function ChatMessageBubble({
             streaming reply has no settled instant yet. */}
         {streaming ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
-            <MessageCopyAction text={content} />
+            <MessageCopyAction text={content} format="markdown" />
             {showFeedback ? <ReplyFeedbackVotes feedback={feedback} /> : null}
             <MessageTime
               value={message.timestamp}
