@@ -2866,43 +2866,40 @@ pub fn generate_tool_definitions(
 /// for a tool listed by [`generate_tool_definitions`]. OpenAI plugin review
 /// requires all three as explicit booleans on every listed tool.
 ///
-/// Meta-tools use a fixed table. Native CRM tools use their declared action
-/// class. Other service tools derive the hints from their HTTP method; generic
-/// proxies accept any method and are therefore potentially destructive.
-/// Unknown names return `None`.
+/// Native CRM tools use their declared action class.
+/// Meta-tools use a fixed table. Service tools derive the hints from their
+/// HTTP method; generic proxies accept any method and are therefore treated
+/// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let crm_hints = name
         .strip_prefix("nyxid__")
         .and_then(super::crm::tools::annotation_hints);
-    let (read_only, destructive, open_world) = if let Some(hints) = crm_hints {
-        hints
-    } else {
-        match name {
-            "nyxid__task_status" => (true, false, false),
-            "nyx__search_tools"
-            | "nyx__discover_services"
-            | "nyx__list_connected_services"
-            | "nyx__wait_for_connection"
-            | "nyx__ssh_list_services"
-            | "nyx__oracle_pools"
-            | "nyx__oracle_result"
-            | "nyx__oracle_session" => (true, false, false),
-            "nyx__connect_service"
-            | "nyx__oracle_ask"
-            | "nyx__oracle_attach"
-            | "nyx__oracle_extract" => (false, false, true),
-            "nyx__resource_get" => (false, false, true),
-            "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
-            _ => {
-                let (service, endpoint) = resolve_tool_call(name, services)?;
-                if service.is_generic_proxy {
-                    (false, true, true)
-                } else {
-                    match endpoint.method.to_ascii_uppercase().as_str() {
-                        "GET" | "HEAD" | "OPTIONS" => (true, false, true),
-                        "POST" => (false, false, true),
-                        _ => (false, true, true),
-                    }
+    let (read_only, destructive, open_world) = match name {
+        _ if let Some(hints) = crm_hints => hints,
+        "nyxid__task_status" => (true, false, false),
+        "nyx__search_tools"
+        | "nyx__discover_services"
+        | "nyx__list_connected_services"
+        | "nyx__wait_for_connection"
+        | "nyx__ssh_list_services"
+        | "nyx__oracle_pools"
+        | "nyx__oracle_result"
+        | "nyx__oracle_session" => (true, false, false),
+        "nyx__connect_service"
+        | "nyx__oracle_ask"
+        | "nyx__oracle_attach"
+        | "nyx__oracle_extract" => (false, false, true),
+        "nyx__resource_get" => (false, false, true),
+        "nyx__call_tool" | "nyx__ssh_exec" => (false, true, true),
+        _ => {
+            let (service, endpoint) = resolve_tool_call(name, services)?;
+            if service.is_generic_proxy {
+                (false, true, true)
+            } else {
+                match endpoint.method.to_ascii_uppercase().as_str() {
+                    "GET" | "HEAD" | "OPTIONS" => (true, false, true),
+                    "POST" => (false, false, true),
+                    _ => (false, true, true),
                 }
             }
         }

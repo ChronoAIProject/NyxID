@@ -665,7 +665,8 @@ pub(crate) async fn execute_step(state: &crate::AppState, job: &SetupStepJob) ->
         SetupStep::ConnectTelegram => {
             let created = super::assistant_team_service::create_approved_specialist(&state.db, &state.encryption_keys, job,
                 super::assistant_team_service::CreateRequest {
-        crm: vec![],                    machines: None, logins: None, name: format!("public-{}", &job.setup_id[..8]),
+                    crm: vec![],
+                    machines: None, logins: None, name: format!("public-{}", &job.setup_id[..8]),
                     description: "A client-owned public bot specialist. Public delivery uses only the reviewed setup publication and has no private connector or account access.".into(),
                     display_name: None, persona: None,
                     targets: super::assistant_team_service::GrantTargets {service_ids: vec![], platform_service_ids: vec![], slugs: vec![], ids_by_request: Default::default()},
