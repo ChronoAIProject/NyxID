@@ -111,6 +111,26 @@ pub async fn barrier(db: &Database, run: &TriggerRun) -> AppResult<Barrier> {
     }).await
 }
 
+/// Confirmation waits retain main's scheduling unless this run enrolled in v2.
+pub async fn confirmation_wait_in_session(
+    db: &Database,
+    run: &TriggerRun,
+    at: DateTime<Utc>,
+    session: &mut ClientSession,
+) -> AppResult<DateTime<Utc>> {
+    let Some(coordinator) = run.coordinator.as_ref() else {
+        return Ok(at);
+    };
+    db.collection::<Document>(RUNS)
+        .update_one(
+            doc! {"_id": &run.id},
+            doc! {"$set": {"coordinator.wait_kind": "confirmation"}},
+        )
+        .session(session)
+        .await?;
+    Ok(at.min(coordinator.deadline))
+}
+
 pub async fn has_source(
     db: &Database,
     run: &TriggerRun,

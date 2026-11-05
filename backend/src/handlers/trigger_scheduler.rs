@@ -881,17 +881,11 @@ pub(super) async fn settle_result(
                                 .sort(doc! { "expires_at": 1 })
                                 .session(&mut *session)
                                 .await?;
-                            let mut at = pending.map_or_else(Utc::now, |card| card.expires_at);
-                            if let Some(coordinator) = saved.coordinator.as_ref() {
-                                at = at.min(coordinator.deadline);
-                                db.collection::<Document>(RUNS)
-                                    .update_one(
-                                        doc! {"_id": &saved.id},
-                                        doc! {"$set": {"coordinator.wait_kind": "confirmation"}},
-                                    )
-                                    .session(&mut *session)
-                                    .await?;
-                            }
+                            let at = pending.map_or_else(Utc::now, |card| card.expires_at);
+                            let at = schedules::continuation::confirmation_wait_in_session(
+                                db, &saved, at, session,
+                            )
+                            .await?;
                             db.collection::<Document>(schedules::WORK)
                                 .update_one(
                                     doc! { "_id": &saved.id },
