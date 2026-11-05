@@ -94,10 +94,11 @@ pub fn metadata(contract: &AsyncOperationContract, args: &Value) -> Option<CmaOp
         .find_map(|key| identifier(args[key].as_str(), Some("agt_")))
         .or_else(|| identifier(args.pointer("/conversation/id")?.as_str(), Some("agt_")));
     Some(CmaOperation {
+        observer_binding: None,
         receipt_id: None,
         seen_working: false,
         kind,
-        agent_id,
+        agent_id: (kind == Presentation::Agent).then_some(agent_id).flatten(),
         callback_url: None,
         idempotency_key: identifier(args["Idempotency-Key"].as_str(), None),
         status: None,
@@ -203,12 +204,13 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
 }
 
 /// A browser-only link: no DNS lookup, server-side fetch, or URL derivation.
-fn validated_callback_url(value: Option<&str>) -> Option<String> {
+pub(crate) fn validated_callback_url(value: Option<&str>) -> Option<String> {
     let value = value?;
-    if !(value.starts_with("https://") || value.starts_with("http://"))
-        || value
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    if !value.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")
+    }) || value
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
     {
         return None;
     }
@@ -218,8 +220,12 @@ fn validated_callback_url(value: Option<&str>) -> Option<String> {
         super::url_validation::MAX_URL_LEN,
     )
     .ok()?;
-    let url = url::Url::parse(value).ok()?;
-    if url.query().is_some() || url.fragment().is_some() {
+    let parsed = url::Url::parse(value).ok()?;
+    let userinfo = value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .is_some_and(|authority| authority.contains('@'));
+    if userinfo || parsed.query().is_some() || parsed.fragment().is_some() {
         return None;
     }
     Some(value.to_owned())
@@ -241,12 +247,15 @@ pub async fn record_observation(
     };
     observed(&mut cma, value);
     let awaiting_activity = cma.kind == Presentation::Agent && !cma.seen_working;
-    db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+    let updated = db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
         .update_one(
             doc! {"_id":&watch.id,"state":&watch.state,"lease_id":&watch.lease_id},
             doc! {"$set":{"cma":bson::to_bson(&cma).map_err(|_| crate::errors::AppError::Internal("Could not serialize CMA status".into()))?}},
         )
         .await?;
+    if updated.matched_count == 1 {
+        super::cma_session_origin::record_best_effort(db, watch, &cma).await;
+    }
     Ok(awaiting_activity)
 }
 
@@ -335,7 +344,7 @@ mod tests {
             &json!({"status":"private output", "phase":"private output", "agent_id":"sk-secret"}),
         );
         assert!(cma.status.is_none() && cma.phase.is_none());
-        assert_eq!(cma.agent_id.as_deref(), Some("agt_test"));
+        assert!(cma.agent_id.is_none());
         for id in [
             "sk-0123456789abcdefghijklmnop",
             "nyxid_ag_secret",
@@ -391,17 +400,18 @@ mod tests {
     fn cma_v2_stream_supplies_the_agent_identity_and_callback() {
         let mut eps = endpoints();
         apply_contracts("cma", &mut eps);
-        let contract = eps[0].async_operation.as_ref().unwrap();
+        let mut contract = eps[0].async_operation.clone().unwrap();
+        contract.presentation = Some(Presentation::Agent);
         for args in [
             json!({"agent_id":"agt_test"}),
             json!({"conversation":{"id":"agt_test"}}),
         ] {
             assert_eq!(
-                metadata(contract, &args).unwrap().agent_id.as_deref(),
+                metadata(&contract, &args).unwrap().agent_id.as_deref(),
                 Some("agt_test")
             );
         }
-        let mut cma = metadata(contract, &json!({})).unwrap();
+        let mut cma = metadata(&contract, &json!({})).unwrap();
         let response = response_metadata(concat!(
             "event: response.created\ndata: {\"response\":{\"id\":\"resp_test\",\"conversation\":{\"id\":\"agt_test\"},\"status\":\"queued\",\"callback_url\":\"https://staging.example:8443/agents/agt_test\"}}\n\n",
             "event: response.completed\ndata: {\"response\":{\"id\":\"resp_test\",\"conversation\":{\"id\":\"agt_test\"},\"status\":\"completed\"}}\n\n",
@@ -433,6 +443,7 @@ mod tests {
             "https://cma.example/agents/agt_test",
             "https://staging.example:8443/agents/agt_test",
             "http://localhost:8080/agents/agt_test",
+            "HTTPS://CMA.example/agents/agt_test",
         ] {
             observed(&mut cma, &json!({"callback_url":callback}));
             assert_eq!(card_url(&cma).as_deref(), Some(callback));
@@ -457,6 +468,8 @@ mod tests {
         let mut cma = metadata(eps[0].async_operation.as_ref().unwrap(), &json!({})).unwrap();
         for callback in [
             json!(null),
+            json!("https://cma.example/agent?secret=value"),
+            json!("https://cma.example/agent#secret"),
             json!(false),
             json!({"url":"https://cma.example"}),
             json!(""),
@@ -465,8 +478,7 @@ mod tests {
             json!("javascript:alert(1)"),
             json!("data:text/html,secret"),
             json!("https://user:secret@cma.example/agents/agt_test"),
-            json!("https://cma.example/agents/agt_test?token=secret"),
-            json!("https://cma.example/agents/agt_test#secret"),
+            json!("https://@cma.example/agents/agt_test"),
             json!(" https://cma.example/agents/agt_test"),
             json!("https://cma.example/agents/agt_\ntest"),
             json!("https://cma.example/agents/agt_\\test"),

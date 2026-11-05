@@ -391,7 +391,21 @@ export interface ChannelActivityDescriptor {
   readonly content_availability: string;
   readonly reply_supported: boolean;
 }
+export interface ChannelAdmission {
+  readonly disposition: string;
+  readonly bot_mentioned: boolean | null;
+  readonly managed_role_mentioned: boolean;
+  readonly broadcast_roles: number | null;
+  readonly broadcast_everyone_or_here: boolean;
+  readonly address: string;
+  readonly thread_follow_selection: string | null;
+  readonly resolved_thread_id: string | null;
+  readonly turn_id: string | null;
+}
+
 export interface ChannelActivityItem {
+  readonly nyxbot_admission?: ChannelAdmission;
+
   readonly id: string;
   readonly conversation_id: string;
   readonly platform_conversation_id: string | null;

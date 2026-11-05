@@ -16,7 +16,7 @@ pub(super) async fn inbound(
 ) -> AppResult<Inbound> {
     use crate::models::channel_thread::ThreadSenderKind;
     if sender.kind == ThreadSenderKind::Unknown {
-        return Ok(Inbound::Silent);
+        return Ok(Inbound::Silent("refused_sender"));
     }
     let private = chat.kind.as_deref() == Some("private");
     if private
@@ -49,7 +49,7 @@ pub(super) async fn inbound(
             return Ok(if private || addressed == Some(true) {
                 Inbound::Reply(MEMBER_REFUSAL.into())
             } else {
-                Inbound::Silent
+                Inbound::Silent("refused_members")
             });
         }
         Err(e) => return Err(e),
@@ -66,12 +66,20 @@ pub(super) async fn inbound(
         chat.clone()
     };
     if sender.kind == ThreadSenderKind::Bot && !chats::bot_guest_allowed(&current, addressed) {
-        return Ok(Inbound::Silent);
+        return Ok(Inbound::Silent("refused_bot_policy"));
     }
     match chats::admission(&projected, &current, sender.id, addressed) {
         chats::Admission::Owner | chats::Admission::Guest => {}
         chats::Admission::Refuse => return Ok(Inbound::Reply(MEMBER_REFUSAL.into())),
-        _ => return Ok(Inbound::Silent),
+        _ => {
+            return Ok(Inbound::Silent(
+                if addressed == Some(false) && current.reply_mode.as_deref() != Some("all") {
+                    "not_addressed"
+                } else {
+                    "refused_members"
+                },
+            ));
+        }
     }
     if !crate::services::channel_bot_turn_service::admit_with_owner_reset(
         &state.db,
@@ -83,7 +91,7 @@ pub(super) async fn inbound(
     )
     .await?
     {
-        return Ok(Inbound::Silent);
+        return Ok(Inbound::Silent("refused_bot_budget"));
     }
     match Box::pin(start_chat_turn(
         state,

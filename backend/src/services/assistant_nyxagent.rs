@@ -682,6 +682,9 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    /// Copied from a verified person's already-loaded enrollment. Not a client field.
+    pub(crate) execution_enrollment: bool,
+    pub(crate) execution_parent: Option<super::execution_permission_dispatch::tasks::Parent>,
     pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
@@ -854,6 +857,8 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            execution_enrollment: false,
+            execution_parent: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: None,
@@ -2433,6 +2438,26 @@ pub(crate) async fn begin_owner_turn_in_session(
             }
         }
     }
+    if row
+        .pending_events
+        .iter()
+        .any(|event| event.execution_task.is_some())
+    {
+        let before = row.pending_events.len();
+        row.pending_events = super::execution_permission_dispatch::tasks::filter_events(
+            db,
+            session,
+            user_id,
+            std::mem::take(&mut row.pending_events),
+        )
+        .await?;
+        if row.pending_events.len() != before {
+            collection.update_one(owner_filter(user_id,&id)?,doc! {"$set":{"pending_events":bson::to_bson(&row.pending_events).map_err(|_| AppError::Internal("Invalid events".into()))?}}).session(&mut *session).await?;
+            if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
+                return Ok(OwnerTurnAdmission::Drained);
+            }
+        }
+    }
     // Every turn drains queued events: an event turn renders them as
     // its message; other turns carry them in their input context.
     if start.origin == TurnOrigin::Event && row.pending_events.is_empty() {
@@ -2463,6 +2488,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?
     };
+    let events = super::execution_permission_dispatch::tasks::partition_events(
+        &mut row.pending_events,
+        events,
+        start.origin,
+    );
     if had_queued_media
         && let Some(fresh) = collection
             .find_one(owner_filter(user_id, &id)?)
@@ -2725,6 +2755,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            execution_task: lost.execution_task.clone(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -2932,6 +2963,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        execution_task: retry.as_ref().and_then(|r| r.execution_task.clone()),
         business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),
@@ -3130,6 +3162,28 @@ pub(crate) async fn begin_owner_turn_in_session(
         db, session, &row,
     ))
     .await?;
+    if let Some(acknowledgement_id) = &start.acknowledgement_id {
+        let card = db
+            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+                crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
+            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
+            .session(&mut *session)
+            .await?;
+        if let Some(card) = card.as_ref() {
+            row.active_turn.as_mut().expect("turn").execution_task = card.execution_task.clone();
+        }
+        if card.is_none() {
+            return Err(AppError::BadRequest(
+                "Acknowledgement must be your allowed decision in this conversation".into(),
+            ));
+        }
+    }
+    Box::pin(super::execution_permission_dispatch::tasks::admit(
+        db, session, &mut row, start, ids,
+    ))
+    .await?;
     // Chats whose queued messages this turn answers get its reply
     // too, unless it already goes there.
     let answered_here = match start.origin {
@@ -3266,21 +3320,6 @@ pub(crate) async fn begin_owner_turn_in_session(
         &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
     ))
     .await?;
-    if let Some(acknowledgement_id) = &start.acknowledgement_id {
-        let card = db
-            .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-                crate::models::assistant_acknowledgement::COLLECTION_NAME,
-            )
-            .find_one(doc! {"_id": acknowledgement_id, "user_id": user_id,
-            "conversation_id": &id, "status": {"$in": ["allowed", "used"]}, "decided_by": "user"})
-            .session(&mut *session)
-            .await?;
-        if card.is_none() {
-            return Err(AppError::BadRequest(
-                "Acknowledgement must be your allowed decision in this conversation".into(),
-            ));
-        }
-    }
     let mut media_event_ids = if start.guest || start.origin == TurnOrigin::Trigger {
         Vec::new()
     } else {
@@ -3321,6 +3360,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        execution_task: row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.execution_task.clone()),
         delegated_images: Default::default(),
         media_event_ids,
         media_queue_notice_id: None,
@@ -3738,6 +3781,7 @@ pub(crate) async fn request_stop_row(
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
+    super::execution_permission_dispatch::tasks::stop(db, existing).await?;
     if existing_turn.heartbeat_at.is_none() && live_turn(existing, now).is_none() {
         return super::async_service_operation::cancel(db, user_id, id).await;
     }
@@ -4149,6 +4193,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+                    execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,
@@ -4216,6 +4261,7 @@ async fn finish_turn_inner(
                 }
                 if let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::assistant_invocation_service::settle_in_session(&db,session,&row.user_id,turn,&message)).await?;
+                    Box::pin(super::execution_permission_dispatch::tasks::settle(&db,session,&current,turn,&message)).await?;
                 }
                 if current.collaboration.is_some() && let Some(turn) = settled_turn.as_ref() {
                     Box::pin(super::collaboration_group_service::runtime::publish_reply(&db,&current,turn,&message,session)).await?;
@@ -4343,6 +4389,8 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
 /// A pending proxy approval request raised by this chat's key. The chat renders
 /// it as a card; the decision itself goes through the ordinary approvals API.
 pub struct ChatApproval {
+    pub status: String,
+    pub review_path: String,
     pub id: String,
     pub service_slug: String,
     pub service_name: String,
@@ -4357,10 +4405,30 @@ pub struct ChatApproval {
 /// carry the key's name as `requester_label` (proxy approvals record the API
 /// key name), and the owner is either the request owner or a notified
 /// approver for org-policy requests.
+#[cfg(test)]
 pub async fn pending_approvals(
     db: &Database,
     user_id: &str,
     credential_api_key_id: &str,
+) -> AppResult<Vec<ChatApproval>> {
+    chat_approvals(db, user_id, credential_api_key_id, false).await
+}
+
+/// Keep terminal requests visible after expiry/decision and after a reload.
+/// This is the same owner/key scope as pending cards, never the global inbox.
+pub async fn approval_history(
+    db: &Database,
+    user_id: &str,
+    credential_api_key_id: &str,
+) -> AppResult<Vec<ChatApproval>> {
+    chat_approvals(db, user_id, credential_api_key_id, true).await
+}
+
+async fn chat_approvals(
+    db: &Database,
+    user_id: &str,
+    credential_api_key_id: &str,
+    include_decided: bool,
 ) -> AppResult<Vec<ChatApproval>> {
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS};
     if credential_api_key_id.is_empty() {
@@ -4369,24 +4437,44 @@ pub async fn pending_approvals(
     let Ok(key) = super::key_service::get_api_key(db, user_id, credential_api_key_id).await else {
         return Ok(Vec::new());
     };
-    let rows: Vec<ApprovalRequest> = db
-        .collection::<ApprovalRequest>(APPROVALS)
-        .find(doc! {
-            "status": "pending",
-            "requester_type": "user",
-            "requester_id": user_id,
-            "requester_label": &key.name,
-            "expires_at": {"$gt": bson::DateTime::now()},
-            "$or": [{"user_id": user_id}, {"notify_user_ids": user_id}],
-        })
-        .sort(doc! {"created_at": 1})
+    let scope = doc! {
+        "requester_type":"user", "requester_id":user_id,"requester_label":&key.name,
+        "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+    };
+    let now = Utc::now();
+    let mut pending = scope.clone();
+    pending.extend(doc! {"status":"pending","expires_at":{"$gt":bson::DateTime::from_chrono(now)}});
+    let collection = db.collection::<ApprovalRequest>(APPROVALS);
+    let mut rows: Vec<ApprovalRequest> = collection
+        .find(pending)
+        .sort(doc! {"created_at":1})
         .limit(10)
         .await?
         .try_collect()
         .await?;
+    if include_decided {
+        let terminal = doc! {"$and":[scope, {"$or":[
+            {"status":{"$ne":"pending"}}, {"expires_at":{"$lte":bson::DateTime::from_chrono(now)}},
+        ]}]};
+        let recent: Vec<ApprovalRequest> = collection
+            .find(terminal)
+            .sort(doc! {"created_at":-1})
+            .limit(20)
+            .await?
+            .try_collect()
+            .await?;
+        rows.extend(recent);
+        rows.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    }
     Ok(rows
         .into_iter()
         .map(|row| ChatApproval {
+            status: if row.status == "pending" && row.expires_at <= now {
+                "expired".into()
+            } else {
+                row.status
+            },
+            review_path: super::assistant_links::AssistantPage::Approvals.path(),
             id: row.id,
             service_slug: row.service_slug,
             service_name: row.service_name,
@@ -4993,6 +5081,7 @@ pub async fn activity_started_for_turn(
     activity_started_with_digest(db, user_id, conversation_id, turn_id, label, None).await
 }
 
+#[cfg(test)]
 pub async fn activity_started_with_digest(
     db: &Database,
     user_id: &str,
@@ -5000,6 +5089,18 @@ pub async fn activity_started_with_digest(
     turn_id: &str,
     label: &str,
     digest: Option<&str>,
+) -> AppResult<Option<String>> {
+    activity_started_with_identity(db, user_id, conversation_id, turn_id, label, digest, None).await
+}
+
+pub async fn activity_started_with_identity(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    label: &str,
+    digest: Option<&str>,
+    retry_identity: Option<&str>,
 ) -> AppResult<Option<String>> {
     let id = Uuid::new_v4().to_string();
     let label = if label
@@ -5015,6 +5116,7 @@ pub async fn activity_started_with_digest(
         "id": &id,
         "label": label,
         "digest": digest,
+        "retry_identity": retry_identity,
         "status": "running",
         "started_at": bson::DateTime::now(),
         "ended_at": bson::Bson::Null,
@@ -5043,6 +5145,7 @@ const RETRY_NOTE_CHARS: usize = 6000;
 
 /// What an owner Retry inherits from the failed turn it retries.
 pub struct RetryContext {
+    pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
     pub digests: Vec<String>,
     pub attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub note: String,
@@ -5061,6 +5164,8 @@ pub struct RecoveryPreview {
 struct RetryActivityEvidence {
     label: String,
     digest: Option<String>,
+    #[serde(default)]
+    retry_identity: Option<String>,
     status: String,
 }
 
@@ -5100,6 +5205,7 @@ impl From<&AssistantMessage> for RetryEvidence {
                 .map(|a| RetryActivityEvidence {
                     label: a.label.clone(),
                     digest: a.digest.clone(),
+                    retry_identity: a.retry_identity.clone(),
                     status: a.status.clone(),
                 })
                 .collect(),
@@ -5112,7 +5218,7 @@ fn retry_evidence_projection() -> bson::Document {
         "turn_id": 1, "seq": 1, "role": 1, "status": 1, "error_code": 1,
         "origin": 1, "retry_of": 1, "retry_claimed_by": 1,
         "activity_count": 1, "activities.label": 1,
-        "activities.digest": 1, "activities.status": 1,
+        "activities.digest": 1, "activities.retry_identity": 1, "activities.status": 1,
     }
 }
 
@@ -5185,6 +5291,11 @@ fn retry_evidence(
             if !digests.iter().any(|seen| seen == digest) {
                 digests.push(digest.to_owned());
             }
+            if let Some(identity) = activity.retry_identity.as_deref().filter(|d| !d.is_empty())
+                && !digests.iter().any(|seen| seen == identity)
+            {
+                digests.push(identity.to_owned());
+            }
             if completed_keys.insert(digest) {
                 completed_labels.push(activity.label.clone());
             }
@@ -5210,6 +5321,10 @@ fn retry_evidence(
     }
     note.push(']');
     Ok(RetryContext {
+        execution_task: input.execution_task.clone().map(|mut task| {
+            task.parent_turn_id = Some(failed.turn_id.clone());
+            task
+        }),
         digests,
         attachments: input.attachments.clone(),
         note: excerpt(&note, RETRY_NOTE_CHARS),
@@ -5484,6 +5599,7 @@ pub async fn retry_context_in_session(
 
 /// Whether a chat-key call repeats a completed call of the failed turn the
 /// live turn retries. One point read of the conversation.
+#[cfg(test)]
 pub async fn retry_duplicate(
     db: &Database,
     user_id: &str,
@@ -5491,12 +5607,22 @@ pub async fn retry_duplicate(
     turn_id: &str,
     digest: &str,
 ) -> AppResult<bool> {
+    retry_duplicate_any(db, user_id, conversation_id, turn_id, &[digest]).await
+}
+
+pub async fn retry_duplicate_any(
+    db: &Database,
+    user_id: &str,
+    conversation_id: &str,
+    turn_id: &str,
+    digests: &[&str],
+) -> AppResult<bool> {
     Ok(db
         .collection::<bson::Document>(CONVERSATIONS)
         .find_one(doc! {
             "_id": conversation_id, "user_id": user_id,
             "active_turn.turn_id": turn_id,
-            "active_turn.retry_digests": digest,
+            "active_turn.retry_digests": {"$in": digests},
         })
         .projection(doc! {"_id": 1})
         .await?
@@ -5521,6 +5647,9 @@ pub async fn record_retry_duplicate(
         "label": label,
         "digest": digest,
         "status": "completed",
+        // Retain the completed digest for retry ancestry, but make clear this
+        // turn did not execute the action again. Additive metadata for readers.
+        "failure": {"kind": RETRY_DUPLICATE_ACTION},
         "started_at": now,
         "ended_at": now,
     };
@@ -5803,6 +5932,7 @@ pub(crate) async fn delete_in_session(
         }
         for collection in [
             crate::models::async_service_operation::COLLECTION_NAME,
+            crate::models::cma_session_origin::COLLECTION_NAME,
             crate::models::assistant_voice::REQUESTS,
             crate::models::assistant_voice_session::COLLECTION_NAME,
             crate::models::assistant_acknowledgement::COLLECTION_NAME,

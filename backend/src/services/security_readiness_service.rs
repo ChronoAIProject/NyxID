@@ -49,6 +49,8 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:live-turn-gate",
     PLATFORM_POLICY,
     super::feature_flag_service::ORG_INSTRUCTION_FLAG_KEY,
+    super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
+    "permissions:execution-dispatch-v1",
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.

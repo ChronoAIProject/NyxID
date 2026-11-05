@@ -28,6 +28,10 @@ import {
   type NyxAgentChannelChatSettings,
   type NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
+import {
+  assistantOnboardingSchema,
+  type OnboardingAnswers,
+} from "@/schemas/assistant-onboarding";
 
 const ROOT = "/assistant/nyxagent";
 const agentPath = (id: string) => `${ROOT}/agents/${encodeURIComponent(id)}`;
@@ -110,6 +114,22 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/settings`, { method: "PUT", body: update }),
     );
   },
+  /** First-run intro state, the answer choices and next-step cards. */
+  async onboarding() {
+    return assistantOnboardingSchema.parse(await assistantJson(`${ROOT}/onboarding`));
+  },
+  /** Finish or skip the intro; replaces earlier answers. */
+  async saveOnboarding(answers: OnboardingAnswers) {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding`, { method: "PUT", body: answers }),
+    );
+  },
+  /** Hides the home's suggestions until the intro is retaken. */
+  async hideSuggestions() {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding/suggestions/hide`, { method: "POST" }),
+    );
+  },
   async channels() {
     return nyxAgentChannelListSchema.parse(await assistantJson(`${ROOT}/channels`))
       .channel_agents;
@@ -133,6 +153,9 @@ export const nyxBotApi = {
         body: { agent_id: agentId },
       }),
     );
+  },
+  async retryChannelGateway(channelAgentId: string) {
+    return assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}/retry-native-gateway`, { method: "POST" });
   },
   /** Who may talk to the agent in the bot's private chats. */
   async setPrivateChats(channelAgentId: string, privateChats: "owner" | "everyone") {

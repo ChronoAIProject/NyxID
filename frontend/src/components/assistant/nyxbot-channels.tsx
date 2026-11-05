@@ -24,6 +24,7 @@ import {
   useDisconnectNyxBotChannel,
   useLinkNyxBotChannel,
   useNyxBotChannels,
+  useRetryNyxBotChannelGateway,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelPlatformName } from "@/lib/assistant/nyxbot-labels";
 import { nyxBotChannelError, nyxBotChannelMutationError } from "@/lib/assistant/nyxbot-channel-errors";
@@ -105,6 +106,7 @@ export function ChannelBotsManager({
   const connect = useConnectNyxBotChannel();
   const link = useLinkNyxBotChannel();
   const disconnect = useDisconnectNyxBotChannel();
+  const retryGateway = useRetryNyxBotChannelGateway();
   const [ownerLink, setOwnerLink] = useState<{
     readonly botId: string;
     readonly agentId?: string;
@@ -143,7 +145,20 @@ export function ChannelBotsManager({
           bot.user_id === agent.owner_id &&
           adminOf(agent.owner_id))),
   );
-  const busy = connect.isPending || disconnect.isPending || link.isPending;
+  const busy =
+    connect.isPending ||
+    disconnect.isPending ||
+    link.isPending ||
+    retryGateway.isPending;
+
+  async function retryNative(row: NyxAgentChannelAgent) {
+    setError(undefined);
+    try {
+      await retryGateway.mutateAsync({ channelAgentId: row.id });
+    } catch (cause) {
+      setError(errorMessage(cause, "Could not retry native gateway activation."));
+    }
+  }
 
   async function requestLink(botId: string, agentId: string | undefined) {
     setError(undefined);
@@ -280,6 +295,7 @@ export function ChannelBotsManager({
                     </p>
                   </div>
                 ) : null}
+                {row.platform === "discord" ? <DiscordGatewayStatus row={row} /> : null}
                 {!row.org_specialist &&
                 !row.owner_linked &&
                 row.inbound_hint ? (
@@ -339,6 +355,12 @@ export function ChannelBotsManager({
                   </div>
                 ) : (
                   <div className="flex justify-end gap-1.5 @max-[480px]/channel-bots:flex-wrap">
+                    {row.platform === "discord" && row.transport === "direct" && row.status === "active" && row.gateway_native_activation ? (
+                      <Button size="sm" variant="outline" disabled={busy || !row.owner_linked}
+                        onClick={() => void retryNative(row)}>
+                        Retry native gateway now
+                      </Button>
+                    ) : null}
                     {row.status === "failed" ? (
                       <Button
                         size="sm"
@@ -500,4 +522,27 @@ function OwnerLink({
       </div>
     </div>
   );
+}
+
+function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
+  if (row.transport === "gateway") {
+    if (row.gateway_source?.type !== "discord") {
+      return <p className="text-11 text-muted-foreground">Agent Event Gateway with NyxID relay intake. Native Discord is not confirmed.</p>;
+    }
+    return <p className="text-11 text-muted-foreground">
+      Native gateway selected. Activation: {row.gateway_native_activation ?? "not reported"}.
+      {row.gateway_native_delivery ? ` Gateway delivery: ${row.gateway_native_delivery}.` : " Native delivery has not been confirmed."}
+    </p>;
+  }
+  if (!row.gateway_native_activation) return null;
+  const draining = row.gateway_native_activation === "relay_draining";
+  return <div className="space-y-1 text-11 text-muted-foreground">
+    <p>{draining ? "Waiting for the native gateway to release Discord before the relay can resume." : row.status === "active" && row.delivery_status !== "failing" ? "Working on NyxID relay." : "NyxID relay selected. Check channel health for delivery status."}</p>
+    {row.gateway_native_activation !== "relay_ready" && !draining ? <>
+      <p>Native gateway activation did not complete: {row.gateway_native_activation_detail ?? row.gateway_native_activation}.</p>
+      <p>A successful relay reply does not confirm native gateway acceptance.</p>
+      {row.gateway_next_retry_at ? <p>Next automatic retry: {formatDateTime(row.gateway_next_retry_at)} (while the gateway flag is enabled; deferred while answering).</p> : null}
+      {row.gateway_retry_available_at ? <p>Manual retry available after {formatDateTime(row.gateway_retry_available_at)}.</p> : null}
+    </> : null}
+  </div>;
 }

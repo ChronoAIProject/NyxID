@@ -155,6 +155,17 @@ export function ChannelActivities({
                   From {activity.sender_platform_id ?? "unknown sender"} ·{" "}
                   {activity.platform_conversation_id ?? "unknown conversation"}
                 </p>
+                {activity.nyxbot_admission && (
+                  <div className="space-y-1 break-all text-xs text-muted-foreground" aria-label="NyxBot admission">
+                    <p>NyxBot admission: {activity.nyxbot_admission.disposition.replaceAll("_", " ")}</p>
+                    <p>Bot mentioned: {activity.nyxbot_admission.bot_mentioned === null ? "unknown" : activity.nyxbot_admission.bot_mentioned ? "yes" : "no"}
+                      {activity.nyxbot_admission.managed_role_mentioned ? " (own managed role)" : ""} · Broadcast roles: {activity.nyxbot_admission.broadcast_roles ?? "unknown"}
+                      {activity.nyxbot_admission.broadcast_everyone_or_here ? " · @everyone/@here" : ""}</p>
+                    <p>Address: {activity.nyxbot_admission.address} · Thread follow: {activity.nyxbot_admission.thread_follow_selection ?? "not evaluated"}</p>
+                    {activity.nyxbot_admission.resolved_thread_id && <p>Thread: {activity.nyxbot_admission.resolved_thread_id}</p>}
+                    <p>{activity.nyxbot_admission.turn_id ? `Turn: ${activity.nyxbot_admission.turn_id}` : "No agent turn started."}</p>
+                  </div>
+                )}
                 {activity.content_availability === "encrypted" && (
                   <p className="text-xs text-muted-foreground">
                     Encrypted message received. Text and replies are

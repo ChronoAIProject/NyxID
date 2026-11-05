@@ -132,6 +132,7 @@ export function NotificationSettingsPage() {
       ? {
           telegram_enabled: settings.telegram_enabled,
           push_enabled: settings.push_enabled,
+          group_mentions_enabled: settings.group_mentions_enabled ?? true,
           global_approval_mode: settings.global_approval_mode ?? (settings.approval_required ? "all" : "off"),
           approval_timeout_secs: settings.approval_timeout_secs,
           grant_expiry_days: settings.grant_expiry_days,
@@ -242,7 +243,13 @@ export function NotificationSettingsPage() {
 
   async function handleSave(data: UpdateNotificationSettingsFormData) {
     try {
-      await updateMutation.mutateAsync(data);
+      const update = { ...data };
+      // An older replica may omit a saved preference. Do not overwrite it
+      // while saving an unrelated setting during a rolling deployment.
+      if (settings?.group_mentions_enabled === undefined && !form.getFieldState("group_mentions_enabled").isDirty) {
+        delete update.group_mentions_enabled;
+      }
+      await updateMutation.mutateAsync(update);
       toast.success("Notification settings updated");
     } catch (err) {
       if (err instanceof ApiError) {
@@ -460,7 +467,7 @@ export function NotificationSettingsPage() {
     <div className="space-y-8">
       <PageHeader
         title="Notification Settings"
-        description="Configure how you receive approval notifications."
+        description="Configure how you receive approval and group mention notifications."
       />
 
       {isLoading ? (
@@ -716,8 +723,7 @@ export function NotificationSettingsPage() {
                             Push Notifications
                           </FormLabel>
                           <FormDescription>
-                            Send approval requests to your registered mobile
-                            devices.
+                            Send notifications to your registered devices.
                           </FormDescription>
                         </div>
                         <FormControl>
@@ -727,6 +733,20 @@ export function NotificationSettingsPage() {
                             disabled={!pushDevices?.devices.length}
                           />
                         </FormControl>
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name="group_mentions_enabled"
+                    render={({ field }) => (
+                      <FormItem className="!space-y-0 flex items-center justify-between rounded-lg border border-border p-4">
+                        <div className="space-y-0.5">
+                          <FormLabel>Mentions in groups</FormLabel>
+                          <FormDescription>Push alerts when someone mentions you in a group. Requires Push Notifications; unread badges stay on.</FormDescription>
+                        </div>
+                        <FormControl><Switch checked={field.value ?? true} onCheckedChange={field.onChange} /></FormControl>
                       </FormItem>
                     )}
                   />

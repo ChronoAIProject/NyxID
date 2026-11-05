@@ -13,6 +13,11 @@ export const VOICE_MEDIA_ENGINE = String.raw`
   let marks = [];
   let pcmSequence = 0;
   let stage = 'runtime';
+  // Loudness meters for the call screen's aura. Strictly best effort: a runtime
+  // without Web Audio analysers keeps the call working with a resting aura.
+  let meterContext, inputMeter, outputMeter, outputTap, meterTimer, meterSamples;
+  let meterGeneration = 0;
+  let lastLevel = '';
   const pendingPCM = new Set();
   const iceWaiters = new Set();
   const MAX_FRAME = 1920;
@@ -38,9 +43,85 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     return counts;
   }
   const assertAlive = (id) => { if (!alive(id)) throw new Error('cancelled'); };
+  function analyser(target) {
+    const node = target.createAnalyser();
+    node.fftSize = 512;
+    node.smoothingTimeConstant = 0;
+    return node;
+  }
+  // Maps -50..-10 dBFS to 0..1.
+  function loudness(node) {
+    if (!node) return 0;
+    if (!meterSamples || meterSamples.length !== node.fftSize) meterSamples = new Float32Array(node.fftSize);
+    node.getFloatTimeDomainData(meterSamples);
+    let sum = 0;
+    for (let i = 0; i < meterSamples.length; i++) sum += meterSamples[i] * meterSamples[i];
+    const rms = Math.sqrt(sum / meterSamples.length);
+    if (!(rms > 0)) return 0;
+    return Math.round(Math.min(1, Math.max(0, (20 * Math.log10(rms) + 50) / 40)) * 100) / 100;
+  }
+  function startMeter(id) {
+    if (meterTimer || (!inputMeter && !outputMeter)) return;
+    const own = ++meterGeneration;
+    // About 20 Hz, sent only when a rounded level changes, so silence is quiet.
+    meterTimer = setInterval(() => {
+      if (!alive(id) || own !== meterGeneration) return;
+      try {
+        const input = loudness(inputMeter);
+        const output = loudness(outputMeter);
+        const key = input + ':' + output;
+        if (key === lastLevel) return;
+        lastLevel = key;
+        emit({ type: 'level', input, output });
+      } catch { stopMeter(); }
+    }, 50);
+  }
+  function stopMeter() {
+    meterGeneration++;
+    if (meterTimer) clearInterval(meterTimer);
+    meterTimer = undefined;
+    for (const node of [inputMeter, outputMeter, outputTap]) { try { node?.disconnect(); } catch {} }
+    inputMeter = outputMeter = outputTap = undefined;
+    if (meterContext) void meterContext.close().catch(() => {});
+    meterContext = undefined;
+    lastLevel = '';
+  }
+  function meterGrok(id, localContext, input, output) {
+    try {
+      inputMeter = analyser(localContext);
+      input.connect(inputMeter);
+      outputMeter = analyser(localContext);
+      output.connect(outputMeter);
+      startMeter(id);
+    } catch { stopMeter(); }
+  }
+  // OpenAI audio never passes through a worklet, so its meters use a separate,
+  // silent context: analysers are never connected to any destination.
+  function meterOpenAIInput(id, stream) {
+    try {
+      if (!window.AudioContext) return;
+      meterContext = new AudioContext();
+      void meterContext.resume().catch(() => {});
+      inputMeter = analyser(meterContext);
+      meterContext.createMediaStreamSource(stream).connect(inputMeter);
+      startMeter(id);
+    } catch { stopMeter(); }
+  }
+  function meterOpenAIOutput(id, stream) {
+    try {
+      if (!meterContext || outputTap) return;
+      outputMeter = analyser(meterContext);
+      outputTap = meterContext.createMediaStreamSource(stream);
+      outputTap.connect(outputMeter);
+      startMeter(id);
+    } catch {
+      outputMeter = outputTap = undefined;
+    }
+  }
   function cleanup() {
     closed = true;
     capturing = false;
+    stopMeter();
     for (const reject of iceWaiters) reject(new Error('cancelled'));
     iceWaiters.clear();
     media?.getTracks().forEach((track) => track.stop());
@@ -154,6 +235,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     source.connect(localWorklet);
     destination = localContext.createMediaStreamDestination();
     localWorklet.connect(destination);
+    meterGrok(id, localContext, source, localWorklet);
     // Exactly the web audio path: receive-track playback supplies the AEC reference.
     // Never also connect to context.destination (that would play duplicate audio).
     const localSender = new RTCPeerConnection({ iceServers: [] });
@@ -226,39 +308,6 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     emit({ type: 'diagnostic', stage: 'loopback_connected', name: 'ready' });
     return '';
   }
-  async function dictation(id, processor) {
-    atStage('audio_context');
-    if (!window.AudioWorkletNode || !window.AudioContext) throw new Error('unsupported');
-    const localContext = new AudioContext();
-    context = localContext;
-    await localContext.resume();
-    assertAlive(id);
-    if (!localContext.audioWorklet) throw new Error('unsupported');
-    atStage('audio_worklet');
-    const url = URL.createObjectURL(new Blob([processor], { type: 'text/javascript' }));
-    try { await localContext.audioWorklet.addModule(url); }
-    finally { URL.revokeObjectURL(url); }
-    assertAlive(id);
-    const localWorklet = new AudioWorkletNode(localContext, 'nyx-grok-audio', {
-      numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1],
-    });
-    worklet = localWorklet;
-    source = localContext.createMediaStreamSource(media);
-    source.connect(localWorklet);
-    // The processor outputs silence without a playback queue. Keep it running
-    // for PCM24k capture without monitoring or recording the microphone.
-    localWorklet.connect(localContext.destination);
-    localWorklet.port.onmessage = ({ data }) => {
-      if (!alive(id) || !capturing || data.generation !== captureGeneration || data.type !== 'pcm') return;
-      if (!(data.bytes instanceof ArrayBuffer) || data.bytes.byteLength !== 960 || pendingPCM.size >= 100) {
-        fail('Voice audio connection is too slow. Please reconnect.'); return;
-      }
-      const sequence = ++pcmSequence;
-      pendingPCM.add(sequence);
-      emit({ type: 'pcm', sequence, bytes: encode(data.bytes) });
-    };
-    return '';
-  }
   async function prepare(protocol, id, processor) {
     cleanup();
     generation = id;
@@ -285,15 +334,16 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     if (!alive(id)) { localMedia.getTracks().forEach((track) => track.stop()); throw new Error('cancelled'); }
     media = localMedia;
     localMedia.getAudioTracks().forEach((track) => { track.enabled = false; });
-    if (protocol === 'dictation') return dictation(id, processor);
     if (protocol === 'xai_realtime') return grok(id, processor);
     if (protocol !== 'openai_live') throw new Error('unsupported');
     const localPeer = new RTCPeerConnection();
     peer = localPeer;
     localMedia.getTracks().forEach((track) => localPeer.addTrack(track, localMedia));
+    meterOpenAIInput(id, localMedia);
     localPeer.ontrack = ({ track, streams }) => {
       if (!alive(id)) return;
       audio.srcObject = streams[0] || new MediaStream([track]);
+      meterOpenAIOutput(id, audio.srcObject);
       void audio.play().catch(() => {});
     };
     localPeer.onconnectionstatechange = () => {
@@ -335,7 +385,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
         case 'input': input(message.enabled === true); break;
         case 'hold': if (audio) audio.volume = message.pressed ? 0.25 : 1; break;
         case 'speaker': speakerMuted = message.muted === true; if (audio) audio.muted = speakerMuted; break;
-        case 'resume': if (context) await context.resume(); assertAlive(id); if (audio) await audio.play(); break;
+        case 'resume': if (context) await context.resume(); if (meterContext) await meterContext.resume().catch(() => {}); assertAlive(id); if (audio) await audio.play(); break;
         case 'enqueue': {
           if (!worklet || !Number.isSafeInteger(message.end_ms) || message.end_ms < 0 || message.end_ms > 1830000) throw new Error('frame');
           const bytes = decode(message.bytes);

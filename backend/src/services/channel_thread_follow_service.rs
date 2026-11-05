@@ -189,7 +189,7 @@ fn partition(
 
 pub enum Selection {
     Legacy,
-    Quiet,
+    Quiet(&'static str),
     Child(Box<NyxbotThread>, ThreadTurnBinding),
     Stopped(Box<NyxbotThread>, ThreadTurnBinding),
 }
@@ -223,7 +223,7 @@ pub async fn select(
         target.facts().sender_kind,
         ThreadSenderKind::Human | ThreadSenderKind::Bot
     ) {
-        return Ok(Selection::Quiet);
+        return Ok(Selection::Quiet("refused_sender"));
     }
     let db = db.clone();
     let owner = owner.to_owned();
@@ -255,8 +255,8 @@ pub async fn select(
             if settings.follow.threads.as_deref().is_some_and(|s| s != "follow") { return Ok(Selection::Legacy); }
             if settings.agent_id.as_deref().or(channel.agent_id.as_deref()).is_some_and(|a| a != agent) { return Err(not_found()); }
             let (channel, _) = super::org_channel_service::project_sender(db,&channel,sender,target.facts().sender_kind==ThreadSenderKind::Human,agent).await?;
-            let Some(guest) = eligible_for_facts(&channel, &settings, target.facts(), sender) else { return Ok(Selection::Quiet); };
-            if stop && guest {return Ok(Selection::Quiet);}
+            let Some(guest) = eligible_for_facts(&channel, &settings, target.facts(), sender) else { return Ok(Selection::Quiet("refused_members")); };
+            if stop && guest {return Ok(Selection::Quiet("refused_guest_control"));}
             if settings_id!=parent_id {
                 db.collection::<NyxbotThread>(THREADS).update_one(doc! {"_id":settings_id,"user_id":owner,"channel_id":channel_id},
                     doc! {"$set":{"parent_chat_id":parent_id}}).session(&mut *session).await?;
@@ -272,7 +272,7 @@ pub async fn select(
                 return Ok(Selection::Legacy);
             }
             if child.as_ref().is_some_and(|child| !supported_child(child)) {
-                return Ok(Selection::Quiet);
+                return Ok(Selection::Quiet("refused_thread_version"));
             }
             if !enabled && child.is_none() { return Ok(Selection::Legacy); }
             let active = enabled && child.as_ref().is_some_and(follows);
@@ -285,7 +285,7 @@ pub async fn select(
                     == crate::models::channel_thread::ThreadAddress::NotAddressed
                 && target.facts().mentions_others
             {
-                return Ok(Selection::Quiet);
+                return Ok(Selection::Quiet("mentions_others"));
             }
             // Aurinko remains a legacy private chat until an addressed message
             // opens a shared child or an existing child is actively followed.
@@ -298,10 +298,10 @@ pub async fn select(
                     let binding = binding(&child, source, sender, guest, agent, target.facts().sender_kind);
                     return Ok(Selection::Stopped(Box::new(child), binding));
                 }
-                return Ok(Selection::Quiet);
+                return Ok(Selection::Quiet("not_following"));
             }
             if !(active || addressed || child.is_some() && settings.reply_mode.as_deref()==Some("all")) {
-                return Ok(if child.is_none() && settings.reply_mode.as_deref()==Some("all") {Selection::Legacy}else{Selection::Quiet});
+                return Ok(if child.is_none() && settings.reply_mode.as_deref()==Some("all") {Selection::Legacy}else{Selection::Quiet("not_addressed")});
             }
             if !active && addressed && enabled && target.facts().sender_kind == ThreadSenderKind::Human {
                 reserve(db, &channel, &settings, parent_id, &key, target, sender, agent, &mut child, session).await?;

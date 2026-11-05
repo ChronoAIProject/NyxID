@@ -20,6 +20,9 @@ pub enum ApiKeyPurpose {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiKey {
+    /// Reader-only native policy indirection; issuance/enforcement is a later step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_policy_id: Option<String>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -138,12 +141,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn execution_policy_reference_is_optional_and_roundtrips() {
+        let mut key = make_api_key();
+        let legacy = bson::to_document(&key).unwrap();
+        assert!(!legacy.contains_key("permission_policy_id"));
+        assert!(
+            bson::from_document::<ApiKey>(legacy)
+                .unwrap()
+                .permission_policy_id
+                .is_none()
+        );
+        key.permission_policy_id = Some("immutable-policy".into());
+        let decoded: ApiKey = bson::from_document(bson::to_document(&key).unwrap()).unwrap();
+        assert_eq!(
+            decoded.permission_policy_id.as_deref(),
+            Some("immutable-policy")
+        );
+    }
+
+    #[test]
     fn collection_name() {
         assert_eq!(COLLECTION_NAME, "api_keys");
     }
 
     fn make_api_key() -> ApiKey {
         ApiKey {
+            permission_policy_id: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             name: "My Key".to_string(),

@@ -1,7 +1,6 @@
 import type { VoiceControlSocket } from "./AssistantVoiceClient";
 import {
   assistantVoiceStreamPath,
-  assistantDictationPath,
   trustedVoiceOrigin,
 } from "../../../lib/api/assistantVoiceTransport";
 
@@ -35,16 +34,11 @@ export function createVoiceSocketFactory(input: {
       /^\/assistant\/nyxagent\/conversations\/([^/]+)\/voice-sessions\/([^/]+)\/stream$/.exec(
         path,
       );
-    const dictation =
-      /^\/assistant\/nyxagent\/conversations\/([^/]+)\/dictation$/.exec(path);
     const validStream =
       match?.[1] &&
       match[2] &&
       assistantVoiceStreamPath(match[1], match[2]) === path;
-    const validDictation =
-      dictation?.[1] && assistantDictationPath(dictation[1]) === path;
-    if (!validStream && !validDictation)
-      throw new Error("Invalid voice connection.");
+    if (!validStream) throw new Error("Invalid voice connection.");
     const base = new URL(input.apiBaseUrl);
     if (
       !["https:", "http:"].includes(base.protocol) ||

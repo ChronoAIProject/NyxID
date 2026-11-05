@@ -110,6 +110,18 @@ impl Admission {
         connection: &str,
         target: Option<&crate::services::proxy_service::ProxyTarget>,
     ) -> AppResult<()> {
+        if let Some(permit) = self
+            .chat
+            .execution_permission
+            .as_ref()
+            .and_then(|c| c.permit())
+        {
+            permit
+                .revalidate(target.ok_or_else(|| {
+                    AppError::Forbidden("Execution permission requires HTTP egress".into())
+                })?)
+                .await?;
+        }
         if self.chat.guest && self.operation_identity["kind"] == "raw_inference" {
             super::guest_model::require(
                 db,
@@ -255,6 +267,11 @@ impl Admission {
             }
             if service.user_id == self.chat.user_id
                 && !shared_platform_model(&self.chat, &service, &self.operation_identity, target)
+                && !crate::services::execution_permission_dispatch::covers(
+                    &self.chat,
+                    crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent,
+                    connection,
+                )
             {
                 self.shared_permit
                     .as_ref()

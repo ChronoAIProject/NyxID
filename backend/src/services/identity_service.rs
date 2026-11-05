@@ -248,6 +248,7 @@ mod tests {
 
     fn make_user() -> User {
         User {
+            execution_permission_enrollment: None,
             id: "user-123".to_string(),
             email: "alice@example.com".to_string(),
             password_hash: None,

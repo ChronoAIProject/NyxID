@@ -1,34 +1,35 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useFocusEffect } from "@react-navigation/native";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, AppState, Linking, Share, View } from "react-native";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Alert, AppState, Linking, Share } from "react-native";
 import * as Clipboard from "expo-clipboard";
+import { useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import type { WorkspaceSheetParamList } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
-  ActionButton,
-  Card,
-  Field,
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsGroup,
+  SettingsPage,
+  SettingsRow,
+  SettingsTextField,
+} from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { accountApi } from "../../lib/api/accountApi";
 import {
   totpCodeSchema,
-  updateProfileSchema,
-  type AccountSession,
   type MfaEnrollment,
 } from "../../lib/api/accountSchema";
 import { isApiError } from "../../lib/api/ApiError";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { useTheme } from "../../theme/ThemeContext";
-import { useAuthSession } from "../auth/AuthSessionContext";
 import { createMfaRecoveryLifecycle } from "./mfaRecoveryLifecycle";
 import { AccountSecurityControls } from "./AccountSecurityControls";
 import { AccountAuthorizations } from "./AccountAuthorizations";
 import { AccountOrganizations } from "./AccountOrganizations";
+import { sessionDeviceLabel } from "./sessionDevice";
+import { formatSessionDate } from "./SessionDetailScreen";
 import { disableMfaSchema } from "../../lib/api/accountSecurityTransport";
 
 type PrivateAction = "setup" | "confirm" | "disable" | "copy" | "share";
@@ -40,16 +41,9 @@ function accountError(error: unknown): string {
   return resolveErrorMessage(error);
 }
 
-function formatDate(value: string): string {
-  const date = new Date(value);
-  return Number.isFinite(date.getTime())
-    ? date.toLocaleString()
-    : "Unavailable";
-}
-
 export function AccountSecurityScreen() {
-  const { colors } = useTheme();
-  const { signOut } = useAuthSession();
+  const navigation =
+    useNavigation<NativeStackNavigationProp<WorkspaceSheetParamList>>();
   const { isConnected } = useNetworkStatus();
   const queryClient = useQueryClient();
   const profile = useQuery({
@@ -60,9 +54,6 @@ export function AccountSecurityScreen() {
     queryKey: ["account", "sessions"],
     queryFn: ({ signal }) => accountApi.listSessions(signal),
   });
-  const [displayName, setDisplayName] = useState("");
-  const [avatarUrl, setAvatarUrl] = useState("");
-  const profileInitialized = useRef(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
 
   // MFA secrets live only in this screen's transient state, never Query's
@@ -97,13 +88,6 @@ export function AccountSecurityScreen() {
   const [appActive, setAppActive] = useState(
     AppState.currentState === "active",
   );
-
-  useEffect(() => {
-    if (!profile.data || profileInitialized.current) return;
-    profileInitialized.current = true;
-    setDisplayName(profile.data.display_name ?? "");
-    setAvatarUrl(profile.data.avatar_url ?? "");
-  }, [profile.data]);
 
   const clearSensitiveInputs = useCallback(() => {
     privateEpoch.current += 1;
@@ -196,76 +180,6 @@ export function AccountSecurityScreen() {
     isVisible.current;
   const refreshProfile = () =>
     queryClient.invalidateQueries({ queryKey: ["account", "profile"] });
-
-  const updateProfile = useMutation({
-    mutationFn: accountApi.updateProfile,
-    onSuccess: (result) => {
-      setDisplayName(result.display_name ?? "");
-      setAvatarUrl(result.avatar_url ?? "");
-      void refreshProfile();
-      setFeedback({ message: "Profile updated", tone: "success" });
-    },
-    onError: (error) =>
-      setFeedback({ message: accountError(error), tone: "error" }),
-  });
-
-  const revokeSession = useMutation({
-    mutationFn: (session: AccountSession) =>
-      accountApi.revokeSession(session.id),
-    onSuccess: async (_, session) => {
-      if (session.is_current) {
-        await signOut();
-        queryClient.clear();
-        return;
-      }
-      void queryClient.invalidateQueries({ queryKey: ["account", "sessions"] });
-      setFeedback({ message: "Session signed out", tone: "success" });
-    },
-    onError: (error) =>
-      setFeedback({ message: accountError(error), tone: "error" }),
-  });
-
-  function saveProfile() {
-    if (!profile.data) return;
-    const changes = {
-      ...(displayName.trim() !== (profile.data.display_name ?? "")
-        ? { display_name: displayName }
-        : {}),
-      ...(avatarUrl.trim() !== (profile.data.avatar_url ?? "")
-        ? { avatar_url: avatarUrl }
-        : {}),
-    };
-    const result = updateProfileSchema.safeParse(changes);
-    if (!result.success) {
-      setFeedback({
-        message:
-          result.error.issues[0]?.message ?? "Check your profile details",
-        tone: "error",
-      });
-      return;
-    }
-    setFeedback(null);
-    updateProfile.mutate(result.data);
-  }
-
-  function confirmSessionRevocation(session: AccountSession) {
-    Alert.alert(
-      session.is_current
-        ? "Sign out of this session?"
-        : "Sign out this session?",
-      session.is_current
-        ? "You will return to the sign-in screen on this device."
-        : "This session will lose access to your account. You can sign in again later.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Sign out",
-          style: "destructive",
-          onPress: () => revokeSession.mutate(session),
-        },
-      ],
-    );
-  }
 
   async function runPrivate(
     action: PrivateAction,
@@ -418,10 +332,6 @@ export function AccountSecurityScreen() {
     });
   }
 
-  const profileChanged =
-    !!profile.data &&
-    (displayName.trim() !== (profile.data.display_name ?? "") ||
-      avatarUrl.trim() !== (profile.data.avatar_url ?? ""));
   const passwordAccount =
     !!profile.data &&
     (profile.data.has_password ?? !profile.data.social_provider);
@@ -429,121 +339,109 @@ export function AccountSecurityScreen() {
   const privateDisabled = privateAction !== null || !isConnected;
 
   return (
-    <WorkspacePage showHeading={false} title="Account & security">
-      <Label muted>Manage your identity and protect access to NyxID.</Label>
+    <SettingsPage>
       {!isConnected ? (
         <Notice message="You're offline. Connect to update account settings." />
       ) : null}
       {feedback ? <Notice {...feedback} /> : null}
 
-      <Card>
-        <Label accessibilityRole="header">Profile</Label>
-        {profile.isPending ? (
-          <Label muted>Loading your account…</Label>
-        ) : profile.isError || !profile.data ? (
-          <>
-            <Notice tone="error" message="Couldn't load your profile." />
-            <ActionButton
-              label="Retry profile"
-              variant="secondary"
-              onPress={() => {
-                void profile.refetch();
-              }}
+      {profile.isPending ? (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          title
+          accessibilityLabel="Loading your account"
+        />
+      ) : (
+        <SettingsGroup title="Profile" inset={false}>
+          {profile.isError || !profile.data ? (
+            <SettingsRow
+              label="Couldn't load your profile"
+              detail="Tap to retry."
+              tone="action"
+              onPress={() => void profile.refetch()}
             />
-          </>
-        ) : (
-          <>
-            <Label muted>{profile.data.email}</Label>
-            <Label muted>
-              {profile.data.email_verified
-                ? "Email verified"
-                : "Email not verified"}
-            </Label>
-            <Field
-              label="Display name"
-              value={displayName}
-              onChangeText={setDisplayName}
-              autoCapitalize="words"
-              editable={!updateProfile.isPending}
-            />
-            <Field
-              label="Avatar URL"
-              value={avatarUrl}
-              onChangeText={setAvatarUrl}
-              keyboardType="url"
-              autoCorrect={false}
-              editable={!updateProfile.isPending}
-              placeholder="https://example.com/avatar.png"
-            />
-            <ActionButton
-              label="Save profile"
-              onPress={saveProfile}
-              loading={updateProfile.isPending}
-              disabled={!isConnected || !profileChanged}
-            />
-            {profileChanged ? (
-              <ActionButton
-                label="Discard changes"
-                variant="secondary"
-                disabled={updateProfile.isPending}
-                onPress={() => {
-                  setDisplayName(profile.data?.display_name ?? "");
-                  setAvatarUrl(profile.data?.avatar_url ?? "");
-                }}
-              />
-            ) : null}
-          </>
-        )}
-      </Card>
+          ) : (
+            [
+              <SettingsRow
+                key="email"
+                label="Email"
+                detail={
+                  profile.data.email_verified ? "Verified" : "Not verified"
+                }
+                value={profile.data.email}
+              />,
+              <SettingsRow
+                key="name"
+                label="Display name"
+                value={profile.data.display_name || "Not set"}
+                disabled={!isConnected}
+                onPress={() =>
+                  navigation.navigate("ProfileEdit", { field: "display_name" })
+                }
+              />,
+              <SettingsRow
+                key="avatar"
+                label="Avatar"
+                value={profile.data.avatar_url ? "Custom image" : "Initial"}
+                disabled={!isConnected}
+                onPress={() =>
+                  navigation.navigate("ProfileEdit", { field: "avatar_url" })
+                }
+              />,
+            ]
+          )}
+        </SettingsGroup>
+      )}
 
-      <Card>
-        <Label accessibilityRole="header">Two-factor authentication</Label>
-        {profile.isPending ? (
-          <Label muted>Loading security settings…</Label>
-        ) : !profile.data || !ownsPrivateState ? (
-          <Label muted>Load your profile to manage security.</Label>
-        ) : (
-          <>
-            <Label muted>
-              {mfaEnabled
-                ? "Authenticator protection is on."
-                : "Add a six-digit authenticator code to password sign-in."}
-            </Label>
+      {profile.data && ownsPrivateState ? (
+        <>
+          <SettingsGroup
+            title="Two-factor authentication"
+            inset={false}
+            footer={
+              recovery.count > 0
+                ? "These codes are shown once. Keep a private copy, then choose “I've Saved the Codes”. Continue signing in with your authenticator; recovery-code sign-in is currently unavailable."
+                : enrollmentPending && !mfaEnabled
+                  ? "In your authenticator, add a time-based NyxID account with this setup key, then enter its six-digit code."
+                  : mfaEnabled
+                    ? "Password sign-in asks for a code from your authenticator."
+                    : passwordAccount
+                      ? "Add a six-digit authenticator code to password sign-in."
+                      : `This account uses ${profile.data.social_provider} sign-in. You can still add an authenticator; turning it off later needs only an authenticator or recovery code.`
+            }
+          >
+            <SettingsRow
+              label="Two-factor authentication"
+              value={mfaEnabled ? "On" : "Off"}
+            />
             {recovery.count > 0 && !appActive ? (
-              <Label muted>
-                Recovery codes are hidden while the app is inactive.
-              </Label>
+              <SettingsRow label="Recovery codes are hidden while the app is inactive." />
             ) : recovery.count > 0 ? (
-              <>
-                <Label>Save your recovery codes</Label>
-                <Label muted>
-                  These codes are shown once. Keep a private copy. Continue
-                  signing in with your authenticator; recovery-code sign-in is
-                  currently unavailable.
-                </Label>
-                <Label muted>
-                  Save a private copy, then choose “I've saved the codes” to
-                  leave this screen.
-                </Label>
-                <View
-                  accessibilityLabel={
+              [
+                <SettingsRow
+                  key="codes"
+                  mono
+                  selectable={revealCodes}
+                  accessibilityHint={
                     revealCodes ? "Recovery codes" : "Recovery codes hidden"
                   }
-                >
-                  <Label mono selectable={revealCodes}>
-                    {revealCodes
+                  label={
+                    revealCodes
                       ? recoveryCodes.join("\n")
-                      : `${recoveryCodes.length} private codes · hidden`}
-                  </Label>
-                </View>
-                <ActionButton
-                  label={revealCodes ? "Hide codes" : "Reveal codes"}
-                  variant="secondary"
+                      : `${recoveryCodes.length} private codes · hidden`
+                  }
+                />,
+                <SettingsRow
+                  key="reveal"
+                  tone="action"
+                  label={revealCodes ? "Hide Codes" : "Reveal Codes"}
                   onPress={() => setRevealCodes(!revealCodes)}
-                />
-                <ActionButton
-                  label="Copy recovery codes"
-                  variant="secondary"
+                />,
+                <SettingsRow
+                  key="copy"
+                  tone="action"
+                  label="Copy Recovery Codes"
                   disabled={privateDisabled}
                   onPress={() =>
                     copyPrivate(
@@ -551,68 +449,78 @@ export function AccountSecurityScreen() {
                       "Codes copied. Paste them into a private password manager.",
                     )
                   }
-                />
-                <ActionButton
-                  label="Export recovery codes"
-                  variant="secondary"
+                />,
+                <SettingsRow
+                  key="export"
+                  tone="action"
+                  label={
+                    privateAction === "share"
+                      ? "Exporting…"
+                      : "Export Recovery Codes"
+                  }
                   disabled={privateDisabled}
-                  loading={privateAction === "share"}
                   onPress={exportCodes}
-                />
-                <ActionButton
-                  label="I've saved the codes"
+                />,
+                <SettingsRow
+                  key="saved"
+                  tone="action"
+                  label="I've Saved the Codes"
                   disabled={privateAction !== null}
                   onPress={clearPrivateState}
-                />
-              </>
+                />,
+              ]
             ) : enrollmentPending && !mfaEnabled ? (
-              <>
-                {enrollment && appActive ? (
-                  <>
-                    <Label muted>
-                      In your authenticator, add a time-based NyxID account
-                      using this setup key.
-                    </Label>
-                    <Label mono selectable>
-                      {enrollment.secret}
-                    </Label>
-                    <ActionButton
-                      label="Copy setup key"
-                      variant="secondary"
-                      disabled={privateDisabled}
-                      onPress={() =>
-                        copyPrivate(
-                          enrollment.secret,
-                          "Setup key copied. Add it to your authenticator.",
-                        )
-                      }
-                    />
-                    <ActionButton
-                      label="Open authenticator"
-                      variant="secondary"
-                      disabled={privateDisabled}
-                      onPress={() => {
-                        const url = enrollment.qr_code_url;
-                        void Linking.openURL(url).catch(() => {
-                          if (isFocused.current)
-                            setFeedback({
-                              message:
-                                "No authenticator opened. Copy the setup key and add the account manually.",
-                              tone: "info",
-                            });
-                        });
-                      }}
-                    />
-                  </>
+              [
+                enrollment && appActive ? (
+                  <SettingsRow
+                    key="key"
+                    label="Setup key"
+                    detail={enrollment.secret}
+                    selectable
+                  />
                 ) : (
-                  <Label muted>
-                    Enter the code from the NyxID account you just added to your
-                    authenticator. If you did not add it, cancel and start setup
-                    again.
-                  </Label>
-                )}
-                <Field
-                  label="Authenticator code"
+                  <SettingsRow
+                    key="key"
+                    label="Enter the code from the NyxID account you just added. If you did not add it, cancel and start again."
+                  />
+                ),
+                enrollment && appActive ? (
+                  <SettingsRow
+                    key="copy-key"
+                    tone="action"
+                    label="Copy Setup Key"
+                    disabled={privateDisabled}
+                    onPress={() =>
+                      copyPrivate(
+                        enrollment.secret,
+                        "Setup key copied. Add it to your authenticator.",
+                      )
+                    }
+                  />
+                ) : null,
+                enrollment && appActive ? (
+                  <SettingsRow
+                    key="open"
+                    tone="action"
+                    label="Open Authenticator"
+                    disabled={privateDisabled}
+                    onPress={() => {
+                      const url = enrollment.qr_code_url;
+                      void Linking.openURL(url).catch(() => {
+                        if (isFocused.current)
+                          setFeedback({
+                            message:
+                              "No authenticator opened. Copy the setup key and add the account manually.",
+                            tone: "info",
+                          });
+                      });
+                    }}
+                  />
+                ) : null,
+                <SettingsTextField
+                  key="code"
+                  accessibilityLabel="Authenticator code"
+                  placeholder="Six-digit code"
                   value={totpCode}
                   onChangeText={setTotpCode}
                   keyboardType="number-pad"
@@ -620,35 +528,46 @@ export function AccountSecurityScreen() {
                   autoComplete="one-time-code"
                   maxLength={6}
                   editable={!privateAction}
-                />
-                <ActionButton
-                  label="Verify & enable"
-                  loading={privateAction === "confirm"}
+                />,
+                <SettingsRow
+                  key="verify"
+                  tone="action"
+                  label={
+                    privateAction === "confirm"
+                      ? "Verifying…"
+                      : "Verify & Turn On"
+                  }
                   disabled={privateDisabled || !/^\d{6}$/.test(totpCode.trim())}
                   onPress={confirmEnrollment}
-                />
-                <ActionButton
-                  label="Cancel setup"
-                  variant="secondary"
+                />,
+                <SettingsRow
+                  key="cancel"
+                  tone="danger"
+                  label="Cancel Setup"
                   disabled={privateAction !== null}
                   onPress={clearPrivateState}
-                />
-              </>
+                />,
+              ]
             ) : mfaEnabled ? (
               disableOpen ? (
-                <>
-                  <Field
-                    label="Authenticator or recovery code"
+                [
+                  <SettingsTextField
+                    key="disable-code"
+                    accessibilityLabel="Authenticator or recovery code"
+                    placeholder="Authenticator or recovery code"
                     value={disableCode}
                     onChangeText={setDisableCode}
                     autoCorrect={false}
+                    autoCapitalize="none"
                     maxLength={128}
                     secureTextEntry
                     editable={!privateAction}
-                  />
-                  {passwordAccount ? (
-                    <Field
-                      label="Current password"
+                  />,
+                  passwordAccount ? (
+                    <SettingsTextField
+                      key="password"
+                      accessibilityLabel="Current password"
+                      placeholder="Current password"
                       value={password}
                       onChangeText={setPassword}
                       secureTextEntry
@@ -656,57 +575,51 @@ export function AccountSecurityScreen() {
                       autoComplete="current-password"
                       editable={!privateAction}
                     />
-                  ) : null}
-                  <ActionButton
-                    label="Turn off two-factor authentication"
-                    variant="danger"
-                    loading={privateAction === "disable"}
+                  ) : null,
+                  <SettingsRow
+                    key="confirm-off"
+                    tone="danger"
+                    label={
+                      privateAction === "disable"
+                        ? "Turning off…"
+                        : "Turn Off Two-Factor Authentication"
+                    }
                     disabled={
                       privateDisabled ||
                       !disableCode.trim() ||
                       (passwordAccount && !password)
                     }
                     onPress={disableMfa}
-                  />
-                  <ActionButton
+                  />,
+                  <SettingsRow
+                    key="cancel-off"
+                    tone="action"
                     label="Cancel"
-                    variant="secondary"
                     disabled={privateAction !== null}
                     onPress={clearPrivateState}
-                  />
-                </>
+                  />,
+                ]
               ) : (
-                <ActionButton
-                  label="Turn off two-factor authentication"
-                  variant="secondary"
+                <SettingsRow
+                  tone="danger"
+                  label="Turn Off Two-Factor Authentication"
                   disabled={privateDisabled}
                   onPress={() => setDisableOpen(true)}
                 />
               )
             ) : (
-              <>
-                {!passwordAccount ? (
-                  <Label muted>
-                    This account uses {profile.data.social_provider} sign-in.
-                    To turn off two-factor authentication later, use an
-                    authenticator or recovery code. No account password is
-                    required.
-                  </Label>
-                ) : null}
-                <ActionButton
-                  label="Set up authenticator"
-                  loading={privateAction === "setup"}
-                  disabled={privateDisabled}
-                  onPress={beginEnrollment}
-                />
-              </>
+              <SettingsRow
+                tone="action"
+                label={
+                  privateAction === "setup"
+                    ? "Starting…"
+                    : "Set Up Authenticator"
+                }
+                disabled={privateDisabled}
+                onPress={beginEnrollment}
+              />
             )}
-          </>
-        )}
-      </Card>
-
-      {profile.data && ownsPrivateState ? (
-        <>
+          </SettingsGroup>
           <AccountSecurityControls
             key={`security:${profile.data.id}`}
             profile={profile.data}
@@ -722,77 +635,54 @@ export function AccountSecurityScreen() {
           />
         </>
       ) : null}
-      <Card>
-        <Label accessibilityRole="header">Active sessions</Label>
-        <Label muted>
-          Review where your account is signed in. Network details come from
-          NyxID's session records.
-        </Label>
-        {sessions.isPending ? (
-          <Label muted>Loading sessions…</Label>
-        ) : sessions.isError ? (
-          <>
-            <Notice message="Couldn't load active sessions." tone="error" />
-            <ActionButton
-              label="Retry sessions"
-              variant="secondary"
-              onPress={() => {
-                void sessions.refetch();
-              }}
-            />
-          </>
-        ) : sessions.data?.length === 0 ? (
-          <Label muted>No active sessions found.</Label>
-        ) : (
-          sessions.data?.map((session) => (
-            <View
-              key={session.id}
-              style={{
-                gap: 8,
-                paddingVertical: 12,
-                borderTopWidth: 1,
-                borderTopColor: colors.border,
-              }}
-            >
-              <Label>
-                {session.is_current ? "This session" : "Signed-in session"}
-              </Label>
-              <Label muted selectable>
-                {session.user_agent || "Device details unavailable"}
-              </Label>
-              <Label muted>
-                Network: {session.ip_address || "Unavailable"}
-              </Label>
-              <Label muted>Signed in {formatDate(session.created_at)}</Label>
-              <Label muted>Expires {formatDate(session.expires_at)}</Label>
-              <ActionButton
-                label={
-                  session.is_current
-                    ? "Sign out on this device"
-                    : "Sign out session"
-                }
-                variant="danger"
-                disabled={!isConnected || revokeSession.isPending}
-                loading={
-                  revokeSession.isPending &&
-                  revokeSession.variables?.id === session.id
-                }
-                onPress={() => confirmSessionRevocation(session)}
-              />
-            </View>
-          ))
-        )}
-        <ActionButton
-          label="Refresh sessions"
-          variant="secondary"
-          disabled={
-            !isConnected || sessions.isFetching || revokeSession.isPending
-          }
-          onPress={() => {
-            void sessions.refetch();
-          }}
+
+      {profile.isPending ? (
+        <SkeletonRows
+          rows={3}
+          icon={false}
+          title
+          accessibilityLabel="Loading security settings"
         />
-      </Card>
-    </WorkspacePage>
+      ) : null}
+      {sessions.isPending ? (
+        <SkeletonRows
+          rows={2}
+          icon={false}
+          title
+          accessibilityLabel="Loading sessions"
+        />
+      ) : (
+        <SettingsGroup
+          title="Active sessions"
+          inset={false}
+          footer="Where your account is signed in. Tap a session for details or to sign it out."
+        >
+          {sessions.isError ? (
+            <SettingsRow
+              label="Couldn't load active sessions"
+              detail="Tap to retry."
+              tone="action"
+              onPress={() => void sessions.refetch()}
+            />
+          ) : sessions.data?.length === 0 ? (
+            <SettingsRow label="No active sessions found." />
+          ) : (
+            sessions.data?.map((session) => (
+              <SettingsRow
+                key={session.id}
+                label={sessionDeviceLabel(session.user_agent)}
+                detail={`Signed in ${formatSessionDate(session.created_at)}`}
+                value={session.is_current ? "This session" : undefined}
+                onPress={() =>
+                  navigation.navigate("SessionDetail", {
+                    sessionId: session.id,
+                  })
+                }
+              />
+            ))
+          )}
+        </SettingsGroup>
+      )}
+    </SettingsPage>
   );
 }

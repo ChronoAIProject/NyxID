@@ -8151,6 +8151,19 @@ configuration, stored-policy boundaries and sticky platform cutover/recovery.
 
 Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
 
+GET/PUT settings also expose additive `group_mentions_enabled` (boolean, default
+`true` for legacy absent fields; omitted PUT preserves the preference). This
+controls **Mentions in groups** pushes through registered FCM/APNs devices and
+also requires `push_enabled`. It does not disable in-app unread/mention counts.
+Mention pushes omit transcript previews, coalesce per person/group for five
+minutes, and deep-link to the collaboration group; no Telegram or email is sent.
+Collaboration responses include optional `last_seen_seq`, `unread_count`, and
+`mention_count` inside `collaboration`. Human participants advance the marker
+with `POST /api/v1/assistant/nyxagent/groups/{id}/read` and
+`{"last_seen_seq": 42}` (204). The server clamps to existing history and never
+moves the marker backwards. Nonparticipants receive not-found. New writes and
+pushes require the sharing flag and collaboration readiness gate.
+
 ### Get Notification Settings
 
 ```

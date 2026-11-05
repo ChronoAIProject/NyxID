@@ -53,6 +53,8 @@ function engine(
     iceComplete?: boolean;
     loopbackConnected?: boolean;
     candidateSDP?: string;
+    /** Give AudioContext analysers whose waveform amplitude tests can set. */
+    analysers?: boolean;
   } = {},
 ) {
   const messages: Record<string, any>[] = [];
@@ -143,6 +145,29 @@ function engine(
   }
   const worklets: any[] = [];
   const contexts: any[] = [];
+  const analysers: any[] = [];
+  class Analyser {
+    fftSize = 2048;
+    smoothingTimeConstant = 0.8;
+    amplitude = 0;
+    inputs: unknown[] = [];
+    connections: unknown[] = [];
+    disconnected = false;
+    constructor(public context: unknown) {
+      analysers.push(this);
+    }
+    getFloatTimeDomainData(samples: Float32Array) {
+      // A square wave: its RMS is exactly the amplitude.
+      for (let i = 0; i < samples.length; i++)
+        samples[i] = i % 2 ? this.amplitude : -this.amplitude;
+    }
+    connect(value: unknown) {
+      this.connections.push(value);
+    }
+    disconnect() {
+      this.disconnected = true;
+    }
+  }
   class Context {
     state = "suspended";
     currentTime = 0;
@@ -159,8 +184,14 @@ function engine(
       this.closed = true;
       this.state = "closed";
     }
-    createMediaStreamSource() {
-      return { connect() {}, disconnect() {} };
+    createMediaStreamSource(stream: unknown) {
+      return {
+        stream,
+        connect(node: any) {
+          node?.inputs?.push(this);
+        },
+        disconnect() {},
+      };
     }
     createMediaStreamDestination() {
       return { stream, connect() {}, disconnect() {} };
@@ -177,11 +208,16 @@ function engine(
     constructor() {
       worklets.push(this);
     }
-    connect(value: unknown) {
+    connect(value: any) {
       this.connections.push(value);
+      value?.inputs?.push(this);
     }
     disconnect() {}
   }
+  if (options.analysers)
+    (Context.prototype as any).createAnalyser = function () {
+      return new Analyser(this);
+    };
   const sandbox: any = {
     isSecureContext: options.secure !== false,
     navigator: {
@@ -233,6 +269,7 @@ function engine(
     clearInterval() {},
     addEventListener() {},
     __nyxVoiceWorklet: VOICE_WORKLET_SOURCE,
+    Math,
   };
   sandbox.window = sandbox;
   runInNewContext(VOICE_MEDIA_ENGINE, sandbox);
@@ -246,6 +283,7 @@ function engine(
     audio,
     worklets,
     contexts,
+    analysers,
     timers,
     tick: () => intervals.forEach((callback) => callback()),
     micRequests: () => micRequests,
@@ -841,30 +879,105 @@ test("the WebView is inaccessible, blocks later navigation, and closes on unmoun
   assert.equal(closed, 1);
 });
 
-test("dictation captures PCM24k without a conversational peer or microphone playback", async () => {
-  const e = engine();
+const levels = (messages: Record<string, any>[]) =>
+  messages
+    .filter((m) => m.type === "level")
+    .map(({ input, output }) => ({ input, output }));
+
+test("OpenAI meters the microphone and remote audio in a silent context", async () => {
+  const e = engine({ analysers: true });
   e.command({
     type: "prepare",
-    protocol: "dictation",
+    protocol: "openai_live",
     generation: 1,
     requestId: 1,
   });
   await settle();
-  assert.equal(e.peers.length, 0);
-  assert.equal(e.worklets.length, 1);
-  assert.equal(e.tracks[0]!.enabled, false);
-  e.command({ type: "input", enabled: true, generation: 1 });
-  assert.equal(e.tracks[0]!.enabled, true);
-  const worklet = e.worklets[0];
-  worklet.port.onmessage({
-    data: { type: "pcm", bytes: new ArrayBuffer(960), generation: 1 },
-  });
-  assert.equal(e.messages.filter((m) => m.type === "pcm").length, 1);
+  assert.equal(e.contexts.length, 1);
+  const [input] = e.analysers;
+  assert.equal(input.inputs[0].stream, e.stream);
+  e.peers[0]!.ontrack?.({ track: {}, streams: [e.stream] });
+  const output = e.analysers[1];
+  assert.ok(output);
+  // Analysers are taps only: nothing is routed to any destination.
+  for (const node of e.analysers) assert.deepEqual(node.connections, []);
+  input.amplitude = 0.1; // -20 dBFS
+  output.amplitude = 0.01; // -40 dBFS
+  e.tick();
+  assert.deepEqual(levels(e.messages), [{ input: 0.75, output: 0.25 }]);
+  e.tick();
+  assert.equal(levels(e.messages).length, 1, "unchanged levels are not resent");
+  input.amplitude = 0;
+  e.tick();
+  assert.deepEqual(levels(e.messages).at(-1), { input: 0, output: 0.25 });
+  assert.ok(e.messages.filter((m) => m.type === "level").every((m) => m.generation === 1));
   e.command({ type: "close", generation: 1 });
-  assert.equal(e.tracks[0]!.stopped, true);
   assert.equal(e.contexts[0]!.closed, true);
-  worklet.port.onmessage({
-    data: { type: "pcm", bytes: new ArrayBuffer(960), generation: 1 },
+  assert.ok(e.analysers.every((node) => node.disconnected));
+  output.amplitude = 1;
+  e.tick();
+  assert.equal(levels(e.messages).length, 2);
+});
+
+test("Grok meters its microphone source and playback worklet without a second output", async () => {
+  const e = engine({ analysers: true });
+  e.command({
+    type: "prepare",
+    protocol: "xai_realtime",
+    generation: 2,
+    requestId: 1,
   });
-  assert.equal(e.messages.filter((m) => m.type === "pcm").length, 1);
+  await settle();
+  assert.equal(e.contexts.length, 1);
+  const worklet = e.worklets[0]!;
+  assert.equal(
+    worklet.connections.includes(e.contexts[0]!.destination),
+    false,
+  );
+  const [input, output] = e.analysers;
+  assert.ok(worklet.connections.includes(output));
+  assert.equal(input.inputs[0].stream, e.stream);
+  output.amplitude = 1;
+  e.tick();
+  assert.deepEqual(levels(e.messages), [{ input: 0, output: 1 }]);
+});
+
+test("a runtime without analysers still starts calls, with no loudness events", async () => {
+  const e = engine();
+  e.command({
+    type: "prepare",
+    protocol: "openai_live",
+    generation: 1,
+    requestId: 1,
+  });
+  await settle();
+  assert.match(e.messages.find((m) => m.type === "response")?.result, /^v=0/);
+  assert.equal(e.messages.some((m) => m.type === "error"), false);
+  e.tick();
+  assert.deepEqual(levels(e.messages), []);
+});
+
+test("the native adapter forwards bounded loudness and drops malformed meters", async () => {
+  const media = nativeMedia();
+  const events: VoiceMediaEvent[] = [];
+  media.subscribe((event) => events.push(event));
+  const e = engine({ analysers: true, receive: (raw) => media.receive(raw) });
+  media.connect(e.command);
+  await media.prepare("openai_live", new AbortController().signal);
+  e.analysers[0].amplitude = 0.1;
+  e.tick();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(events.filter((event) => event.type === "level"))),
+    [{ type: "level", input: 0.75, output: 0 }],
+  );
+  for (const bad of [
+    { input: 2, output: 0 },
+    { input: -0.1, output: 0 },
+    { input: "0.5", output: 0 },
+    { input: 0.5 },
+  ])
+    media.receive(JSON.stringify({ type: "level", generation: 1, ...bad }));
+  assert.equal(events.filter((event) => event.type === "level").length, 1);
+  assert.equal(events.some((event) => event.type === "error"), false);
+  media.close();
 });

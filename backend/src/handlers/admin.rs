@@ -2828,6 +2828,7 @@ mod tests {
     fn make_user(id: &str) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: id.to_string(),
             email: format!("{id}@example.com"),
             password_hash: Some("$argon2id$hash".to_string()),

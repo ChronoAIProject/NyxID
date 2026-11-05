@@ -505,5 +505,5 @@ If you have any questions, concerns, or complaints regarding these Terms, please
 **ChronoAI Pte. Ltd.**
 Address: 8 Marina Boulevard, #14-02, Singapore 018981
 Contact: **contact@chrono-ai.fun**
-Website: **https://nyx.chrono-ai.fun/**
+Website: **https://nyxid.ai/**
 

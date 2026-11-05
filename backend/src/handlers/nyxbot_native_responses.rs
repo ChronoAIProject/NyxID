@@ -374,7 +374,7 @@ async fn execute(
             )
             .await?
         }
-        Ok(Inbound::Silent) => {
+        Ok(Inbound::Silent(_)) => {
             recovery::finish(&state.db, &state.encryption_keys, stored, None, false).await?
         }
         Ok(Inbound::Busy) => {

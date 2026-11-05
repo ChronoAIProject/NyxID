@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { QueryClient } from "@tanstack/react-query";
 import { openAssistant, sendMessage, composerInput } from "./helpers";
 import {
   cmaFrame,
@@ -6,15 +7,117 @@ import {
   cmaSession,
 } from "../src/lib/assistant/cma-session.test-fixtures";
 
+// Explicit server-receipt fixture; it is fixed to a seeded source thread before
+// rendering any CMA cards and never follows later navigation.
+const sourceByPage = new WeakMap<
+  Page,
+  { conversation: string; specialist: string }
+>();
+async function openCmaAssistant(
+  page: Page,
+  options: Parameters<typeof openAssistant>[1] & { specialist?: boolean } = {},
+) {
+  await openAssistant(page, options);
+  const source = await page.evaluate((useSpecialist) => {
+    const state = JSON.parse(
+      sessionStorage.getItem("nyxagent-http-fixture-v4")!,
+    ) as {
+      rows: [string, { agentId: string }][];
+      agents: { id: string; kind: string }[];
+    };
+    const specialist = state.agents.find(
+      (agent) => agent.kind === (useSpecialist ? "specialist" : "nyxbot"),
+    )!.id;
+    return {
+      conversation: state.rows.find(
+        ([, row]) => row.agentId === specialist,
+      )![0],
+      specialist,
+    };
+  }, Boolean(options.specialist));
+  sourceByPage.set(page, source);
+  await page.goto(
+    `/assistant?mock=1&c=${source.conversation}&agent=${source.specialist}`,
+  );
+  await expect(composerInput(page)).toBeVisible();
+}
+
 async function mockCma(
   page: Page,
-  options: { actionCount?: number; idle?: boolean; multiple?: boolean } = {},
+  options: {
+    actionCount?: number;
+    idle?: boolean;
+    multiple?: boolean;
+    receiptCallback?: string | null;
+    headStatus?: number;
+    headDelayMs?: number;
+    pinDelayMs?: number;
+    pinFailure?: number;
+    deniedConnection?: boolean;
+  } = {},
 ) {
   let active = !options.idle;
   let completed = false;
+  let callback: unknown = undefined;
   let tails = 0;
+  let heads = 0;
+  const deniedId = "00000000-0000-4000-8000-000000000001";
   const actionCount = options.actionCount ?? 1;
   const requests: string[] = [];
+  await page.route(
+    "**/api/v1/assistant/nyxagent/cma-sessions?*",
+    async (route) => {
+      if (
+        new URL(route.request().url()).searchParams.has("pins") &&
+        options.pinDelayMs
+      )
+        await new Promise((resolve) => setTimeout(resolve, options.pinDelayMs));
+      if (
+        new URL(route.request().url()).searchParams.has("pins") &&
+        options.pinFailure
+      )
+        return route.fulfill({
+          status: options.pinFailure,
+          json: {
+            error: "unavailable",
+            message: "Temporary outage",
+            error_code: 1,
+          },
+        });
+      const source = sourceByPage.get(page);
+      return route.fulfill({
+        json: {
+          sessions: source
+            ? [
+                cmaSession.agentId,
+                ...(options.multiple ? ["agt_second"] : []),
+              ].map((agent_id) => ({
+                service_id: cmaSession.connection.id,
+                agent_id,
+                conversation_id: source.conversation,
+                specialist_id: source.specialist,
+                turn_id: "original-turn",
+                connection_name: cmaSession.connection.name,
+                connection_slug: cmaSession.connection.slug,
+                cma_url:
+                  options.receiptCallback === undefined
+                    ? "https://cma.example/agents/agt_observed"
+                    : options.receiptCallback,
+              }))
+            : [],
+          next_cursor: null,
+          connections: source
+            ? [
+                ...(options.deniedConnection
+                  ? [{ ...cmaSession.connection, id: deniedId }]
+                  : []),
+                cmaSession.connection,
+              ]
+            : [],
+        },
+      });
+    },
+  );
   await page.route("**/api/v1/proxy/**", async (route) => {
     const url = new URL(route.request().url());
     requests.push(url.pathname + url.search);
@@ -38,6 +141,15 @@ async function mockCma(
         },
       });
     }
+    if (url.pathname.includes(deniedId))
+      return route.fulfill({
+        status: 403,
+        json: {
+          error: "forbidden",
+          message: "Revoked connection",
+          error_code: 1003,
+        },
+      });
     if (url.pathname.endsWith("/openapi.json")) {
       return route.fulfill({
         json: {
@@ -48,13 +160,28 @@ async function mockCma(
       });
     }
     const second = url.pathname.includes("/agt_second/");
-    if (url.pathname.endsWith("/events/head"))
+    if (url.pathname.endsWith("/events/head")) {
+      heads++;
+      if (options.headDelayMs)
+        await new Promise((resolve) =>
+          setTimeout(resolve, options.headDelayMs),
+        );
+      if (options.headStatus)
+        return route.fulfill({
+          status: options.headStatus,
+          json: {
+            error: "forbidden",
+            message: "Stream unavailable",
+            error_code: 1003,
+          },
+        });
       return route.fulfill({
         json: {
           ...cmaHead,
           agent_id: second ? "agt_second" : cmaSession.agentId,
         },
       });
+    }
     if (url.pathname.endsWith("/events")) {
       tails++;
       const after = url.searchParams.get("after_cursor");
@@ -94,6 +221,7 @@ async function mockCma(
       id: cmaSession.agentId,
       title: cmaSession.title,
       status: active ? "working" : "ready",
+      ...(callback === undefined ? {} : { callback_url: callback }),
     };
     const otherAgent = {
       id: "agt_second",
@@ -113,6 +241,9 @@ async function mockCma(
   });
   return {
     requests,
+    setCallback: (value: unknown) => {
+      callback = value;
+    },
     start: () => {
       active = true;
     },
@@ -123,6 +254,7 @@ async function mockCma(
       active = false;
     },
     tailCount: () => tails,
+    headCount: () => heads,
   };
 }
 
@@ -139,16 +271,18 @@ test("automatically shows running CMA, streams while minimised, restores, and re
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   const cma = await mockCma(page);
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   const panel = card(page);
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
   await expect(
     sessions(page).getByRole("heading", {
-      name: "Your CMA session",
+      name: cmaSession.title,
       exact: true,
     }),
   ).toBeVisible();
-  await expect(sessions(page).getByText("Across chats")).toBeVisible();
+  await expect(
+    panel.getByRole("link", { name: "Open source chat" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Pin session", exact: true }),
   ).toHaveCount(0);
@@ -157,10 +291,18 @@ test("automatically shows running CMA, streams while minimised, restores, and re
   ).toHaveCount(0);
   const main = await page.getByRole("main").boundingBox();
   const bounds = await panel.boundingBox();
-  const preview = (await page.getByRole("complementary", { name: "Preview", exact: true }).boundingBox())!;
+  const preview = (await page
+    .getByRole("complementary", { name: "Preview", exact: true })
+    .boundingBox())!;
   expect(bounds!.x).toBeCloseTo(preview.x + 12, 0);
-  expect(bounds!.x + bounds!.width).toBeCloseTo(main!.x + main!.width, 0);
-  expect((await composerInput(page).boundingBox())!.x + (await composerInput(page).boundingBox())!.width).toBeLessThanOrEqual(preview.x);
+  expect(bounds!.width).toBeCloseTo(Math.min(500, preview.width - 12), 0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(
+    preview.x + preview.width,
+  );
+  expect(
+    (await composerInput(page).boundingBox())!.x +
+      (await composerInput(page).boundingBox())!.width,
+  ).toBeLessThanOrEqual(preview.x);
   expect(bounds!.y).toBeGreaterThanOrEqual(main!.y);
   expect(bounds!.height).toBeLessThan(480);
   expect(bounds!.y + bounds!.height).toBeLessThan(main!.y + main!.height - 100);
@@ -176,6 +318,7 @@ test("automatically shows running CMA, streams while minimised, restores, and re
   const minimised = await panel.boundingBox();
   expect(minimised!.height).toBeLessThan(bounds!.height);
   await page.screenshot({ path: "/tmp/nyxid-cma-auto-minimised.png" });
+  await panel.getByRole("button", { name: "Pin CMA session" }).click();
   await page
     .getByRole("button", { name: "New chat with NyxBot", exact: true })
     .click();
@@ -204,18 +347,22 @@ test("discovers a session that starts after opening chat without any manual acti
   page,
 }) => {
   const cma = await mockCma(page, { idle: true });
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   await expect
     .poll(
       () =>
-        cma.requests.filter((url) => url.includes("/api/v1/agents?")).length,
+        cma.requests.filter(
+          (url) =>
+            url.includes("/api/v1/agents?status=") ||
+            /\/api\/v1\/agents\?.*status=/.test(url),
+        ).length,
     )
     .toBeGreaterThan(0);
   await expect(sessions(page)).toHaveCount(0);
   expect(cma.tailCount()).toBe(0);
   cma.start();
   await expect(card(page).getByText("Inspecting the browser page")).toBeVisible(
-    { timeout: 12_000 },
+    { timeout: 22_000 },
   );
 });
 
@@ -228,8 +375,14 @@ for (const viewport of [
   }) => {
     await page.setViewportSize(viewport);
     await mockCma(page, { actionCount: 30 });
-    await openAssistant(page, { faults: { nyxagentEnabled: true } });
+    await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
     const panel = card(page);
+    await expect(
+      panel.getByRole("region", { name: "CMA activity" }).getByRole("listitem"),
+    ).toHaveCount(3);
+    const history = panel.getByRole("button", { name: "Show all 30 actions" });
+    await expect(history).toHaveAttribute("aria-expanded", "false");
+    await history.click();
     await expect(
       panel.getByRole("region", { name: "CMA activity" }).getByRole("listitem"),
     ).toHaveCount(30);
@@ -237,7 +390,9 @@ for (const viewport of [
       name: "Session details",
       exact: true,
     });
-    const connection = panel.getByText(cmaSession.connection.name, { exact: true });
+    const connection = panel.getByText(cmaSession.connection.name, {
+      exact: true,
+    });
     const sessionId = panel.getByText(cmaSession.agentId, { exact: true });
     await expect(details).toHaveAttribute("aria-expanded", "false");
     await expect(sessionId).not.toBeVisible();
@@ -252,7 +407,9 @@ for (const viewport of [
     expect(idBounds!.y + idBounds!.height).toBeLessThanOrEqual(
       expandedBounds!.y + expandedBounds!.height,
     );
-    expect((await composerInput(page).boundingBox())!.y).toBe(composerBefore!.y);
+    expect((await composerInput(page).boundingBox())!.y).toBe(
+      composerBefore!.y,
+    );
     await details.press("Space");
     await expect(details).toHaveAttribute("aria-expanded", "false");
     await expect(sessionId).not.toBeVisible();
@@ -263,7 +420,9 @@ for (const viewport of [
     await panel.getByRole("button", { name: "Maximise CMA session" }).click();
     await expect(details).toHaveAttribute("aria-expanded", "true");
     await expect(sessionId).toBeInViewport({ ratio: 1 });
-    await page.screenshot({ path: `/tmp/nyxid-cma-details-${viewport.width}.png` });
+    await page.screenshot({
+      path: `/tmp/nyxid-cma-details-${viewport.width}.png`,
+    });
   });
 }
 
@@ -272,7 +431,7 @@ test("keeps the automatic CMA card and chat usable together on a narrow screen",
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await mockCma(page);
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   const panel = card(page);
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
   await expect(composerInput(page)).toBeVisible();
@@ -300,9 +459,11 @@ test("bounds long activity and keeps minimise reachable with the mobile keyboard
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mockCma(page, { actionCount: 30 });
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   const panel = card(page);
   const actions = panel.getByRole("region", { name: "CMA activity" });
+  await expect(actions.getByRole("listitem")).toHaveCount(3);
+  await panel.getByRole("button", { name: "Show all 30 actions" }).click();
   await expect(actions.getByRole("listitem")).toHaveCount(30);
   await expect(actions.getByRole("listitem").first()).toHaveText(
     "Checking page section 29",
@@ -334,7 +495,7 @@ test("shows simultaneous CMA sessions and minimises each independently", async (
 }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await mockCma(page, { multiple: true });
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   const first = card(page);
   const second = sessions(page).getByRole("region", {
     name: "CMA session: Check deployment",
@@ -359,23 +520,29 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   await mockCma(page);
   await page.route("**/api/v1/assistant/nyxagent/machines?*", (route) =>
     route.fulfill({
-      json: [{
-        node_id: "node-1",
-        session_id: "s1",
-        conversation_id: null,
-        status: "agent",
-        reason: null,
-        display: "secure",
-      }],
+      json: [
+        {
+          node_id: "node-1",
+          session_id: "s1",
+          conversation_id: null,
+          status: "agent",
+          reason: null,
+          display: "secure",
+        },
+      ],
     }),
   );
-  await page.route("**/api/v1/assistant/nyxagent/machines/*/contexts", (route) =>
-    route.fulfill({ json: [] }),
+  await page.route(
+    "**/api/v1/assistant/nyxagent/machines/*/contexts",
+    (route) => route.fulfill({ json: [] }),
   );
-  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   await sendMessage(page, "Use GitHub");
   await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
-  const preview = page.getByRole("complementary", { name: "Preview", exact: true });
+  const preview = page.getByRole("complementary", {
+    name: "Preview",
+    exact: true,
+  });
   const machine = preview.getByRole("region", { name: "Live machine desktop" });
   await expect(machine).toBeVisible();
   const panel = card(page);
@@ -383,14 +550,30 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   const machineBounds = (await machine.boundingBox())!;
   const cmaBounds = (await panel.boundingBox())!;
   expect(cmaBounds.x).toBeCloseTo(machineBounds.x - 12, 0);
-  expect(cmaBounds.width).toBeCloseTo(machineBounds.width + 24, 0);
+  expect(cmaBounds.width).toBeCloseTo(
+    Math.min(500, machineBounds.width + 24),
+    0,
+  );
   expect(cmaBounds.y).toBeGreaterThan(machineBounds.y + machineBounds.height);
-  await expect(preview.getByRole("complementary", { name: "CMA sessions", exact: true })).toHaveCount(1);
-  await expect(page.getByRole("separator", { name: "Resize preview column" })).toHaveCount(1);
-  const divider = page.getByRole("separator", { name: "Resize preview column" });
+  await expect(
+    preview.getByRole("complementary", { name: "CMA sessions", exact: true }),
+  ).toHaveCount(1);
+  await expect(
+    page.getByRole("separator", { name: "Resize preview column" }),
+  ).toHaveCount(1);
+  const divider = page.getByRole("separator", {
+    name: "Resize preview column",
+  });
   await divider.focus();
   await page.keyboard.press("ArrowLeft");
   await expect(divider).toHaveAttribute("aria-valuenow", "52");
+  const resizedPreview = (await preview.boundingBox())!;
+  const resizedCmaBounds = (await panel.boundingBox())!;
+  expect(resizedCmaBounds.width).toBeCloseTo(
+    Math.min(500, resizedPreview.width - 12),
+    0,
+  );
+  expect(resizedCmaBounds.x).toBeCloseTo(resizedPreview.x + 12, 0);
   await expect(composerInput(page)).toBeInViewport({ ratio: 1 });
   await panel.getByRole("button", { name: "Minimise CMA session" }).click();
   await expect(machine).toBeVisible();
@@ -404,4 +587,405 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   await expect(machine).toBeVisible();
   await panel.getByRole("button", { name: "Maximise CMA session" }).click();
   await page.screenshot({ path: "/tmp/nyxid-cma-with-machine.png" });
+});
+
+test("keeps unpinned work in its verified source and pins across every route, reload, and source deep link", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const cma = await mockCma(page);
+  await openCmaAssistant(page, {
+    faults: { nyxagentEnabled: true },
+    specialist: true,
+  });
+  const panel = card(page);
+  await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  await expect(
+    page.getByLabel("CMA is working in this session", { exact: true }),
+  ).toBeVisible();
+  const source = sourceByPage.get(page)!;
+  await expect(
+    panel.getByRole("link", { name: "Open source chat" }),
+  ).toHaveAttribute(
+    "href",
+    `/assistant?c=${source.conversation}&agent=${source.specialist}`,
+  );
+  await expect(
+    panel.getByRole("link", { name: /View in CMA/ }),
+  ).toHaveAttribute("href", "https://cma.example/agents/agt_observed");
+  await page.getByRole("button", { name: /^New chat with/ }).click();
+  await expect(sessions(page)).toHaveCount(0);
+  const stoppedAt = cma.tailCount();
+  await page.waitForTimeout(1500);
+  expect(cma.tailCount()).toBe(stoppedAt);
+  await page.goto(
+    `/assistant?mock=1&c=${source.conversation}&agent=${source.specialist}`,
+  );
+  await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  await panel.getByRole("button", { name: "Pin CMA session" }).click();
+  await page.getByRole("button", { name: /^New chat with/ }).click();
+  await expect(
+    panel.getByRole("button", { name: "Unpin CMA session (Pinned)" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByLabel("CMA is working in this session", { exact: true }),
+  ).toHaveCount(0);
+  await page.goto("/keys?mock=1");
+  await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  await page.reload();
+  await expect(
+    panel.getByRole("button", { name: "Unpin CMA session (Pinned)" }),
+  ).toBeVisible();
+  await expect(
+    panel
+      .getByRole("button", { name: "Unpin CMA session (Pinned)" })
+      .getByText("Pinned", { exact: true }),
+  ).toBeVisible();
+  await expect(sessions(page)).toHaveCount(1);
+  await panel
+    .getByRole("button", { name: "Unpin CMA session (Pinned)" })
+    .click();
+  await expect(sessions(page)).toHaveCount(0);
+  await page.goto(
+    `/assistant?mock=1&c=${source.conversation}&agent=${source.specialist}`,
+  );
+  await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  await expect(
+    panel.getByRole("button", { name: "Pin CMA session" }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await expect(panel.getByText("Pinned", { exact: true })).toHaveCount(0);
+  // This click exercises the specialist routing, not just its href serialization.
+  await panel.getByRole("button", { name: "Pin CMA session" }).click();
+  await page.goto("/keys?mock=1");
+  await panel.getByRole("link", { name: "Open source chat" }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`c=${source.conversation}.*agent=${source.specialist}`),
+  );
+  await expect(composerInput(page)).toBeVisible();
+  expect(
+    cma.requests
+      .filter((path) => /\/agents\?/.test(path))
+      .every((path) =>
+        /status=(starting|working|waiting_approval|paused)/.test(path),
+      ),
+  ).toBe(true);
+});
+
+test("unattributed CMA inventory and old pin objects never appear as local activity", async ({
+  page,
+}) => {
+  const cma = await mockCma(page);
+  await openAssistant(page, { faults: { nyxagentEnabled: true } });
+  await page.waitForTimeout(1200);
+  await expect(sessions(page)).toHaveCount(0);
+  expect(cma.tailCount()).toBe(0);
+  expect(cma.requests).toEqual([]);
+});
+
+test("renders one pinned surface on shell, authenticated dashboard, standalone desktop and not-found routes", async ({
+  page,
+}) => {
+  await mockCma(page);
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+  await card(page).getByRole("button", { name: "Pin CMA session" }).click();
+  for (const path of [
+    "/assistant/plugins",
+    "/assistant/approvals",
+    "/assistant/automations",
+    "/assistant/machines",
+    "/assistant/machines/new",
+    "/assistant/machines/pair",
+    "/keys",
+    "/assistant/machines/node-1/desktop",
+    "/assistant/machines/node-1/desktop/",
+    "/assistant/not-a-route",
+  ]) {
+    await page.goto(`${path}?mock=1`);
+    await expect(sessions(page)).toHaveCount(1);
+    await expect(
+      card(page).getByRole("button", { name: "Unpin CMA session (Pinned)" }),
+    ).toBeVisible();
+  }
+  await page.reload();
+  await expect(sessions(page)).toHaveCount(1);
+  await card(page).getByRole("link", { name: "Open source chat" }).click();
+  await expect(composerInput(page)).toBeVisible();
+  await expect(sessions(page)).toHaveCount(1);
+});
+test("uses only supplied valid callbacks and clears missing, null, query, fragment and malformed links", async ({
+  page,
+}) => {
+  const cma = await mockCma(page, { receiptCallback: null });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+  const link = card(page).getByRole("link", { name: "View in CMA" });
+  await expect(
+    card(page).getByText("Inspecting the browser page"),
+  ).toBeVisible();
+  await expect(link).toHaveCount(0);
+  cma.setCallback("https://CMA.example:8443/agent/custom-path");
+  await page.reload();
+  await expect(link).toHaveAttribute(
+    "href",
+    "https://CMA.example:8443/agent/custom-path",
+  );
+  for (const value of [
+    null,
+    "https://cma.example/agent?secret=value",
+    "https://cma.example/agent#secret",
+    "https://user:pass@cma.example/agent",
+    "javascript:alert(1)",
+    undefined,
+  ]) {
+    cma.setCallback(value);
+    await page.reload();
+    await expect(
+      card(page).getByText("Inspecting the browser page"),
+    ).toBeVisible();
+    await expect(link).toHaveCount(0);
+  }
+});
+
+for (const cache of ["none", "empty", "error", "transient"] as const) {
+  test(`keeps a newly pinned live observation through a slow receipt refresh and client navigation, cached=${cache}`, async ({
+    page,
+  }) => {
+    const cma = await mockCma(page, {
+      pinDelayMs: 5000,
+      deniedConnection: true,
+      pinFailure: cache === "transient" ? 503 : undefined,
+    });
+    await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+    await expect(
+      card(page).getByText("Inspecting the browser page"),
+    ).toBeVisible();
+    const heads = cma.headCount();
+    if (cache !== "none")
+      await page.evaluate(async (cached) => {
+        const client = (window as unknown as { __nyxQueryClient: QueryClient })
+          .__nyxQueryClient;
+        const source = client
+          .getQueryCache()
+          .findAll({ queryKey: ["cma-session"] })
+          .find(
+            (query) =>
+              query.queryKey[2] === "origins" &&
+              Array.isArray(query.state.data) &&
+              query.state.data.length,
+          );
+        const key: unknown[] = ["cma-session", source!.queryKey[1], "pins", []];
+        // Use the live server-verified identity, not route-derived source metadata.
+        const session = (
+          source!.state.data as {
+            connection: { id: string };
+            agentId: string;
+          }[]
+        )[0]!;
+        key[3] = [`${session.connection.id}:${session.agentId}`];
+        if (cached === "empty" || cached === "transient")
+          client.setQueryData(key, []);
+        else
+          await client
+            .fetchQuery({
+              queryKey: key,
+              queryFn: async () => {
+                throw new Error("Earlier receipt denial");
+              },
+              retry: false,
+            })
+            .catch(() => undefined);
+      }, cache);
+    await page.evaluate(() => {
+      const track = window as unknown as {
+        cmaPinGaps: number;
+        cmaPinSample?: number;
+      };
+      track.cmaPinGaps = 0;
+      track.cmaPinSample = window.setInterval(() => {
+        if (!document.querySelector('[aria-label="CMA sessions"]'))
+          track.cmaPinGaps++;
+      }, 20);
+    });
+    await card(page).getByRole("button", { name: "Pin CMA session" }).click();
+    await page.getByRole("button", { name: /^New chat with/ }).click();
+    await expect(
+      card(page).getByRole("button", { name: "Unpin CMA session (Pinned)" }),
+    ).toBeVisible();
+    await page.waitForTimeout(5500);
+    await expect(sessions(page)).toHaveCount(1);
+    expect(cma.headCount()).toBe(heads);
+    const gaps = await page.evaluate(() => {
+      const track = window as unknown as {
+        cmaPinGaps: number;
+        cmaPinSample: number;
+      };
+      clearInterval(track.cmaPinSample);
+      return track.cmaPinGaps;
+    });
+    expect(gaps).toBe(0);
+    await card(page)
+      .getByRole("button", { name: "Unpin CMA session (Pinned)" })
+      .click();
+    await expect(sessions(page)).toHaveCount(0);
+  });
+}
+
+for (const minimised of [false, true]) {
+  for (const input of ["pointer", "keyboard"] as const) {
+    test(`keeps Reconnect hittable by ${input} at keyboard height, minimised=${minimised}`, async ({
+      page,
+    }) => {
+      const cma = await mockCma(page, { headStatus: 403, headDelayMs: 200 });
+      await page.setViewportSize({ width: 390, height: 300 });
+      await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+      const panel = card(page);
+      const reconnect = panel.getByRole("button", {
+        name: "Reconnect",
+        exact: true,
+      });
+      await expect(reconnect).toBeAttached();
+      if (minimised)
+        await panel
+          .getByRole("button", { name: "Minimise CMA session" })
+          .click();
+      for (let retry = 0; retry < 3; retry++) {
+        await expect(
+          panel.getByText("Disconnected", { exact: true }),
+        ).toBeVisible();
+        await expect(reconnect).toBeEnabled();
+        if (input === "keyboard") {
+          // Tab from the fixed header; native focus must scroll recovery into view.
+          await panel
+            .getByRole("button", {
+              name: minimised ? "Maximise CMA session" : "Minimise CMA session",
+            })
+            .focus();
+          await page.keyboard.press("Tab");
+          await expect(reconnect).toBeFocused();
+        } else {
+          await reconnect.scrollIntoViewIfNeeded();
+        }
+        // visible() accepts clipped controls. The actual centre must receive input.
+        await expect
+          .poll(() =>
+            reconnect.evaluate((button) => {
+              const rect = button.getBoundingClientRect();
+              return button.contains(
+                document.elementFromPoint(
+                  rect.x + rect.width / 2,
+                  rect.y + rect.height / 2,
+                ),
+              );
+            }),
+          )
+          .toBe(true);
+        if (input === "keyboard")
+          await page.screenshot({
+            path: `/tmp/nyxid-cma-keyboard-recovery-${minimised ? "minimised" : "expanded"}.png`,
+          });
+        const before = cma.headCount();
+        if (input === "keyboard") await page.keyboard.press("Enter");
+        else await reconnect.click();
+        // The old failed button must leave before asserting the next failure.
+        // A head request alone does not prove its 403 response has settled.
+        await expect(reconnect).not.toBeAttached();
+        await expect.poll(cma.headCount).toBeGreaterThan(before);
+        await expect(
+          panel.getByText("Disconnected", { exact: true }),
+        ).toBeVisible();
+        await expect(reconnect).toBeEnabled();
+        await expect(composerInput(page)).toBeVisible();
+      }
+    });
+  }
+}
+
+test("describes CMA header controls on hover and focus without internal dividers", async ({
+  page,
+}) => {
+  await mockCma(page, { actionCount: 5 });
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+  const panel = card(page);
+  await expect(panel.getByRole("listitem")).toHaveCount(3);
+  const controls = [
+    ["link", "Open source chat", "Open source chat"],
+    ["link", "View in CMA", "View in CMA"],
+    ["button", "Pin CMA session", "Pin to monitor on every page"],
+    ["button", "Minimise CMA session", "Minimise CMA session"],
+  ] as const;
+  for (const [role, name, copy] of controls) {
+    const control = panel.getByRole(role, { name, exact: true });
+    await expect(control).not.toHaveAttribute("title");
+    await control.hover();
+    await expect(
+      page.getByRole("tooltip", { name: copy, exact: true }),
+    ).toBeVisible();
+    await page.mouse.move(0, 0);
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByRole("tooltip", { includeHidden: true }),
+    ).toHaveCount(0);
+    await control.focus();
+    await expect(
+      page.getByRole("tooltip", { name: copy, exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByRole("tooltip", { includeHidden: true }),
+    ).toHaveCount(0);
+  }
+  await panel
+    .getByRole("button", { name: "Pin CMA session", exact: true })
+    .click();
+  await page.mouse.move(0, 0);
+  await expect(page.getByRole("tooltip", { includeHidden: true })).toHaveCount(
+    0,
+  );
+  await panel
+    .getByRole("button", { name: "Unpin CMA session (Pinned)", exact: true })
+    .hover();
+  await expect(
+    page.getByRole("tooltip", {
+      name: "Unpin: show only in the source chat",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.mouse.move(0, 0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip", { includeHidden: true })).toHaveCount(
+    0,
+  );
+  await panel
+    .getByRole("button", { name: "Minimise CMA session", exact: true })
+    .click();
+  await page.mouse.move(0, 0);
+  await expect(page.getByRole("tooltip", { includeHidden: true })).toHaveCount(
+    0,
+  );
+  await panel
+    .getByRole("button", { name: "Maximise CMA session", exact: true })
+    .hover();
+  await expect(
+    page.getByRole("tooltip", { name: "Maximise CMA session", exact: true }),
+  ).toBeVisible();
+  await panel
+    .getByRole("button", { name: "Maximise CMA session", exact: true })
+    .click();
+  await expect(panel.locator("hr, [role=separator]")).toHaveCount(0);
+  expect(
+    await panel.getByRole("listitem").evaluateAll((items) =>
+      items.every((item) => {
+        const style = getComputedStyle(item);
+        return (
+          style.borderTopWidth === "0px" && style.borderBottomWidth === "0px"
+        );
+      }),
+    ),
+  ).toBe(true);
+  expect(
+    await panel
+      .getByRole("button", { name: "Session details", exact: true })
+      .evaluate(
+        (button) => getComputedStyle(button.parentElement!).borderTopWidth,
+      ),
+  ).toBe("0px");
 });

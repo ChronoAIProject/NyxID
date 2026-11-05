@@ -151,6 +151,7 @@ pub mod assistant_feedback;
 mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
+pub mod assistant_onboarding;
 pub mod assistant_team;
 pub mod channel_platforms;
 #[cfg(test)]
@@ -226,4 +227,5 @@ pub mod monitoring;
 
 pub mod collaboration_group;
 
+pub mod cma_sessions;
 pub mod org_specialist_channels;

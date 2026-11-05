@@ -28,6 +28,7 @@ pub async fn bind_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
+    super::nyxbot_admission_service::bind_in_session(db, session, &bound, turn).await?;
     let replay = bound
         .get_document("delivery")
         .ok()

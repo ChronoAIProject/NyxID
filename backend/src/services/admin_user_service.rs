@@ -128,6 +128,7 @@ pub async fn create_user(
     role_service::add_platform_role_id(&mut role_ids, platform_role, &platform_role_ids);
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id.clone(),
         email: normalized,
         password_hash: Some(password_hash),
@@ -720,6 +721,7 @@ mod tests {
     async fn seed_person(db: &mongodb::Database, user_id: &str, email: &str) {
         let now = Utc::now();
         let user = User {
+            execution_permission_enrollment: None,
             id: user_id.to_string(),
             email: email.to_string(),
             password_hash: Some(crate::crypto::password::hash_password(&test_password()).unwrap()),
@@ -1601,6 +1603,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let user = User {
+            execution_permission_enrollment: None,
             id: user_id.clone(),
             email: "social@example.com".to_string(),
             password_hash: None,

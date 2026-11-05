@@ -494,6 +494,7 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            execution_permission: None,
             assistant_chat: None,
             response_body_limit: None,
             actor_user_id: Some(&caller.actor_user_id),
@@ -2179,6 +2180,7 @@ mod tests {
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             approval_required: Some(true),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: Vec::new(),
             created_at: Utc::now(),

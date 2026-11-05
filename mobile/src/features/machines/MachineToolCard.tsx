@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Pressable, View } from "react-native";
+import { StyleSheet, View } from "react-native";
+import { ChevronDown, ChevronRight } from "lucide-react-native";
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import {
-  Card,
-  Label,
-  ActionButton,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { useTheme } from "../../theme/ThemeContext";
+import { spacing } from "../../theme/designTokens";
 import { requestAuthenticatedResponse, requestJson } from "../../lib/api/http";
 import { ApiError } from "../../lib/api/ApiError";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -114,26 +117,32 @@ export function MachineToolCard({
   }
   const image = attachments.find((a) => a.id === receipt.screenshot_id);
   return (
-    <Card>
-      <View accessibilityLabel="Machine action">
-        <Label>
-          {receipt.action.replaceAll(".", " · ").replaceAll("_", " ")} ·{" "}
-          {receipt.status}
-        </Label>
+    <View accessibilityLabel="Machine action" style={styles.receipt}>
+      <SettingsGroup inset={false}>
+        <SettingsRow
+          label={receipt.action.replaceAll(".", " · ").replaceAll("_", " ")}
+          value={receipt.status}
+        />
         {receipt.exit_code != null ? (
-          <Label muted>Exit {receipt.exit_code}</Label>
+          <SettingsRow label="Exit code" value={String(receipt.exit_code)} />
         ) : null}
         {receipt.bytes != null ? (
-          <Label muted>{receipt.bytes.toLocaleString()} bytes</Label>
+          <SettingsRow
+            label="Output"
+            value={`${receipt.bytes.toLocaleString()} bytes`}
+          />
         ) : null}
-        <Label muted>
-          {receipt.machine_name?.trim() ||
-            `Machine ${receipt.node_id.slice(0, 8)}`}{" "}
-          ·{" "}
-          {receipt.context_mode === "separated"
-            ? "Separate workspace and browser for this agent"
-            : "Shared workspace and browser"}
-        </Label>
+        <SettingsRow
+          label={
+            receipt.machine_name?.trim() ||
+            `Machine ${receipt.node_id.slice(0, 8)}`
+          }
+          detail={
+            receipt.context_mode === "separated"
+              ? "Separate workspace and browser for this agent"
+              : "Shared workspace and browser"
+          }
+        />
         <Disclosure
           label="Correlation IDs"
           open={ids}
@@ -148,93 +157,81 @@ export function MachineToolCard({
             ]
               .filter(([, v]) => v)
               .map(([label, value]) => (
-                <Label key={label} selectable muted>
-                  {label}: {value}
-                </Label>
+                <SettingsRow
+                  key={label}
+                  label={`${label}: ${value}`}
+                  mono
+                  selectable
+                />
               ))
           : null}
-        {receipt.error_code != null ? (
-          <Label accessibilityRole="alert">
-            Machine error {receipt.error_code}
-          </Label>
-        ) : null}
-        {image ? (
-          <AssistantAttachmentView
-            attachment={image}
-            conversationId={conversationId}
-            groupId={groupId}
-          />
-        ) : null}
         {receipt.preview_id && root ? (
-          <>
-            <Disclosure
-              label={`${excerpt ? "Hide" : "Show"} saved excerpt`}
-              open={excerpt}
-              onPress={() => setExcerpt(!excerpt)}
-            />
-            {excerpt ? (
-              <CommandExcerpt
-                key={`${runtime.epoch}:${root}:${receipt.preview_id}`}
-                endpoint={`${root}/attachments/${encodeURIComponent(receipt.preview_id)}`}
-                active={runtime.active}
-              />
-            ) : null}
-          </>
+          <Disclosure
+            label={`${excerpt ? "Hide" : "Show"} saved excerpt`}
+            open={excerpt}
+            onPress={() => setExcerpt(!excerpt)}
+          />
         ) : null}
         {command && root ? (
-          <>
-            <Disclosure
-              label="Command excerpt preference"
-              open={preference}
-              onPress={() => setPreference(!preference)}
-            />
-            {preference ? (
-              <>
-                <Label muted>
-                  Off by default. Save bounded, redacted output from future
-                  commands in this conversation for up to 30 days. Output can
-                  contain private data.
-                </Label>
-                <ActionButton
-                  compact
-                  variant="secondary"
-                  label={
-                    policy.data?.enabled
-                      ? "Stop saving excerpts"
-                      : "Save future excerpts"
-                  }
-                  loading={saving}
-                  disabled={
-                    !runtime.active ||
-                    saving ||
-                    !policy.data ||
-                    policy.isFetching
-                  }
-                  onPress={() => void changePolicy()}
-                />
-                {error ? (
-                  <Label accessibilityRole="alert">
-                    Could not change excerpt preference.
-                  </Label>
-                ) : null}
-                {policy.isError ? (
-                  <Label accessibilityRole="alert">
-                    Could not load excerpt preference.
-                  </Label>
-                ) : null}
-              </>
-            ) : null}
-          </>
-        ) : null}
-        {onOpenDesktop ? (
-          <MachineDesktopEntries
-            nodeId={receipt.node_id}
-            conversationId={conversationId}
-            onOpen={onOpenDesktop}
+          <Disclosure
+            label="Command excerpt preference"
+            open={preference}
+            onPress={() => setPreference(!preference)}
           />
         ) : null}
-      </View>
-    </Card>
+      </SettingsGroup>
+      {receipt.error_code != null ? (
+        <Notice tone="error" message={`Machine error ${receipt.error_code}`} />
+      ) : null}
+      {image ? (
+        <AssistantAttachmentView
+          attachment={image}
+          conversationId={conversationId}
+          groupId={groupId}
+        />
+      ) : null}
+      {receipt.preview_id && root && excerpt ? (
+        <CommandExcerpt
+          key={`${runtime.epoch}:${root}:${receipt.preview_id}`}
+          endpoint={`${root}/attachments/${encodeURIComponent(receipt.preview_id)}`}
+          active={runtime.active}
+        />
+      ) : null}
+      {command && root && preference ? (
+        <SettingsGroup
+          inset={false}
+          footer="Off by default. Save bounded, redacted output from future commands in this conversation for up to 30 days. Output can contain private data."
+        >
+          <SettingsRow
+            tone="action"
+            label={
+              saving
+                ? "Saving…"
+                : policy.data?.enabled
+                  ? "Stop saving excerpts"
+                  : "Save future excerpts"
+            }
+            disabled={
+              !runtime.active || saving || !policy.data || policy.isFetching
+            }
+            onPress={() => void changePolicy()}
+          />
+        </SettingsGroup>
+      ) : null}
+      {command && root && preference && error ? (
+        <Notice tone="error" message="Could not change excerpt preference." />
+      ) : null}
+      {command && root && preference && policy.isError ? (
+        <Notice tone="error" message="Could not load excerpt preference." />
+      ) : null}
+      {onOpenDesktop ? (
+        <MachineDesktopEntries
+          nodeId={receipt.node_id}
+          conversationId={conversationId}
+          onOpen={onOpenDesktop}
+        />
+      ) : null}
+    </View>
   );
 }
 function Disclosure({
@@ -246,18 +243,16 @@ function Disclosure({
   open: boolean;
   onPress: () => void;
 }) {
+  const { colors } = useTheme();
+  const Icon = open ? ChevronDown : ChevronRight;
   return (
-    <Pressable
-      accessibilityRole="button"
+    <SettingsRow
+      label={label}
       accessibilityLabel={label}
       accessibilityState={{ expanded: open }}
-      style={{ minHeight: 44, justifyContent: "center" }}
+      accessory={<Icon size={18} color={colors.textMuted} />}
       onPress={onPress}
-    >
-      <Label muted>
-        {open ? "⌄" : "›"} {label}
-      </Label>
-    </Pressable>
+    />
   );
 }
 export function CommandExcerpt({
@@ -305,3 +300,6 @@ export function CommandExcerpt({
     </Label>
   );
 }
+const styles = StyleSheet.create({
+  receipt: { gap: spacing.sm },
+});

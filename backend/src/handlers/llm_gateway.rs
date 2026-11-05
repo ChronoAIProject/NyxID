@@ -593,6 +593,51 @@ pub async fn llm_proxy_request(
         }
     }
 
+    let mut target = target;
+    projection.apply(&mut target);
+    // Only enrolled callers can carry coverage; unenrolled requests skip this work.
+    if auth_user.execution_permission.is_some() {
+        let mut permission_operation = operation_descriptor::build_llm_descriptor(
+            &request_method_str,
+            &dispatch_path,
+            Some(&dispatch_body),
+        );
+        operation_descriptor::apply_inference_contract(
+            &mut permission_operation,
+            &target.service,
+            Some(&dispatch_body),
+            crate::services::mcp_service::http_carries_method_override(
+                &request_method_str,
+                &headers,
+                query.as_deref(),
+                &dispatch_body,
+            ),
+            llm_scope.guest,
+        );
+        let permission_headers = if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_header_map()
+        } else {
+            headers.clone()
+        };
+        crate::services::execution_permission_dispatch::admit_http(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            owner_for_approval.as_deref(),
+            &mut target,
+            &request_method_str,
+            &dispatch_path,
+            query.as_deref(),
+            &dispatch_body,
+            &permission_headers,
+            None,
+            &permission_operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     // Check approval against the owner selected by credential resolution.
     // Legacy credentials are personal, so `None` retains the actor fallback.
     let approval_auto = check_llm_approval(
@@ -619,8 +664,6 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
-    let mut target = target;
-    projection.apply(&mut target);
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
@@ -899,6 +942,7 @@ pub async fn llm_proxy_request(
                 Some(usage_context),
                 Some(usage_complete),
                 billing_egress_permit,
+                Some(&target),
             )
             .await?
         } else {
@@ -1388,6 +1432,51 @@ async fn gateway_provider_request(
         &headers,
     )?;
 
+    let mut target = target;
+    projection.apply(&mut target);
+    // Only enrolled callers can carry coverage; unenrolled requests skip this work.
+    if auth_user.execution_permission.is_some() {
+        let mut permission_operation = operation_descriptor::build_llm_descriptor(
+            "POST",
+            &final_path,
+            final_body_bytes.as_deref(),
+        );
+        operation_descriptor::apply_inference_contract(
+            &mut permission_operation,
+            &target.service,
+            final_body_bytes.as_deref(),
+            crate::services::mcp_service::http_carries_method_override(
+                "POST",
+                &headers,
+                query.as_deref(),
+                final_body_bytes.as_deref().unwrap_or_default(),
+            ),
+            llm_scope.guest,
+        );
+        let permission_headers = if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_header_map()
+        } else {
+            headers.clone()
+        };
+        crate::services::execution_permission_dispatch::admit_http(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &mut target,
+            "POST",
+            &final_path,
+            query.as_deref(),
+            final_body_bytes.as_deref().unwrap_or_default(),
+            &permission_headers,
+            None,
+            &permission_operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     // Check approval if user has it enabled (uses cascade if the service
     // turned out to be org-owned).
     let approval_auto = check_llm_approval(
@@ -1414,8 +1503,6 @@ async fn gateway_provider_request(
     )
     .await?;
 
-    let mut target = target;
-    projection.apply(&mut target);
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
@@ -1709,6 +1796,7 @@ async fn gateway_provider_request(
                 Some(usage_context),
                 Some(usage_complete),
                 billing_egress_permit,
+                Some(&target),
             )
             .await?
         } else {
@@ -2596,7 +2684,8 @@ async fn check_llm_approval(
             .as_deref()
             .is_some_and(|chat| chat.guest && chat.turn_live),
     );
-    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
+    let (approval_outcome, automatic) = crate::services::execution_permission_dispatch::approval(
+        auth_user.execution_permission.as_ref(),
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
@@ -2610,6 +2699,12 @@ async fn check_llm_approval(
     )
     .await?;
 
+    let approval_outcome = crate::services::execution_permission_dispatch::approval_for_catalog(
+        auth_user.execution_permission.as_ref(),
+        owner_for_resolution,
+        service_id,
+        approval_outcome,
+    );
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,
@@ -3138,6 +3233,8 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

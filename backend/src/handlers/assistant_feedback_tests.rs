@@ -33,6 +33,7 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -74,6 +75,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -142,6 +144,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -195,6 +198,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -378,6 +382,7 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -450,6 +455,7 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -506,6 +512,7 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -655,6 +662,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -737,6 +745,7 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                execution_task: None,
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -1008,6 +1017,7 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1105,6 +1115,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1229,6 +1240,7 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1447,6 +1459,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1463,6 +1476,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,

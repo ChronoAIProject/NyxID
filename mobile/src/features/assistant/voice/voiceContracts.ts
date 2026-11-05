@@ -181,6 +181,17 @@ export const voiceTaskSchema = z.object({
   pending_acknowledgement_ids: z.array(z.string()),
   title: z.string().max(120).nullable().optional(),
   result_message_id: z.string().nullable().optional(),
+  /** Server-authored progress labels, never raw activity text. */
+  progress: z
+    .object({
+      stage: z.string(),
+      detail: z.string(),
+      last_completed_step: z.string().nullable(),
+      completed_steps: z.number().int().nonnegative(),
+      updated_at: z.string(),
+    })
+    .nullable()
+    .optional(),
 });
 export const voiceSnapshotSchema = z.object({
   type: z.literal("snapshot"),

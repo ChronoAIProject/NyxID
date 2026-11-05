@@ -773,6 +773,20 @@ setup. Unauthenticated PINGs cannot change bot diagnostics.
 Bots linked to NyxBot or a specialist use NyxBot's Discord gateway when
 **`nyxbot:gateway-discord`** is enabled for the linking person and the Agent Event
 Gateway accepts the bot. That path does not require `channel:discord-gateway`.
+If native activation fails, the channel-agent API and UI explicitly identify
+NyxID relay fallback, its bounded `gateway_native_activation`/detail, and the
+next automatic retry eligibility time (23 hours after the last attempt). A
+successful relay reply or connected relay WebSocket does not establish native
+CMA acceptance. The owner may choose **Retry native gateway now** in bot settings
+or agent details, or use NyxBot's `nyxid__retry_channel_gateway`. The human-only
+REST action is `POST /api/v1/assistant/nyxagent/channels/{id}/retry-native-gateway`;
+it preserves owner verification, live org-admin authority, gateway flag,
+idle-turn and release/drain fences, and limits attempts to once per ten minutes.
+Refusal leaves the relay in place; re-linking agents does not itself retry.
+The retained native source identity is diagnostic, not a transport selection:
+followed-thread answers admitted on the direct relay still use the relay.
+An answer originating from a native event cannot borrow a relay reply target.
+See [native status and retry](CHANNEL_EVENT_GATEWAY.md#discord-transport-and-provider-boundary).
 Other relay bots (including a bot whose gateway enrollment is refused) need the
 separate, default-off **`channel:discord-gateway`** flag, resolved for the bot
 owner (global/user cohorts, including org-owned bot IDs).
@@ -798,11 +812,14 @@ Interaction-only bots require no change while the ingress flag stays off.
    only for media replies. Private threads also require the bot to be a member.
 3. Assign the agent/NyxBot route in NyxID. Send a DM, then a structured @mention
    in a guild channel and a thread. Groups use their existing `reply_mode`
-   settings; mentions compare Discord's `mentions[].id` to the bot user ID,
-   never names or words. Self messages, other bots, webhooks and system messages
+   settings; `mentions[].id` matching the bot user ID or `mention_roles[]`
+   matching its own managed integration role addresses the bot. Role identity
+   requires Discord's `managed: true` and exact `tags.bot_id`; names, highlight
+   styling and message text never count. Self messages, other bots, webhooks and system messages
    are suppressed. Followed threads use the existing `nyxbot:thread-follow`
    flag, per-chat settings and sender authority. Other-user-only mentions remain
-   quiet context; broadcasts do not become bot mentions.
+   quiet context; other roles, other bots' managed roles and @everyone/@here
+   remain broadcasts rather than bot mentions.
 4. Check **Health > Last NyxID relay Gateway state** and the recovery recommendation. A
    missing/denied intent (close 4013/4014), invalid token (4004), identity mismatch,
    or repeated transport/heartbeat/ingress failure records a stable metadata-only
@@ -810,6 +827,28 @@ Interaction-only bots require no change while the ingress flag stays off.
    minutes, and credential rotation closes the old session at lease renewal.
    Interactions remain available independently of the socket status. A reported
    historical state is not proof of current external delivery.
+
+NyxID learns that one managed role per bot/guild from authenticated
+`GUILD_CREATE`, `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE` and `GUILD_ROLE_DELETE`
+events. The process cache is bound to both the stored bot and its Discord user
+identity, capped at 256 guilds per identity and 2,048 entries overall, with a
+five-minute lifetime. READY clears that bot's cached roles. A role mention on a
+cache miss (including a resumed process or native source without a NyxID socket)
+uses one authenticated, size/time-bounded `GET /guilds/{guild}/roles`; unavailable
+or ambiguous role evidence confers no addressing authority. Only IDs are cached;
+role names and payloads are discarded. Ordinary group admission and thread follow
+consume the same persisted facts, including across replicas.
+
+NyxBot group messages retain an additive `nyxbot_admission` projection on their
+existing `channel_messages` record. The owner-visible bot/route Activity view
+shows disposition (`addressed_user_mention`, `addressed_managed_role`,
+`followed_thread`, `not_addressed`, or a bounded refusal), bot mention evidence,
+managed-role evidence, other-role count, @everyone/@here evidence, normalized
+address, follow selection, resolved child and turn ID. The turn ID is bound in
+the same transaction as turn admission, including queued work. Callback
+`delivered` means only callback acceptance; `received`/`queued` is not a completed
+agent turn. Quiet selections retain their reason. No text, names, raw payloads,
+mentioned role IDs or credentials enter this projection. Legacy rows omit it.
 
 The worker caps each replica at 32 bot sessions; unclaimed eligible bots beyond
 capacity receive a `waiting_capacity` status and an administrator recommendation. It scans at most 100 active

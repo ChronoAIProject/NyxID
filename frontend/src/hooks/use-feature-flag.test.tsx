@@ -112,6 +112,7 @@ describe("feature flag catalog", () => {
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
       INVITATION_CODE: "auth:invitation-code",
+      MOBILE_NEW_DOMAINS: "mobile:new-domains",
       MOBILE_MFA: "auth:mobile-mfa",
       AI_ASSISTANT: "experimental:ai-assistant",
       ASSISTANT_VOICE: "assistant:voice",
@@ -143,6 +144,7 @@ describe("feature flag catalog", () => {
       NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
       NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
       DISCORD_GATEWAY: "channel:discord-gateway",
+      EXECUTION_PERMISSIONS: "permissions:execution-v1",
       NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
       NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
       NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",

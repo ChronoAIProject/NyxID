@@ -129,3 +129,26 @@ Only a verified admin records owner presence; ordinary members cannot open the
 guest audience. Follow expiry, stop, exact source targeting and delivery fences
 remain mandatory. Guest exposure, exact daily budget and per-sender limits apply
 to followed turns too. Gateway sender IDs never establish NyxID membership.
+
+Discord addressing and diagnostics (#2185): an exact bot-user mention and a
+mention of that bot's own authenticated managed integration role both normalize
+to `address: mention`; other roles and @everyone/@here do not. Additive v1 facts
+include `managed_role_mentioned` and `broadcast_role_count` (other roles only).
+The existing `bot_mentioned` reflects either verified mention kind, preserving
+old-reader compatibility. Neither names nor model text establish role identity.
+
+NyxID native Discord intake verifies the original message/channel through the
+bot's token and uses the same bounded role cache/lookup before following or
+ordinary group admission. This requires CMA to deliver the event: native NyxID
+policies already request `groups: all`. A gateway that filters role mentions out
+upstream cannot be repaired by NyxID; the CMA owner must retain broad admission
+or equivalent managed-role addressing. If authenticated role lookup is
+unavailable, the role stays a broadcast and confers no new follow authority.
+No native acceptance claim follows from relay success.
+
+The existing owner Activity API exposes `nyxbot_admission` on received group
+messages: bounded disposition, mention/broadcast evidence, address, follow
+selection, resolved child and transaction-bound turn ID. `Quiet`/`Silent` carry a
+reason (`not_addressed`, `mentions_others`, or a bounded refusal); callback
+acceptance alone never proves the message started a turn. See the
+[Discord relay contract](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).

@@ -144,6 +144,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::cma_session_origin::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::async_service_operation::QUOTAS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
@@ -251,6 +255,7 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::assistant_voice::REQUESTS, doc! {"user_id":owner}),
         (m::assistant_settings::COLLECTION_NAME, doc! {"_id":owner}),
+        (m::assistant_onboarding::COLLECTION_NAME, doc! {"_id":owner}),
         (
             m::assistant_sharing::COLLECTION_NAME,
             doc! {"owner_id": owner},
@@ -327,6 +332,14 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (
             m::notification_channel::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_group_collaboration::READ_STATES,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_group_collaboration::MENTION_NOTIFICATIONS,
             doc! {"user_id":owner},
         ),
         (

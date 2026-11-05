@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
-import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
+import {
+  deferred,
+  hookHarness,
+} from "../../features/assistant/assistantHookTestHarness";
 import { darkColors, lightColors } from "../../theme/mobileTheme";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 import * as search from "./workspaceSearchModel";
@@ -75,7 +78,8 @@ function setup(
     name: history ? "AssistantHistory" : "WorkspaceRecents",
     params: initialAgent ? { agentId: initialAgent } : undefined,
   };
-  const h = hookHarness<E>({
+  const mocks: Record<string, unknown> = {
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
     "react/jsx-runtime": {
       jsx: (type: any, props: any) => ({ type, props }),
       jsxs: (type: any, props: any) => ({ type, props }),
@@ -180,7 +184,11 @@ function setup(
         target,
       }),
     },
-  });
+  };
+  const h = hookHarness<E>(mocks);
+  mocks["../../hooks/usePullRefresh"] = h.load(
+    fileURLToPath(new URL("../../hooks/usePullRefresh.ts", import.meta.url)),
+  );
   const mod = h.load(
     fileURLToPath(new URL("./WorkspaceBrowseScreen.tsx", import.meta.url)),
   ) as any;
@@ -417,6 +425,32 @@ test("Chat History shares the paged browser and New chat retains its originating
     assert.equal(x.actions[0].kind, "chat");
     assert.equal(x.actions[0].target.agentId, agent);
     assert.equal(x.actions[0].target.conversationId, undefined);
+    x.h.unmount();
+  }
+});
+
+test("first loads show row skeletons and only a pull shows the refresh spinner", async () => {
+  for (const recents of [true, false]) {
+    const x = setup(recents);
+    const pending = deferred<void>();
+    Object.assign(x.data, { loading: true, refresh: () => pending.promise });
+    x.h.render();
+    const skeleton = recents
+      ? x.list().props.ListEmptyComponent
+      : x.all().find((n) => n.type === "SkeletonRows")!;
+    assert.equal(skeleton.type, "SkeletonRows");
+    assert.equal(
+      skeleton.props.accessibilityLabel,
+      recents ? "Loading recent chats" : "Loading chats, agents and crews",
+    );
+    const control = () => x.list().props.refreshControl.props;
+    assert.equal(control().refreshing, false);
+    control().onRefresh();
+    x.h.flush();
+    assert.equal(control().refreshing, true);
+    pending.resolve();
+    await x.h.settle();
+    assert.equal(control().refreshing, false);
     x.h.unmount();
   }
 });

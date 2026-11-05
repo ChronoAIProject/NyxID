@@ -193,6 +193,7 @@ pub async fn admit(
         message_id: Uuid::new_v4().to_string(),
     };
     let invocation = AssistantInvocation {
+        execution_task: None,
         id: Uuid::new_v4().to_string(),
         user_id: owner.into(),
         idempotency_key: key.into(),
@@ -505,6 +506,7 @@ pub async fn decision_in_session(
                 .and_then(|routing| routing.report_to()),
         )
         .for_invocation(Some(id));
+    event.execution_task = card.execution_task.clone();
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!("invocation-decision:{}", card.id).as_bytes(),
