@@ -2475,8 +2475,9 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if automation_work.is_some() && start.trigger.is_some() {
-        let work = automation_work.as_ref().expect("automation binding");
+    let events = if let Some(work) = automation_work.as_ref()
+        && start.trigger.is_some()
+    {
         let (selected, rest) = std::mem::take(&mut row.pending_events)
             .into_iter()
             .partition(|e| e.automation_work.as_ref() == Some(work));
@@ -2992,7 +2993,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         automation_work = events.first().and_then(|e| e.automation_work.clone());
         if let Some(work) = automation_work.as_ref() {
             super::trigger_schedule::direct::resume_in_session(
-                db, user_id, &id, &turn_id, work, session,
+                db, user_id, &id, turn_id, work, session,
             )
             .await?;
         }

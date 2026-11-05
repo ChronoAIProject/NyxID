@@ -179,7 +179,10 @@ pub async fn reserve_admission(db: &Database, job: &Document) -> AppResult<()> {
                 "_id": job.get_str("_id").unwrap_or_default(),
                 "fence": job.get_str("fence").unwrap_or_default(), "at": {"$gt": date(now)},
             },
-            doc! {"$set": {"at": date(now + Duration::seconds(ADMISSION_LEASE_SECONDS))}},
+            doc! {"$set": {
+                "at": date(now + Duration::seconds(ADMISSION_LEASE_SECONDS)),
+                "admission_lease_until": date(now + Duration::seconds(ADMISSION_LEASE_SECONDS)),
+            }},
         )
         .await?
         .matched_count;
@@ -604,8 +607,8 @@ pub async fn fence_work(
     if db.collection::<Document>(RUNS).update_one(doc! {"_id": &work.run_id, "user_id": owner, "coordinator.protocol": 2, "coordinator.deadline": {"$gt": date(Utc::now())}, "outcome": {"$in": ["started", "waiting"]}}, doc! {"$inc": {"coordinator.version": 1_i64}}).session(&mut *session).await?.matched_count != 1 { return Err(AppError::AssistantTurnRequired); }
     let pending = match work.role.as_str() {
         "coordinator" => true,
-        "direct" => db.collection::<Document>(HANDOFFS).find_one(doc! {"_id": &work.work_id, "run_id": &work.run_id, "user_id": owner, "state": "pending"}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
-        "group" => db.collection::<Document>(GROUPS).find_one(doc! {"user_id": owner, "followers": {"$elemMatch": {"automation.work.run_id": &work.run_id, "automation.dispatches": {"$elemMatch": {"id": &work.work_id, "state": "running"}}}}}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
+        "direct" => db.collection::<Document>(HANDOFFS).find_one(doc! {"_id": &work.work_id, "run_id": &work.run_id, "user_id": owner, "state": "pending", "work": bson::to_bson(work).map_err(|_| AppError::Internal("Encode automation work".into()))?}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
+        "group" => db.collection::<Document>(GROUPS).find_one(doc! {"user_id": owner, "followers": {"$elemMatch": {"automation.work.run_id": &work.run_id, "automation.work.coordinator_thread_id": &work.coordinator_thread_id, "automation.work.confirmation_policy": bson::to_bson(&work.confirmation_policy).map_err(|_| AppError::Internal("Encode automation policy".into()))?, "automation.dispatches": {"$elemMatch": {"id": &work.work_id, "state": "running"}}}}}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
         _ => false,
     };
     if !pending {
@@ -643,15 +646,19 @@ pub async fn event_can_resume(
         "coordinator.deadline": {"$gt": date(Utc::now())}, "outcome": {"$in": ["started", "waiting"]},
     }).await? else { return Ok(false); };
     Ok(match work.role.as_str() {
-        "coordinator" => work.coordinator_thread_id == row.id && work.work_id == run.id
+        "coordinator" => run.thread_id.as_deref() == Some(row.id.as_str())
+            && *work == context(&run, &row.id)
             && run.coordinator.as_ref().is_some_and(|c| c.continuations < CONTINUATION_LIMIT),
         "direct" => db.collection::<Document>(HANDOFFS).find_one(doc! {
             "_id": &work.work_id, "run_id": &run.id, "user_id": &row.user_id,
             "child_thread_id": &row.id, "state": "pending",
+            "work": bson::to_bson(work).map_err(|_| AppError::Internal("Encode automation work".into()))?,
         }).projection(doc! {"_id": 1}).await?.is_some(),
         "group" => db.collection::<Document>(GROUPS).find_one(doc! {
             "_id": &row.group_id, "user_id": &row.user_id,
             "followers": {"$elemMatch": {"automation.work.run_id": &run.id,
+                "automation.work.coordinator_thread_id": &work.coordinator_thread_id,
+                "automation.work.confirmation_policy": bson::to_bson(&work.confirmation_policy).map_err(|_| AppError::Internal("Encode automation policy".into()))?,
                 "automation.dispatches": {"$elemMatch": {"id": &work.work_id, "thread_id": &row.id, "state": "running"}}}},
         }).projection(doc! {"_id": 1}).await?.is_some(),
         _ => false,

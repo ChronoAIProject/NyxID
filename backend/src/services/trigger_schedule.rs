@@ -1029,7 +1029,7 @@ async fn admit_turn_inner(
         db.collection::<Document>(WORK)
             .update_one(
                 doc! {"_id": &run.id},
-                doc! {"$set": {"automation_v2": true, "at": date(state.deadline.min(now + Duration::seconds(super::assistant_nyxagent::ACTIVE_TURN_TTL_SECS)))}, "$unset": {"admission_lease_until": ""}},
+                doc! {"$set": {"automation_v2": true, "at": date(state.deadline.min(now + continuation::backstop(0)))}, "$unset": {"admission_lease_until": ""}},
             )
             .session(&mut *session)
             .await?;
