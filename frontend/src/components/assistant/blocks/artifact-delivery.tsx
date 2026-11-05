@@ -89,7 +89,7 @@ export function ArtifactDelivery({
   return (
     <div
       role="status"
-      className="mb-2 space-y-1 rounded-lg border border-hairline p-3 text-xs text-muted-foreground"
+      className="mb-2 space-y-1 rounded-lg border border-hairline p-3 text-12 text-muted-foreground"
     >
       <p>{copy}</p>
       {!!delivery.rejected?.length && (

@@ -116,8 +116,8 @@ export function GeneratedAttachment({
       style={{ minHeight: height }}
       className="min-w-0 max-w-full space-y-2 rounded-lg border border-hairline bg-card p-3"
     >
-      <p className="break-words text-xs font-medium">{name}</p>
-      <p className="text-11 text-muted-foreground">
+      <p className="break-words type-group-label">{name}</p>
+      <p className="text-12 text-muted-foreground">
         {attachment.contentType} ·{" "}
         {attachment.size?.toLocaleString() ?? "Unknown"} bytes
         {attachment.resultVersion
@@ -125,12 +125,12 @@ export function GeneratedAttachment({
           : ""}
       </p>
       {expired ? (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-12 text-muted-foreground">
           This generated file has expired. Ask for a new result to generate it
           again.
         </p>
       ) : error ? (
-        <div role="status" className="space-y-1 text-xs text-muted-foreground">
+        <div role="status" className="space-y-1 text-12 text-muted-foreground">
           <p>{error}</p>
           <Button
             variant="link"
@@ -146,7 +146,7 @@ export function GeneratedAttachment({
         </div>
       ) : !inline && !downloadRequested ? (
         <>
-          <p role="status" className="text-xs text-muted-foreground">
+          <p role="status" className="text-12 text-muted-foreground">
             Preview unavailable for this type. Download the file to open it.
           </p>
           <Button
@@ -160,7 +160,7 @@ export function GeneratedAttachment({
           </Button>
         </>
       ) : !url ? (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-12 text-muted-foreground">
           Loading generated file…
         </p>
       ) : (
@@ -191,7 +191,7 @@ export function GeneratedAttachment({
             </a>
           )}
           {(!inline || decodeFailed) && (
-            <p role="status" className="text-xs text-muted-foreground">
+            <p role="status" className="text-12 text-muted-foreground">
               {decodeFailed
                 ? "Your browser could not decode this preview. You can still download the verified file."
                 : "Preview unavailable for this type. Download the file to open it."}
@@ -206,7 +206,7 @@ export function GeneratedAttachment({
         </>
       )}
       {attachment.expiresAt && (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-12 text-muted-foreground">
           Available until {new Date(attachment.expiresAt).toLocaleString()}
         </p>
       )}
