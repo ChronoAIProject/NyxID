@@ -305,5 +305,10 @@ export function LoginAgentKeyPage({
   flow = "agent-key",
   mint = false,
 }: { flow?: LoginFlow; mint?: boolean } = {}) {
-  return mint ? <MintLoginCodePage /> : <DeviceApproval flow={flow} />;
+  const { user } = useAuthStore();
+  return mint ? (
+    <MintLoginCodePage key={user?.id ?? "anonymous"} />
+  ) : (
+    <DeviceApproval flow={flow} />
+  );
 }

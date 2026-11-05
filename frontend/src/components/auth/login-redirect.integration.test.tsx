@@ -1,4 +1,11 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -139,6 +146,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   client.clear();
+  vi.useRealTimers();
   assign.mockRestore();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -233,6 +241,26 @@ async function confirmProfile() {
   });
 }
 
+async function startAppLogin() {
+  const trigger = await screen.findByRole("button", {
+    name: "Continue with the NyxID app",
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    await act(async () => {
+      fireEvent.click(trigger);
+    });
+    await vi.waitFor(() => {
+      expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 it.each(["methods", "password MFA", "social MFA", "phone resume"])(
   "preserves the assistant conversation after app login from %s through the global provider",
   async (start) => {
@@ -243,12 +271,7 @@ it.each(["methods", "password MFA", "social MFA", "phone resume"])(
       await passwordLogin();
       await screen.findByRole("heading", { name: "MFA verification" });
     }
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: "Continue with the NyxID app",
-      }),
-    );
-    await screen.findByText("ABCD-EFGH");
+    await startAppLogin();
     if (start === "phone resume") {
       // Model returning to the requesting tab after approving in the app.
       act(() => {
@@ -283,11 +306,7 @@ it.each([
   "uses the Assistant fallback for app login with return_to=%s",
   async (returnTo) => {
     const router = await open("/login", returnTo ?? "");
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: "Continue with the NyxID app",
-      }),
-    );
+    await startAppLogin();
     await confirmProfile();
     await screen.findByText("Assistant destination");
     expect(router.state.location.pathname).toBe("/assistant");
@@ -300,9 +319,7 @@ it("retains a configured backend return URL after app session restoration", asyn
   const target =
     "https://api.example.test/oauth/authorize?client_id=app&state=resume";
   await open("/login", target);
-  await userEvent.click(
-    await screen.findByRole("button", { name: "Continue with the NyxID app" }),
-  );
+  await startAppLogin();
   await confirmProfile();
   await waitFor(() => expect(assign).toHaveBeenCalledExactlyOnceWith(target));
 });
@@ -409,11 +426,7 @@ it.each([false, true])(
       await userEvent.click(
         await screen.findByRole("button", { name: /Keep me signed in/ }),
       );
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: "Continue with the NyxID app",
-      }),
-    );
+    await startAppLogin();
     if (keep) await confirmProfile();
     await waitFor(() => expect(verified).toHaveBeenCalledOnce(), {
       timeout: 3000,

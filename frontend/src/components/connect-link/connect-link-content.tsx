@@ -65,17 +65,29 @@ interface DeviceChallenge {
   readonly status: string;
 }
 
-export function ConnectLinkContent({
-  token,
-  embedded = false,
-  redirectOnTerminal = true,
-}: {
+interface ConnectLinkContentProps {
   readonly token: string;
   /** Render inside an existing dialog instead of the standalone hosted page. */
   readonly embedded?: boolean;
   /** Hosted pages return to the requesting app; chat modals stay in place. */
   readonly redirectOnTerminal?: boolean;
-}) {
+}
+
+export function ConnectLinkContent(props: ConnectLinkContentProps) {
+  const { user } = useAuthStore();
+  return (
+    <ConnectLinkSession
+      key={`${user?.id ?? "anonymous"}:${props.token}`}
+      {...props}
+    />
+  );
+}
+
+function ConnectLinkSession({
+  token,
+  embedded = false,
+  redirectOnTerminal = true,
+}: ConnectLinkContentProps) {
   const navigate = useNavigate();
   const { isAuthenticated, isLoading, user } = useAuthStore();
   const [deviceChallenge, setDeviceChallenge] =

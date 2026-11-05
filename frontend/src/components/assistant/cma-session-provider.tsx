@@ -4,7 +4,13 @@ import {
   type Observation,
   type ObservedCmaSession,
 } from "./cma-session-context";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useState,
+  type ReactNode,
+} from "react";
 import { useRouterState } from "@tanstack/react-router";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCmaSessionStore } from "@/stores/cma-session-store";
@@ -93,7 +99,7 @@ function OwnedCmaSessions({
     },
     [],
   );
-  useEffect(() => {
+  useLayoutEffect(() => {
     onChange(
       ownerId,
       sessions.map((session) => ({
