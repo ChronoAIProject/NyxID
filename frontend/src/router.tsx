@@ -749,7 +749,17 @@ const assistantCrmRoute = createRoute({
   onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/crm"),
   getParentRoute: () => rootRoute,
   beforeLoad: standaloneAuthBeforeLoad,
-  validateSearch: withAccountPanelSearch(() => ({})),
+  validateSearch: withAccountPanelSearch((search: Record<string, unknown>) => {
+    const bounded = (value: unknown) =>
+      typeof value === "string" && value.length <= 128 ? value : undefined;
+    return {
+      owner: bounded(search.owner),
+      record: bounded(search.record),
+      view: bounded(search.view),
+      object: bounded(search.object),
+      surface: bounded(search.surface),
+    };
+  }),
   component: () => <AssistantPage view="crm" />,
 });
 
