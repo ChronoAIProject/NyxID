@@ -25,6 +25,8 @@ export const FEATURE_FLAG = {
   MOBILE_NEW_DOMAINS: "mobile:new-domains",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
+  CMA_SANDBOX_BILLING: "experimental:cma-sandbox-billing",
+  CMA_SANDBOX_RATE_SYNC: "experimental:cma-sandbox-rate-sync",
   SERVICE_MONITORING: "services:monitoring",
   REMOTE_MACHINES: "experimental:remote-machines",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
@@ -82,10 +84,11 @@ export function userHasFeature(
   return user?.capabilities?.enabled_features?.includes(flag) ?? false;
 }
 
-/** Read before sign-in through `/public/config`; only a global override applies. */
+/** Resolved without a user or organization; only a global override applies. */
 const GLOBAL_ONLY_FLAGS: readonly string[] = [
   FEATURE_FLAG.INVITATION_CODE,
   FEATURE_FLAG.MOBILE_NEW_DOMAINS,
+  FEATURE_FLAG.CMA_SANDBOX_RATE_SYNC,
 ];
 
 export function isGlobalOnlyFlag(key: string): boolean {
