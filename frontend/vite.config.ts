@@ -301,12 +301,6 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: apiProxy,
-    fs: {
-      allow: [
-        path.resolve(__dirname),
-        path.resolve(__dirname, "../docs/fixtures/crm"),
-      ],
-    },
   },
   preview: {
     port: 3000,
