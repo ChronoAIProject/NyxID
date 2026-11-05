@@ -210,7 +210,7 @@ function presentForegroundNotification(
           ? [`https://${NYXID_UNIVERSAL_LINK_HOST}`]
           : []),
       ],
-    }),
+    }) ?? `${NYXID_APP_SCHEME}://activity`,
     title,
     body,
     challengeId: signal?.challengeId ?? null,

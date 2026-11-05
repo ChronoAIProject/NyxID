@@ -373,3 +373,19 @@ test("unrecognized destinations and empty payload taps fall back to native Activ
   assert.equal(f.actions.length, 2);
   f.h.unmount();
 });
+
+for (const cold of [false, true]) {
+  for (const known of [false, true]) {
+    test(`${cold ? "cold" : "warm"} malformed-relative notification uses ${known ? "known type" : "Activity"} fallback`, async () => {
+      const f = setup();
+      const tap = response({ type: known ? "channel_bot_failed" : "unknown", url: "//[" });
+      if (cold) f.cached.resolve(tap);
+      else { f.cached.resolve(null); f.tap(tap); }
+      await f.h.settle();
+      await f.signIn();
+      assert.equal(f.actions.length, 1);
+      assert.match(JSON.stringify(f.actions[0]), known ? /Plugins/ : /Activity/);
+      f.h.unmount();
+    });
+  }
+}

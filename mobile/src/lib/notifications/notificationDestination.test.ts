@@ -295,3 +295,10 @@ test("reconnect_url maps /keys independently of the type fallback", () => {
     { tab: "connectors" },
   );
 });
+
+test("malformed relative URL candidates continue through alternatives and type fallbacks", () => {
+  const config = { scheme: "nyxid", trustedUrls: ["https://nyx.example"] };
+  assert.equal(notificationDestination({ type: "channel_bot_failed", url: "//[" }, config), "nyxid://plugins?tab=connectors");
+  assert.equal(notificationDestination({ url: "//[", reconnect_url: "/plugins" }, config), "nyxid://plugins");
+  assert.equal(notificationDestination({ type: "unknown", url: "//[" }, config), null);
+});

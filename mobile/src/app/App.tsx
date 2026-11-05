@@ -1,4 +1,5 @@
 import "react-native-gesture-handler";
+import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
 import { useNotificationNavigation } from "./useNotificationNavigation";
 import {
   WorkspaceAccessibilityContext,
@@ -84,7 +85,6 @@ import {
   consumePendingPushSyncSignal,
   initializeNotificationRuntime,
   PushSyncSignal,
-  setForegroundNotificationHandler,
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
 import { ToastOverlay, type ToastState } from "../components/ToastOverlay";
@@ -174,7 +174,6 @@ export default function App() {
   const criticalNavigationGuards = useRef(new Set<symbol>());
   const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
-  const [pushToast, setPushToast] = useState<ToastState | null>(null);
 
   const { open: openNotification, flush: flushPendingNotificationNavigation } =
     useNotificationNavigation(navigationRef, navigationGuardsRef);
@@ -326,36 +325,10 @@ export default function App() {
     };
   }, []);
 
-  // In-app replacement for the OS banner suppressed while the app is
-  // foregrounded (see `configureNotificationHandler`). Without this, a push
-  // arriving with the app open would be silent to the user. Reuses the same
-  // toast the rest of the app uses; the backend's push body is boilerplate
-  // ("A service is requesting access"), so the title alone loses nothing.
-  useEffect(() => {
-    return setForegroundNotificationHandler((notification) => {
-      const message = notification.title ?? notification.body;
-      if (!message) return;
-
-      const { challengeId } = notification;
-      setPushToast({
-        message,
-        kind: "info",
-        action: challengeId
-          ? {
-              label: "Review",
-              onPress: () => openChallengeFromNotification(challengeId),
-            }
-          : notification.url
-            ? {
-                label: "Open",
-                onPress: () => {
-                  openNotification(notification.url!);
-                },
-              }
-            : undefined,
-      });
-    });
-  }, [openChallengeFromNotification, openNotification]);
+  const { toast: pushToast, toastKey: pushToastKey } = useForegroundNotificationToast(
+    openChallengeFromNotification,
+    openNotification,
+  );
 
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal | null) => {
@@ -428,6 +401,7 @@ export default function App() {
                         criticalNavigationGuards.current.size > 0
                       }
                       pushToast={pushToast}
+                      pushToastKey={pushToastKey}
                     />
                   </AuthSessionProvider>
                 </MobileConsentProvider>
@@ -448,6 +422,7 @@ function ThemedAppShell({
   onNavigationGuardChange,
   navigationBlocked = false,
   pushToast,
+  pushToastKey,
 }: {
   navigationRef: ReturnType<
     typeof useNavigationContainerRef<RootStackParamList>
@@ -458,6 +433,7 @@ function ThemedAppShell({
   onNavigationGuardChange: WorkspaceNavigationGuardChange;
   navigationBlocked?: boolean;
   pushToast: ToastState | null;
+  pushToastKey: number;
 }) {
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
@@ -774,7 +750,7 @@ function ThemedAppShell({
         style={[pushToastStyles.overlay, { top: insets.top }]}
         pointerEvents="box-none"
       >
-        <ToastOverlay toast={pushToast} duration={6000} />
+        <ToastOverlay key={pushToastKey} toast={pushToast} duration={6000} />
       </View>
     </View>
   );

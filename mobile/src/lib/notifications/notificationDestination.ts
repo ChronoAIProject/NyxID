@@ -12,7 +12,10 @@ export function nativeNotificationUrl(
 ): string | null {
   let path: string;
   try {
-    const url = new URL(value);
+    const url =
+      value.startsWith("/") && config.trustedUrls[0]
+        ? new URL(value, config.trustedUrls[0])
+        : new URL(value);
     if (url.username || url.password) return null;
     if (url.protocol === `${config.scheme}:`) {
       path = `${url.host ? `/${url.host}` : ""}${url.pathname.startsWith("/") ? url.pathname : `/${url.pathname}`}${url.search}`;
@@ -101,12 +104,7 @@ export function notificationDestination(
     ]) {
       const href = string(row[key]);
       if (!href) continue;
-      const normalized = nativeNotificationUrl(
-        href.startsWith("/") && config.trustedUrls[0]
-          ? new URL(href, config.trustedUrls[0]).href
-          : href,
-        config,
-      );
+      const normalized = nativeNotificationUrl(href, config);
       if (normalized) return normalized;
     }
     if (agent)
