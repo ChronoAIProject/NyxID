@@ -9,10 +9,13 @@ function nodes(node: any): E[] {
   if (typeof node.type === "function") return nodes(node.type(node.props));
   return [node, ...[node.props.children].flat(Infinity).flatMap(nodes)];
 }
-function setup() {
+function setup(withNativeRecognition = false) {
   let sheetOpen = false;
+  let appState = "active";
   let time = 10000;
   let tick = () => {};
+  let nextTimer = 0;
+  const timers = new Map<number, { at: number; callback: () => void }>();
   let epoch = 1,
     focused = true;
   let options: any;
@@ -69,6 +72,9 @@ function setup() {
         useWindowDimensions: () => ({ height: 844 }),
         Keyboard: { addListener: () => ({ remove: () => {} }) },
         AppState: {
+          get currentState() {
+            return appState;
+          },
           addEventListener: (_: string, fn: any) => {
             listeners.add(fn);
             return { remove: () => listeners.delete(fn) };
@@ -126,8 +132,56 @@ function setup() {
         tick = callback;
         return 1;
       },
+      setTimeout: (callback: () => void, delay: number) => {
+        timers.set(++nextTimer, { at: time + delay, callback });
+        return nextTimer;
+      },
+      clearTimeout: (id: number) => {
+        timers.delete(id);
+      },
     },
   );
+  const nativeListeners = new Map<string, Set<(event?: unknown) => void>>();
+  const emitNative = (event: string, value?: unknown) => {
+    for (const listener of [...(nativeListeners.get(event) ?? [])])
+      listener(value);
+  };
+  if (withNativeRecognition) {
+    h.mock("expo-speech-recognition", {
+      ExpoSpeechRecognitionModule: {
+        requestPermissionsAsync: async () => ({ granted: true }),
+        getSupportedLocales: async () => ({ locales: ["en-US"] }),
+        supportsOnDeviceRecognition: () => true,
+        addListener: (event: string, listener: (value?: unknown) => void) => {
+          const listeners = nativeListeners.get(event) ?? new Set();
+          listeners.add(listener);
+          nativeListeners.set(event, listeners);
+          return { remove: () => listeners.delete(listener) };
+        },
+        start: () => {
+          events.push("native-start");
+          emitNative("start");
+        },
+        stop: () => emitNative("end"),
+        abort: () => emitNative("end"),
+      },
+    });
+    h.mock("./voice/dictationLanguage", {
+      savedDictationLanguage: async () => "en-US",
+    });
+    h.mock("./voice/dictationLocale", { dictationLocale: () => "en-US" });
+    h.mock("./voice/voicePermission", {
+      waitForVoiceForeground: async () => {},
+    });
+    h.mock(
+      "../assistant/useComposerDictation",
+      h.load(
+        fileURLToPath(
+          new URL("../assistant/useComposerDictation.ts", import.meta.url),
+        ),
+      ),
+    );
+  }
   h.mock(
     "../assistant/voice/VoiceComposerShell",
     h.load(
@@ -140,6 +194,20 @@ function setup() {
     fileURLToPath(new URL("./CrewVoiceComposer.tsx", import.meta.url)),
   ).CrewVoiceComposer as any;
   h.mount(() => Component(props));
+  const advance = (milliseconds: number) => {
+    const target = time + milliseconds;
+    while (true) {
+      const next = [...timers].sort((a, b) => a[1].at - b[1].at)[0];
+      if (!next || next[1].at > target) break;
+      time = next[1].at;
+      timers.delete(next[0]);
+      next[1].callback();
+      h.flush();
+    }
+    time = target;
+    tick();
+    h.flush();
+  };
   return {
     h,
     props,
@@ -147,6 +215,7 @@ function setup() {
     speech,
     dictation,
     send,
+    emitNative,
     options: () => options,
     sheet: (open: boolean) => {
       sheetOpen = open;
@@ -154,20 +223,28 @@ function setup() {
     },
     all: () => nodes(h.value()),
     app: (state: string) => {
+      appState = state;
       for (const fn of listeners) fn(state);
       h.flush();
     },
-    advance: (milliseconds: number) => {
-      time += milliseconds;
-      tick();
-      h.flush();
+    advance,
+    pendingTimers: () => timers.size,
+    silence: (durationMs: number) => {
+      advance(durationMs);
+      dictation.active = false;
+      dictation.recording = false;
+      dictation.phase = "idle";
+      options.onSilence(durationMs);
+      h.render();
     },
     background: () => {
+      appState = "background";
       for (const fn of listeners) fn("background");
       h.flush();
     },
     account: () => {
       epoch++;
+      h.render();
     },
     blur: () => {
       focused = false;
@@ -389,11 +466,13 @@ test("temporary inactivity re-arms capture but explicit user pause survives app 
   );
   f.h.unmount();
 });
-test("silent native utterances re-arm capture while recognizer errors require explicit retry", () => {
+test("silent native utterances wait 500ms before re-arming and recognizer errors require explicit retry", () => {
   const f = setup();
-  f.h.render();
-  f.dictation.active = false;
-  f.h.render();
+  f.silence(3000);
+  assert.equal(f.events.filter((e) => e === "start").length, 1);
+  f.advance(499);
+  assert.equal(f.events.filter((e) => e === "start").length, 1);
+  f.advance(1);
   assert.equal(f.events.filter((e) => e === "start").length, 2);
   f.dictation.active = false;
   f.dictation.error = "Microphone denied";
@@ -404,6 +483,161 @@ test("silent native utterances re-arm capture while recognizer errors require ex
   );
   f.h.unmount();
 });
+
+test("three consecutive sub-second silent ends pause the microphone until explicit retry", () => {
+  const f = setup();
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    f.silence(50);
+    assert.equal(f.events.filter((e) => e === "start").length, attempt);
+    f.advance(500);
+  }
+  assert.equal(f.pendingTimers(), 0);
+  assert.equal(f.events.filter((e) => e === "start").length, 3);
+  assert.ok(
+    f
+      .all()
+      .some(
+        (n) =>
+          n.props.accessibilityRole === "alert" &&
+          n.props.children === "Can't hear the microphone. Tap to retry.",
+      ),
+  );
+  f.advance(60_000);
+  assert.equal(f.events.filter((e) => e === "start").length, 3);
+  f.all()
+    .find((n) => n.props.accessibilityLabel === "Retry crew voice")!
+    .props.onPress();
+  f.h.flush();
+  assert.equal(f.events.filter((e) => e === "start").length, 4);
+  f.silence(50);
+  f.advance(500);
+  assert.equal(
+    f.events.filter((e) => e === "start").length,
+    5,
+    "retry resets the circuit breaker",
+  );
+  f.h.unmount();
+});
+
+test("actual native no-speech events pass through dictation into the delayed crew circuit breaker", async () => {
+  const f = setup(true);
+  await f.h.settle();
+  assert.equal(f.events.filter((e) => e === "native-start").length, 1);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    f.advance(50);
+    f.emitNative("error", { error: "no-speech" });
+    f.emitNative("end");
+    f.h.flush();
+    f.advance(499);
+    await f.h.settle();
+    assert.equal(f.events.filter((e) => e === "native-start").length, attempt);
+    f.advance(1);
+    await f.h.settle();
+  }
+  assert.equal(f.events.filter((e) => e === "native-start").length, 3);
+  assert.ok(
+    f
+      .all()
+      .some(
+        (n) =>
+          n.props.accessibilityRole === "alert" &&
+          n.props.children === "Can't hear the microphone. Tap to retry.",
+      ),
+  );
+  assert.equal(
+    f.events.some((e) => Array.isArray(e) && e[0] === "send"),
+    false,
+  );
+  f.h.unmount();
+});
+
+test("normal multi-second silence keeps re-arming and resets a preceding rapid-silence streak", () => {
+  const f = setup();
+  for (const duration of [50, 50, 1000, 50, 50, 2000, 3000, 2000, 5000, 3000]) {
+    const before = f.events.filter((e) => e === "start").length;
+    f.silence(duration);
+    f.advance(500);
+    assert.equal(f.events.filter((e) => e === "start").length, before + 1);
+    assert.equal(
+      f.all().some((n) => n.props.accessibilityRole === "alert"),
+      false,
+    );
+  }
+  f.h.unmount();
+});
+
+test("a successful spoken utterance resets the rapid-silence circuit breaker", async () => {
+  const f = setup();
+  for (let i = 0; i < 2; i++) {
+    f.silence(50);
+    f.advance(500);
+  }
+  f.dictation.active = false;
+  const delivery = f.options().onInsert("heard correctly");
+  f.h.flush();
+  f.send.resolve(true);
+  await delivery;
+  f.h.flush();
+  f.silence(50);
+  f.advance(500);
+  assert.equal(
+    f.all().some((n) => n.props.accessibilityRole === "alert"),
+    false,
+  );
+  f.h.unmount();
+});
+
+for (const transition of [
+  "pause",
+  "close",
+  "unmount",
+  "epoch",
+  "scope",
+  "background",
+  "blur",
+  "disabled",
+  "sheet",
+  "typing",
+]) {
+  test(`silence re-arm timer is cancelled on ${transition}`, () => {
+    const f = setup();
+    f.silence(50);
+    assert.equal(f.pendingTimers(), 1);
+    if (transition === "pause")
+      f.all()
+        .find((n) => n.props.accessibilityLabel === "Pause crew microphone")!
+        .props.onPress();
+    if (transition === "close")
+      f.all()
+        .find((n) => n.props.accessibilityLabel === "End voice and close")!
+        .props.onPress();
+    if (transition === "unmount") f.h.unmount();
+    if (transition === "epoch") f.account();
+    if (transition === "scope") {
+      f.props.scope = "another-crew";
+      f.h.render();
+    }
+    if (transition === "background") f.background();
+    if (transition === "blur") f.blur();
+    if (transition === "disabled") {
+      f.props.enabled = false;
+      f.h.render();
+    }
+    if (transition === "sheet") f.sheet(true);
+    if (transition === "typing") {
+      f.props.enabled = false;
+      f.all()
+        .find((n) => n.type === "TextInput")!
+        .props.onChangeText("typed");
+    }
+    if (transition !== "unmount") f.h.flush();
+    assert.equal(f.pendingTimers(), 0);
+    const starts = f.events.filter((e) => e === "start").length;
+    f.advance(1000);
+    assert.equal(f.events.filter((e) => e === "start").length, starts);
+    if (transition !== "unmount") f.h.unmount();
+  });
+}
 test("a reply arriving while the spoken send promise is pending is read as plain text", async () => {
   const f = setup();
   const delivery = f.options().onInsert("send this");

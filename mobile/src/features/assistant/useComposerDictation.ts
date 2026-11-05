@@ -119,11 +119,14 @@ export function useComposerDictation({
   scope,
   enabled,
   onInsert,
+  onSilence,
   continuous = true,
 }: {
   scope: string;
   enabled: boolean;
   onInsert: (text: string) => void;
+  /** Automatic utterance users can pace retries using native session duration. */
+  onSilence?: (durationMs: number) => void;
   /** Crew voice ends each utterance at native silence detection. */
   continuous?: boolean;
 }) {
@@ -136,8 +139,15 @@ export function useComposerDictation({
   const [error, setError] = useState<string>();
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [levels] = useState(levelSource);
-  const current = useRef({ scope, epoch, enabled, focused, onInsert });
-  current.current = { scope, epoch, enabled, focused, onInsert };
+  const current = useRef({
+    scope,
+    epoch,
+    enabled,
+    focused,
+    onInsert,
+    onSilence,
+  });
+  current.current = { scope, epoch, enabled, focused, onInsert, onSilence };
   const operation = useRef<{ cancel(): void; stop(): void } | undefined>(
     undefined,
   );
@@ -180,6 +190,7 @@ export function useComposerDictation({
     let finalText = "";
     let interimText = "";
     let failure: string | undefined;
+    let nativeStartedAt = 0;
     let subscriptions: { remove(): void }[] = [];
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
@@ -226,6 +237,7 @@ export function useComposerDictation({
             ? undefined
             : (failure ?? "Speech wasn't finalized. Please try again."),
         );
+        if (silence) current.current.onSilence?.(Date.now() - nativeStartedAt);
         return;
       }
       if (!text) {
@@ -334,6 +346,7 @@ export function useComposerDictation({
         }),
       ];
       native = true;
+      nativeStartedAt = Date.now();
       Recognizer.start({
         ...(lang ? { lang } : {}),
         interimResults: true,

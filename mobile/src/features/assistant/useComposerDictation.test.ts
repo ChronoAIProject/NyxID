@@ -62,6 +62,8 @@ function setup({
   const appListeners = new Set<(state: string) => void>();
   const events: string[] = [],
     inserted: string[] = [];
+  const silentDurations: number[] = [];
+  let time = 10_000;
   let resolveForeground: (() => void) | undefined;
   const native = recognizer(events);
   const locales: [string | undefined, readonly string[]][] = [];
@@ -72,53 +74,66 @@ function setup({
     onInsert: (text: string) => {
       inserted.push(text);
     },
+    onSilence: (durationMs: number) => silentDurations.push(durationMs),
   };
-  const h = hookHarness<ReturnType<typeof useComposerDictation>>({
-    "react-native": {
-      Linking: {
-        openSettings: async () => {
-          events.push("settings");
+  const h = hookHarness<ReturnType<typeof useComposerDictation>>(
+    {
+      "react-native": {
+        Linking: {
+          openSettings: async () => {
+            events.push("settings");
+          },
+        },
+        AppState: {
+          get currentState() {
+            return state;
+          },
+          addEventListener: (_: string, callback: (state: string) => void) => {
+            appListeners.add(callback);
+            return { remove: () => appListeners.delete(callback) };
+          },
         },
       },
-      AppState: {
-        get currentState() {
-          return state;
+      "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
+      "@react-navigation/native": { useIsFocused: () => focused },
+      "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+      "../../lib/accessibility/workspaceAccessibility": {
+        useWorkspaceAccessibility: () => ({ sheetOpen }),
+      },
+      "./voice/dictationLanguage": {
+        savedDictationLanguage: async () => chosen,
+      },
+      "./voice/dictationLocale": {
+        dictationLocale: (
+          phone: string | undefined,
+          list: readonly string[],
+        ) => {
+          locales.push([phone, list]);
+          return "en-GB";
         },
-        addEventListener: (_: string, callback: (state: string) => void) => {
-          appListeners.add(callback);
-          return { remove: () => appListeners.delete(callback) };
+      },
+      "./voice/voicePermission": {
+        waitForVoiceForeground: async (_app: unknown, signal: AbortSignal) => {
+          if (state === "active") return;
+          await new Promise<void>((resolve, reject) => {
+            resolveForeground = resolve;
+            signal.addEventListener(
+              "abort",
+              () => reject(new Error("cancelled")),
+              { once: true },
+            );
+          });
         },
       },
     },
-    "expo-speech-recognition": { ExpoSpeechRecognitionModule: native },
-    "@react-navigation/native": { useIsFocused: () => focused },
-    "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../../lib/accessibility/workspaceAccessibility": {
-      useWorkspaceAccessibility: () => ({ sheetOpen }),
-    },
-    "./voice/dictationLanguage": {
-      savedDictationLanguage: async () => chosen,
-    },
-    "./voice/dictationLocale": {
-      dictationLocale: (phone: string | undefined, list: readonly string[]) => {
-        locales.push([phone, list]);
-        return "en-GB";
+    {
+      Date: class extends Date {
+        static override now() {
+          return time;
+        }
       },
     },
-    "./voice/voicePermission": {
-      waitForVoiceForeground: async (_app: unknown, signal: AbortSignal) => {
-        if (state === "active") return;
-        await new Promise<void>((resolve, reject) => {
-          resolveForeground = resolve;
-          signal.addEventListener(
-            "abort",
-            () => reject(new Error("cancelled")),
-            { once: true },
-          );
-        });
-      },
-    },
-  });
+  );
   const module = h.load(
     fileURLToPath(new URL("./useComposerDictation.ts", import.meta.url)),
   );
@@ -136,6 +151,10 @@ function setup({
     props,
     events,
     inserted,
+    silentDurations,
+    advance: (ms: number) => {
+      time += ms;
+    },
     native,
     locales,
     emit,
@@ -518,10 +537,38 @@ test("silent crew utterances end without error or delivery and can re-arm; failu
       ["not-allowed", "service-not-allowed"].includes(event),
       event,
     );
+    assert.deepEqual(x.silentDurations, x.h.value().error ? [] : [0], event);
     if (!x.h.value().error) {
       await x.begin();
       assert.equal(x.h.value().active, true);
     }
+    x.h.unmount();
+  }
+});
+
+test("crew silence duration measures the native session and excludes time waiting for permission", async () => {
+  const x = setup({ continuous: false });
+  const pending = x.h.value().start();
+  x.advance(5000);
+  x.native.grant({ granted: true });
+  await pending;
+  await x.h.settle();
+  x.emit("start");
+  x.advance(75);
+  x.native.emit("nomatch");
+  x.emit("end");
+  assert.deepEqual(x.silentDurations, [75]);
+  x.h.unmount();
+});
+
+test("cancelled crew capture and ordinary draft dictation never report automatic silence", async () => {
+  for (const continuous of [true, false]) {
+    const x = setup({ continuous });
+    await x.begin();
+    if (!continuous) x.h.value().discard();
+    x.native.emit("nomatch");
+    x.emit("end");
+    assert.deepEqual(x.silentDurations, []);
     x.h.unmount();
   }
 });

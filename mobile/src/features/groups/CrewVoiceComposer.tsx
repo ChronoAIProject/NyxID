@@ -40,6 +40,11 @@ type Props = {
   recipientLabel: string;
 };
 
+const SILENCE_REARM_MS = 500;
+const RAPID_SILENCE_MS = 1000;
+const MAX_RAPID_SILENCES = 3;
+const MICROPHONE_RETRY = "Can't hear the microphone. Tap to retry.";
+
 /** Native speech uses the ordinary crew sender and its recipient/authority fences. */
 export function CrewVoiceComposer(props: Props) {
   const { colors } = useTheme();
@@ -53,7 +58,13 @@ export function CrewVoiceComposer(props: Props) {
   const closed = useRef(false);
   const { sheetOpen } = useWorkspaceAccessibility();
   const epoch = getAuthEpoch();
+  const origin = useRef({ scope: props.scope, epoch });
   const [paused, setPaused] = useState(false);
+  const [rearming, setRearming] = useState(false);
+  const rearmTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  const rapidSilences = useRef(0);
   const [sending, setSending] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [error, setError] = useState<string>();
@@ -73,8 +84,13 @@ export function CrewVoiceComposer(props: Props) {
     mounted.current &&
     !closed.current &&
     appActive.current &&
-    epoch === getAuthEpoch() &&
+    origin.current.epoch === getAuthEpoch() &&
+    origin.current.scope === current.current.scope &&
     current.current.enabled;
+  function clearRearm() {
+    clearTimeout(rearmTimer.current);
+    rearmTimer.current = undefined;
+  }
   const dictation = useComposerDictation({
     scope: `crew-voice:${props.scope}`,
     enabled:
@@ -88,8 +104,24 @@ export function CrewVoiceComposer(props: Props) {
       !speaking &&
       !error,
     continuous: false,
+    onSilence: (durationMs) => {
+      if (!available()) return;
+      clearRearm();
+      rapidSilences.current =
+        durationMs < RAPID_SILENCE_MS ? rapidSilences.current + 1 : 0;
+      if (rapidSilences.current >= MAX_RAPID_SILENCES) {
+        setError(MICROPHONE_RETRY);
+        return;
+      }
+      setRearming(true);
+      rearmTimer.current = setTimeout(() => {
+        rearmTimer.current = undefined;
+        if (available()) setRearming(false);
+      }, SILENCE_REARM_MS);
+    },
     onInsert: async (text) => {
       if (!available() || current.current.busy || sendLock.current) return;
+      rapidSilences.current = 0;
       sendLock.current = true;
       setSending(true);
       try {
@@ -120,6 +152,7 @@ export function CrewVoiceComposer(props: Props) {
   }
   function close() {
     closed.current = true;
+    clearRearm();
     setForeground(false);
     recognition.current.discard();
     stopPlayback();
@@ -135,6 +168,8 @@ export function CrewVoiceComposer(props: Props) {
         !(state === "inactive" && recognition.current.phase === "permission")
       ) {
         appActive.current = false;
+        clearRearm();
+        setRearming(false);
         setForeground(false);
         recognition.current.discard();
         stopPlayback();
@@ -147,10 +182,16 @@ export function CrewVoiceComposer(props: Props) {
     });
     return () => {
       mounted.current = false;
+      clearRearm();
       subscription.remove();
       stopPlayback();
     };
   }, []);
+  useEffect(() => {
+    if (origin.current.scope !== props.scope || origin.current.epoch !== epoch)
+      close();
+    return clearRearm;
+  }, [props.scope, epoch]);
   useEffect(() => {
     if (!focused) close();
     if (
@@ -174,10 +215,39 @@ export function CrewVoiceComposer(props: Props) {
     dictation.error,
   ]);
   useEffect(() => {
+    if (
+      !props.enabled ||
+      !focused ||
+      !foreground ||
+      sheetOpen ||
+      props.busy ||
+      paused ||
+      sending ||
+      speaking ||
+      error ||
+      dictation.error
+    ) {
+      clearRearm();
+      setRearming(false);
+      rapidSilences.current = 0;
+    }
+  }, [
+    props.enabled,
+    focused,
+    foreground,
+    sheetOpen,
+    props.busy,
+    paused,
+    sending,
+    speaking,
+    error,
+    dictation.error,
+  ]);
+  useEffect(() => {
     if (dictation.recording)
       setConnectedAt((previous) => previous ?? Date.now());
     if (
-      props.enabled &&
+      available() &&
       focused &&
       foreground &&
       !sheetOpen &&
@@ -187,6 +257,7 @@ export function CrewVoiceComposer(props: Props) {
       !speaking &&
       !error &&
       !dictation.error &&
+      !rearming &&
       !dictation.active
     )
       void dictation.start();
@@ -203,6 +274,9 @@ export function CrewVoiceComposer(props: Props) {
     dictation.active,
     dictation.error,
     dictation.recording,
+    rearming,
+    props.scope,
+    epoch,
   ]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -314,6 +388,9 @@ export function CrewVoiceComposer(props: Props) {
     [dictation.subscribeLevel, inputLevel],
   );
   const togglePause = () => {
+    clearRearm();
+    setRearming(false);
+    rapidSilences.current = 0;
     recognition.current.discard();
     setError(undefined);
     setPaused((value) => !value);
@@ -374,6 +451,9 @@ export function CrewVoiceComposer(props: Props) {
                 onPress={
                   notice
                     ? () => {
+                        clearRearm();
+                        setRearming(false);
+                        rapidSilences.current = 0;
                         dictation.discard();
                         setError(undefined);
                         setPaused(false);
@@ -408,6 +488,8 @@ export function CrewVoiceComposer(props: Props) {
         draft={props.draft}
         onExpand={props.onExpand}
         onChangeText={(text) => {
+          clearRearm();
+          setRearming(false);
           recognition.current.discard();
           stopPlayback();
           setSpeaking(false);
