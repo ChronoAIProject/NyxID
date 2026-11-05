@@ -9096,6 +9096,18 @@ and personal connections without creating a thread, reserving funds, or authoriz
 a call. Supplying `conversation_id` retains the live thread and source checks above;
 call startup always reauthorizes the selected connection against its actual thread.
 
+Devices use a published Bot Voice service with their own ordinary Agent Key.
+The human owner publishes a connection through
+`GET, PUT /api/v1/assistant/nyxagent/agents/{id}/voice-service` and grants its
+exact `UserService.id` through existing Key service scope. The service URL is
+`{BASE_URL}/api/v1/proxy/nyxbot-voice/{service_id}`; it exposes `/voice/options`,
+`/voice/sessions`, session status/control/stream and bounded announcements.
+Each connection fixes one Bot, and each call binds the actual login child
+credential. Existing browser routes remain first-party human only.
+See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
+independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
+work running; explicit Stop cancels it.
+
 Dictation adds two first-party human browser routes:
 
 | Route | Contract |

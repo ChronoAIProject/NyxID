@@ -259,6 +259,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::nyxbot_gateway_response::COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (
+            m::assistant_voice_announcement::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::assistant_voice::REQUESTS, doc! {"user_id":owner}),
         (m::assistant_settings::COLLECTION_NAME, doc! {"_id":owner}),
         (m::assistant_onboarding::COLLECTION_NAME, doc! {"_id":owner}),
