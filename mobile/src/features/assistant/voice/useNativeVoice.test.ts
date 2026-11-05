@@ -220,6 +220,7 @@ function setup(context: TestContext) {
   const connect = async () => {
     await start();
     clients.at(-1)!.options.onSnapshot(snapshot());
+    clients.at(-1)!.options.onConnected?.();
     return harness.flush();
   };
   return {
@@ -1018,7 +1019,7 @@ test("post-call task cancellation is aborted on scope exit and late errors canno
   assert.equal(e.harness.flush().error, undefined);
 });
 
-test("the call clock begins on the first active snapshot, survives updates and resets for a new attempt", async (context) => {
+test("the call clock waits for client readiness, survives updates and resets for a new attempt", async (context) => {
   const f = setup(context);
   await f.start();
   assert.equal(f.harness.value().connectedAt, undefined);
@@ -1026,6 +1027,9 @@ test("the call clock begins on the first active snapshot, survives updates and r
   assert.equal(f.harness.flush().connectedAt, undefined);
   const before = Date.now();
   f.clients.at(-1)!.options.onSnapshot(snapshot());
+  assert.equal(f.harness.flush().connectedAt, undefined);
+  assert.equal(f.harness.value().connected, false);
+  f.clients.at(-1)!.options.onConnected?.();
   const connectedAt = f.harness.flush().connectedAt!;
   assert.ok(connectedAt >= before && connectedAt <= Date.now());
   f.clients.at(-1)!.options.onSnapshot(snapshot({ observed_seconds: 8 }));

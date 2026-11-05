@@ -210,6 +210,12 @@ export function useNativeVoice(
         api: environment.api,
         createSocket: environment.createSocket,
         randomId: Crypto.randomUUID,
+        onConnected: () => {
+          if (!valid()) return;
+          setConnectedAt((previous) => previous ?? Date.now());
+          setConnected(true);
+          setStarting(false);
+        },
         onSnapshot: (value) => {
           if (!valid()) return;
           const previous = latestSnapshot.current;
@@ -223,16 +229,9 @@ export function useNativeVoice(
               previous.session.generation !== value.session.generation)
           )
             setHolding(false);
-          if (value.session.state === "active")
-            setConnectedAt((previous) => previous ?? Date.now());
           if (value.session.state === "closed" || value.session.state === "failed")
             setDisconnectedAt((previous) => previous ?? Date.now());
           setSnapshot(value);
-          setStarting(value.session.state === "starting");
-          setConnected(
-            value.session.state === "active" ||
-              value.session.state === "closing",
-          );
           refresh();
         },
         onError: (message, nextRecovery) => {

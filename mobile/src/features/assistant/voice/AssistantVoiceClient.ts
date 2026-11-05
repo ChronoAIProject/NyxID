@@ -87,6 +87,7 @@ export interface AssistantVoiceClientOptions {
   api: AssistantVoiceApi;
   createSocket(path: string, signal: AbortSignal): Promise<VoiceControlSocket>;
   onSnapshot(snapshot: VoiceSnapshot): void;
+  onConnected?(): void;
   onError(message: string, recovery?: VoiceStartRecovery): void;
   onClosed?(): void;
   onConflict?(session: VoiceSession | null): void;
@@ -113,6 +114,7 @@ export class AssistantVoiceClient {
   private attempted = false;
   private started = false;
   private ready = false;
+  private connected = false;
   private held = false;
   private inputEnabled = false;
   private speakerMuted = false;
@@ -275,8 +277,7 @@ export class AssistantVoiceClient {
     if (this.closed) return;
     if (event.type === "provider-ready") {
       this.started = true;
-      if (this.ready && this.session?.state === "active")
-        this.clearReadinessTimeout();
+      this.publishReadiness();
       this.updateInput();
     } else if (event.type === "error") {
       // Media exception strings may include device/provider details. Keep UI bounded.
@@ -385,10 +386,9 @@ export class AssistantVoiceClient {
         this.releaseHeldInput();
       this.session = snapshot.session;
       this.ready = true;
-      if (this.started && snapshot.session.state === "active")
-        this.clearReadinessTimeout();
       this.updateInput();
       this.options.onSnapshot(snapshot);
+      this.publishReadiness();
       if (
         snapshot.session.state === "closed" ||
         snapshot.session.state === "failed"
@@ -412,6 +412,21 @@ export class AssistantVoiceClient {
       session.muted ||
       session.input_muted
     );
+  }
+
+  private publishReadiness() {
+    if (
+      this.closed ||
+      this.connected ||
+      !this.started ||
+      !this.ready ||
+      this.socket?.readyState !== 1 ||
+      this.session?.state !== "active"
+    )
+      return;
+    this.connected = true;
+    this.clearReadinessTimeout();
+    this.options.onConnected?.();
   }
 
   /** Revoked input permission cannot keep a previous physical press latched. */

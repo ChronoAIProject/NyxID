@@ -159,6 +159,17 @@ function GroupChat({
   const [pickingRecipients, setPickingRecipients] = useState<
     false | "add" | "header"
   >(false);
+  const recipientPickerOpen = useRef(false);
+  const captureRevision = useRef(0);
+  const voiceCapture = useRef<(() => void) | undefined>(undefined);
+  function showRecipientPicker(next: false | "add" | "header") {
+    if (next) {
+      captureRevision.current++;
+      recipientPickerOpen.current = true;
+      voiceCapture.current?.();
+    } else recipientPickerOpen.current = false;
+    setPickingRecipients(next);
+  }
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [voiceMinimized, setVoiceMinimized] = useState(false);
   function resizeVoice(minimized: boolean) {
@@ -343,6 +354,11 @@ function GroupChat({
     unavailableRecipients,
     recipients,
   } = routeDraft(draft);
+  const voiceRecipientKey = JSON.stringify(recipients.ids);
+  const latestVoiceRecipients = useRef(voiceRecipientKey);
+  latestVoiceRecipients.current = voiceRecipientKey;
+  const capturedRevision = captureRevision.current;
+  const captureKey = `${capturedRevision}:${voiceRecipientKey}`;
   const list = useRef<FlatList<GroupMessage>>(null);
   const transcriptScroll = useTranscriptScrollFollow(list, groupId, {
     loading: chat.isPending,
@@ -392,7 +408,7 @@ function GroupChat({
                   : undefined
             }
             disabled={!group || chat.sending || uploads.session.sending}
-            onPress={() => setPickingRecipients("header")}
+            onPress={() => showRecipientPicker("header")}
           />
         </WorkspaceHeaderVisibility>
       ),
@@ -422,7 +438,7 @@ function GroupChat({
   });
   useEffect(() => {
     if (!chat.active) {
-      setPickingRecipients(false);
+      showRecipientPicker(false);
     }
   }, [chat.active]);
   const blocked =
@@ -498,13 +514,13 @@ function GroupChat({
     if (next !== draft) edit(next);
     uploads.remove(key);
   }
-  async function send(message = draft) {
+  async function send(message = draft, capturedRecipients?: typeof recipients) {
     const route = routeDraft(message);
     if (!canSubmit(message, route) || sendLock.current || !chat.available())
       return false;
     sendLock.current = true;
     setLocalError(undefined);
-    const target = route.recipients;
+    const target = capturedRecipients ?? route.recipients;
     let accepted = false;
     const submittedRoster = [...recipientRoster.current];
     const submittedMentions = groupMentionBindings(
@@ -584,6 +600,8 @@ function GroupChat({
       sendLock.current = false;
     }
   }
+  const currentSend = useRef(send);
+  currentSend.current = send;
   async function decide(action: GroupPendingAction, choice: "allow" | "deny") {
     if (
       blocked ||
@@ -923,6 +941,7 @@ function GroupChat({
               crewName={group.name}
               scope={`${chat.epoch}:${groupId}`}
               enabled={
+                !pickingRecipients &&
                 !chat.recoveryRequired &&
                 !chat.loadingOlder &&
                 chat.active &&
@@ -934,7 +953,17 @@ function GroupChat({
               }
               busy={chat.sending || uploads.session.sending}
               messages={chat.data?.messages ?? []}
-              onSend={send}
+              captureControl={voiceCapture}
+              captureKey={captureKey}
+              onSend={(text) => {
+                if (
+                  recipientPickerOpen.current ||
+                  capturedRevision !== captureRevision.current ||
+                  voiceRecipientKey !== latestVoiceRecipients.current
+                )
+                  return Promise.resolve(false);
+                return currentSend.current(text, recipients);
+              }}
               onClose={() => setVoiceOpen(false)}
               minimized={voiceMinimized}
               onExpand={() => resizeVoice(false)}
@@ -1023,7 +1052,7 @@ function GroupChat({
                     accessibilityRole="button"
                     accessibilityLabel="Add recipient"
                     disabled={blocked}
-                    onPress={() => setPickingRecipients("add")}
+                    onPress={() => showRecipientPicker("add")}
                     style={styles.addRecipient}
                   >
                     <Plus size={14} color={colors.primaryOnTint} />
@@ -1068,7 +1097,7 @@ function GroupChat({
                         uploads.picking ||
                         uploads.session.sending ||
                         uploads.files.length >= 10,
-                      onPress: uploads.choose,
+                      onPress: () => uploads.choose(),
                     }}
                     mention={mentionAction}
                   >
@@ -1116,7 +1145,7 @@ function GroupChat({
         visible={!!pickingRecipients}
         transparent
         animationType={reducedMotion ? "none" : "slide"}
-        onRequestClose={() => setPickingRecipients(false)}
+        onRequestClose={() => showRecipientPicker(false)}
       >
         <View style={styles.modalBackdrop}>
           <View
@@ -1133,7 +1162,7 @@ function GroupChat({
               </Label>
               <Icon
                 label="Close recipients"
-                onPress={() => setPickingRecipients(false)}
+                onPress={() => showRecipientPicker(false)}
               >
                 <X size={22} color={colors.textPrimary} />
               </Icon>
@@ -1169,7 +1198,7 @@ function GroupChat({
                             )
                           : withAdded(old, member.id),
                       );
-                      setPickingRecipients(false);
+                      showRecipientPicker(false);
                     }}
                   >
                     <AgentAvatar agent={member} size="lg" />

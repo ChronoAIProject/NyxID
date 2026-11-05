@@ -13,6 +13,11 @@ function recognizer(events: string[]) {
   let permission = deferred<Permission>();
   const module = {
     onDevice: true,
+    setAudioSessionActiveIOS: (active: boolean, options: { notifyOthersOnDeactivation: boolean }) => {
+      assert.equal(active, false);
+      assert.equal(options.notifyOthersOnDeactivation, true);
+      events.push("audio-release");
+    },
     options: undefined as Record<string, unknown> | undefined,
     requestPermissionsAsync: () => {
       events.push("permission");
@@ -79,6 +84,7 @@ function setup({
   const h = hookHarness<ReturnType<typeof useComposerDictation>>(
     {
       "react-native": {
+        Platform: { OS: "ios" },
         Linking: {
           openSettings: async () => {
             events.push("settings");
@@ -572,3 +578,107 @@ test("cancelled crew capture and ordinary draft dictation never report automatic
     x.h.unmount();
   }
 });
+
+test("an utterance retains its capture-time insertion callback", async () => {
+  const f = setup({ continuous: false });
+  await f.begin();
+  const replacements: string[] = [];
+  f.props.onInsert = (text) => { replacements.push(text); };
+  f.h.render();
+  f.result("capture-time route", true);
+  f.emit("end");
+  assert.deepEqual(f.inserted, ["capture-time route"]);
+  assert.deepEqual(replacements, []);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("normal/error completion releases iOS audio with notify-others exactly once", async () => {
+  for (const error of [false, true]) {
+    const f = setup();
+    await f.begin();
+    if (error) f.emit("error", { error: "audio-capture" });
+    f.emit("end");
+    f.emit("end");
+    f.h.unmount();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  }
+});
+
+test("discard/background/unmount wait for native end before releasing the audio session", async () => {
+  for (const transition of ["discard", "background", "unmount"]) {
+    const f = setup();
+    await f.begin();
+    if (transition === "unmount") f.h.unmount();
+    else if (transition === "discard") f.h.value().discard();
+    else f.app("background");
+    assert.ok(f.events.includes("abort"));
+    assert.equal(f.events.includes("audio-release"), false);
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  }
+});
+
+test("a delayed recognizer end cannot deactivate a newer voice owner", async () => {
+  const { claimVoiceAudioSession } = await import("./voice/audioSessionOwnership");
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const newer = claimVoiceAudioSession();
+  f.native.emit("end");
+  assert.equal(f.events.includes("audio-release"), false);
+  newer.release();
+  f.h.unmount();
+});
+
+test("a missing native end releases after the bounded abort timeout", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  context.mock.timers.tick(1499);
+  assert.equal(f.events.includes("audio-release"), false);
+  context.mock.timers.tick(1);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});
+
+test("ordinary editable dictation appends through the latest draft callback", async () => {
+  const f = setup();
+  await f.begin();
+  const replacements: string[] = [];
+  f.props.onInsert = (text) => { replacements.push(text); };
+  f.h.render();
+  f.result("append to the edited draft", true);
+  f.emit("end");
+  assert.deepEqual(f.inserted, []);
+  assert.deepEqual(replacements, ["append to the edited draft"]);
+  f.h.unmount();
+});
+
+for (const closeFirst of [false, true]) {
+  test(`delayed recognizer cleanup cannot deactivate the real private media owner${closeFirst ? " after it closes" : " while it is live"}`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    f.h.mock("react-native", { StyleSheet: { create: (v: unknown) => v } });
+    f.h.mock("react-native-webview", { WebView: "WebView" });
+    const { NativeVoiceMedia } = f.h.load(fileURLToPath(new URL("./voice/VoiceMediaBridge.tsx", import.meta.url))) as typeof import("./voice/VoiceMediaBridge");
+    const media = new NativeVoiceMedia();
+    media.connect((message) => {
+      if (message.type === "prepare") queueMicrotask(() => media.receive(JSON.stringify({
+        type: "response", generation: message.generation, requestId: message.requestId, result: "offer",
+      })));
+    });
+    media.receive(JSON.stringify({ type: "ready" }));
+    await media.prepare("openai_live", new AbortController().signal);
+    if (closeFirst) media.close();
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), false);
+    media.close();
+    f.h.unmount();
+  });
+}

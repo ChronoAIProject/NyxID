@@ -962,6 +962,8 @@ test("minimizing preserves media and session; tapping or typing expands and text
     f.all().some((n) => n.props.accessibilityLabel === "Listening mode"),
     false,
   );
+  assert.ok(f.button("Expand voice composer").props.style.minWidth >= 44);
+  assert.ok(f.button("Expand voice composer").props.style.minHeight >= 44);
   f.button("Expand voice composer").props.onPress();
   const input = f.all().find((n) => n.type === "TextInput")!;
   input.props.onFocus();

@@ -282,6 +282,7 @@ const styles = StyleSheet.create({
   elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
   compactRow: { flexDirection: "row", alignItems: "center", minHeight: 44 },
   compactExpand: {
+    minWidth: 44,
     flexDirection: "row",
     gap: 10,
     alignItems: "center",

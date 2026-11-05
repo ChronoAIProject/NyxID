@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
+import { claimVoiceAudioSession } from "./audioSessionOwnership";
 import type {
   VoiceMediaAdapter,
   VoiceMediaEvent,
@@ -29,6 +30,7 @@ const closedError = () => new Error("Voice audio was closed.");
 
 /** No authentication material is ever passed to the local media document. */
 export class NativeVoiceMedia implements VoiceMediaAdapter {
+  private audioOwner?: ReturnType<typeof claimVoiceAudioSession>;
   private send?: (message: Record<string, unknown>) => void;
   private ready = false;
   private closed = true;
@@ -299,6 +301,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     if (microphoneOwner && microphoneOwner !== this)
       throw new Error("The microphone is already in use.");
     microphoneOwner = this;
+    this.audioOwner = claimVoiceAudioSession();
     this.closed = false;
     this.diagnostics = [];
     const generation = ++this.generation;
@@ -392,6 +395,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     return { ...this.telemetry };
   }
   close(): void {
+    this.audioOwner?.release();
+    this.audioOwner = undefined;
     const active = !this.closed && this.ready;
     this.closed = true;
     if (microphoneOwner === this) microphoneOwner = undefined;

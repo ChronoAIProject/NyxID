@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AppState, ScrollView, StyleSheet, View, Text } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import * as Speech from "expo-speech";
@@ -38,6 +38,8 @@ type Props = {
   canSendText: boolean;
   onSendText: () => void;
   recipientLabel: string;
+  captureKey: string;
+  captureControl?: { current: (() => void) | undefined };
 };
 
 const SILENCE_REARM_MS = 500;
@@ -80,6 +82,8 @@ export function CrewVoiceComposer(props: Props) {
   const playback = useRef(0);
   const playing = useRef(false);
   const sendLock = useRef(false);
+  const captureKey = props.captureKey;
+  const sendUtterance = props.onSend;
   const available = () =>
     mounted.current &&
     !closed.current &&
@@ -92,7 +96,7 @@ export function CrewVoiceComposer(props: Props) {
     rearmTimer.current = undefined;
   }
   const dictation = useComposerDictation({
-    scope: `crew-voice:${props.scope}`,
+    scope: `crew-voice:${props.scope}:${props.captureKey}`,
     enabled:
       props.enabled &&
       focused &&
@@ -120,12 +124,18 @@ export function CrewVoiceComposer(props: Props) {
       }, SILENCE_REARM_MS);
     },
     onInsert: async (text) => {
-      if (!available() || current.current.busy || sendLock.current) return;
+      if (
+        !available() ||
+        current.current.busy ||
+        sendLock.current ||
+        current.current.captureKey !== captureKey
+      )
+        return;
       rapidSilences.current = 0;
       sendLock.current = true;
       setSending(true);
       try {
-        const delivered = await current.current.onSend(text);
+        const delivered = await sendUtterance(text);
         if (available() && !delivered)
           setError(
             "Your spoken message was not sent. Review the draft in chat before trying again.",
@@ -143,6 +153,12 @@ export function CrewVoiceComposer(props: Props) {
   });
   const recognition = useRef(dictation);
   recognition.current = dictation;
+  useLayoutEffect(() => {
+    const control = props.captureControl;
+    if (!control) return;
+    control.current = () => recognition.current.discard();
+    return () => { control.current = undefined; };
+  }, [props.captureControl]);
 
   function stopPlayback() {
     playback.current++;
@@ -276,6 +292,7 @@ export function CrewVoiceComposer(props: Props) {
     dictation.recording,
     rearming,
     props.scope,
+    props.captureKey,
     epoch,
   ]);
   useEffect(() => {

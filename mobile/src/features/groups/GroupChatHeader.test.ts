@@ -42,6 +42,7 @@ function setup({
     },
   ];
   const posted: any[] = [];
+  const attachmentChoices: unknown[][] = [];
   const chat: any = {
     active: true,
     epoch: 1,
@@ -175,6 +176,7 @@ function setup({
     "../assistant/assistantSelectableMarkdown": {},
     "../assistant/useAssistantUploads": {
       useAssistantUploads: () => ({
+        choose: (...actions: unknown[]) => attachmentChoices.push(actions),
         files: [],
         session: {
           sending: false,
@@ -256,6 +258,7 @@ function setup({
     h,
     chat,
     posted,
+    attachmentChoices,
     identity,
     headerActions: () => nodes(options.headerRight()),
     settingsOpened: () => settingsOpened,
@@ -347,6 +350,58 @@ test("crew header shows member identity and narrows recipients through its picke
     0,
   );
   h.unmount();
+});
+
+test("the header Modal discards capture before opening and fences an utterance across recipient changes", async () => {
+  const f = setup();
+  f.submit().props.onPress();
+  f.h.flush();
+  const voice = () => nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(voice().props.enabled, true);
+  const oldSender = voice().props.onSend;
+  let discarded = false;
+  voice().props.captureControl.current = () => { discarded = true; };
+  f.identity().props.onPress();
+  assert.equal(discarded, true, "capture stops before Modal presentation");
+  assert.equal(await oldSender("old confidential utterance"), false);
+  f.h.flush();
+  assert.ok(nodes(f.h.value()).some((n) => n.type === "Modal" && n.props.visible));
+  assert.equal(voice().props.enabled, false);
+  assert.equal(await voice().props.onSend("behind modal"), false);
+  nodes(f.h.value()).find((n) => n.props.accessibilityLabel === "Message Researcher")!.props.onPress();
+  f.h.flush();
+  assert.equal(voice().props.enabled, true);
+  assert.equal(await oldSender("late final after recipient change"), false);
+  assert.equal(f.posted.length, 0);
+  assert.equal(await voice().props.onSend("new utterance @nyxbot"), true);
+  assert.deepEqual(Array.from(f.posted[0].recipient_agent_ids), ["research"]);
+  f.h.unmount();
+});
+
+test("the real crew attachment control never passes its native press event to the picker service", () => {
+  const f = setup();
+  const attach = nodes(f.input().props.renderActions()).find(
+    (n) => n.type === "ComposerAttachButton",
+  )!;
+  attach.props.onPress({ nativeEvent: { timestamp: 1 } });
+  assert.deepEqual(f.attachmentChoices.map((args) => args.length), [0]);
+  f.h.unmount();
+});
+
+test("a capture-time recipient binding still uses the current crew authority gates", async () => {
+  const f = setup();
+  f.identity().props.onPress();
+  f.h.flush();
+  nodes(f.h.value()).find((n) => n.props.accessibilityLabel === "Message Researcher")!.props.onPress();
+  f.h.flush();
+  f.submit().props.onPress();
+  f.h.flush();
+  const sender = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!.props.onSend;
+  f.chat.data.group.members[1].unavailable = true;
+  f.h.render();
+  assert.equal(await sender("retained utterance"), false);
+  assert.equal(f.posted.length, 0);
+  f.h.unmount();
 });
 
 test("revoking or removing a mentioned shared agent blocks dispatch until an explicit replacement", async () => {
@@ -684,7 +739,7 @@ test("crew voice starts from the composer, routes spoken turns through selected 
   assert.equal(await panel.props.onSend("@researcher review the launch"), true);
   assert.deepEqual(JSON.parse(JSON.stringify(f.posted[0])), {
     text: "@researcher review the launch",
-    recipient_agent_ids: ["research"],
+    recipient_agent_ids: ["bot"],
   });
   nodes(f.h.value())
     .find((n) => n.props.onTouchStart)!

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AppState, Linking } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import {
   ExpoSpeechRecognitionModule as Recognizer,
@@ -11,6 +11,7 @@ import { volumeLevel } from "./voice/dictationLevel";
 import { dictationLocale } from "./voice/dictationLocale";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
+import { claimVoiceAudioSession } from "./voice/audioSessionOwnership";
 
 type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 
@@ -54,11 +55,26 @@ function dictationError(code: ExpoSpeechRecognitionErrorCode) {
  * close it.
  */
 let releasing: Promise<void> | undefined;
-function release() {
+type AudioOwner = ReturnType<typeof claimVoiceAudioSession>;
+function deactivate(owner: AudioOwner) {
+  owner.release(() => {
+    if (Platform.OS === "ios") {
+      try {
+        Recognizer.setAudioSessionActiveIOS(false, {
+          notifyOthersOnDeactivation: true,
+        });
+      } catch {
+        // The native session may already have been released by the OS.
+      }
+    }
+  });
+}
+function release(owner: AudioOwner) {
   const done = new Promise<void>((resolve) => {
     const finish = () => {
       subscription.remove();
       clearTimeout(timer);
+      deactivate(owner);
       if (releasing === done) releasing = undefined;
       resolve();
     };
@@ -185,6 +201,9 @@ export function useComposerDictation({
     let permission = true;
     /** Recognition was started and has not reported `end`: the mic may be on. */
     let native = false;
+    let audioOwner: AudioOwner | undefined;
+    // One utterance keeps the sender/routing that was visible at capture entry.
+    const insert = current.current.onInsert;
     let listening = false;
     let stopping = false;
     let finalText = "";
@@ -214,7 +233,7 @@ export function useComposerDictation({
       detach();
       if (native) {
         native = false;
-        release();
+        release(audioOwner!);
       }
     };
     /**
@@ -251,7 +270,7 @@ export function useComposerDictation({
         current.current.enabled &&
         current.current.focused
       )
-        current.current.onInsert(text);
+        (continuous ? current.current.onInsert : insert)(text);
     };
     const attempt = {
       cancel,
@@ -270,7 +289,7 @@ export function useComposerDictation({
         stopTimer = setTimeout(() => {
           if (!valid()) return;
           native = false;
-          release();
+          release(audioOwner!);
           settle();
         }, STOP_TIMEOUT_MS);
       },
@@ -342,10 +361,12 @@ export function useComposerDictation({
         Recognizer.addListener("end", () => {
           if (!valid()) return;
           native = false;
+          deactivate(audioOwner!);
           settle();
         }),
       ];
       native = true;
+      audioOwner = claimVoiceAudioSession();
       nativeStartedAt = Date.now();
       Recognizer.start({
         ...(lang ? { lang } : {}),

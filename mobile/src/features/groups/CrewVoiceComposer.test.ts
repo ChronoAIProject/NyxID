@@ -38,6 +38,7 @@ function setup(withNativeRecognition = false) {
   };
   const send = deferred<boolean>();
   const props: any = {
+    captureKey: "bot",
     scope: "crew",
     crewName: "Launch crew",
     recipientLabel: "Researcher and Designer",
@@ -62,6 +63,7 @@ function setup(withNativeRecognition = false) {
         jsxs: (type: unknown, props: unknown) => ({ type, props }),
       },
       "react-native": {
+        Platform: { OS: "ios" },
         ...Object.fromEntries(
           ["Pressable", "ScrollView", "TextInput", "Text", "View"].map((n) => [
             n,
@@ -149,6 +151,7 @@ function setup(withNativeRecognition = false) {
   if (withNativeRecognition) {
     h.mock("expo-speech-recognition", {
       ExpoSpeechRecognitionModule: {
+        setAudioSessionActiveIOS: () => events.push("audio-release"),
         requestPermissionsAsync: async () => ({ granted: true }),
         getSupportedLocales: async () => ({ locales: ["en-US"] }),
         supportsOnDeviceRecognition: () => true,
@@ -257,6 +260,9 @@ test("crew voice automatically listens, sends native utterances once and retains
   const f = setup();
   assert.deepEqual(f.events, ["start"]);
   assert.equal(f.options().continuous, false);
+  const expand = f.all().find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
+  assert.ok(expand.props.style.minWidth >= 44);
+  assert.ok(expand.props.style.minHeight >= 44);
   assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
   f.dictation.active = false;
   f.dictation.recording = true;
@@ -385,6 +391,9 @@ test("typing releases capture and playback before publishing the draft", () => {
 test("permission prompts can return to listening, the clock starts on capture, and background closes crew voice", () => {
   const f = setup();
   f.advance(8000);
+  const expand = f.all().find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
+  assert.ok(expand.props.style.minWidth >= 44);
+  assert.ok(expand.props.style.minHeight >= 44);
   assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
   f.dictation.phase = "permission";
   f.app("inactive");
@@ -433,6 +442,9 @@ test("crew shell shares aura, header, central mic, End and compact row with priv
   assert.ok(
     f.all().some((n) => n.props.accessibilityLabel === "Expand voice composer"),
   );
+  const expand = f.all().find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
+  assert.ok(expand.props.style.minWidth >= 44);
+  assert.ok(expand.props.style.minHeight >= 44);
   assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
   f.h.unmount();
 });
@@ -684,3 +696,27 @@ test("a stopped playback's late error cannot stop a newer reply", () => {
   assert.equal(f.speech[1].text, "second");
   f.h.unmount();
 });
+
+test("changing recipient capture identity discards a retained speech sender", async () => {
+  const f = setup();
+  const oldInsert = f.options().onInsert;
+  f.props.captureKey = "research";
+  f.h.render();
+  await oldInsert("old target");
+  assert.ok(!f.events.some((e) => Array.isArray(e) && e[0] === "send"));
+  f.h.unmount();
+});
+
+for (const transition of ["close", "background", "unmount"]) {
+  test(`real crew dictation releases native iOS audio on ${transition}`, async () => {
+    const f = setup(true);
+    await f.h.settle();
+    assert.equal(f.events.filter((e) => e === "native-start").length, 1);
+    if (transition === "close") f.all().find((n) => n.props.accessibilityLabel === "End voice and close")!.props.onPress();
+    else if (transition === "background") f.background();
+    else f.h.unmount();
+    f.h.flush();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+}

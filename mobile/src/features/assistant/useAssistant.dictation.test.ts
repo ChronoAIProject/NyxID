@@ -68,6 +68,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       listener(event);
   };
   const native = {
+    setAudioSessionActiveIOS: () => {},
     requestPermissionsAsync: () => {
       events.push("permission");
       return permission.promise;
@@ -111,6 +112,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       ]),
     ),
     "react-native": {
+        Platform: { OS: "ios" },
       AppState: {
         get currentState() {
           return appState;

@@ -1121,11 +1121,14 @@ unsealed, unsent live captions appear in the voice panel; sent speech, completed
 replies, task receipts and approval cards belong in the transcript. Tapping the
 voice entry starts the connection immediately using the saved voice and mode.
 The timer shows “-” until connected, then counts from 00:00 in both modes.
+Private voice requires both the verified active control snapshot and provider
+readiness before reporting connected or starting its clock.
 Hands-free listens automatically; Hold to talk retains its explicit microphone
 control and release-to-send instruction. Holding swells the microphone and
 lifts a soft halo (still under Reduce Motion).
 
 Touching or scrolling the transcript minimizes voice to a single composer row.
+The minimized expand control has a minimum 44×44pt touch target in both modes.
 Tapping that row or focusing/typing in its text field expands it without
 replacing the media engine or ending the session. Text sends through the same
 chat sender and retains its draft when voice closes. Closing voice or leaving
@@ -1137,7 +1140,10 @@ with private chats, plus recipients and crew settings. Empty crew composers
 expose Crew voice. Because realtime provider sessions exclude group/member
 threads, Crew voice uses native speech recognition with utterance boundaries,
 posts spoken text through the ordinary crew sender to the displayed recipients,
-and reads new agent replies with native speech synthesis. It releases the
+and reads new agent replies with native speech synthesis. Each utterance binds
+to the recipients displayed when capture starts. Opening the recipient picker
+discards capture before presenting the picker; capture resumes after the
+selection settles. It releases the
 recognizer during playback, pauses on typed drafts or an unavailable crew, and
 ends on backgrounding or leaving the chat. Uncertain delivery retains the
 existing review-before-resend fence. This mode starts on entry and supports the
