@@ -76,9 +76,9 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
 
 /// Per-person rollout for CMA's prepaid Sandbox allocation billing. This is
 /// deliberately separate from the general billing flag so operators can
-/// enable CMA for a pilot owner independently of other metered traffic. The
-/// operational `CMA_BILLING_ENABLED` setting remains a fleet-wide admission
-/// gate; both gates must allow new Sandbox coverage.
+/// enable CMA for a pilot owner independently of other metered traffic.
+/// This is the sole CMA rollout gate for new Sandbox coverage; it resolves
+/// global, matching organization, then personal overrides.
 pub const CMA_SANDBOX_BILLING_FLAG_KEY: &str = "experimental:cma-sandbox-billing";
 
 const CMA_SANDBOX_BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {

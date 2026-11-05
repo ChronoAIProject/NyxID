@@ -164,7 +164,7 @@ async fn fixture(name: &str) -> Fixture {
         "revoked":false,"credential_generation":0_i64,"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::hours(1)),"created_at":now,
     }).await.unwrap();
     let mut service = crate::test_utils::test_auto_connected_catalog_service();
-    service.slug = "cma-test".into();
+    service.slug = "cma".into();
     let prices = METRICS
         .into_iter()
         .map(|metric| SandboxPriceSnapshot {
@@ -190,11 +190,21 @@ async fn fixture(name: &str) -> Fixture {
         .insert_one(&service)
         .await
         .unwrap();
+    db.collection::<crate::models::sandbox_billing_settings::SandboxBillingSettings>(
+        crate::models::sandbox_billing_settings::COLLECTION_NAME,
+    )
+    .insert_one(
+        crate::models::sandbox_billing_settings::SandboxBillingSettings {
+            service_id: service.id.clone(),
+            authorized_producer_service_account_id: Some(producer_id.clone()),
+            revision: 1,
+            updated_at: Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
     let config = Arc::new(AppConfig {
         billing_enabled: true,
-        cma_billing_enabled: true,
-        cma_billing_service_id: Some(service.id.clone()),
-        cma_billing_service_account_id: Some(producer_id.clone()),
         ..crate::test_utils::test_app_config()
     });
     let provider = Arc::new(Provider {
@@ -225,7 +235,7 @@ async fn fixture(name: &str) -> Fixture {
     .await
     .unwrap();
     let billing = BillingService::new_with_lago(db.clone(), config, provider.clone());
-    let producer = authorize_producer(&db, Some(&producer_id), &producer_id, WRITE_SCOPE, &jti)
+    let producer = authorize_producer(&db, &producer_id, WRITE_SCOPE, &jti)
         .await
         .unwrap();
     Fixture {
@@ -268,7 +278,7 @@ async fn wallet(f: &Fixture) -> BillingWallet {
 
 #[tokio::test]
 async fn committed_receipt_replays_during_provider_outage_and_disabled_admission() {
-    let mut f = fixture("sandbox_receipt").await;
+    let f = fixture("sandbox_receipt").await;
     let input = request(&f, 60).await;
     let first = f
         .billing
@@ -279,7 +289,15 @@ async fn committed_receipt_replays_during_provider_outage_and_disabled_admission
     assert!(held > Credits::ZERO);
     assert_eq!(first.components.len(), 3);
     f.provider.available.store(false, Ordering::SeqCst);
-    Arc::make_mut(&mut f.billing.config).cma_billing_enabled = false;
+    crate::services::feature_flag_service::set_platform_override(
+        &f.db,
+        crate::services::feature_flag_service::CMA_SANDBOX_BILLING_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
     let replay = f
         .billing
         .reserve_sandbox_window(&f.producer, input.clone())
@@ -383,21 +401,14 @@ async fn producer_revocation_after_extraction_cannot_commit_money() {
     ));
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
     assert!(
-        authorize_producer(
-            &f.db,
-            Some(&f.producer.id),
-            &f.producer.id,
-            "proxy",
-            &f.producer.token_jti
-        )
-        .await
-        .is_err()
+        authorize_producer(&f.db, &f.producer.id, "proxy", &f.producer.token_jti)
+            .await
+            .is_err()
     );
     assert!(
         authorize_producer(
             &f.db,
-            Some("another-account"),
-            &f.producer.id,
+            &Uuid::new_v4().to_string(),
             WRITE_SCOPE,
             &f.producer.token_jti
         )
@@ -615,5 +626,6 @@ async fn catalog_identity_drift_and_expired_quote_do_not_admit_usage() {
 mod admission;
 mod ingestion;
 mod routes;
+mod settings;
 
 mod rates;

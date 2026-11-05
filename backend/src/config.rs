@@ -592,11 +592,6 @@ pub struct AppConfig {
     pub billing_enabled: bool,
     /// Enable allocation policy authoring only after every billing writer is upgraded.
     pub billing_allocations_enabled: bool,
-    /// Finite CMA admission remains off until all readers and workers support it.
-    pub cma_billing_enabled: bool,
-    /// Exact ordinary service-account and catalog identities; never credentials.
-    pub cma_billing_service_account_id: Option<String>,
-    pub cma_billing_service_id: Option<String>,
     /// Lago API URL for later phases. Empty means no Lago sink configured.
     pub lago_api_url: Option<String>,
     /// Lago API key for later phases. Redacted from Debug.
@@ -953,12 +948,6 @@ impl std::fmt::Debug for AppConfig {
                 &self.oracle_task_retention_days,
             )
             .field("billing_enabled", &self.billing_enabled)
-            .field("cma_billing_enabled", &self.cma_billing_enabled)
-            .field(
-                "cma_billing_service_account_id",
-                &self.cma_billing_service_account_id,
-            )
-            .field("cma_billing_service_id", &self.cma_billing_service_id)
             .field("lago_api_url", &self.lago_api_url)
             .field(
                 "lago_api_key",
@@ -1540,11 +1529,6 @@ impl AppConfig {
                 .unwrap_or(crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES),
             billing_enabled: parse_bool_env("BILLING_ENABLED", false),
             billing_allocations_enabled: parse_bool_env("BILLING_ALLOCATIONS_ENABLED", false),
-            cma_billing_enabled: parse_bool_env("CMA_BILLING_ENABLED", false),
-            cma_billing_service_account_id: env::var("CMA_BILLING_SERVICE_ACCOUNT_ID")
-                .ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
-            cma_billing_service_id: env::var("CMA_BILLING_SERVICE_ID")
-                .ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
             lago_api_url: env::var("LAGO_API_URL")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -2104,9 +2088,6 @@ mod tests {
                 crate::services::cloud_response_cache::DEFAULT_MAX_ENTRIES,
             billing_enabled: false,
             billing_allocations_enabled: false,
-            cma_billing_enabled: false,
-            cma_billing_service_account_id: None,
-            cma_billing_service_id: None,
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),

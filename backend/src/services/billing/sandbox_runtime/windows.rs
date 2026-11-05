@@ -1,9 +1,6 @@
 use super::super::{funding, meter, reservation::LayerReservation, sandbox_runtime_math};
 use super::*;
-use crate::models::{
-    downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService},
-    usage_meter::BillingLayer,
-};
+use crate::models::{downstream_service::COLLECTION_NAME as SERVICES, usage_meter::BillingLayer};
 use chrono::{Datelike, TimeZone};
 use serde::Serialize;
 
@@ -83,12 +80,12 @@ impl BillingService {
             return replay(receipt, &request_digest);
         }
         self.require_sandbox_rollout(&input.owner_id).await?;
-        let service_id = self.require_sandbox_admission()?;
+        let service = self.require_sandbox_admission(producer).await?;
         super::super::exact_migration::require_ready(&self.db).await?;
         let quote = self.db.collection::<SandboxBillingQuote>(QUOTE_COLLECTION)
             .find_one(doc! {"_id":&input.quote_id,"producer_id":&producer.id,"owner_id":&input.owner_id,"sandbox_id":&input.sandbox_id}).await?
             .ok_or_else(|| invalid("Sandbox quote does not match this request"))?;
-        if quote.service_id != service_id
+        if quote.service_id != service.id
             || units(&input.allocation)
                 .iter()
                 .zip(units(&quote.maximum_allocation))
@@ -98,12 +95,6 @@ impl BillingService {
                 "Sandbox allocation or catalog differs from its quote",
             ));
         }
-        let service = self
-            .db
-            .collection::<DownstreamService>(SERVICES)
-            .find_one(doc! {"_id":service_id,"is_active":true})
-            .await?
-            .ok_or_else(|| unavailable("CMA service is unavailable"))?;
         if service.slug != quote.service_slug {
             return Err(conflict(
                 "CMA service prices changed; a new quote is required",
