@@ -860,6 +860,7 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                artifact_delivery: None,
                 failure_reason: reason.map(|reason| {
                     Box::new(crate::models::assistant_message::TurnFailureReason {
                         source: "nyxid".into(),

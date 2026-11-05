@@ -3385,6 +3385,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                artifact_delivery: None,
                 work: Some(super::assistant_real_work::evidence(&row, turn, None)),
                 ..Default::default()
             }
@@ -4020,6 +4021,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+                                artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
@@ -4667,6 +4669,7 @@ pub async fn attach_routed_image(
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: Some(chat_delivery),
         image_input: None,
         image_input_reason: None,
@@ -4711,6 +4714,7 @@ pub async fn attach_routed_image(
     );
     let stored = async {
         let mut attachment = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             origin: "tool".into(),
             id: meta.id.clone(),
@@ -4769,6 +4773,7 @@ pub(crate) async fn attach_resource_image(
         assistant_resource::{AssistantResource, COLLECTION_NAME as RESOURCES},
     };
     let meta = media.map(|media| TurnAttachment {
+        artifact: Default::default(),
         id: resource.attachment_id.clone(),
         label: resource
             .source
@@ -4791,6 +4796,7 @@ pub(crate) async fn attach_resource_image(
     let attachment = if let Some(media) = media {
         let meta = meta.as_ref().ok_or_else(resources::missing)?;
         let mut row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: meta.id.clone(),
             origin: "tool".into(),

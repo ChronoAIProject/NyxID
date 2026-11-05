@@ -554,3 +554,5 @@ pub mod assistant_delegated_images;
 
 pub mod cma_session_origin;
 pub mod org_channel_service;
+
+pub mod generated_artifacts;

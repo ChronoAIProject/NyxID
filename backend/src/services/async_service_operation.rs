@@ -225,7 +225,11 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation { instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let watch=AsyncServiceOperation {
+            artifact_catalog_service_id: None,
+            artifact_mode: None,
+            artifact_result: None,
+            artifact_event_turn_id: None, instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;

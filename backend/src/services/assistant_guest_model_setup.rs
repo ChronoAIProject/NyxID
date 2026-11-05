@@ -828,6 +828,7 @@ pub(crate) async fn failure(
     if let Some(reason) = reason.filter(|s| failure_code(s)) {
         error = error.with_model_route_reason(Some(&reason));
         error.metadata = Some(Box::new(TurnMetadata {
+            artifact_delivery: None,
             failure_reason: Some(Box::new(TurnFailureReason {
                 source: "nyxid".into(),
                 stage: "guest_setup".into(),
