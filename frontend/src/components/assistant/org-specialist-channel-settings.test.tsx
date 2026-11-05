@@ -12,6 +12,10 @@ vi.mock("@/stores/auth-store", () => ({
 let client: QueryClient;
 let admin: boolean;
 let reason: string | null;
+let challengeState: string;
+let expiresAt: string;
+let memberVerified: boolean;
+let settingsUnavailable: boolean;
 let writes: { endpoint: string; method: string; body: unknown }[];
 beforeEach(() => {
   client = new QueryClient({
@@ -19,8 +23,15 @@ beforeEach(() => {
   });
   admin = true;
   reason = null;
+  challengeState = "observed";
+  expiresAt = new Date(Date.now() + 600_000).toISOString();
+  memberVerified = false;
+  settingsUnavailable = false;
   writes = [];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (settingsUnavailable && endpoint.endsWith("/org-specialist")) {
+      return new Response(JSON.stringify({ message: "Organization access is unavailable" }), { status: 403 });
+    }
     if (init.method && init.method !== "GET")
       writes.push({
         endpoint,
@@ -32,6 +43,7 @@ beforeEach(() => {
           channel_id: "channel",
           org_id: "org",
           can_manage: admin,
+          member_verified: memberVerified,
           guest_enabled: false,
           delegated_service_ids: [],
           daily_credits: null,
@@ -42,10 +54,10 @@ beforeEach(() => {
           readiness_reason: reason,
         }
       : endpoint.endsWith("/member-link")
-        ? { id: "challenge", state: "issued", code: "nyxorg_test" }
+        ? { id: "challenge", state: "issued", code: "nyxorg_test", expires_at: expiresAt }
         : endpoint.endsWith("/confirm")
           ? { confirmed: true }
-          : { id: "challenge", state: "observed", sender_label: "My chat" };
+          : { id: "challenge", state: challengeState, sender_label: "My chat" };
     return new Response(JSON.stringify(body));
   };
 });
@@ -142,4 +154,47 @@ it("keeps credit precision and rejects absent, zero and fractional-overflow budg
       daily_credits: "0.000000000001",
     }).daily_credits,
   ).toBe("0.000000000001");
+});
+
+
+it("waits for an observed DM before offering confirmation", async () => {
+  challengeState = "issued";
+  view();
+  await userEvent.click(screen.getByRole("button", { name: "Verify my chat account" }));
+  expect(await screen.findByText(/Waiting for NyxID to observe your private message/)).toBeVisible();
+  expect(screen.getByText(/Never send it to a group/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Confirm my account" })).not.toBeInTheDocument();
+  expect(writes).toHaveLength(1);
+});
+
+it("hides expired codes and confirmation, then allows a fresh code without auto-confirming", async () => {
+  expiresAt = new Date(Date.now() - 1000).toISOString();
+  view();
+  await userEvent.click(screen.getByRole("button", { name: "Verify my chat account" }));
+  expect(await screen.findByText(/This verification code expired/)).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Confirm my account" })).not.toBeInTheDocument();
+  expect(screen.queryByText("nyxorg_test")).not.toBeInTheDocument();
+  expiresAt = new Date(Date.now() + 600_000).toISOString();
+  await userEvent.click(screen.getByRole("button", { name: "Generate a new code" }));
+  expect(await screen.findByRole("button", { name: "Confirm my account" })).toBeVisible();
+  expect(writes).toHaveLength(2);
+  expect(writes.every((write) => write.endpoint.endsWith("/member-link"))).toBe(true);
+});
+
+it("shows a persisted member verification after reloading without issuing a code", async () => {
+  memberVerified = true;
+  view();
+  expect(await screen.findByText("Your chat account is verified.")).toBeVisible();
+  expect(writes).toEqual([]);
+});
+
+it("does not keep a local confirmation success visible after losing access", async () => {
+  view();
+  await userEvent.click(screen.getByRole("button", { name: "Verify my chat account" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Confirm my account" }));
+  expect(await screen.findByText("Your chat account is verified.")).toBeVisible();
+  settingsUnavailable = true;
+  await client.invalidateQueries({ queryKey: ["org-specialist-channel", "member", "channel"] });
+  expect(await screen.findByRole("alert")).toHaveTextContent("Organization access is unavailable");
+  expect(screen.queryByText("Your chat account is verified.")).not.toBeInTheDocument();
 });

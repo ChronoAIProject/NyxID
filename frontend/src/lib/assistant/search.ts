@@ -40,6 +40,8 @@ export interface AssistantSearch extends AccountPanelSearch {
   readonly draft?: boolean;
   readonly agent?: string;
   readonly details?: AgentDetailsTab;
+  /** Focus one connection in the agent Channels tab. */
+  readonly connection?: string;
   readonly g?: string;
   readonly mock?: 1;
 }
@@ -67,6 +69,8 @@ function parseChatSearch(
     ...(agentDetailsTab(search.details) !== undefined
       ? { details: agentDetailsTab(search.details) }
       : {}),
+    ...(search.details === "channels" && typeof search.connection === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.connection)
+      ? { connection: search.connection } : {}),
     ...(typeof search.g === "string" && search.g ? { g: search.g } : {}),
     ...(search.mock === 1 || search.mock === "1"
       ? { mock: 1 as const }

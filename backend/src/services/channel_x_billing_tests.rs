@@ -549,6 +549,7 @@ async fn x_billing_no_agent_route_still_accounts_for_received_event() {
             "sender_id": "20", "target": {"recipient_id": "10"}, "message_data": {"text": "private content"}
         }}]}}}).to_string().into_bytes()).await.unwrap();
     crate::services::channel_inbound_service::process_inbound_messages(
+        crate::services::channel_inbound_service::InboundSource::Webhook,
         crate::services::channel_inbound_service::InboundDeps::from(&state),
         &bot,
         &adapter,
@@ -666,6 +667,7 @@ async fn x_billing_failure_unsubscribes_and_cleanup_rechecks_recovery() {
         }}]}}}).to_string().into_bytes()).await.unwrap();
     assert!(
         crate::services::channel_inbound_service::process_inbound_messages(
+            crate::services::channel_inbound_service::InboundSource::Webhook,
             crate::services::channel_inbound_service::InboundDeps::from(&state),
             &bot,
             &adapter,

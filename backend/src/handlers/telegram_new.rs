@@ -583,6 +583,7 @@ pub(crate) async fn relay_manager_channel(
         match tokio::time::timeout(
             deadline,
             crate::services::channel_inbound_service::process_inbound_messages(
+                crate::services::channel_inbound_service::InboundSource::Webhook,
                 (&state).into(),
                 &bot,
                 adapter.as_ref(),

@@ -1483,6 +1483,14 @@ pub fn organization_agent_channel_refusal() -> Value {
     })
 }
 
+/// Keep the known disabled-flag condition distinct from unsupported shortcuts.
+pub fn organization_agent_channel_disabled_refusal() -> Value {
+    let mut refusal = organization_agent_channel_refusal();
+    refusal["message"] =
+        crate::errors::access_denial::ORGANIZATION_AGENT_CHANNEL_DISABLED_MESSAGE.into();
+    refusal
+}
+
 /// What a guest turn is told when a service call goes beyond what the owner
 /// lets guests do with that service.
 pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {

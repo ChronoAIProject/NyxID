@@ -1871,6 +1871,18 @@ home reply binding and guest execution lane; adoption is atomic and keeps the
 relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
 workers, then enable for an admin. Disable and retire before binary downgrade.
 
+### Finding organization channel member verification (#2242)
+
+On a Lark / Feishu Channel bot detail page, **Setup status** separates app credentials,
+callback challenge, authenticated message receipt, route/agent connection, the current
+member's identity, and outbound delivery. **Verify Bot** checks app credentials only.
+Use **Continue setup / Verify my chat account** to open the bound agent's Channels tab
+at that connection. Every member (including admins) generates their own code, sends it
+in a private message to the bot, waits for observation, then confirms in their own
+first-party NyxID session. Expired codes must be regenerated. Connection success,
+a callback challenge, or delivery receipt does not complete member verification or
+prove an agent answer; membership and expiry checks remain mandatory.
+
 ## Automation coordinator completion
 
 Coordinator completion is an optional, default-off enrollment protocol; see
