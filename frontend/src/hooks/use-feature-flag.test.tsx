@@ -126,6 +126,7 @@ describe("feature flag catalog", () => {
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",
       ORG_INSTRUCTION: "assistant:org-instruction-v1",
+      ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
       HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
