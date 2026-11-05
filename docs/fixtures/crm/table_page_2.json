@@ -13,7 +13,7 @@
         "required": true,
         "archived": false,
         "type": "text",
-        "max_length": 1000
+        "max_length": 200
       },
       {
         "key": "domain",
@@ -21,7 +21,7 @@
         "required": false,
         "archived": false,
         "type": "text",
-        "max_length": 1000
+        "max_length": 253
       },
       {
         "key": "industry",
