@@ -1,0 +1,457 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "NyxBot Voice",
+    "version": "1.1.0",
+    "description": "HTTP/WebSocket reference for a published NyxBot Voice service. Call the endpoint returned by owner publication with the board Agent Key. The selected UserService fixes the Bot and the key credential identifies the board. A generic catalog connection authorizes no Bot. This document describes the dedicated Voice service and must not be imported as ordinary MCP tool endpoints."
+  },
+  "servers": [
+    {
+      "url": "{nyxid_base_url}/api/v1/proxy/nyxbot-voice/{service_id}",
+      "description": "Use the real service endpoint returned by owner publication. Replace both variables with this deployment and the exact authorized Voice UserService.",
+      "variables": {
+        "nyxid_base_url": {
+          "default": "https://nyxid.example",
+          "description": "NyxID deployment base URL, without a trailing slash."
+        },
+        "service_id": {
+          "default": "00000000-0000-4000-8000-000000000000",
+          "description": "Owner-published Voice UserService ID; this binding selects the Bot."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "AgentKey": []
+    }
+  ],
+  "paths": {
+    "/voice/agents": {
+      "get": {
+        "summary": "Inspect the Bot bound to this Voice service",
+        "operationId": "nyxbot_voice_get_voice_agents",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        }
+      }
+    },
+    "/voice/options": {
+      "get": {
+        "summary": "List available voice providers for a conversation",
+        "operationId": "nyxbot_voice_get_voice_options",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional conversation of the bound Bot; omitted selects that Bot's home thread."
+          }
+        ]
+      }
+    },
+    "/voice/sessions": {
+      "post": {
+        "summary": "Start a call with the selected personal Bot",
+        "operationId": "nyxbot_voice_post_voice_sessions",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Start"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/voice/sessions/{sid}": {
+      "get": {
+        "summary": "Control or inspect an owned voice call",
+        "operationId": "nyxbot_voice_get_voice_sessions_sid",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/voice/sessions/{sid}/stream": {
+      "get": {
+        "summary": "Open authenticated voice control WebSocket (audio travels via provider WebRTC)",
+        "operationId": "nyxbot_voice_get_voice_sessions_sid_stream",
+        "responses": {
+          "101": {
+            "description": "WebSocket upgraded. Send heartbeat with generation, monotonically increasing revision, playback_ms and playback_audible; receive bounded snapshots."
+          }
+        },
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/voice/sessions/{sid}/control": {
+      "post": {
+        "summary": "Control or inspect an owned voice call",
+        "operationId": "nyxbot_voice_post_voice_sessions_sid_control",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Control"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations/{id}/voice-sessions/active": {
+      "get": {
+        "summary": "Control or inspect an owned voice call",
+        "operationId": "nyxbot_voice_get_conversations_id_voice_sessions_active",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{id}/voice-requests/{rid}": {
+      "get": {
+        "summary": "Control or inspect an owned voice call",
+        "operationId": "nyxbot_voice_get_conversations_id_voice_requests_rid",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/conversations/{id}/voice-requests/{rid}/cancel": {
+      "post": {
+        "summary": "Control or inspect an owned voice call",
+        "operationId": "nyxbot_voice_post_conversations_id_voice_requests_rid_cancel",
+        "responses": {
+          "200": {
+            "description": "NyxID voice response"
+          },
+          "401": {
+            "description": "Inactive or expired Key"
+          },
+          "403": {
+            "description": "Service or Bot access denied"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "rid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/voice/sessions/{sid}/announcements": {
+      "post": {
+        "summary": "Queue a spoken notification in an active owned call; never admits user work",
+        "operationId": "nyxbot_voice_announce",
+        "parameters": [
+          {
+            "name": "sid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "text"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "text": {
+                    "type": "string",
+                    "maxLength": 300
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Queued or deduplicated; provider acknowledgement is not proof of audible delivery"
+          },
+          "403": {
+            "description": "Call or bound voice connection access denied"
+          },
+          "409": {
+            "description": "Call inactive, queue full or request identity reused"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "AgentKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The Agent Key delivered by this device login"
+      }
+    },
+    "schemas": {
+      "Preferences": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "service_id",
+          "key_source",
+          "model"
+        ],
+        "properties": {
+          "service_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "key_source": {
+            "type": "string",
+            "enum": [
+              "platform",
+              "own"
+            ]
+          },
+          "model": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string",
+            "nullable": true
+          },
+          "input_mode": {
+            "type": "string",
+            "enum": [
+              "automatic",
+              "push_to_talk"
+            ]
+          },
+          "language": {
+            "type": "string",
+            "nullable": true
+          },
+          "notify_on_completion": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      },
+      "Start": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "client_request_id",
+          "preferences",
+          "sdp_offer"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional echo of the bound Bot ID. It cannot select a different Bot."
+          },
+          "client_request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "preferences": {
+            "$ref": "#/components/schemas/Preferences"
+          },
+          "sdp_offer": {
+            "type": "string",
+            "maxLength": 65536
+          },
+          "service_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional echo of the service ID in the URL. If supplied it must match; the URL always selects the Voice connection."
+          }
+        }
+      },
+      "Control": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "command_id",
+          "expected_revision",
+          "action"
+        ],
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "mute",
+              "unmute",
+              "end"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

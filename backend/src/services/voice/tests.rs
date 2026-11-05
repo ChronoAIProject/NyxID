@@ -126,6 +126,30 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
     Box::pin(async {
         let (state, thread, call) = setup("voice_session_receipt").await;
         let db = &state.db;
+        // The deployed schema predates both device identity and native token
+        // settlement. Recover/control that exact shape without a data migration.
+        db.collection::<bson::Document>(CALLS)
+            .update_one(
+                doc! {"_id":&call.id},
+                doc! {"$unset":{
+                    "client_key":"", "responses_model":"", "responses_reserved":"",
+                    "responses_finalized":"", "responses_usage":"",
+                }},
+            )
+            .await
+            .unwrap();
+        let legacy = session::get(db, &call.user_id, &thread.id, &call.id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            legacy.responses,
+            crate::models::voice_responses::ResponsesState::Disabled
+        ));
+        assert!(legacy.client_key.is_none());
+        assert_eq!(
+            legacy.created_at.timestamp_millis(),
+            call.created_at.timestamp_millis()
+        );
         let other = session::admit(
             db,
             &call.user_id,
@@ -748,7 +772,7 @@ async fn unknown_initialization_is_reconciled_after_its_live_slot_expires() {
     .await;
 }
 
-async fn pending_card(
+pub(super) async fn pending_card(
     state: &crate::AppState,
     thread: &crate::models::assistant_conversation::AssistantConversation,
     call: &VoiceSession,
@@ -978,7 +1002,7 @@ async fn provider_fixture_reserves_before_create_attaches_before_sdp_and_closes_
     let billing=BillingRouteContext::new(BillingIngress::LlmProvider,Uuid::new_v4().to_string(),old.user_id.clone(),old.user_id.clone(),None,None,None,None,
         NodeIntent::Direct,"bearer".into(),CredentialClass::UserOwned,BillingMetric::VoiceSeconds,None,false);
     let id=Uuid::new_v4().to_string();
-    let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,
+    let result=runtime::start_with_provider(&state,runtime::StartInput{responses_billing:None,client_key:None,user:&old.user_id,conversation:&thread.id,client_request_id:&id,
         preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,
         openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await.unwrap();
     assert!(attached.load(Ordering::SeqCst),"Sideband must attach before the SDP answer is exposed");
@@ -1078,7 +1102,7 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
             assert_eq!(platform["available"], false);
             assert_eq!(platform["unavailable_reason"], "provider_rollout_pending");
         }
-        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"}}).await.unwrap();
+        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"},"$unset":{"inference.voice.delegation_model":""}}).await.unwrap();
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
         flags::set_platform_override(&state.db, flags::VOICE_GROK_FLAG_KEY, &flags::FlagTarget::Global, true, &thread.user_id).await.unwrap();
         // A protocol switch cannot redirect credentials to the old provider origin.
@@ -1218,7 +1242,7 @@ async fn voice_attach_failure_is_audited_and_recovery_retries_close_without_recr
         let server=tokio::spawn(async move{axum::serve(listener,app).await.unwrap()});
         let billing=BillingRouteContext::new(BillingIngress::LlmProvider,Uuid::new_v4().to_string(),old.user_id.clone(),old.user_id.clone(),None,None,None,None,NodeIntent::Direct,"bearer".into(),CredentialClass::UserOwned,BillingMetric::VoiceSeconds,None,false);
         let id=Uuid::new_v4().to_string();
-        let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await;
+        let result=runtime::start_with_provider(&state,runtime::StartInput{responses_billing:None,client_key:None,user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await;
         let result=diagnostics::finish(&state.db,&old.user_id,result,crate::errors::voice_start::Stage::Transport).await;
         let error=result.err().unwrap();
         assert_eq!(error.response_body().details.unwrap()["reason"],"transport:503");

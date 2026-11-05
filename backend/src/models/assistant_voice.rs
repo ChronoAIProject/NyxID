@@ -57,6 +57,9 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    /// Model-authored task provenance, distinct from the user's ASR captions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_task: Option<VoiceTaskSource>,
     #[serde(default)]
     pub progress: Option<VoiceTaskProgress>,
     /// First observed offsets from the call start, never transcript or tool content.
@@ -104,6 +107,13 @@ pub struct VoiceRequest {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct VoiceTaskSource {
+    pub model: String,
+    pub response_id: String,
+    pub delegation_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
