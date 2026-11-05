@@ -3250,13 +3250,6 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     super::trigger_schedule::direct::adopt_lineage(db, &mut row, session).await?;
-    if let Some(work) = row
-        .active_turn
-        .as_ref()
-        .and_then(|t| t.automation_work.as_ref())
-    {
-        super::trigger_schedule::continuation::fence_work(db, user_id, &id, work, session).await?;
-    }
     if row
         .active_turn
         .as_ref()
@@ -3317,6 +3310,14 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     } else {
         collection.insert_one(&row).session(&mut *session).await?;
+    }
+    // Fresh group member threads must exist before taking their child fence.
+    if let Some(work) = row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.as_ref())
+    {
+        super::trigger_schedule::continuation::fence_work(db, user_id, &id, work, session).await?;
     }
     // Private credential work is complete. The final shared write conflicts
     // with unlink/manager stop before this event admission can commit.
