@@ -2,7 +2,7 @@
 
 The production frontend moves from `https://nyx.chrono-ai.fun` to `https://nyxid.ai`; the backend moves from `https://nyx-api.chrono-ai.fun` to `https://api.nyxid.ai`. The mobile API base keeps its `/api/v1` suffix.
 
-Production builds embed both domain sets. The NyxID admin feature flag **`mobile:new-domains`** (Admin → Feature flags, global only, default off) selects which set an installed app uses. The app reads the flag at every launch, before anything else runs, so switching it needs no rebuild: users restart or reload the app to move to the selected domains.
+Production builds embed both domain sets. The NyxID admin feature flag **`mobile:new-domains`** (Admin → Feature flags, global only, default off) selects which set an installed app uses. The app reads the flag at every launch, before any domain-dependent app work runs, so switching it needs no rebuild: users restart or reload the app to move to the selected domains.
 
 ## Environment configuration
 
@@ -27,6 +27,43 @@ Set all three `PROD_NEW_*` URLs or none. Each must be an HTTPS URL without crede
 `index.ts` registers `AppRoot`, which renders nothing (the splash screen stays up) until `DomainGate` finishes. The gate calls `GET /api/v1/public/config` on both API hosts in parallel and applies the first valid `mobile_new_domains` boolean either host returns. A host that is unreachable, returns an error, or runs a backend too old to send the field gives no answer and is ignored. Each launch waits at most 5 seconds. If neither host answers in time, the last answer saved on this device applies, and a device that has never received an answer uses the original domains. A received answer is saved in SecureStore for that fallback.
 
 The selection lasts until the next launch. It switches the API base used by every request (`src/lib/api/baseUrl.ts`), the frontend URL used by waitlist, registration and web links, and the legal base URL used by Privacy / Terms. The server only chooses between the two embedded sets; it never supplies a URL.
+
+### URL resolution and startup boundaries
+
+`domains.ts` keeps the selected set private. `activeDomains()`,
+`getFrontendUrl()` and `getLegalBaseUrl()` read it when called;
+`api/baseUrl.ts::getApiBaseUrl()` validates the selected API base and
+`buildApiUrl()` joins a relative endpoint. There are no mutable URL exports.
+Import accessors freely, but call them only when building a request or opening a
+link, never in a module-level constant, a cached default or a configuration
+object. Dual-set builds throw on an active-domain read before selection, so an
+early consumer cannot silently retain the legacy host. Single-set builds are
+ready immediately and perform no flag lookup.
+
+Initialization always selects a set in `finally`, with precedence remote answer
+→ saved answer → legacy. A SecureStore read failure means no saved answer; a
+write failure is ignored and never replaces the remote answer. An unexpected
+exception preserves whichever answers are already known, in that same order.
+`DomainGate` admits the app when initialization settles. Session restore,
+refresh and resume timers, public auth configuration, Query observers, push-token
+registration, and telemetry requests all start inside that gate. The early
+`bootstrapNotificationInfrastructure()` call in `index.ts` only configures native
+notification delivery, defines the headless task and persists pending signals;
+it neither builds URLs nor contacts NyxID. The telemetry relay and QueryClient
+created during module evaluation hold functions and state, without making
+requests or resolving domains. Navigation prefixes and QR allowlists are static
+trust metadata built from **all** embedded sets, independent of the active set;
+they never choose an execution destination. Native voice sockets obtain their
+API base through a callback when each connection opens.
+
+The former mutable exports worked under Expo's default live-binding transform
+but retained stale values under its static transform; accessors avoid that
+dependency. `mutableExports.test.ts` guards against mutable exports and their
+re-exports across production source. The node-loader tests import consumers
+before selection, reject early reads, and check auth, refresh, legal and frontend
+URLs after selection. Gate tests cover startup, dependency failures, saved/legacy
+fallbacks and headless notifications; auth screen tests cover registration and
+waitlist callbacks.
 
 Independent of the selection, the app trusts both embedded sets:
 

@@ -1,11 +1,12 @@
-import { NYXID_API_BASE_URL } from "../domains";
+import { activeDomains } from "../domains";
 
 /** The active API base, selected once per launch (see `lib/domains.ts`). */
 export function getApiBaseUrl(): string {
-  if (!NYXID_API_BASE_URL) {
+  const apiBaseUrl = activeDomains().apiBaseUrl;
+  if (!apiBaseUrl) {
     throw new Error("API base URL is not configured. Set the mobile build's API_BASE_URL.");
   }
-  return NYXID_API_BASE_URL;
+  return apiBaseUrl;
 }
 
 export function buildApiUrl(path: string): string {
