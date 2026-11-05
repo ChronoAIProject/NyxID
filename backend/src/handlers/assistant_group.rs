@@ -237,7 +237,7 @@ async fn group_response_for(
 
 /// Start (or keep queued) the members a group has addressed.
 pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
-    let result: AppResult<()> = async {
+    let result: AppResult<()> = Box::pin(async {
         let group = groups::get(&state.db, owner, group_id).await?;
         crate::services::assistant_group_kind::require_legacy(&group)?;
         if crate::services::org_group_service::is_org(&group) {
@@ -256,7 +256,7 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
             if !groups::take_pending(&state.db, owner, group_id, agent_id).await? {
                 continue;
             }
-            match run_member(state, owner, &group, agent_id).await {
+            match Box::pin(run_member(state, owner, &group, agent_id)).await {
                 Ok(()) => {}
                 // Gone or refused: the member is not retried.
                 Err(
@@ -274,7 +274,7 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
             }
         }
         Ok(())
-    }
+    })
     .await;
     if let Err(error) = result {
         tracing::debug!(%error, "Group advance deferred");
@@ -400,7 +400,14 @@ async fn run_member(
         reply_channel: None,
     };
     let limit = team_pool_limit(state, owner).await + 1;
-    let started = match start_server_turn(state, owner, start, Pool::Team { owner, limit }).await {
+    let started = match Box::pin(start_server_turn(
+        state,
+        owner,
+        start,
+        Pool::Team { owner, limit },
+    ))
+    .await
+    {
         Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
             return refuse_member(state, owner, group, agent_id).await;
         }
@@ -614,7 +621,17 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    post_with_uploads(state, owner, group_id, text, author, &[], None, None).await
+    Box::pin(post_with_uploads(
+        state,
+        owner,
+        group_id,
+        text,
+        author,
+        &[],
+        None,
+        None,
+    ))
+    .await
 }
 
 /// NyxBot posts into a group from one of its own threads (`follower`): the
@@ -629,7 +646,7 @@ pub(crate) async fn post_and_follow(
     author: Option<&AssistantAgent>,
     follower: &str,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    post_with_uploads(
+    Box::pin(post_with_uploads(
         state,
         owner,
         group_id,
@@ -638,7 +655,7 @@ pub(crate) async fn post_and_follow(
         &[],
         None,
         Some(follower),
-    )
+    ))
     .await
 }
 
@@ -778,7 +795,7 @@ async fn post_with_uploads(
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
     groups::reset_hops(&state.db, owner, group_id).await?;
     groups::address(&state.db, owner, group_id, &addressed).await?;
-    advance(state, owner, group_id).await;
+    Box::pin(advance(state, owner, group_id)).await;
     Ok((message, addressed))
 }
 
