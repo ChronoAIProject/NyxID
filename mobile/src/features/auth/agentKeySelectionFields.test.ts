@@ -269,6 +269,7 @@ test("expiry selectors retain validation and disable all permission pickers duri
 
 function setupLogin({ inSheet = false, mint = true } = {}) {
   const apiCalls: string[] = [];
+  let actionTime = Date.now();
   const key: AgentKeySummary = {
     ...model.newKeySummary(model.defaultNewAgentKey(), options),
     id: "existing-key",
@@ -285,7 +286,21 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
     },
     "lucide-react-native": { ChevronLeft: "ChevronLeft", KeyRound: "KeyRound", UserRound: "UserRound" },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
-    "../../lib/api/agentKeyLoginApi": { agentKeyLoginApi: {} },
+    "../../lib/api/agentKeyLoginApi": {
+      agentKeyLoginApi: {
+        preview: async () => schema.agentKeyPreviewSchema.parse({
+          status: "pending",
+          initiated_at: new Date(actionTime).toISOString(),
+          expires_at: new Date(actionTime + 300_000).toISOString(),
+          requested_profile: null,
+          interval: 5,
+        }),
+        options: async () => {
+          apiCalls.push("options");
+          return { ...options, keys: [key] };
+        },
+      },
+    },
     "../../lib/api/loginCodeApi": {
       loginCodeApi: {
         options: async () => {
@@ -315,6 +330,10 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
       useWorkspaceSheet: () => (inSheet ? {} : null),
       useWorkspaceBack: () => {},
     },
+  }, {
+    Date: class extends Date {
+      static override now() { return actionTime; }
+    },
   });
   const { AgentKeyLoginScreen } = harness.load(
     fileURLToPath(new URL("./AgentKeyLoginScreen.tsx", import.meta.url)),
@@ -325,7 +344,7 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
       route: { params: { mint } },
     }),
   );
-  return { harness, apiCalls, key };
+  return { harness, apiCalls, key, advanceActionClock: () => { actionTime += 800; } };
 }
 
 test("login key picker replaces repeated permission blocks and still requires full review before issuance", async () => {
@@ -335,6 +354,9 @@ test("login key picker replaces repeated permission blocks and still requires fu
   );
   assert.ok(choose);
   choose.props.onPress();
+  harness.flush();
+  const loading = elements(harness.value()).find((item) => item.props.label === "Choose an Agent Key");
+  assert.equal(loading?.props.disabled, true);
   await harness.settle();
   const picker = elements(harness.value()).find(
     (item) => item.type === "WorkspaceSelectionField",
@@ -380,6 +402,32 @@ test("login key picker replaces repeated permission blocks and still requires fu
     ),
   );
   assert.deepEqual(apiCalls, ["options"]);
+});
+
+test("Agent Key request options keep the primary submit spinner while pending", async () => {
+  const { harness, advanceActionClock, apiCalls } = setupLogin({ mint: false });
+  const field = elements(harness.value()).find((item) => item.props.accessibilityLabel === "User code");
+  assert.ok(field);
+  field.props.onChangeText("ABCD1234");
+  harness.flush();
+  const next = elements(harness.value()).find((item) => item.props.label === "Continue");
+  assert.ok(next);
+  next.props.onPress();
+  await harness.settle();
+  advanceActionClock();
+  const choose = elements(harness.value()).find((item) => item.props.label === "Choose an Agent Key");
+  assert.ok(choose);
+  assert.equal(choose.type, "PrimaryButton");
+  assert.equal(choose.props.loading, false);
+  choose.props.onPress();
+  harness.flush();
+  const pending = elements(harness.value()).find((item) => item.props.label === "Choose an Agent Key");
+  assert.equal(pending?.props.disabled, true);
+  assert.equal(pending?.props.loading, true);
+  await harness.settle();
+  assert.deepEqual(apiCalls, ["options"]);
+  assert.ok(elements(harness.value()).some((item) => item.type === "WorkspaceSelectionField"));
+  harness.unmount();
 });
 
 test("returning to keys allows reviewing the same sole key again without issuance", async () => {

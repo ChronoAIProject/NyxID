@@ -488,6 +488,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                 (flow === "agent-key" ||
                   preview?.supports_grant_choice === true) ? (
                   <AuthSubmitButton
+                    loading={pending}
                     label="Choose an Agent Key"
                     disabled={pending || expired}
                     onPress={() => void act(loadOptions)}
