@@ -1,3 +1,5 @@
+import { rememberBillingCheckout } from "@/lib/billing-checkout-return";
+import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -26,27 +28,32 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { Skeleton } from "@/components/ui/skeleton";
 const date = (value: string) => new Date(value).toLocaleDateString();
 
-export function BillingTopUpHistory() {
+export function BillingTopUpHistory({ ownerId, presentation = "page" }: { ownerId?: string; presentation?: "page" | "panel" }) {
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
-  return <TopUpHistory key={period} period={period} onPeriod={setPeriod} />;
+  return <TopUpHistory key={`${ownerId ?? "personal"}:${period}`} period={period} onPeriod={setPeriod} ownerId={ownerId} presentation={presentation} />;
 }
 
 function TopUpHistory({
   period,
   onPeriod,
+  ownerId,
+  presentation,
 }: {
   period: BillingUsagePeriod;
+  ownerId?: string;
+  presentation: "page" | "panel";
   onPeriod: (period: BillingUsagePeriod) => void;
 }) {
+  const actorId = useAuthStore((state) => state.user?.id);
   const [page, setPage] = useState(1);
-  const historyQuery = useTopUpHistory(page, 10, period);
+  const historyQuery = useTopUpHistory(page, 10, period, ownerId);
   const visible = historyQuery.data?.topups ?? [];
   const total = historyQuery.data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / 10));
   const currentPage = page;
   async function handleReceipt(invoiceId: string) {
     try {
-      await openInvoiceReceipt(invoiceId);
+      await openInvoiceReceipt(invoiceId, ownerId);
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -76,7 +83,14 @@ function TopUpHistory({
       <Button
         variant="outline"
         size="sm"
-        onClick={() => openExternal(payment.checkout_url!)}
+        onClick={() => {
+          try {
+            rememberBillingCheckout(actorId, ownerId, presentation);
+            openExternal(payment.checkout_url!);
+          } catch (error) {
+            toast.error(error instanceof Error ? error.message : "Unable to resume payment");
+          }
+        }}
       >
         Resume payment
       </Button>

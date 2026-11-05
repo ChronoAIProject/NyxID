@@ -13,13 +13,13 @@ describe("account panel search", () => {
     expect(parseAccountPanelSearch({ panel: "settings", panelTab: ["security"] })).toEqual({ panel: "settings" });
   });
   it("delegates every billing field to its schema exactly", () => {
-    const billing = { tab: "usage", period: "7d", service: " legacy ", services: [" a ", "a", "b", null, ""], action: "topup" };
-    const panel = parseAccountPanelSearch({ panel: "billing", panelTab: billing.tab, panelPeriod: billing.period, panelService: billing.service, panelServices: billing.services, panelAction: billing.action });
+    const billing = { ownerId: "22222222-2222-4222-8222-222222222222", tab: "usage", period: "7d", service: " legacy ", services: [" a ", "a", "b", null, ""], action: "topup" };
+    const panel = parseAccountPanelSearch({ panel: "billing", panelOwnerId: billing.ownerId, panelTab: billing.tab, panelPeriod: billing.period, panelService: billing.service, panelServices: billing.services, panelAction: billing.action });
     expect(billingPanelSearch(panel)).toEqual(billingSearchSchema.parse(billing));
     expect(parseAccountPanelSearch({ panel: "billing", panelTab: "security", panelPeriod: "bad", panelAction: "bad", panelServices: "a" })).toEqual({ panel: "billing" });
   });
   it("preserves route-owned keys and mock through composition and removal", () => {
-    const search = { tab: "logins", machine: "n", mock: "1", panel: "billing", panelTab: "usage", panelPeriod: "7d", panelServices: ["a"], panelAction: "topup" };
+    const search = { panelOwnerId: "22222222-2222-4222-8222-222222222222", tab: "logins", machine: "n", mock: "1", panel: "billing", panelTab: "usage", panelPeriod: "7d", panelServices: ["a"], panelAction: "topup" };
     const parsed = withAccountPanelSearch((raw) => ({ tab: raw.tab, machine: raw.machine }))(search);
     expect(parsed).toMatchObject({ tab: "logins", machine: "n", mock: 1, panel: "billing", panelTab: "usage" });
     expect(withoutAccountPanel({ ...parsed })).toEqual({ tab: "logins", machine: "n", mock: 1 });
