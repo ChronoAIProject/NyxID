@@ -1273,14 +1273,15 @@ pub async fn take_followers_if_quiet(
             .await?;
     }
     let group = get(db, owner, group_id).await?;
-    if group.followers.iter().any(|f| f.automation.is_some()) {
-        // Atomic v2 delivery owns bound windows; never destructively take them.
-        return Ok((Vec::new(), 0));
-    }
+    let bound_count = group
+        .followers
+        .iter()
+        .filter(|f| f.automation.is_some())
+        .count();
     let live: Vec<GroupFollower> = group
         .followers
         .into_iter()
-        .filter(|follower| follower.expiry() > now)
+        .filter(|follower| follower.automation.is_none() && follower.expiry() > now)
         .collect();
     if live.is_empty()
         || !group.pending_agent_ids.is_empty()
@@ -1302,12 +1303,17 @@ pub async fn take_followers_if_quiet(
     filter.insert(
         "$and",
         vec![
-            doc! {"followers": {"$size": live.len() as i64}},
+            doc! {"followers": {"$size": (live.len() + bound_count) as i64}},
             doc! {"followers": {"$all": identities}},
         ],
     );
+    let update = if bound_count == 0 {
+        doc! {"$set": {"followers": []}}
+    } else {
+        doc! {"$pull": {"followers": {"automation": null}}}
+    };
     let before = groups
-        .find_one_and_update(filter, doc! {"$set": {"followers": []}})
+        .find_one_and_update(filter, update)
         .return_document(ReturnDocument::Before)
         .await?;
     // Sampled after the acknowledgement: a follower that expired during the
@@ -1315,7 +1321,14 @@ pub async fn take_followers_if_quiet(
     let taken_at = Utc::now();
     Ok(match before {
         Some(before) => (
-            followers_live_at(before.followers, taken_at),
+            followers_live_at(
+                before
+                    .followers
+                    .into_iter()
+                    .filter(|f| f.automation.is_none())
+                    .collect(),
+                taken_at,
+            ),
             before.message_count,
         ),
         None => (Vec::new(), 0),

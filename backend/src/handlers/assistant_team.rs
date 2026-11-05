@@ -380,7 +380,6 @@ pub(crate) async fn owner_denial_decided(
         ),
     );
     event.execution_task = row.execution_task.clone();
-    event.automation_work = row.automation_work.clone();
     notify(state, owner, &row.conversation_id, vec![event]).await;
 }
 
@@ -505,14 +504,12 @@ pub(crate) async fn after_turn(
         {
             tracing::debug!(%error, "Automation handoff publication deferred");
         }
-        Box::pin(wake(state, owner, &row.id)).await;
-        return;
     }
     if row.is_subagent()
         && !turn
             .automation_work
             .as_ref()
-            .is_some_and(|w| w.role == "group")
+            .is_some_and(|w| matches!(w.role.as_str(), "direct" | "group"))
         && !row.guest_turn
         && let Some((target, published_assignment)) =
             match settled_report_target(state, row, turn).await {
@@ -761,7 +758,6 @@ pub(crate) async fn permission_decided(
             team::event("permission_decided", note, None),
         );
         event.execution_task = request.execution_task.clone();
-        event.automation_work = request.automation_work.clone();
         Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
     if allowed

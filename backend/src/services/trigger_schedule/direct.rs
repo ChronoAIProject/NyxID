@@ -36,13 +36,9 @@ pub async fn register_in_session(
         .active_turn
         .as_mut()
         .ok_or(AppError::AssistantTurnRequired)?;
-    if child.user_id != owner
-        || child.id == parent.thread
-        || child.shared_agent_thread
-        || child.agent_owner_id.as_ref().is_some_and(|id| id != owner)
-    {
+    if child.user_id != owner || child.id == parent.thread {
         return Err(AppError::Forbidden(
-            "Automation handoffs require a personal specialist".into(),
+            "Automation handoffs require the acting person’s own specialist thread".into(),
         ));
     }
     let run = continuation::register_in_session(
@@ -115,12 +111,6 @@ pub async fn resume_in_session(
         .matched_count
         != 1
     {
-        return Err(AppError::AssistantTurnRequired);
-    }
-    if db.collection::<Document>(RUNS).update_one(doc! {
-        "_id": &work.run_id, "user_id": owner, "coordinator.protocol": 2,
-        "coordinator.deadline": {"$gt": date(Utc::now())}, "outcome": {"$in": ["started", "waiting"]},
-    }, doc! {"$inc": {"coordinator.version": 1_i64}}).session(session).await?.matched_count != 1 {
         return Err(AppError::AssistantTurnRequired);
     }
     Ok(())
@@ -260,12 +250,29 @@ async fn publish(
     // A late callback must not fall back to an unbound notice after cancellation.
     let live = db.collection::<Document>(RUNS).update_one(doc! {"_id": &receipt.run_id, "user_id": &receipt.user_id, "coordinator.protocol": 2, "outcome": {"$in": ["started", "waiting"]}}, doc! {"$inc": {"coordinator.version": 1_i64}}).session(&mut *session).await?.matched_count == 1;
     if live {
+        let agent = db
+            .collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &receipt.agent_id})
+            .session(&mut *session)
+            .await?;
+        let name = agent
+            .as_ref()
+            .map(|a| a.name.as_str())
+            .unwrap_or(&receipt.agent_id);
+        let status = match error {
+            None => "replied".to_owned(),
+            Some("cancelled") => "was stopped".to_owned(),
+            Some(code) => format!("failed ({code})"),
+        };
         let mut event = super::super::assistant_team_service::event(
             "subagent_settled",
             format!(
-                "Automation specialist {}. {}",
-                error.unwrap_or("replied"),
-                super::super::assistant_nyxagent::excerpt(text, 4000)
+                "Specialist {} {status}. Reply excerpt: \"{}\" Read more with nyxid__read_subagent (agent ID {}).",
+                super::super::assistant_nyxagent::identifier(name),
+                super::super::assistant_nyxagent::excerpt(text, 1200).replace('"', "'"),
+                receipt.agent_id
             ),
             Some(&receipt.agent_id),
         );
