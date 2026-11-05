@@ -23,6 +23,7 @@ import { GuestReadiness } from "./guest-readiness";
 import { ShareAgentDialog, SharedAgentMemory, SharedAgentProfile, SharedConsentCards } from "./shared-agent-controls";
 import { AgentSkills } from "./agent-skills";
 import { AgentConnections } from "./agent-connections";
+import { AgentVoiceService } from "./agent-voice-service";
 import { AgentLearningReview } from "./agent-learning-review";
 import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
@@ -599,6 +600,7 @@ function AgentDetailsContent({
                             />
                           ) : null}
                           <AgentConnections agent={agent} />
+                          <AgentVoiceService agent={agent} />
                         </>
                       )}
                     </>

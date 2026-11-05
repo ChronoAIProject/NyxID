@@ -19,8 +19,9 @@ pub async fn prepare(
     request: &str,
     preferences: VoicePreferences,
     identity: String,
+    client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<runtime::Started> {
-    let row = session::admit(
+    let row = session::admit_for_client_key(
         &state.db,
         user,
         conversation,
@@ -28,6 +29,7 @@ pub async fn prepare(
         preferences,
         identity,
         &state.replica_identity.generation_id,
+        client_key,
     )
     .await?;
     let row = session::write(&state.db, &row, doc! {"protocol":"xai_realtime"}).await?;
@@ -54,6 +56,7 @@ pub async fn serve(
             doc! {"$set":{"lease_owner":&state.replica_identity.generation_id}})
             .return_document(mongodb::options::ReturnDocument::After).await?
             .ok_or_else(||AppError::Conflict("Voice relay already started".into()))?;
+        Box::pin(super::client_key::revalidate(&state.db, &call)).await?;
         let resolved = Box::pin(credentials::resolve(
             &state,
             &call.user_id,

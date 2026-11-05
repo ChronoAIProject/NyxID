@@ -13,7 +13,7 @@ type SocketConstructor = new (
 
 /** Credentials stay in native headers and can never reach the media WebView. */
 export function createVoiceSocketFactory(input: {
-  apiBaseUrl: string;
+  getApiBaseUrl: () => string;
   origin: string;
   epoch: number;
   getEpoch: () => number;
@@ -39,7 +39,7 @@ export function createVoiceSocketFactory(input: {
       match[2] &&
       assistantVoiceStreamPath(match[1], match[2]) === path;
     if (!validStream) throw new Error("Invalid voice connection.");
-    const base = new URL(input.apiBaseUrl);
+    const base = new URL(input.getApiBaseUrl());
     if (
       !["https:", "http:"].includes(base.protocol) ||
       base.username ||

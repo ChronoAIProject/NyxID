@@ -894,6 +894,13 @@ async fn server_main() {
         ));
 
     // Create shared state
+    services::billing::sandbox_rates::seed(
+        &db,
+        &config.lago_plan_code,
+        audit_chain_hmac_key.as_slice(),
+    )
+    .await
+    .expect("Failed to seed initial CMA rate card");
     let billing = Arc::new(services::billing::BillingService::new(
         db.clone(),
         Arc::new(config.clone()),

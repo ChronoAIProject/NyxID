@@ -14,7 +14,12 @@ async fn fixture_session_restricts_browser_and_finalizes_only_on_provider_close(
         assert_eq!(headers["authorization"],"Bearer fixture-secret");
         assert_eq!(body["session"]["model"],"catalog-live-model");
         assert_eq!(body["session"]["store"],false);
-        assert_eq!(body["session"]["delegation"],json!({"type":"client"}));
+        let delegation=&body["session"]["delegation"];
+        assert_eq!(delegation["type"],"responses");
+        assert_eq!(delegation["responses"]["model"],"catalog-task-model");
+        assert_eq!(delegation["responses"]["tools"].as_array().unwrap().len(),1);
+        assert_eq!(delegation["responses"]["tools"][0]["name"],"request_nyxbot");
+        assert_eq!(delegation["responses"]["tools"][0]["parameters"]["required"],json!(["request"]));
         assert_eq!(body["session"]["client"]["data_channel"]["allowed_client_events"],json!([]));
         assert!(body["session"].get("tools").is_none());
         assert_eq!(body["session"]["audio"]["output"]["voice"], "marin");
@@ -33,7 +38,8 @@ async fn fixture_session_restricts_browser_and_finalizes_only_on_provider_close(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let provider = OpenAi::fixture(Zeroizing::new("fixture-secret".into()), address);
+    let provider = OpenAi::fixture(Zeroizing::new("fixture-secret".into()), address)
+        .with_delegation_model(Some("catalog-task-model".into()));
     let created = provider
         .create(
             "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",

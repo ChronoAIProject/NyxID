@@ -230,7 +230,7 @@ function setup({
         },
       },
     },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
+    "../../lib/env": { getFrontendUrl: () => "https://nyxid.example" },
     "../../app/WorkspaceHeader": { useWorkspaceBack: () => {} },
     "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },

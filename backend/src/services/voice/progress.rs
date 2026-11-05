@@ -23,16 +23,13 @@ pub fn pending(r: &VoiceRequest) -> bool {
 }
 
 // Exact protocol identifiers, not intent/permission classification. Unknown
-// providers still get truthful stage/count evidence without leaking identifiers.
-pub fn activity_label(label: &str) -> &'static str {
+// activities stay in telemetry without becoming generic spoken progress.
+pub fn activity_label(label: &str) -> Option<&'static str> {
     match label.rsplit("__").next().unwrap_or(label) {
-        "list_connected_services" => "Checking connected services",
-        "get_authenticated_user" => "Reading account identity",
         "search_issues" | "list_issues" | "list_user_issues" | "issue_read" => {
-            "Checking issue progress"
+            Some("Checking issue progress")
         }
-        "search_tools" | "tool_search" => "Finding the available service tools",
-        _ => "Running a task step",
+        _ => None,
     }
 }
 
@@ -49,7 +46,7 @@ pub fn project(
     let last = completed.iter().max_by_key(|a| a.ended_at);
     let latest = activities.iter().max_by_key(|a| a.started_at);
     let (stage, detail) = match r.state {
-        RequestState::Queued => ("queued", "Waiting for an available task slot".to_string()),
+        RequestState::Queued => ("queued", String::new()),
         RequestState::AwaitingConfirmation => (
             "awaiting_approval",
             r.progress
@@ -58,63 +55,47 @@ pub fn project(
                 .map(|p| p.detail.clone())
                 .unwrap_or_else(|| "Waiting for your approval of the pending action".into()),
         ),
-        RequestState::Completed => ("result_ready", "The answer is ready in this chat".into()),
+        RequestState::Completed => ("result_ready", String::new()),
         RequestState::Cancelled => (
             "ended",
             terminal_detail(r.terminal_error_code.as_deref()).into(),
         ),
-        RequestState::Claimed if r.async_operation_pending => (
-            "waiting_service",
-            "The service is still processing the request".into(),
-        ),
+        RequestState::Claimed if r.async_operation_pending => ("waiting_service", String::new()),
         RequestState::Claimed
             if turn.is_some_and(|t| {
                 now - t.heartbeat_at.unwrap_or(t.started_at) > chrono::Duration::seconds(45)
             }) =>
         {
-            (
-                "checking_status",
-                "Waiting for a fresh execution update".into(),
-            )
+            ("checking_status", String::new())
         }
         RequestState::Claimed if turn.is_some_and(|t| t.waiting_for_capacity) => {
-            ("waiting_capacity", "Waiting for model capacity".into())
+            ("waiting_capacity", String::new())
         }
         RequestState::Claimed
             if latest.is_some_and(|a| a.failure.is_some() || a.status == "error") =>
         {
-            (
-                "tool_error",
-                "A service step failed; the assistant is checking whether it can continue".into(),
-            )
+            ("tool_error", String::new())
         }
-        RequestState::Claimed if latest.is_some_and(|a| a.status == "running") => {
-            ("working", activity_label(&latest.unwrap().label).into())
-        }
-        RequestState::Claimed if !completed.is_empty() => (
+        RequestState::Claimed if latest.is_some_and(|a| a.status == "running") => (
             "working",
-            format!(
-                "{} task steps finished; the task is still running",
-                completed.len()
-            ),
+            activity_label(&latest.unwrap().label)
+                .unwrap_or_default()
+                .into(),
         ),
-        RequestState::Claimed if turn.is_some() => (
-            "planning",
-            "The assistant is working out the next step".into(),
-        ),
-        RequestState::Claimed => (
-            "checking_status",
-            "Waiting for a fresh execution update".into(),
-        ),
+        RequestState::Claimed if !completed.is_empty() => ("working", String::new()),
+        RequestState::Claimed if turn.is_some() => ("planning", String::new()),
+        RequestState::Claimed => ("checking_status", String::new()),
     };
     VoiceTaskProgress {
         stage: stage.into(),
         detail,
-        last_completed_step: last.map(|a| activity_label(&a.label).into()).or_else(|| {
-            turn.is_none()
-                .then(|| r.progress.as_ref()?.last_completed_step.clone())
-                .flatten()
-        }),
+        last_completed_step: last
+            .and_then(|a| activity_label(&a.label).map(str::to_owned))
+            .or_else(|| {
+                turn.is_none()
+                    .then(|| r.progress.as_ref()?.last_completed_step.clone())
+                    .flatten()
+            }),
         completed_steps: if turn.is_some() {
             completed.len()
         } else {
@@ -145,7 +126,7 @@ pub fn terminal_detail(code: Option<&str>) -> &'static str {
             "Access settings changed during the task. Review completed actions before trying again."
         }
         _ => {
-            "The task failed before returning an answer. The error details are in this chat; check completed actions before retrying."
+            "The task failed before returning an answer. Some actions may already have finished; check them before retrying."
         }
     }
 }
@@ -245,14 +226,15 @@ pub async fn mark(
 
 #[derive(Default)]
 pub struct Coalescer {
-    sent: HashMap<String, (String, usize)>,
+    sent: HashMap<String, String>,
     last_ms: Option<i64>,
 }
 impl Coalescer {
     pub fn due(&mut self, r: &VoiceRequest, elapsed_ms: i64, age_ms: i64) -> bool {
         let Some(p) = &r.progress else { return false };
-        let key = (format!("{}:{}", p.stage, p.detail), p.completed_steps);
-        if age_ms < 2000
+        let key = format!("{}:{}", p.stage, p.detail);
+        if p.detail.trim().is_empty()
+            || age_ms < 2000
             || self.last_ms.is_some_and(|t| elapsed_ms - t < 8000)
             || self.sent.get(&r.id) == Some(&key)
         {
@@ -299,9 +281,9 @@ pub fn close_notice(reason: Option<&str>, continuing: bool) -> String {
     };
     if continuing {
         format!(
-            "{reason} Accepted tasks continue in the background, subject to their permissions and limits. Their answers or failure details will appear in this chat. Pending approvals remain available here."
+            "{reason} Work already started will continue, subject to its permissions and limits."
         )
     } else {
-        format!("{reason} Task results and any failure details are separate messages in this chat.")
+        reason.into()
     }
 }

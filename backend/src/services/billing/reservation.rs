@@ -232,7 +232,7 @@ pub async fn apply_settlement_for_row(
     // Machine runs are admitted only against finite, fully funded windows.
     // Never turn a larger measured quantity or a corrupt funding split into
     // wallet debt, including when a later top-up made funds available.
-    if row.metric == BillingMetric::MachineRunningSeconds
+    if row.metric.is_runtime_allocation()
         && (actual_credits < Credits::ZERO || actual_credits > row.reserved_credits)
     {
         return Err(AppError::Internal(
@@ -813,7 +813,7 @@ pub async fn abandon_stale_unforwarded(
             "status": "reserved",
             "forwarded": false,
             "released": false,
-            "metric": { "$ne": BillingMetric::MachineRunningSeconds.as_str() },
+            "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.is_runtime_allocation()).map(BillingMetric::as_str).collect::<Vec<_>>() },
             "updated_at": { "$lt": bson::DateTime::from_chrono(cutoff) },
             "managed_execution_id": { "$exists": false },
         })
@@ -1093,7 +1093,7 @@ async fn release_one_unforwarded_row(
     // A stale or failed HTTP caller is not proof that a Machine stopped.
     // Its dedicated evidence path finalizes even zero-quantity windows and
     // releases their funding through ordinary settlement after that proof.
-    if row.metric == BillingMetric::MachineRunningSeconds {
+    if row.metric.is_runtime_allocation() {
         return Ok(false);
     }
     let now = Utc::now();
@@ -1116,7 +1116,7 @@ async fn release_one_unforwarded_row(
                 "forwarded": false,
                 "status": "reserved",
                 "released": false,
-                "metric": { "$ne": BillingMetric::MachineRunningSeconds.as_str() },
+                "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.is_runtime_allocation()).map(BillingMetric::as_str).collect::<Vec<_>>() },
             },
             doc! { "$set": set_doc },
         )
@@ -1152,7 +1152,7 @@ pub(super) async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> Ap
     Ok(())
 }
 
-fn is_entitled(ctx: &BillingRouteContext, entitlements: &[Entitlement]) -> bool {
+pub(super) fn is_entitled(ctx: &BillingRouteContext, entitlements: &[Entitlement]) -> bool {
     let candidates = entitlement_candidates(ctx);
     entitlements.iter().any(|entitlement| {
         entitlement.code == "*"

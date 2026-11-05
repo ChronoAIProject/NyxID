@@ -9096,6 +9096,18 @@ and personal connections without creating a thread, reserving funds, or authoriz
 a call. Supplying `conversation_id` retains the live thread and source checks above;
 call startup always reauthorizes the selected connection against its actual thread.
 
+Devices use a published Bot Voice service with their own ordinary Agent Key.
+The human owner publishes a connection through
+`GET, PUT /api/v1/assistant/nyxagent/agents/{id}/voice-service` and grants its
+exact `UserService.id` through existing Key service scope. The service URL is
+`{BASE_URL}/api/v1/proxy/nyxbot-voice/{service_id}`; it exposes `/voice/options`,
+`/voice/sessions`, session status/control/stream and bounded announcements.
+Each connection fixes one Bot, and each call binds the actual login child
+credential. Existing browser routes remain first-party human only.
+See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
+independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
+work running; explicit Stop cancels it.
+
 Dictation adds two first-party human browser routes:
 
 | Route | Contract |
@@ -9475,3 +9487,31 @@ Native tools and MCP expose `create_collaboration_group`,
 writes remain first-party human only. Flag-off preserves authorized retained
 history, cancellation, departure and deletion; binary rollback requires the
 archive/drain procedure in the design.
+
+
+## CMA Sandbox billing producer API
+
+The routes below require a verified service-account JWT from the single
+configured CMA producer and issued/live `billing:sandbox:write` scope. They do
+not accept user sessions, user access tokens, API keys, delegated or relay
+credentials. New admission defaults to disabled. Full request/response examples,
+units, retry semantics and rollout requirements are in [CMA billing](CMA_BILLING.md).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/v1/billing/sandboxes/quotes` | Quote the existing catalog service prices for an owner and full Sandbox allocation. |
+| POST | `/api/v1/billing/sandboxes/windows` | Atomically reserve at most 300 seconds across all applicable resource metrics. |
+| GET | `/api/v1/billing/sandboxes/cursors/{sandbox_id}` | Recover the durable ordered allocation-evidence checkpoint. |
+| GET | `/api/v1/billing/sandboxes/receipts/{request_id}` | Recover an already committed producer request, including during an admission/provider outage. |
+| POST | `/api/v1/billing/sandboxes/windows/{window_id}/evidence` | Finalize retained allocation intervals and queue the existing settlement/reconciliation path. |
+
+Bodies are bounded to 512 KiB; evidence is bounded to 1,024 intervals. Client
+price/amount fields and other unknown fields are rejected. A reused request ID
+with different input, changed final evidence, or changed retained ledger
+revision is a conflict. Evidence acceptance is distinct from provider emission.
+
+CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
+(admin/operator) and `POST /api/v1/admin/billing/cma-rate-cards` (admin-only)
+list and publish immutable effective-dated resource prices. See
+[CMA billing](CMA_BILLING.md#enablement-and-runtime-rate-configuration) for
+exact decimal payloads, validation, audit and activation semantics.
