@@ -62,8 +62,8 @@ export function SshServiceInstructions({
       {/* Client Setup */}
       <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-13 font-semibold">Client Setup</h4>
-          <p className="text-xs text-muted-foreground">
+          <h4 className="type-card-title">Client Setup</h4>
+          <p className="text-13 text-muted-foreground">
             Install the NyxID CLI on your local machine and authenticate.
           </p>
         </div>
@@ -72,7 +72,7 @@ export function SshServiceInstructions({
           value={installCommand}
         />
         <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">
+          <p className="type-secondary-emphasis text-muted-foreground">
             2. Authenticate (choose one)
           </p>
         </div>
@@ -94,9 +94,9 @@ export function SshServiceInstructions({
         />
         {sshConfig.certificate_auth_enabled && (
           <>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Replace{" "}
-              <code className="rounded bg-muted px-1 text-10">
+              <code className="rounded bg-muted px-1 text-14">
                 {keyPlaceholder}
               </code>{" "}
               with your SSH private key path ({keyHint}).
@@ -113,10 +113,10 @@ export function SshServiceInstructions({
       {sshConfig.certificate_auth_enabled && (
         <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
           <div className="space-y-1">
-            <h4 className="text-13 font-semibold">
+            <h4 className="type-card-title">
               Target Machine Setup (Passwordless Login)
             </h4>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Run these commands on the SSH target machine to trust NyxID
               certificates. Each principal maps to a Unix user -- only users
               listed in the authorized principals file can log in via that
@@ -143,30 +143,30 @@ export function SshServiceInstructions({
             label="4. Restart SSH daemon (macOS)"
             value={restartSshdMac}
           />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             macOS: ensure Remote Login is enabled in System Settings &gt;
             General &gt; Sharing (&nbsp;or{" "}
-            <code className="rounded bg-muted px-1 text-10">
+            <code className="rounded bg-muted px-1 text-14">
               sudo systemsetup -setremotelogin on
             </code>
             ). The sshd_config path is{" "}
-            <code className="rounded bg-muted px-1 text-10">
+            <code className="rounded bg-muted px-1 text-14">
               /etc/ssh/sshd_config
             </code>{" "}
             (same as Linux). On recent macOS, SIP may restrict direct edits to
             /etc/ssh/ -- use{" "}
-            <code className="rounded bg-muted px-1 text-10">sudo</code> to
+            <code className="rounded bg-muted px-1 text-14">sudo</code> to
             write config files. Ensure CA key file permissions are{" "}
-            <code className="rounded bg-muted px-1 text-10">644</code> and
+            <code className="rounded bg-muted px-1 text-14">644</code> and
             auth_principals directories are{" "}
-            <code className="rounded bg-muted px-1 text-10">755</code>.
+            <code className="rounded bg-muted px-1 text-14">755</code>.
           </p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             How it works: NyxID signs short-lived certificates with a specific
             principal (e.g., &quot;{primaryPrincipal}&quot;). The target machine
             checks that the certificate is signed by the trusted CA AND that the
             principal is listed in{" "}
-            <code className="rounded bg-muted px-1 text-10">
+            <code className="rounded bg-muted px-1 text-14">
               /etc/ssh/auth_principals/{primaryPrincipal}
             </code>
             . This means even if someone has a valid NyxID certificate, they can
@@ -181,8 +181,8 @@ export function SshServiceInstructions({
       {/* Node-Agent Setup (for unreachable targets) */}
       <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-13 font-semibold">Node Agent (Required)</h4>
-          <p className="text-xs text-muted-foreground">
+          <h4 className="type-card-title">Node Agent (Required)</h4>
+          <p className="text-13 text-muted-foreground">
             A node agent is required for web terminal, command execution
             (API/MCP), and SSH tunneling. Deploy a node agent on a machine that
             can reach the SSH target. The node agent connects outbound to NyxID
@@ -195,7 +195,7 @@ export function SshServiceInstructions({
           label="1. Install node agent"
           value={nodeInstallCommand}
         />
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           2. Generate a registration token from the{" "}
           <a href="/nodes" className="underline">
             Nodes page
@@ -210,7 +210,7 @@ export function SshServiceInstructions({
           label="4. Start the agent"
           value={nodeStartCommand}
         />
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           5. Bind this SSH service to the node from the{" "}
           <a href="/nodes" className="underline">
             Nodes page

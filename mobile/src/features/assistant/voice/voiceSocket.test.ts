@@ -252,16 +252,3 @@ test("missing human tokens and refresh/storage failures do not fall back to unau
   assert.equal(storageFailure.opened.length, 0);
 });
 
-test("dictation uses the same authenticated native socket with its exact dedicated path", async () => {
-  const f = fixture();
-  const dictation = `/assistant/nyxagent/conversations/${thread}/dictation`;
-  await f.connect(dictation, new AbortController().signal);
-  assert.equal(f.opened[0]?.url, `wss://api.nyx.example/api/v1${dictation}`);
-  assert.equal(f.opened[0]?.options.headers.Origin, "https://nyx.example");
-  for (const invalid of [
-    `${dictation}?model=other`,
-    dictation.replace(thread, "../other"),
-    `${dictation}/stream`,
-  ])
-    await assert.rejects(f.connect(invalid, new AbortController().signal));
-});

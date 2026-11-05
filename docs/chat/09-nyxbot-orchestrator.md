@@ -790,7 +790,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
-| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
+| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Default-off org-specialist bindings allow same-org targets under the [channel contract](#organization-specialists-on-channel-bots), with hidden per-actor execution. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
@@ -1817,3 +1817,52 @@ home/report pointers, define the result.
 
 The storage and claim contract is in
 [Channel bot relay — assigned specialist images](../CHANNEL_BOT_RELAY.md#images-from-an-assigned-specialist-1897).
+
+## Organization specialists on channel bots
+
+With `nyxbot:org-specialist-channels` enabled after replica readiness, an org
+admin can connect an existing **same-org** bot to an org specialist in the
+Channel bots settings, REST connect/link routes, or their personal NyxBot's
+`connect_channel_bot` / `link_channel_bot` tools. Personal setup links still
+create personal bots. There is no org NyxBot, cross-org link, or personal fallback.
+
+Each Admin/Member with `can_proxy()` requests a verification code in their own
+first-party NyxID session, sends it privately to the bot, and confirms the
+observed chat account back in that session. Another member/admin cannot confirm
+it. Codes expire in ten minutes. “Owner only” means verified org members on this
+binding; only a verified admin sets “owner talked here”. Removed members are
+refused and their channel keys revoked; they do not become guests automatically.
+Person erasure removes the linked person ID and their transcript content, keeping
+a sender revocation tombstone until channel/org erasure to preserve that refusal.
+Member DMs continue their private org-agent home. Groups/topics publish one
+public transcript, with hidden execution and confirmation cards per actor.
+Private DM context, tool traces and another actor's approvals are never public.
+Queued questions enter that transcript atomically with source acceptance; queue
+instructions and unfinished/failed reply drafts remain private execution state.
+
+Guests are off by default. Only an admin can enable them, choose delegated HTTP
+services, and accept a positive daily exact-credit cap (1 credit suggested).
+Delegation intersects the specialist's grants, guest access levels and operation
+scopes; no services means model-only chat. The org wallet pays all guest model
+and tool usage, including platform keys. It must already be provisioned with a
+subscription. Each sender has a six-request/minute limit. Budget/rate failures
+produce a short refusal; verified members retain their own existing access and
+billing rules. Settings show today's spend/reservations and wallet readiness.
+Guest execution cannot use account tools, machines, saved logins or approvals.
+
+Binding metadata lives on `org_specialist`, sender verification in
+`org_channel_sender_links`; optional `org_execution` origins carry the exact
+actor/revision through queueing, thread follow, recovery and late delivery.
+First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
+`GET/PUT org-specialist`, `POST/DELETE member-link`,
+`GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.
+Other live org admins can manage/unlink the binding without reading member DMs
+or obtaining provider keys. Relinking resets verification and guest exposure;
+changing personal ↔ org target requires disconnect/reconnect. Loss of the
+transport admin, org/bot/agent authority, or feature readiness retires the link
+with `org_access_lost`. Guest-policy changes invalidate pending guest authority.
+Relay/native/gateway use the same local validator; CMA never decides membership
+or payer. A verified private chat moves between relay and gateway with its member
+home reply binding and guest execution lane; adoption is atomic and keeps the
+relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
+workers, then enable for an admin. Disable and retire before binary downgrade.

@@ -1140,3 +1140,12 @@ agent owner, including `images_delete_after_turn`. Channel/platform guests still
 never ingest or download user media. NyxAgent's configured-origin check is
 unchanged; operations must keep its `NYXID_BASE_URL` aligned with NyxID's
 canonical `BASE_URL`.
+
+### Separate org-specialist channel authority
+
+The default-off org-specialist channel feature reuses the public-transcript /
+per-actor execution pattern, without allowing org agents to be shared or
+allowing guests in org collaboration groups. Its explicitly enabled channel
+guest lane is a separate, budgeted org-wallet authority, including platform
+keys. None of the personal shared-agent or org-group billing rules changes.
+See [organization specialists on bots](09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).

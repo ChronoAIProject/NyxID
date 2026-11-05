@@ -57,7 +57,7 @@ export function SchedulesTable({
               key={schedule.id}
               className="max-sm:grid max-sm:gap-1 max-sm:p-3 max-sm:[&>td]:min-w-0 max-sm:[&>td]:whitespace-normal max-sm:[&>td]:break-words max-sm:[&>td]:px-0"
             >
-              <TableCell className="font-medium">
+              <TableCell className="font-normal">
                 {formatExactCredits(
                   exactCredits(
                     schedule.amount,
@@ -74,7 +74,7 @@ export function SchedulesTable({
               <TableCell>{expiryLabel(schedule.expiry)}</TableCell>
               <TableCell>
                 <div>{billingTargetLabel(schedule)}</div>
-                <p className="text-11 text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {schedule.scope.all_services
                     ? "All services"
                     : schedule.scope.service_slugs.join(", ")}
@@ -82,7 +82,7 @@ export function SchedulesTable({
                 {schedule.service_limits?.map((rule) => (
                   <p
                     key={rule.key}
-                    className="max-w-sm whitespace-normal break-words text-11"
+                    className="max-w-sm whitespace-normal break-words text-13"
                   >
                     {rule.label || "Service limit"}:{" "}
                     {rule.service_slugs.join(", ")} · up to{" "}

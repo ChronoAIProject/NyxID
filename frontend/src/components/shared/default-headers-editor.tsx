@@ -115,7 +115,7 @@ export function DefaultHeadersEditor({
   return (
     <div className="space-y-2">
       {value.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+        <div className="rounded-lg border border-dashed border-border p-4 text-center text-13 text-muted-foreground">
           No default headers configured.
         </div>
       ) : (
@@ -155,10 +155,10 @@ export function DefaultHeadersEditor({
                         placeholder="X-Api-Version"
                         maxLength={256}
                         disabled={disabled}
-                        className="font-mono text-xs"
+                        className="font-mono text-14"
                       />
                       {warning && (
-                        <p className="mt-1 text-11 text-destructive">
+                        <p className="mt-1 text-13 text-destructive">
                           {warning}
                         </p>
                       )}
@@ -173,10 +173,10 @@ export function DefaultHeadersEditor({
                         maxLength={4096}
                         disabled={disabled}
                         type={row.sensitive ? "password" : "text"}
-                        className="font-mono text-xs"
+                        className="font-mono text-14"
                       />
                       {valueError && (
-                        <p className="mt-1 text-11 text-destructive">
+                        <p className="mt-1 text-13 text-destructive">
                           {valueError}
                         </p>
                       )}
@@ -226,7 +226,7 @@ export function DefaultHeadersEditor({
       )}
 
       <div className="flex items-center justify-between">
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {value.length} / {MAX_DEFAULT_HEADERS} headers. Values stored in
           plaintext; do not place real secrets here.
         </p>
@@ -265,7 +265,7 @@ function FlagHeader({
             <Info className="h-3 w-3" />
           </button>
         </TooltipTrigger>
-        <TooltipContent className="max-w-[260px] text-xs">
+        <TooltipContent className="max-w-[260px] text-13">
           {hint}
         </TooltipContent>
       </Tooltip>
@@ -286,7 +286,7 @@ function ReadOnlyHeadersList({
 }) {
   if (value.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {fromCatalog
           ? "No admin-configured defaults for this service."
           : "No default headers configured."}
@@ -306,8 +306,8 @@ function ReadOnlyHeadersList({
         <TableBody>
           {value.map((row, idx) => (
             <TableRow key={idx}>
-              <TableCell className="font-mono text-xs">{row.name}</TableCell>
-              <TableCell className="font-mono text-xs">
+              <TableCell className="font-mono text-14">{row.name}</TableCell>
+              <TableCell className="font-mono text-14">
                 {row.sensitive ? (
                   <span className="text-muted-foreground">{"\u2022\u2022\u2022\u2022\u2022"}</span>
                 ) : (
@@ -316,17 +316,17 @@ function ReadOnlyHeadersList({
               </TableCell>
               <TableCell className="space-x-1">
                 {row.overridable && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     overridable
                   </Badge>
                 )}
                 {row.sensitive && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     sensitive
                   </Badge>
                 )}
                 {fromCatalog && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     from catalog
                   </Badge>
                 )}

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useId, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -100,13 +101,13 @@ export function FilterPicker({
       </PopoverTrigger>
       <PopoverContent align="start" className="w-80 space-y-3 p-3">
         <div className="flex items-center justify-between">
-          <span className="text-12 font-medium">{label}</span>
-          <span className="text-11 text-muted-foreground">
+          <span className="type-row-title">{label}</span>
+          <span className="text-13 text-muted-foreground">
             {draft.length} selected
           </span>
         </div>
         {description && (
-          <p className="-mt-1.5 text-11 text-muted-foreground">{description}</p>
+          <p className="-mt-1.5 text-13 text-muted-foreground">{description}</p>
         )}
         <div className="relative">
           <Search className="absolute left-2.5 top-2 size-3.5 text-muted-foreground" />
@@ -152,7 +153,7 @@ export function FilterPicker({
                 <span className="min-w-0">
                   <span className="block truncate">{option.label}</span>
                   {option.detail && (
-                    <span className="block truncate text-10 text-muted-foreground">
+                    <span className="block truncate text-12 text-muted-foreground">
                       {option.detail}
                     </span>
                   )}
@@ -160,10 +161,10 @@ export function FilterPicker({
               </Button>
             ))}
             {options.options.length === 0 && (
-              <p className="p-2 text-12 text-muted-foreground">No matches.</p>
+              <p className="p-2 text-14 text-muted-foreground">No matches.</p>
             )}
             {options.total > options.options.length && (
-              <p className="text-10 text-muted-foreground">
+              <p className="text-12 text-muted-foreground">
                 Search to narrow {options.total.toLocaleString()} matches.
               </p>
             )}
@@ -245,21 +246,21 @@ export function AnalyticsSelect({
   return (
     <div
       className={cn(
-        "min-w-0",
-        inline ? "flex items-center gap-2" : "space-y-1.5",
+        "min-w-0 max-w-full",
+        inline ? "flex flex-wrap items-center gap-2" : "space-y-1.5",
       )}
     >
-      <label
+      <Label
         htmlFor={id}
-        className="whitespace-nowrap text-10 font-medium text-muted-foreground"
+        className="min-w-0 break-words text-muted-foreground"
       >
         {label}
-      </label>
+      </Label>
       <Select value={value} onValueChange={onChange}>
         <SelectTrigger
           id={id}
           aria-label={ariaLabel ?? label}
-          className={inline ? "w-40" : "w-full"}
+          className={inline ? "w-40 max-w-full" : "w-full"}
           style={inline ? { marginTop: 0 } : undefined}
         >
           <SelectValue />

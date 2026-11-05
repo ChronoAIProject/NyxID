@@ -711,6 +711,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id,
         invocation_id: None,
@@ -1009,6 +1010,10 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_task: None,
+            execution_permission: None,
             business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
@@ -1043,6 +1048,11 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) execution_group_id: Option<String>,
+    pub(crate) execution_unsupported: bool,
+    pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
+    pub(crate) execution_permission:
+        Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
     pub business_system_success: bool,
     /// Explicitly bound collaboration thread; never a private memory/account lane.
     pub collaboration_thread: bool,
@@ -1298,6 +1308,7 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+                    execution_task: None,
                     delegated_images: Default::default(),
                     media_event_ids: Vec::new(),
                     media_queue_notice_id: None,
@@ -1542,8 +1553,14 @@ pub async fn for_key_with_access(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
-    let resolved = if access.is_none() && agent.user_id != user {
-        super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
+    let resolved = if access.is_none() {
+        match super::org_channel_service::conversation_access(db, &conversation).await? {
+            Some(access) => Some(access),
+            None if agent.user_id != user => {
+                super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
+            }
+            None => None,
+        }
     } else {
         None
     };
@@ -1569,10 +1586,30 @@ pub async fn for_key_with_access(
         .filter(|turn| !turn.stop_requested);
     let turn_live = live.is_some();
     let shared = access.is_some_and(|a| a.shared().is_some());
+    let org_guest = access
+        .and_then(|a| a.channel())
+        .is_some_and(|c| c.execution().guest);
     let (report_to, with_nyxbot) = live
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        execution_group_id: conversation
+            .collaboration
+            .as_ref()
+            .map(|b| b.group_id.clone())
+            .or_else(|| conversation.group_id.clone()),
+        execution_unsupported: conversation.automation_thread
+            || conversation.platform_thread.is_some()
+            || conversation.active_turn.as_ref().is_some_and(|t| {
+                t.voice_request_id.is_some()
+                    || t.trigger_run_id.is_some()
+                    || t.channel_adapter_origin.is_some()
+            }),
+        execution_task: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.execution_task.clone()),
+        execution_permission: None,
         business_system_success: live.is_some_and(|turn| turn.business_system_success),
         collaboration_thread: conversation.collaboration.is_some(),
         channel_adapter_origin: conversation
@@ -1598,12 +1635,12 @@ pub async fn for_key_with_access(
         turn_live,
         report_to,
         with_nyxbot,
-        machine_node_ids: if shared {
+        machine_node_ids: if shared || org_guest {
             Vec::new()
         } else {
             agent.machine_node_ids.clone()
         },
-        saved_login_ids: if shared {
+        saved_login_ids: if shared || org_guest {
             Vec::new()
         } else {
             agent.saved_login_ids.clone()
@@ -1658,6 +1695,9 @@ pub(crate) async fn fence(
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
     super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
+    if let Some(task) = &chat.execution_task {
+        super::execution_permission_dispatch::tasks::fence(db, session, task).await?;
+    }
     if !super::assistant_invocation_service::fence_in_session(
         db,
         session,
@@ -1709,7 +1749,18 @@ pub(crate) async fn fence(
     }
     // Cards are execution authority. Human decisions and internal NyxBot paths
     // must enforce the same live org/group ACL as a new tool request.
-    let access = if row.collaboration.is_some() {
+    let access = if let Some(origin) = super::org_channel_service::origin(&row) {
+        let checked = Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            origin,
+            &row.user_id,
+            row.agent_id.as_deref().ok_or_else(not_found)?,
+            true,
+        ))
+        .await?;
+        Some(super::org_agent_service::RequestAccess::from_channel(db, checked).await?)
+    } else if row.collaboration.is_some() {
         // Human decisions have no inherited request snapshot. Resolve from the
         // concrete thread key so a foreign personal owner selects the shared
         // lane instead of the legacy organization-only owner-marker path.
@@ -2186,6 +2237,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id: super::machine_activity_service::activity_id(),
         invocation_id: None,
@@ -2282,6 +2334,15 @@ async fn request_candidate_in_session(
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
     let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    if access
+        .as_ref()
+        .and_then(|a| a.channel())
+        .is_some_and(|c| c.execution().guest)
+    {
+        return Err(AppError::Forbidden(
+            "Organization channel guests cannot request approvals".into(),
+        ));
+    }
     // Covers every permission kind, including machine/skill/scope
     // requests and internal callers without an auth snapshot.
     // Reuse the access already resolved or reused by the fence.
@@ -3093,6 +3154,14 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        execution_group_id: target
+            .collaboration
+            .as_ref()
+            .map(|b| b.group_id.clone())
+            .or_else(|| target.group_id.clone()),
+        execution_unsupported: false,
+        execution_task: row.execution_task.clone(),
+        execution_permission: None,
         business_system_success: false,
         collaboration_thread: target.collaboration.is_some(),
         channel_adapter_origin: None,

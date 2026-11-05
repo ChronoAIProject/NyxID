@@ -180,7 +180,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
             {form.formState.errors.root && (
-              <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+              <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                 {form.formState.errors.root.message}
               </div>
             )}
@@ -200,20 +200,20 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             />
 
             <div>
-              <p className="text-12 font-medium mb-1">Slug</p>
+              <p className="type-row-title mb-1">Slug</p>
               <Badge variant="secondary">{provider.slug}</Badge>
-              <p className="text-xs text-muted-foreground mt-1">
+              <p className="text-13 text-muted-foreground mt-1">
                 Slug cannot be changed after creation.
               </p>
             </div>
 
             <div>
-              <p className="text-12 font-medium mb-1">Provider Type</p>
+              <p className="type-row-title mb-1">Provider Type</p>
               <Badge variant="secondary">
                 {PROVIDER_TYPE_LABELS[provider.provider_type] ??
                   provider.provider_type}
               </Badge>
-              <p className="text-xs text-muted-foreground mt-1">
+              <p className="text-13 text-muted-foreground mt-1">
                 Provider type cannot be changed after creation.
               </p>
             </div>
@@ -226,7 +226,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -243,7 +243,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                 <FormItem className="flex items-center justify-between rounded-lg border p-3">
                   <div className="space-y-0.5">
                     <FormLabel>Active</FormLabel>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       Inactive providers will not be available for user
                       connections.
                     </p>
@@ -280,7 +280,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                         <SelectItem value="both">Admin or User</SelectItem>
                       </SelectContent>
                     </Select>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       Controls whether admin-configured or user-provided OAuth
                       credentials are used for connections.
                     </p>
@@ -324,10 +324,10 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isOAuth && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="type-card-title">
                   OAuth 2.0 Configuration
                 </h3>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Saved endpoint URLs are shown below.
                 </p>
 
@@ -385,7 +385,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Comma-separated list of scopes.
                       </p>
                       <FormMessage />
@@ -433,11 +433,11 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Only fill in if you want to change the client secret.
                       </p>
                       {!isAdmin && provider.has_client_secret && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Catalog Managers: on a provider someone else
                           created, URLs, credential mode and token settings
                           can change only before anyone has connected, and
@@ -458,7 +458,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem className="flex items-center justify-between rounded-lg border p-3">
                       <div className="space-y-0.5">
                         <FormLabel>Supports PKCE</FormLabel>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Enable Proof Key for Code Exchange.
                         </p>
                       </div>
@@ -478,7 +478,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                     <FormItem className="flex items-center justify-between rounded-lg border p-3">
                       <div className="space-y-0.5">
                         <FormLabel>Authorization nonce required</FormLabel>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Generate a fresh nonce for each hosted OAuth
                           authorization attempt.
                           Enable only when the provider requires it, after
@@ -500,10 +500,10 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isDeviceCode && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="type-card-title">
                   Device Code Configuration (RFC 8628)
                 </h3>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Saved endpoint URLs are shown below.
                 </p>
 
@@ -516,7 +516,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Endpoint to request a device code (RFC 8628 step 1).
                       </p>
                       <FormMessage />
@@ -533,7 +533,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <FormControl>
                         <Input placeholder="https://…" {...field} />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Endpoint to poll for token (RFC 8628 step 3).
                       </p>
                       <FormMessage />
@@ -581,7 +581,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Comma-separated list of scopes.
                       </p>
                       <FormMessage />
@@ -634,10 +634,10 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isTelegram && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="type-card-title">
                   Telegram Widget Configuration
                 </h3>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Leave the bot token blank to keep the current secret.
                 </p>
 
@@ -650,7 +650,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <FormControl>
                         <Input placeholder="NyxIdBot" {...field} />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Enter the BotFather username. A leading
                         <span> @</span> is optional.
                       </p>
@@ -677,7 +677,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Only fill this in when rotating the Telegram bot token.
                       </p>
                       <FormMessage />
@@ -690,7 +690,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             {isApiKey && (
               <>
                 <Separator className="my-2" />
-                <h3 className="text-13 font-semibold">
+                <h3 className="type-card-title">
                   API Key Configuration
                 </h3>
 
@@ -702,7 +702,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                       <FormLabel>API Key Instructions</FormLabel>
                       <FormControl>
                         <textarea
-                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                          className="flex min-h-[80px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                           placeholder="Instructions for users to obtain an API key"
                           {...field}
                         />
@@ -724,7 +724,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Link where users can generate an API key.
                       </p>
                       <FormMessage />
@@ -735,7 +735,7 @@ function ProviderEditForm({ source }: { readonly source: ProviderConfig }) {
             )}
 
             {(isOAuth || isDeviceCode) && (
-              <div className="space-y-2 rounded-md border border-border p-3 text-xs">
+              <div className="space-y-2 rounded-md border border-border p-3 text-13">
                 <p>
                   Token endpoint authentication:{" "}
                   {provider.token_endpoint_auth_method}

@@ -83,7 +83,8 @@ async fn complete_meter(
         return Ok(false);
     }
     if rows.iter().any(|row| {
-        row.billing_owner_id != ctx.billing_owner_id
+        row.org_channel_guest != ctx.org_channel_guest.as_ref().map(|g| g.usage())
+            || row.billing_owner_id != ctx.billing_owner_id
             || row.actor_user_id != ctx.actor_user_id
             || row.api_key_id != ctx.api_key_id
             || row.service_id.as_deref()
@@ -725,6 +726,7 @@ pub(super) fn reserved_row(
         .then(|| ctx.operation.clone())
         .flatten();
     UsageMeterRow {
+        org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,

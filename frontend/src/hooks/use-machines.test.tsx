@@ -302,7 +302,7 @@ describe("Remote Machine owner HTTP hooks", () => {
       });
       expect(JSON.parse(config?.body as string)).toEqual(createBody);
     }
-    expect(result.current.data?.replayed).toBe(true);
+    await waitFor(() => expect(result.current.data?.replayed).toBe(true));
     client.clear();
   });
 

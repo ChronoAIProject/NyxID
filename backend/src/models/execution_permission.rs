@@ -12,6 +12,40 @@ pub const LEGACY_SCOPE: &str = "execution:v1";
 pub const PERSISTENT_TTL_SECONDS: i64 = 253_402_300_799;
 pub const TERMINAL_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
+/// Only operation permissions carry this record. Unknown versions never dispatch.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ExecutionUse {
+    pub version: u32,
+    pub operation_id: String,
+    pub prepared_digest: String,
+    pub claim_id: String,
+    pub state: ExecutionUseState,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub claimed_at: DateTime<Utc>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub dispatched_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for ExecutionUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionUse")
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionUseState {
+    Claimed,
+    Dispatched,
+    Completed,
+    NotSent,
+    Unknown,
+}
+
 /// Unknown versions remain readable for inspection/revocation but cannot cover
 /// execution. Future versions must use their own payload, not reinterpret v1.
 #[derive(Clone, Serialize, Deserialize)]
@@ -113,6 +147,20 @@ pub enum ConversationScope {
 pub struct TaskRef {
     pub root_kind: TaskRootKind,
     pub root_id: String,
+}
+
+/// Persisted on existing roots and their server-admitted descendants only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskAdmission {
+    pub version: u32,
+    pub task: TaskRef,
+    pub actor_user_id: String,
+    pub audience: Audience,
+    pub epoch: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub hard_deadline: DateTime<Utc>,
+    pub cancelled: bool,
+    pub parent_turn_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

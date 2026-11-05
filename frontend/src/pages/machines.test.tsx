@@ -14,6 +14,7 @@ const state = vi.hoisted(() => ({
   machine: undefined as string | undefined,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   useSearch: () => ({ tab: state.tab, machine: state.machine }),
   useNavigate: () => state.navigate,
   Link: ({

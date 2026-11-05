@@ -62,7 +62,7 @@ export function WizardShell({
           <NyxidLogo className="h-9 w-auto short:h-7 very-short:h-6" />
         </div>
         {step ? (
-          <div className="text-12 text-muted-foreground">{formatStepLabel(step)}</div>
+          <div className="text-14 text-muted-foreground">{formatStepLabel(step)}</div>
         ) : null}
       </header>
       {/*

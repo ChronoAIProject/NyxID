@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type Ref } from "react";
 import {
   ScrollView,
   StyleSheet,
@@ -32,10 +32,13 @@ export function ScrollEdgeFades({
   edges,
   color,
   horizontal = false,
+  page = false,
 }: {
   edges: ScrollEdges;
   color: string;
   horizontal?: boolean;
+  /** Full-page scrollers get a taller, softer fade than inline fields. */
+  page?: boolean;
 }) {
   return (
     <View
@@ -50,7 +53,7 @@ export function ScrollEdgeFades({
           colors={[color, `${color}00`]}
           start={{ x: 0, y: 0 }}
           end={horizontal ? { x: 1, y: 0 } : { x: 0, y: 1 }}
-          style={horizontal ? styles.left : styles.top}
+          style={horizontal ? styles.left : page ? styles.pageTop : styles.top}
         />
       )}
       {edges.end && (
@@ -59,7 +62,7 @@ export function ScrollEdgeFades({
           colors={[`${color}00`, color]}
           start={{ x: 0, y: 0 }}
           end={horizontal ? { x: 1, y: 0 } : { x: 0, y: 1 }}
-          style={horizontal ? styles.right : styles.bottom}
+          style={horizontal ? styles.right : page ? styles.pageBottom : styles.bottom}
         />
       )}
     </View>
@@ -107,7 +110,61 @@ export function OverflowScrollView({
     </View>
   );
 }
+/**
+ * The scroller for whole pages and pull-up sheets: when content is clipped at
+ * the top or bottom, a subtle fade into the page colour says there is more.
+ * Pages get this by default through SettingsPage and WorkspacePage.
+ */
+export function PageScrollView({
+  children,
+  fadeColor,
+  scrollRef,
+  ...props
+}: ScrollViewProps & { fadeColor: string; scrollRef?: Ref<ScrollView> }) {
+  const overflow = useScrollEdges();
+  return (
+    <View style={styles.page}>
+      <ScrollView
+        ref={scrollRef}
+        {...props}
+        scrollEventThrottle={32}
+        onLayout={(event) => {
+          props.onLayout?.(event);
+          overflow.layout(event.nativeEvent.layout.height);
+        }}
+        onContentSizeChange={(width, height) => {
+          props.onContentSizeChange?.(width, height);
+          overflow.content(height);
+        }}
+        onScroll={(event) => {
+          props.onScroll?.(event);
+          overflow.scroll(event.nativeEvent.contentOffset.y);
+        }}
+      >
+        {children}
+      </ScrollView>
+      <ScrollEdgeFades edges={overflow.edges} color={fadeColor} page />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
+  page: { flex: 1, minHeight: 0 },
+  pageTop: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 18,
+    opacity: 0.8,
+  },
+  pageBottom: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 32,
+  },
   top: {
     position: "absolute",
     top: 0,

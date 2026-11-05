@@ -14,8 +14,8 @@ const { extractPathFromURL } = require(path.join(navigationRoot, "lib/module/ext
 
 const newDomains = {
   appScheme: "nyxid",
-  apiBaseUrl: "https://api.nyxid.ai/api/v1",
-  frontendUrl: "https://nyxid.ai",
+  apiBaseUrls: ["https://api.nyxid.ai/api/v1"],
+  frontendUrls: ["https://nyxid.ai"],
   universalLinkHost: "nyxid.ai",
   allowHttp: false,
 };
@@ -27,6 +27,17 @@ test("routes selected frontend, backend and custom-scheme device-login links", (
       extractPathFromURL(prefixes, `${origin}login/device?user_code=ABCD-EFGH`),
       "login/device?user_code=ABCD-EFGH",
     );
+  }
+});
+
+test("routes every embedded domain set so native links work before and after the switch", () => {
+  const prefixes = buildLinkingPrefixes({
+    ...newDomains,
+    apiBaseUrls: ["https://nyx-api.chrono-ai.fun/api/v1", "https://api.nyxid.ai/api/v1"],
+    frontendUrls: ["https://nyx.chrono-ai.fun", "https://nyxid.ai"],
+  });
+  for (const origin of ["https://nyx-api.chrono-ai.fun/", "https://api.nyxid.ai/", "https://nyx.chrono-ai.fun/", "https://nyxid.ai/"]) {
+    assert.equal(extractPathFromURL(prefixes, `${origin}login/device`), "login/device");
   }
 });
 
@@ -48,8 +59,8 @@ test("routes an explicit link host and development HTTP origins", () => {
   const prefixes = buildLinkingPrefixes({
     ...newDomains,
     appScheme: "nyxid-dev",
-    apiBaseUrl: "http://localhost:3001/api/v1",
-    frontendUrl: "http://localhost:3000",
+    apiBaseUrls: ["http://localhost:3001/api/v1"],
+    frontendUrls: ["http://localhost:3000"],
     universalLinkHost: "dev-links.example.com",
     allowHttp: true,
   });
@@ -59,7 +70,7 @@ test("routes an explicit link host and development HTTP origins", () => {
 });
 
 test("ignores empty or invalid optional URL inputs", () => {
-  const prefixes = buildLinkingPrefixes({ ...newDomains, apiBaseUrl: "invalid", frontendUrl: "", universalLinkHost: "" });
+  const prefixes = buildLinkingPrefixes({ ...newDomains, apiBaseUrls: ["invalid"], frontendUrls: [""], universalLinkHost: "" });
   assert.equal(extractPathFromURL(prefixes, "nyxid://login/device"), "login/device");
   assert.equal(extractPathFromURL(prefixes, "https://nyxid.ai/login/device"), undefined);
 });

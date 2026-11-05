@@ -1,3 +1,4 @@
+import { executionProposalSchema } from "./execution-proposal";
 import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
@@ -267,6 +268,7 @@ export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSche
 /// A pending proxy approval raised by the chat's key; decided through the
 /// ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  execution_proposal: executionProposalSchema.nullish(),
   status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
   review_path: z.string().optional(),
   id: z.string(),
@@ -687,8 +689,19 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  org_specialist: z
+    .object({
+      org_id: z.string(),
+      guest_enabled: z.boolean(),
+      delegated_service_ids: z.array(z.string()),
+      daily_credits: z.string().nullish(),
+    })
+    .optional(),
   guest_readiness: guestReadinessSchema.nullish(),
-  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
+  follow_readiness: z
+    .enum(["ready", "unavailable"])
+    .catch("unavailable")
+    .optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),

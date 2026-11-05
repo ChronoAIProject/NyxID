@@ -121,6 +121,7 @@ pub mod event_dedup_cache;
 pub mod exact_service_approval_service;
 pub mod execution_authority;
 pub mod execution_permission;
+pub mod execution_permission_dispatch;
 pub mod feature_flag_admin_service;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
@@ -552,3 +553,4 @@ pub mod monitoring_service;
 pub mod assistant_delegated_images;
 
 pub mod cma_session_origin;
+pub mod org_channel_service;

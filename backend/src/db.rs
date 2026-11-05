@@ -1495,6 +1495,31 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .await?;
     ensure_exact_service_semantic_effect_index(&approval_requests).await?;
 
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v1.effect_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("execution_proposal_effect_v1".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v1.effect_id":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc! {"execution_proposal.version":1,"execution_proposal.v1.delivered_turn_id":1,"execution_proposal.v1.maintenance_at":1,"created_at":1}).build()).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v1.gap_key":1,"created_at":-1})
+                .build(),
+        )
+        .await?;
+
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants
@@ -1528,6 +1553,13 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+
+    // Additive candidate lookup; the existing expires_at TTL remains unchanged.
+    approval_grants.create_index(IndexModel::builder()
+        .keys(doc! {"execution.v1.subject.actor_user_id":1,"execution.v1.subject.principal":1,"execution.v1.binding.connection_id":1})
+        .options(IndexOptions::builder().name("execution_permission_candidates_v1".to_owned())
+            .partial_filter_expression(doc! {"execution.version":{"$exists":true}}).build())
+        .build()).await?;
 
     // ── service_approval_configs ──
     let sac = db.collection::<mongodb::bson::Document>("service_approval_configs");
@@ -3027,6 +3059,7 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
 
     ensure_feature_flag_indexes(db).await?;
     crate::services::shared_agent_service::ensure_indexes(db).await?;
+    crate::services::org_channel_service::ensure_indexes(db).await?;
 
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");

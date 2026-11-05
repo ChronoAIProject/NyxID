@@ -310,7 +310,7 @@ async fn guest_setup_backoff_crash_and_guest_force_cannot_bypass_cooldown() {
     let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();
-    let (_, row) = claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT)
+    let (_, row) = claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT, None)
         .await
         .unwrap()
         .unwrap();
@@ -336,7 +336,7 @@ async fn guest_setup_backoff_crash_and_guest_force_cannot_bypass_cooldown() {
     delay(&failed, 240);
     sweep(&f.state).await.unwrap();
     assert!(
-        claim(&f.state, &f.owner, &agent, &agent.model, true, WAIT)
+        claim(&f.state, &f.owner, &agent, &agent.model, true, WAIT, None)
             .await
             .unwrap()
             .is_none()
@@ -352,7 +352,7 @@ async fn guest_setup_backoff_crash_and_guest_force_cannot_bypass_cooldown() {
     // A new worker after the cooldown inherits the count, but not dispatch.
     rows.update_one(doc! {"_id":failed.get_str("_id").unwrap()},
         doc! {"$set":{"until":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
-    let (_, retry) = claim(&f.state, &f.owner, &agent, &agent.model, true, WAIT)
+    let (_, retry) = claim(&f.state, &f.owner, &agent, &agent.model, true, WAIT, None)
         .await
         .unwrap()
         .unwrap();
@@ -388,7 +388,7 @@ async fn guest_setup_backoff_crash_and_guest_force_cannot_bypass_cooldown() {
         .unwrap();
     assert_eq!(reset.get_i64("model_failures"), Ok(0));
     delay(&reset, 0);
-    let (_, next) = claim(&f.state, &f.owner, &agent, &agent.model, true, WAIT)
+    let (_, next) = claim(&f.state, &f.owner, &agent, &agent.model, true, WAIT, None)
         .await
         .unwrap()
         .unwrap();

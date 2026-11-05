@@ -29,7 +29,7 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
       ? "An administrator may need to check the manager configuration."
       : undefined;
   return (
-    <div className="space-y-3 text-xs text-muted-foreground">
+    <div className="space-y-3 text-13 text-muted-foreground">
       <p role="status" aria-live="polite">{text}{reason ? ` ${reason}` : ""}</p>
       {request.can_open_creation_form && !recoveryUnexpired && <p role="status">This setup expired. Refresh its progress before continuing.</p>}
       {request.status === "waiting_bot" && <p>Waiting for a verified bot creation from the Telegram account that opened this setup.</p>}

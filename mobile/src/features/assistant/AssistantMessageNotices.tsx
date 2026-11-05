@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
-import { Label, Notice } from "../../components/workspace/WorkspaceUI";
+import { ArrowUpRight, ChevronDown, ChevronUp, CircleAlert } from "lucide-react-native";
+import { Label } from "../../components/workspace/WorkspaceUI";
+import { FirstLineIcon } from "../../components/workspace/FirstLineIcon";
 import { useTheme } from "../../theme/ThemeContext";
-import { TOUCH_TARGET } from "../../theme/designTokens";
+import { TOUCH_TARGET, fonts } from "../../theme/designTokens";
 import type { AssistantMessage } from "./assistantTypes";
 import {
   diagnosticId,
@@ -12,6 +14,8 @@ import {
   steeringNotice,
   storedError,
 } from "./assistantTurnPresentation";
+
+const ERROR_LINE = 19;
 
 export function AssistantMessageNotices({
   message,
@@ -61,21 +65,39 @@ export function AssistantMessageNotices({
         </Label>
       ) : null}
       {error ? (
-        <Notice
-          tone="error"
-          message={storedError(message.error_code, detail?.capacity_wait_ms)}
-        />
+        // One compact line instead of a full-width alert box.
+        <View
+          accessibilityRole="alert"
+          style={[styles.error, { backgroundColor: colors.dangerSoftBg }]}
+        >
+          <FirstLineIcon lineHeight={ERROR_LINE} maxFontScale={1.4}>
+            <CircleAlert size={15} color={colors.danger} />
+          </FirstLineIcon>
+          <Label
+            maxFontSizeMultiplier={1.4}
+            style={[styles.errorText, { color: colors.danger }]}
+          >
+            {storedError(message.error_code, detail?.capacity_wait_ms)}
+          </Label>
+        </View>
       ) : null}
-      {error && billingCodes.includes(message.error_code ?? "") ? (
-        <QuietButton label="Billing & Usage" onPress={onOpenBilling} />
+      {error &&
+      (billingCodes.includes(message.error_code ?? "") || detail) ? (
+        <View style={styles.actions}>
+          {billingCodes.includes(message.error_code ?? "") ? (
+            <QuietButton label="Usage & credits" opens onPress={onOpenBilling} />
+          ) : null}
+          {detail ? (
+            <QuietButton
+              label={details ? "Hide details" : "Details"}
+              expanded={details}
+              onPress={() => setDetails((value) => !value)}
+            />
+          ) : null}
+        </View>
       ) : null}
       {error && detail ? (
         <>
-          <QuietButton
-            label="Details"
-            expanded={details}
-            onPress={() => setDetails((value) => !value)}
-          />
           {details ? (
             <View style={[styles.details, { borderColor: colors.border }]}>
               {failure?.source === "nyxid" &&
@@ -160,16 +182,26 @@ export function AssistantMessageNotices({
     </View>
   );
 }
+/** A compact secondary button for in-chat follow-ups; rows of them wrap. */
+/**
+ * A compact secondary button. With `expanded` it is a disclosure for an
+ * in-chat panel and shows a chevron that turns as it opens; with `opens` it
+ * leaves the chat (a page or sheet) and shows an arrow.
+ */
 export function QuietButton({
   label,
   onPress,
   expanded,
+  opens,
   disabled,
+  icon,
 }: {
   label: string;
   onPress: () => void;
   expanded?: boolean;
+  opens?: boolean;
   disabled?: boolean;
+  icon?: ReactNode;
 }) {
   const { colors } = useTheme();
   return (
@@ -178,28 +210,68 @@ export function QuietButton({
       accessibilityLabel={label}
       accessibilityState={{ expanded, disabled }}
       disabled={disabled}
+      hitSlop={{ top: 7, bottom: 7 }}
       onPress={onPress}
-      style={styles.button}
+      style={({ pressed }) => [
+        styles.button,
+        {
+          backgroundColor: pressed ? colors.navActive : colors.card,
+          borderColor: colors.controlBorder,
+          shadowColor: colors.shadowColor,
+          opacity: disabled ? 0.5 : 1,
+        },
+      ]}
     >
+      {icon}
       <Label
+        maxFontSizeMultiplier={1.3}
         style={{
-          color: disabled ? colors.textMuted : colors.textSecondary,
-          fontSize: 12,
-          textDecorationLine: "underline",
+          color: colors.textPrimary,
+          fontFamily: fonts.bodySemi,
+          fontSize: 13,
+          lineHeight: 17,
         }}
       >
         {label}
       </Label>
+      {expanded === undefined ? (
+        opens ? (
+          <ArrowUpRight size={14} color={colors.textSecondary} />
+        ) : null
+      ) : expanded ? (
+        <ChevronUp size={14} color={colors.textSecondary} />
+      ) : (
+        <ChevronDown size={14} color={colors.textSecondary} />
+      )}
     </Pressable>
   );
 }
 const styles = StyleSheet.create({
-  container: { gap: 4 },
+  container: { gap: 6 },
+  error: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 8,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  errorText: { flex: 1, fontSize: 14, lineHeight: ERROR_LINE },
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   details: { padding: 10, borderRadius: 8, borderWidth: 1, gap: 4 },
+  // A compact secondary button: white surface, control edge, soft lift.
   button: {
-    minHeight: TOUCH_TARGET,
-    justifyContent: "center",
+    minHeight: TOUCH_TARGET - 10,
+    flexDirection: "row",
+    alignItems: "center",
     alignSelf: "flex-start",
-    paddingHorizontal: 3,
+    gap: 6,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 1,
   },
 });

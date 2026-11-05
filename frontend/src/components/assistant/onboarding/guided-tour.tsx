@@ -2,11 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { capture } from "@/lib/telemetry";
+import { computedTextSize } from "@/lib/typography";
 import { ASSISTANT_TOUR, type TourStep } from "./guided-tour-steps";
-
-const PAD = 6;
-const GAP = 12;
-const CARD_WIDTH = 300;
 
 function visibleTarget(name: string): HTMLElement | undefined {
   return [...document.querySelectorAll<HTMLElement>(`[data-tour="${name}"]`)].find((element) => {
@@ -20,33 +17,35 @@ interface Placement {
   readonly card: { top: number; left: number };
 }
 
-function place(element: HTMLElement, cardHeight: number): Placement {
+function place(element: HTMLElement, width: number, cardHeight: number): Placement {
+  const unit = computedTextSize(16);
+  const pad = unit * 0.375;
+  const gap = unit * 0.75;
   const box = element.getBoundingClientRect();
   // Keep the spotlight on screen, so a full-height target (the sidebar) is
   // outlined whole.
-  const shownTop = Math.max(box.top, PAD);
-  const shownLeft = Math.max(box.left, PAD);
+  const shownTop = Math.max(box.top, pad);
+  const shownLeft = Math.max(box.left, pad);
   const rect = {
     top: shownTop,
     left: shownLeft,
-    width: Math.min(box.right, window.innerWidth - PAD) - shownLeft,
-    height: Math.min(box.bottom, window.innerHeight - PAD) - shownTop,
+    width: Math.min(box.right, window.innerWidth - pad) - shownLeft,
+    height: Math.min(box.bottom, window.innerHeight - pad) - shownTop,
   };
   const hole = {
-    top: rect.top - PAD,
-    left: rect.left - PAD,
-    width: rect.width + PAD * 2,
-    height: rect.height + PAD * 2,
+    top: rect.top - pad,
+    left: rect.left - pad,
+    width: rect.width + pad * 2,
+    height: rect.height + pad * 2,
   };
-  const width = Math.min(CARD_WIDTH, window.innerWidth - 2 * GAP);
-  const clampLeft = (left: number) => Math.min(Math.max(GAP, left), window.innerWidth - width - GAP);
-  const clampTop = (top: number) => Math.min(Math.max(GAP, top), window.innerHeight - cardHeight - GAP);
+  const clampLeft = (left: number) => Math.min(Math.max(gap, left), window.innerWidth - width - gap);
+  const clampTop = (top: number) => Math.min(Math.max(gap, top), window.innerHeight - cardHeight - gap);
   // Beside narrow targets (the sidebar), otherwise above or below.
-  if (hole.left + hole.width + GAP + width <= window.innerWidth && rect.width < window.innerWidth / 3) {
-    return { hole, card: { left: hole.left + hole.width + GAP, top: clampTop(rect.top) } };
+  if (hole.left + hole.width + gap + width <= window.innerWidth && rect.width < window.innerWidth / 3) {
+    return { hole, card: { left: hole.left + hole.width + gap, top: clampTop(rect.top) } };
   }
-  const below = hole.top + hole.height + GAP;
-  const top = below + cardHeight <= window.innerHeight - GAP ? below : hole.top - GAP - cardHeight;
+  const below = hole.top + hole.height + gap;
+  const top = below + cardHeight <= window.innerHeight - gap ? below : hole.top - gap - cardHeight;
   return { hole, card: { left: clampLeft(rect.left), top: clampTop(top) } };
 }
 
@@ -106,12 +105,13 @@ export function GuidedTour({
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const target = visibleTarget(step.target);
-        if (target) setPlacement(place(target, card.current?.offsetHeight ?? 160));
+        if (target && card.current) setPlacement(place(target, card.current.offsetWidth, card.current.offsetHeight));
       });
     };
     update();
     const observer = new ResizeObserver(update);
     observer.observe(element);
+    if (card.current) observer.observe(card.current);
     window.addEventListener("resize", update);
     window.addEventListener("scroll", update, true);
     return () => {
@@ -181,7 +181,7 @@ export function GuidedTour({
                   y={placement.hole.top}
                   width={placement.hole.width}
                   height={placement.hole.height}
-                  rx={12}
+                  rx="0.75rem"
                   fill="black"
                 />
               </mask>
@@ -202,27 +202,26 @@ export function GuidedTour({
         aria-labelledby="guided-tour-title"
         aria-describedby="guided-tour-body"
         tabIndex={-1}
-        className="absolute space-y-2 rounded-xl border border-border bg-popover p-4 shadow-xl outline-none transition-[top,left] duration-300 ease-out animate-in fade-in-0 zoom-in-95 motion-reduce:transition-none motion-reduce:animate-none"
+        className="absolute max-h-[calc(100dvh-1.5rem)] w-[min(18.75rem,calc(100vw-1.5rem))] space-y-2 overflow-y-auto rounded-xl border border-border bg-popover p-4 shadow-xl outline-none transition-[top,left] duration-300 ease-out animate-in fade-in-0 zoom-in-95 motion-reduce:transition-none motion-reduce:animate-none"
         style={{
-          width: Math.min(CARD_WIDTH, window.innerWidth - 2 * GAP),
           top: placement?.card.top ?? -9999,
           left: placement?.card.left ?? -9999,
         }}
       >
-        <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+        <p className="type-group-label uppercase tracking-[0.125em] text-text-tertiary">
           {index + 1} of {available.length}
         </p>
-        <h2 id="guided-tour-title" className="text-13 font-semibold text-foreground">
+        <h2 id="guided-tour-title" className="type-card-title text-foreground">
           {step.title}
         </h2>
-        <p id="guided-tour-body" className="text-12 leading-relaxed text-muted-foreground">
+        <p id="guided-tour-body" className="text-14 text-muted-foreground">
           {step.body}
         </p>
-        <div className="flex items-center gap-2 pt-1">
+        <div className="flex flex-wrap items-center gap-2 pt-1">
           <Button variant="ghost" size="sm" onClick={() => finish(false)}>
             End tour
           </Button>
-          <div className="ml-auto flex gap-2">
+          <div className="ml-auto flex flex-wrap justify-end gap-2">
             {index > 0 ? (
               <Button variant="outline" size="sm" onClick={() => setIndex(index - 1)}>
                 Back

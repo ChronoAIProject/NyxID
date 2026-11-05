@@ -1,3 +1,4 @@
+import { Label, FieldHelp } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -168,10 +169,10 @@ export function DevicesOnboardPage() {
         style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
       >
         <header className="flex flex-col gap-1">
-          <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">
+          <h1 className="type-section-heading text-foreground sm:type-metric">
             Onboard device
           </h1>
-          <p className="break-words text-13 text-muted-foreground">
+          <p className="break-words text-15 text-muted-foreground">
             Generate a one-scan provisioning QR for a headless device.
           </p>
         </header>
@@ -224,7 +225,7 @@ export function DevicesOnboardPage() {
                           }}
                         >
                           <FormControl>
-                            <SelectTrigger className="h-11 text-sm">
+                            <SelectTrigger className="h-11 text-14">
                               <SelectValue placeholder="Personal account" />
                             </SelectTrigger>
                           </FormControl>
@@ -253,7 +254,7 @@ export function DevicesOnboardPage() {
                         <FormControl>
                           <Input
                             {...field}
-                            className="h-11 text-sm"
+                            className="h-11 text-14"
                             maxLength={128}
                             placeholder="Kitchen Camera"
                             value={field.value ?? ""}
@@ -275,7 +276,7 @@ export function DevicesOnboardPage() {
                             <Input
                               {...field}
                               autoComplete="off"
-                              className="h-11 text-sm"
+                              className="h-11 text-14"
                               maxLength={32}
                               placeholder="MyHomeNetwork"
                               value={field.value ?? ""}
@@ -296,7 +297,7 @@ export function DevicesOnboardPage() {
                             <Input
                               {...field}
                               autoComplete="off"
-                              className="h-11 text-sm"
+                              className="h-11 text-14"
                               maxLength={63}
                               minLength={8}
                               placeholder="At least 8 characters"
@@ -340,18 +341,18 @@ export function DevicesOnboardPage() {
                           <FormLabel>
                             Grant proxy access to (optional)
                           </FormLabel>
-                          <FormDescription className="text-12 leading-relaxed">
+                          <FormDescription className="text-14">
                             Pick which of your services this device should be
                             allowed to proxy through. You can add more later
                             from the API Keys page.
                           </FormDescription>
                           <div className="relative max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                             {isServicesLoading ? (
-                              <p className="px-2 py-3 text-12 text-muted-foreground">
+                              <p className="px-2 py-3 text-14 text-muted-foreground">
                                 Loading services...
                               </p>
                             ) : grantableServices.length === 0 ? (
-                              <p className="px-2 py-3 text-12 text-muted-foreground">
+                              <p className="px-2 py-3 text-14 text-muted-foreground">
                                 {selectedOwner
                                   ? "This org has no services available for device access."
                                   : "Your personal account has no services available for device access."}
@@ -382,17 +383,17 @@ export function DevicesOnboardPage() {
                                           )
                                         }
                                       />
-                                      <label
+                                      <Label
                                         htmlFor={checkboxId}
                                         className="min-w-0 flex-1 cursor-pointer"
                                       >
-                                        <span className="block truncate text-13 font-medium text-foreground">
+                                        <span className="block truncate text-foreground">
                                           {service.label}
                                         </span>
-                                        <span className="block truncate font-mono text-12 text-muted-foreground">
+                                        <FieldHelp variant="body" className="block truncate font-mono text-muted-foreground">
                                           {service.slug}
-                                        </span>
-                                      </label>
+                                        </FieldHelp>
+                                      </Label>
                                     </div>
                                   );
                                 })
@@ -404,7 +405,7 @@ export function DevicesOnboardPage() {
                     }}
                   />
 
-                  <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-12 leading-relaxed text-muted-foreground">
+                  <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-14 text-muted-foreground">
                     Your WiFi password stays in this browser. NyxID receives
                     only the owner, label, and optional service grants needed to
                     create a short-lived bootstrap token.
@@ -412,7 +413,7 @@ export function DevicesOnboardPage() {
 
                   <div className="flex justify-end">
                     <Button
-                      className="h-11 w-full text-sm sm:w-auto"
+                      className="h-11 w-full text-14 sm:w-auto"
                       disabled={onboardDevice.isPending}
                       isLoading={onboardDevice.isPending}
                       type="submit"
@@ -473,13 +474,13 @@ function OnboardSuccess({
               src={qrDataUrl}
             />
           ) : (
-            <div className="flex h-[360px] w-full max-w-[360px] items-center justify-center text-13 text-muted-foreground">
+            <div className="flex h-[360px] w-full max-w-[360px] items-center justify-center text-15 text-muted-foreground">
               {qrError ? "QR code rendering failed." : "Rendering QR..."}
             </div>
           )}
         </div>
 
-        <dl className="grid gap-3 text-13 sm:grid-cols-2">
+        <dl className="grid gap-3 text-15 sm:grid-cols-2">
           <DetailRow label="Device" value={device.label} />
           <DetailRow
             label="Bootstrap"
@@ -490,7 +491,7 @@ function OnboardSuccess({
 
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button
-            className="h-11 w-full text-sm sm:w-auto"
+            className="h-11 w-full text-14 sm:w-auto"
             disabled={isRevoking}
             isLoading={isRevoking}
             onClick={onRevoke}
@@ -503,7 +504,7 @@ function OnboardSuccess({
             Revoke QR
           </Button>
           <Button
-            className="h-11 w-full text-sm sm:w-auto"
+            className="h-11 w-full text-14 sm:w-auto"
             disabled={!qrDataUrl}
             onClick={onPrint}
             type="button"
@@ -529,10 +530,10 @@ function DetailRow({
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/30 px-3 py-2">
-      <dt className="text-11 font-medium uppercase text-muted-foreground">
+      <dt className="type-secondary-emphasis uppercase text-muted-foreground">
         {label}
       </dt>
-      <dd className="mt-1 truncate font-mono text-13 text-foreground">
+      <dd className="mt-1 truncate font-mono text-15 text-foreground">
         {value}
       </dd>
     </div>

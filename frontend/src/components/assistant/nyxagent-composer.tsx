@@ -86,7 +86,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVo
         disabled={connectionLocked} />
       {connection && <ComposerConnectionChip connection={connection} unavailable={connectionUnavailable}
         disabled={connectionLocked} onRemove={() => setConnection(undefined)} />}
-      {notice && <div className="mb-2 ml-[30px] text-12 text-muted-foreground" role="status">
+      {notice && <div className="mb-2 ml-[30px] text-14 text-muted-foreground" role="status">
       <p>{steeringNotice(notice.code, notice.outcome)}</p>
       {notice.code === "no_active_turn" && notice.text && <Button type="button" size="sm" variant="outline"
         disabled={submitting || props.active}

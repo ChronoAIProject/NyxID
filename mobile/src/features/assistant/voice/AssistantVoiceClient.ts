@@ -23,14 +23,13 @@ import {
 export type VoiceMediaEvent =
   | { type: "provider-ready" }
   | { type: "pcm"; bytes: ArrayBuffer }
+  /** Mic and playback loudness, 0..1, about 20 Hz while either changes. */
+  | { type: "level"; input: number; output: number }
   | { type: "error"; message: string };
 
 /** Ephemeral device media only; this adapter never receives account credentials. */
 export interface VoiceMediaAdapter {
-  prepare(
-    protocol: VoiceProtocol | "dictation",
-    signal: AbortSignal,
-  ): Promise<string>;
+  prepare(protocol: VoiceProtocol, signal: AbortSignal): Promise<string>;
   answer(sdp: string): Promise<void>;
   setInput(enabled: boolean): void;
   hold(pressed: boolean): void;
@@ -284,7 +283,11 @@ export class AssistantVoiceClient {
       this.fail(
         "Voice media stopped. Check microphone permission and start a new call.",
       );
-    } else if (this.protocol === "xai_realtime" && this.inputEnabled) {
+    } else if (
+      event.type === "pcm" &&
+      this.protocol === "xai_realtime" &&
+      this.inputEnabled
+    ) {
       const bytes = event.bytes;
       if (
         !bytes.byteLength ||
@@ -496,6 +499,22 @@ export class AssistantVoiceClient {
     this.options.media.hold(pressed);
     this.updateInput();
     return this.held;
+  }
+
+  /**
+   * Switch Hands-free / Hold to talk during a call. OpenAI listens for turns
+   * itself, so the mode only decides whether the microphone stays open; Grok
+   * runs on explicit hold events and stays Hold to talk.
+   */
+  setInputMode(mode: VoicePreferences["input_mode"]): boolean {
+    if (this.closed || !this.preferences) return false;
+    if (this.protocol === "xai_realtime" && mode !== "push_to_talk")
+      return false;
+    if (this.preferences.input_mode === mode) return true;
+    if (this.held) this.hold(false);
+    this.preferences = { ...this.preferences, input_mode: mode };
+    this.updateInput();
+    return true;
   }
 
   muteSpeaker(muted: boolean) {

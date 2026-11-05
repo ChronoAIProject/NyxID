@@ -61,7 +61,9 @@ export function ApprovalGrantsPage() {
     (configData?.dominant_org_policies?.length ?? 0) > 0;
   const grantModeStatusUnavailable = Boolean(configsError);
   const grantModeKnownOff =
-    !hasGrantModeService && !hasDominantOrgPolicies && !grantModeStatusUnavailable;
+    !hasGrantModeService &&
+    !hasDominantOrgPolicies &&
+    !grantModeStatusUnavailable;
 
   const revokeTarget = grants.find((g) => g.id === revokeGrantId);
 
@@ -116,25 +118,27 @@ export function ApprovalGrantsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-2">
-            <p className="text-12 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               {grantModeStatusUnavailable
                 ? "Policy Status Unavailable"
                 : grantModeKnownOff
                   ? "Grant Mode Is Off"
                   : "No Active Grants"}
             </p>
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               {grantModeStatusUnavailable
                 ? "No grants are active, but approval policy status could not be loaded."
                 : hasGrantModeService
-                ? "Your grant-enabled services have no active grants. Grants appear here after an approval is granted."
-                : grantModeKnownOff
-                  ? "All configured services use per-request approval. Enable time-based grant mode for a service to create standing approvals."
-                  : "No grants are active. Organization policies are managed by an org admin and may define grant mode separately."}
+                  ? "Your grant-enabled services have no active grants. Grants appear here after an approval is granted."
+                  : grantModeKnownOff
+                    ? "All configured services use per-request approval. Enable time-based grant mode for a service to create standing approvals."
+                    : "No grants are active. Organization policies are managed by an org admin and may define grant mode separately."}
             </p>
             {(grantModeKnownOff || hasDominantOrgPolicies) && (
               <Button asChild variant="outline" className="mt-2">
-                <Link to="/approvals/settings">Configure approval policies</Link>
+                <Link to="/approvals/settings">
+                  Configure approval policies
+                </Link>
               </Button>
             )}
           </div>
@@ -160,7 +164,7 @@ export function ApprovalGrantsPage() {
                   </Button>
                 </div>
                 <div className="flex min-w-0 items-center gap-2 pr-10">
-                  <p className="truncate text-13 font-semibold text-foreground">
+                  <p className="truncate type-card-title text-foreground">
                     {grant.service_name}
                   </p>
                   {grant.org_scoped && (
@@ -173,17 +177,25 @@ export function ApprovalGrantsPage() {
                     </Badge>
                   )}
                 </div>
-                <p className="text-11 text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {grant.requester_label ?? grant.requester_type}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {isExpiringSoon(grant.expires_at) && (
+                  {!grant.execution && isExpiringSoon(grant.expires_at) && (
                     <Badge variant="warning">Expiring soon</Badge>
                   )}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                {grant.execution && <ExecutionGrantDetails grant={grant} />}
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                   <span>Granted {formatDate(grant.granted_at)}</span>
-                  <span>Expires {formatDate(grant.expires_at)}</span>
+                  <span>
+                    Expires{" "}
+                    {grant.execution?.validity === "persistent"
+                      ? "Until revoked or binding changes"
+                      : formatDate(
+                          grant.execution?.valid_until ?? grant.expires_at,
+                        )}
+                  </span>
                 </div>
               </div>
             ))}
@@ -204,9 +216,12 @@ export function ApprovalGrantsPage() {
               <TableBody>
                 {grants.map((grant) => (
                   <TableRow key={grant.id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       <div className="flex items-center gap-2">
                         <span>{grant.service_name}</span>
+                        {grant.execution && (
+                          <ExecutionGrantDetails grant={grant} />
+                        )}
                         {grant.org_scoped && (
                           <Badge
                             variant="info"
@@ -223,7 +238,7 @@ export function ApprovalGrantsPage() {
                         <span>
                           {grant.requester_label ?? grant.requester_type}
                         </span>
-                        <span className="text-11 text-muted-foreground">
+                        <span className="text-13 text-muted-foreground">
                           {grant.requester_type}
                         </span>
                       </div>
@@ -234,13 +249,19 @@ export function ApprovalGrantsPage() {
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <span className="text-muted-foreground">
-                          {formatDate(grant.expires_at)}
+                          {grant.execution?.validity === "persistent"
+                            ? "Until revoked or binding changes"
+                            : formatDate(
+                                grant.execution?.valid_until ??
+                                  grant.expires_at,
+                              )}
                         </span>
-                        {isExpiringSoon(grant.expires_at) && (
-                          <Badge variant="warning" className="text-xs">
-                            Expiring soon
-                          </Badge>
-                        )}
+                        {!grant.execution &&
+                          isExpiringSoon(grant.expires_at) && (
+                            <Badge variant="warning" className="text-12">
+                              Expiring soon
+                            </Badge>
+                          )}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -263,7 +284,7 @@ export function ApprovalGrantsPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-11 text-text-tertiary">
+              <p className="text-13 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -277,7 +298,7 @@ export function ApprovalGrantsPage() {
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-11 text-text-tertiary">
+                <span className="text-13 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button
@@ -326,5 +347,52 @@ export function ApprovalGrantsPage() {
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+function ExecutionGrantDetails({
+  grant,
+}: {
+  readonly grant: import("@/types/approvals").ApprovalGrantItem;
+}) {
+  const permission = grant.execution;
+  if (!permission) return null;
+  if (!permission.supported)
+    return (
+      <p className="text-12">
+        This permission version is unavailable; it may be revoked.
+      </p>
+    );
+  return (
+    <details className="max-w-lg text-12">
+      <summary className="cursor-pointer">
+        {permission.review?.operation ?? "Execution permission"} ·{" "}
+        {permission.validity}
+      </summary>
+      {permission.review && (
+        <div className="space-y-1 py-2">
+          <p>{permission.review.connection}</p>
+          <p>{permission.review.agent}</p>
+          <p>{permission.review.scope}</p>
+          <p>{permission.review.audience}</p>
+          <p>{permission.review.added_permission}</p>
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-sans">
+            {permission.review.inputs}
+          </pre>
+        </div>
+      )}
+      <p>
+        Last dispatched:{" "}
+        {permission.last_dispatched_at
+          ? formatDate(permission.last_dispatched_at)
+          : "Not yet dispatched"}
+      </p>
+      <a
+        href={permission.source_review_path ?? "/assistant/approvals"}
+        className="underline"
+      >
+        View source permission request
+      </a>
+    </details>
   );
 }

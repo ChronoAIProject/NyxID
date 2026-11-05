@@ -168,7 +168,7 @@ export function ManagedOAuthConnect({
     <div className="space-y-3">
       {error && <ErrorBanner message={error} />}
       {canRetry && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           Finish authorization in the sign-in window. If you closed it, retry
           the connection.
         </p>
@@ -263,7 +263,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
       <div className="space-y-3 py-3">
         {bot.platform === "x" && <XEventsSettings bot={bot} />}
         {!bot.webhook_registered && bot.last_poll_notice && (
-          <p role="status" className="text-xs text-warning">
+          <p role="status" className="text-13 text-warning">
             {bot.last_poll_notice}
           </p>
         )}
@@ -285,7 +285,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
           />
         )}
         {bootstrap.data && !bootstrap.data.available && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Account connection is not available until an admin configures{" "}
             {getPlatform(bot.platform).label}.
           </p>

@@ -142,10 +142,11 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         + source.embedded_attachments.len()
         + source.embedded_attachments_omitted;
     if declared == 0
-        || !request
-            .channel
-            .owner_sender_ids
-            .contains(&request.sender_id)
+        || (request.channel.org_specialist.is_none()
+            && !request
+                .channel
+                .owner_sender_ids
+                .contains(&request.sender_id))
         || !flags::personal_flag_enabled(
             db,
             &request.channel.user_id,

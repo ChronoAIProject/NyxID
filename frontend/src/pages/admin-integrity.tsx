@@ -48,7 +48,7 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
           ) : (
             <ShieldCheck className="h-5 w-5 text-emerald-500" />
           )}
-          <CardTitle className="text-base">
+          <CardTitle className="text-15">
             {CHAIN_LABELS[status.chain]}
           </CardTitle>
         </div>
@@ -61,12 +61,12 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
         </Badge>
       </CardHeader>
       <CardContent className="space-y-4">
-        <p className="text-sm text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           {CHAIN_DESCRIPTIONS[status.chain]}
         </p>
 
         {broken ? (
-          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
+          <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-14">
             <p className="font-medium text-destructive">
               {status.chain === "billing_accounts"
                 ? "Account balance mismatch"
@@ -74,7 +74,7 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
               {status.break_kind ? ` (${status.break_kind})` : ""}
             </p>
             {status.break_detail ? (
-              <p className="mt-1 break-all font-mono text-xs text-muted-foreground">
+              <p className="mt-1 break-all font-mono text-13 text-muted-foreground">
                 {status.break_detail}
               </p>
             ) : null}
@@ -86,7 +86,7 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
           </div>
         ) : null}
 
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-14 sm:grid-cols-3">
           <div>
             <dt className="text-muted-foreground">Chain head</dt>
             <dd>{status.head_seq ?? "empty"}</dd>
@@ -136,18 +136,18 @@ function StartupDiagnostics({
       <CardHeader className="flex flex-row items-center justify-between space-y-0">
         <div className="flex items-center gap-2">
           <ShieldAlert className="h-5 w-5 text-destructive" />
-          <CardTitle className="text-base">Startup diagnostics</CardTitle>
+          <CardTitle className="text-15">Startup diagnostics</CardTitle>
         </div>
         <Badge variant="destructive">Action required</Badge>
       </CardHeader>
       <CardContent className="space-y-4">
         {diagnostics.map((diagnostic) => (
-          <div key={diagnostic.code} className="space-y-2 text-sm">
+          <div key={diagnostic.code} className="space-y-2 text-14">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <p className="font-medium text-destructive">
                 {diagnostic.summary}
               </p>
-              <span className="text-xs text-muted-foreground">
+              <span className="text-13 text-muted-foreground">
                 {formatTimestamp(diagnostic.detected_at)}
               </span>
             </div>
@@ -217,7 +217,7 @@ export function AdminIntegrityPage() {
 
       {error ? (
         <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+          <CardContent className="py-8 text-center text-14 text-muted-foreground">
             Failed to load chain verification status.
           </CardContent>
         </Card>
@@ -236,7 +236,7 @@ export function AdminIntegrityPage() {
         </div>
       ) : (
         <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
+          <CardContent className="py-8 text-center text-14 text-muted-foreground">
             No verification runs recorded yet. The background sweep runs on an
             interval after startup; use Run check now to verify immediately.
           </CardContent>

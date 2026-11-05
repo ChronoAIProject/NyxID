@@ -65,7 +65,6 @@ export function useWorkspaceRecents(visible: boolean, agentId?: string) {
     conversations,
     crews: crews.data ?? [],
     loading: active && (chats.isPending || crews.isPending),
-    refreshing: chats.isRefetching || crews.isRefetching,
     online: isConnected,
     error: chats.isError || crews.isError,
     active,

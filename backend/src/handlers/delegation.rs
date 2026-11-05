@@ -1147,6 +1147,8 @@ mod tests {
 
     fn catalog_auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -1630,6 +1632,8 @@ mod tests {
         let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)
             .expect("verify minted delegated token");
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,

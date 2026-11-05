@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
@@ -193,9 +194,9 @@ function ProfileTab() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <label className="text-12 font-medium" htmlFor="profile-name">
+          <Label htmlFor="profile-name">
             Name
-          </label>
+          </Label>
           <Input
             id="profile-name"
             value={displayName}
@@ -205,15 +206,15 @@ function ProfileTab() {
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <label className="text-12 font-medium" htmlFor="profile-email">
+            <Label htmlFor="profile-email">
               Email
-            </label>
+            </Label>
             {user?.email_verified ? (
-              <Badge variant="success" className="text-xs">
+              <Badge variant="success" className="text-12">
                 Verified
               </Badge>
             ) : (
-              <Badge variant="warning" className="text-xs">
+              <Badge variant="warning" className="text-12">
                 Not verified
               </Badge>
             )}
@@ -230,7 +231,7 @@ function ProfileTab() {
               type="button"
               variant="link"
               size="sm"
-              className="h-auto p-0 text-12"
+              className="h-auto p-0 text-14"
               onClick={() => {
                 // TODO: backend endpoint POST /api/v1/auth/verify-email/resend is not yet
                 // implemented. Do NOT invent the URL — once it lands, wire it here as:
@@ -413,7 +414,7 @@ function SecurityTab() {
                 }}
                 aria-label="Toggle two-factor authentication"
               />
-              <span className="text-12">
+              <span className="text-14">
                 {user?.mfa_enabled ? "Enabled" : "Disabled"}
               </span>
             </div>
@@ -439,18 +440,18 @@ function SecurityTab() {
             {disableMfaError && (
               <div
                 role="alert"
-                className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+                className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
               >
                 {disableMfaError}
               </div>
             )}
             <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
+              <Label
+
                 htmlFor="disable-mfa-code"
               >
                 Authenticator or recovery code
-              </label>
+              </Label>
               <Input
                 id="disable-mfa-code"
                 value={disableMfaCode}
@@ -462,12 +463,12 @@ function SecurityTab() {
               />
             </div>
             {isPasswordUser && <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
+              <Label
+
                 htmlFor="disable-mfa-password"
               >
                 Password
-              </label>
+              </Label>
               <Input
                 id="disable-mfa-password"
                 type="password"
@@ -508,7 +509,7 @@ function SecurityTab() {
                   {passwordForm.formState.errors.root && (
                     <div
                       role="alert"
-                      className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+                      className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
                     >
                       {passwordForm.formState.errors.root.message}
                     </div>
@@ -675,12 +676,12 @@ function SecurityTab() {
           <AccountDeletionDisclosure />
 
           <div className="space-y-2">
-            <label
-              className="text-12 font-medium"
+            <Label
+
               htmlFor="delete-account-email"
             >
               Email
-            </label>
+            </Label>
             <Input
               id="delete-account-email"
               value={deleteConfirmEmail}
@@ -690,7 +691,7 @@ function SecurityTab() {
               autoFocus
             />
             {deleteEmailError && (
-              <p className="text-xs text-destructive">{deleteEmailError}</p>
+              <p className="text-13 text-destructive">{deleteEmailError}</p>
             )}
           </div>
 
@@ -776,8 +777,8 @@ function McpTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-medium">MCP (Model Context Protocol)</h3>
-        <p className="text-12 text-muted-foreground">
+        <h3 className="type-card-title">MCP (Model Context Protocol)</h3>
+        <p className="text-14 text-muted-foreground">
           Install NyxID as an MCP server in your client of choice.
         </p>
       </div>
@@ -801,15 +802,15 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Or copy manually
               </p>
-              <Badge variant="secondary" className="text-10">
+              <Badge variant="secondary" className="text-12">
                 .cursor/mcp.json
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {cursorConfig}
               </pre>
               <CopyInlineButton text={cursorConfig} label="Cursor config" />
@@ -828,7 +829,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-14 break-all font-mono">
               {claudeCommand}
             </code>
             <CopyInlineButton text={claudeCommand} label="CLI command" />
@@ -836,15 +837,15 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Or add manually
               </p>
-              <Badge variant="secondary" className="text-10">
+              <Badge variant="secondary" className="text-12">
                 .claude/settings.json or .mcp.json
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {claudeConfig}
               </pre>
               <CopyInlineButton
@@ -866,7 +867,7 @@ function McpTab() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-14 break-all font-mono">
               {codexCommand}
             </code>
             <CopyInlineButton text={codexCommand} label="CLI command" />
@@ -874,15 +875,15 @@ function McpTab() {
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
+              <p className="type-secondary-emphasis text-muted-foreground">
                 Or add manually
               </p>
-              <Badge variant="secondary" className="text-10">
+              <Badge variant="secondary" className="text-12">
                 ~/.codex/config.toml
               </Badge>
             </div>
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {codexConfig}
               </pre>
               <CopyInlineButton text={codexConfig} label="Codex config" />
@@ -892,8 +893,8 @@ function McpTab() {
       </Card>
 
       <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
-        <p className="mb-1 text-13 font-medium">How it works</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="mb-1 type-card-title">How it works</p>
+        <p className="text-13 text-muted-foreground">
           When your MCP client connects for the first time, NyxID will open an
           OAuth flow in your browser to authenticate. Once authenticated, the
           proxy exposes tools from all your connected services. Tool calls are
@@ -958,8 +959,8 @@ function SessionsTab() {
         {!sessions || sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <PowerButtonIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 font-medium text-foreground">No Active Sessions</p>
-            <p className="text-12 text-muted-foreground">
+            <p className="type-row-title text-foreground">No Active Sessions</p>
+            <p className="text-14 text-muted-foreground">
               Your active sessions across devices will appear here.
             </p>
           </div>
@@ -988,7 +989,7 @@ function SessionsTab() {
                   </div>
                   <div className="flex items-center gap-2 pr-10">
                     {getDeviceIcon(session.user_agent)}
-                    <p className="min-w-0 flex-1 truncate text-13 font-bold">
+                    <p className="min-w-0 flex-1 truncate type-card-title">
                       {deviceLabel}
                     </p>
                     {session.is_current && (
@@ -996,14 +997,14 @@ function SessionsTab() {
                     )}
                   </div>
                   <div className="mt-3 space-y-1">
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       <span className="font-medium">IP Address:</span> {ipLabel}
                     </p>
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       <span className="font-medium">Signed in:</span>{" "}
                       {formatDate(session.created_at)}
                     </p>
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       <span className="font-medium">Expires:</span>{" "}
                       {formatDate(session.expires_at)}
                     </p>
@@ -1164,7 +1165,7 @@ function PrivacyTab() {
             onCheckedChange={(next) => void handleToggle(next)}
             aria-label="Allow account usage analytics"
           />
-          <span className="text-12" role="status">{permission.isFetching ? "Loading account permission…" : permission.isError ? "Account permission unavailable" : permission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</span>
+          <span className="text-14" role="status">{permission.isFetching ? "Loading account permission…" : permission.isError ? "Account permission unavailable" : permission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</span>
           {permission.isError && (
             <Button variant="outline" size="sm" isLoading={permission.isFetching}
               onClick={() => void permission.refetch()}>Retry</Button>
@@ -1174,14 +1175,14 @@ function PrivacyTab() {
           <Switch checked={consentEnabled} disabled={!consentEnabled && (permission.data?.enabled !== true || permission.isError || permission.isFetching)}
             onCheckedChange={(next) => { setConsent(next); if (!next) disableTelemetry(); }}
             aria-label="Allow usage analytics on this browser" />
-          <span className="text-12">Allow on this browser</span>
+          <span className="text-14">Allow on this browser</span>
         </div>
-        {persistenceError && <div role="alert" className="space-y-2 text-12 text-muted-foreground">
+        {persistenceError && <div role="alert" className="space-y-2 text-14 text-muted-foreground">
           <p>This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.</p>
           <Button variant="outline" size="sm" onClick={() => setConsent(false)}>Retry saving browser choice</Button>
         </div>}
         <Separator />
-        <div className="space-y-2 text-12 text-muted-foreground">
+        <div className="space-y-2 text-14 text-muted-foreground">
           <p>
             For the full disclosure of what we collect, how it's stored, and
             retention windows, see the{" "}

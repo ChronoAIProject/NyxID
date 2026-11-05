@@ -183,8 +183,10 @@ function NavItem({
       to={item.to}
       onClick={onClick}
       title={collapsed ? item.label : undefined}
+      data-nav-collapsed={collapsed}
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "group/nav flex items-center rounded-lg py-2 text-13 overflow-hidden",
+        "shell-nav-item group/nav flex items-center rounded-lg py-2 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
         collapsed ? "justify-center px-0 gap-0" : "gap-3 px-3",
         active
@@ -194,7 +196,7 @@ function NavItem({
     >
       <item.icon
         className={cn(
-          "h-[16px] w-[16px] shrink-0",
+          "size-[1.125em] shrink-0",
           active ? "text-nyx-secondary-400" : "text-text-tertiary",
         )}
       />
@@ -228,10 +230,11 @@ export function AssistantNavEntry({
       to="/assistant"
       onClick={onClick}
       title={collapsed ? "Assistant" : undefined}
+      data-nav-collapsed={collapsed}
       className={cn(
-        "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
+        "shell-nav-item group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
-        mobile ? "gap-3 px-4 py-3 text-14" : "py-[7px] text-12",
+        mobile ? "gap-3 px-4 py-3" : "py-[7px]",
         !mobile && (collapsed ? "justify-center gap-0 px-0" : "gap-[9px] px-3"),
       )}
     >
@@ -251,7 +254,7 @@ export function AssistantNavEntry({
       </span>
       <span
         className={cn(
-          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 text-9 font-semibold text-nyx-secondary-400",
+          "ml-auto shrink-0 rounded-md border border-nyx-500/30 bg-nyx-500/15 px-1.5 type-table-header text-nyx-secondary-400",
           collapsed && "hidden",
         )}
       >
@@ -315,7 +318,7 @@ export function Sidebar({
     <>
       <nav className="flex-1 overflow-y-auto scrollbar-none px-2 pt-2 pb-4">
         <AssistantNavEntry collapsed={isCollapsed} onClick={onNavigate} />
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {mainNav.map((item) => (
             <NavItem
               key={item.to}
@@ -327,16 +330,16 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="px-3 my-2 flex items-center">
+        <div className="flex items-center">
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+            <span className="shell-group-label">
               Approvals
             </span>
           )}
         </div>
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {APPROVALS_NAV.map((item) => (
             <NavItem
               key={item.to}
@@ -348,16 +351,16 @@ export function Sidebar({
           ))}
         </div>
 
-        <div className="px-3 my-2 flex items-center">
+        <div className="flex items-center">
           {isCollapsed ? (
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
-            <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+            <span className="shell-group-label">
               Developer
             </span>
           )}
         </div>
-        <div className="flex flex-col gap-[2px]">
+        <div className="shell-nav-stack">
           {DEVELOPER_NAV.map((item) => (
             <NavItem
               key={item.to}
@@ -371,16 +374,16 @@ export function Sidebar({
 
         {adminNav.length > 0 && (
           <>
-            <div className="px-3 my-2 flex items-center">
+            <div className="flex items-center">
               {isCollapsed ? (
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
-                <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+                <span className="shell-group-label">
                   Admin
                 </span>
               )}
             </div>
-            <div className="flex flex-col gap-[2px]">
+            <div className="shell-nav-stack">
               {adminNav.map((item) => (
                 <NavItem
                   key={item.to}
@@ -417,7 +420,7 @@ export function Sidebar({
               sideOffset={8}
             >
               <div className="px-4 py-2.5 border-b border-border/50">
-                <p className="text-13 font-medium text-foreground">
+                <p className="type-card-title text-foreground">
                   Sidebar control
                 </p>
               </div>
@@ -512,7 +515,7 @@ function SidebarModeOption({
       type="button"
       onClick={onClick}
       className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-13 transition-colors duration-200 hover:bg-overlay-strong",
+        "flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-15 transition-colors duration-200 hover:bg-overlay-strong",
         active
           ? "text-foreground"
           : "text-muted-foreground hover:text-foreground",

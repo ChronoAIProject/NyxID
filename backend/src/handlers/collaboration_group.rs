@@ -657,7 +657,7 @@ async fn decisions(state: &AppState, actor: &str, id: &str) -> AppResult<Vec<Val
     let consents:Vec<crate::models::assistant_sharing::AgentConsent>=state.db.collection(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME)
         .find(doc! {"conversation_id":{"$in":&ids},"decision":"pending","expires_at":{"$gt":bson::DateTime::now()}}).limit(4096).await?.try_collect().await?;
     let approvals:Vec<crate::models::approval_request::ApprovalRequest>=state.db.collection(crate::models::approval_request::COLLECTION_NAME)
-        .find(doc! {"assistant_group.group_id":id,"assistant_group.conversation_id":{"$in":&ids},"status":"pending","expires_at":{"$gt":bson::DateTime::now()}}).limit(4096).await?.try_collect().await?;
+        .find(doc! {"assistant_group.group_id":id,"assistant_group.conversation_id":{"$in":&ids},"$or":[{"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},{"user_id":actor,"execution_proposal.version":{"$exists":true}}]}).limit(4096).await?.try_collect().await?;
     let connections:Vec<crate::models::user_service::UserService>=state.db.collection(crate::models::user_service::COLLECTION_NAME)
         .find(doc! {"user_id":actor,"_id":{"$in":consents.iter().filter(|c|c.actor_user_id==actor).map(|c|&c.connection_id).collect::<Vec<_>>()}}).limit(4096).await?.try_collect().await?;
     let mut result = Vec::new();
@@ -692,7 +692,7 @@ async fn decisions(state: &AppState, actor: &str, id: &str) -> AppResult<Vec<Val
             continue;
         }
         for approval in approvals {
-            result.push(json!({"id":approval.id,"kind":"approval","requester_id":actor,"agent_id":binding.agent_id,"can_decide":true,"summary":approval.action_description.as_ref().unwrap_or(&approval.operation_summary),"audience":"Everyone in this group can see the reply."}));
+            result.push(json!({"execution_proposal":crate::services::execution_permission_dispatch::proposals::view(approval),"id":approval.id,"kind":"approval","requester_id":actor,"agent_id":binding.agent_id,"can_decide":true,"summary":approval.action_description.as_ref().unwrap_or(&approval.operation_summary),"audience":"Everyone in this group can see the reply."}));
         }
         for ack in acks {
             result.push(json!({"id":ack.id,"kind":"action","requester_id":actor,"agent_id":binding.agent_id,"can_decide":true,"summary":ack.summary,"audience":"Everyone in this group can see the reply."}));

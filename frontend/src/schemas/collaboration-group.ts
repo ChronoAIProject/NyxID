@@ -1,3 +1,4 @@
+import { executionProposalSchema } from "./execution-proposal";
 import { z } from "zod";
 
 export const guestAccessRequestSchema = z.object({
@@ -36,6 +37,7 @@ export const collaborationGroupSchema = z.object({
   invites: z.array(z.object({ id: z.string(), expires_at: z.string() })),
 });
 export const collaborationDecisionSchema = z.object({
+  execution_proposal: executionProposalSchema.nullish(),
   id: z.string().optional(),
   kind: z.enum(["action", "consent", "approval"]).optional(),
   requester_id: z.string(),

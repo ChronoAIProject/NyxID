@@ -12,6 +12,9 @@ fn now() -> DateTime<Utc> {
 pub(crate) fn fixture() -> ApprovalGrant {
     let validity = Validity::Persistent;
     ApprovalGrant {
+        execution_review: None,
+        execution_last_used_at: None,
+        execution_use: None,
         id: uuid::Uuid::new_v4().to_string(), user_id: "actor".into(), service_id: "catalog".into(),
         service_name: "Service".into(), requester_type: "api_key".into(), requester_id: "actor".into(), requester_label: None,
         approval_request_id: "human-decision".into(), scope: Some(LEGACY_SCOPE.into()), granted_at: now(),
@@ -666,6 +669,8 @@ fn oauth_refresh_preserves_coverage_but_account_replacement_invalidates() {
     let service = crate::models::downstream_service::test_helpers::dummy_service();
     let mut resolution = UserServiceResolution {
         target: ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

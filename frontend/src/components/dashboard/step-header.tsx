@@ -39,7 +39,7 @@ export function StepHeader({
         </div>
       )}
       <div className="min-w-0 space-y-1">
-        <DialogTitle className="leading-tight">{title}</DialogTitle>
+        <DialogTitle>{title}</DialogTitle>
         {description && <DialogDescription>{description}</DialogDescription>}
       </div>
     </div>

@@ -646,6 +646,7 @@ pub async fn create_approval_request(
             .find_one(doc! {
                 "idempotency_key": &idempotency_key,
                 "status": "pending",
+                "execution_proposal": null,
             })
             .await?
         {
@@ -656,6 +657,7 @@ pub async fn create_approval_request(
         let expires_at = now + Duration::seconds(i64::from(timeout_secs));
 
         let request = ApprovalRequest {
+            execution_proposal: None,
             assistant_group: operation.assistant_group.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -892,6 +894,7 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        execution_proposal: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -1024,6 +1027,7 @@ pub(crate) async fn process_decision_with_access(
     snapshot: Option<&Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<ApprovalRequest> {
     let current = get_request(db, request_id).await?;
+    super::execution_permission_dispatch::proposals::legacy_refusal(&current)?;
     if let Some(binding) = &current.assistant_group {
         super::org_group_service::authorize_approval(
             db,
@@ -1172,6 +1176,9 @@ pub(crate) async fn process_decision_with_access(
         let grant_expiry = resolve_grant_expiry(now, duration_sec, channel.grant_expiry_days);
 
         let grant = ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: updated.user_id.clone(),
@@ -1275,6 +1282,7 @@ pub async fn expire_pending_requests(
         .collection::<ApprovalRequest>(REQUESTS)
         .find(doc! {
             "status": "pending",
+            "execution_proposal": null,
             "expires_at": { "$lte": sweep_time },
         })
         .with_options(
@@ -1423,7 +1431,7 @@ pub(super) async fn retire_full_access_chat_requests(
         assistant_agent_credential::{AssistantAgentCredential, COLLECTION_NAME as CREDENTIALS},
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
     };
-    let mut filter = doc! {"status": "pending", "requester_type": "user",
+    let mut filter = doc! {"execution_proposal": null, "status": "pending", "requester_type": "user",
     "requester_label": {"$ne": bson::Bson::Null}, "created_at": {"$lte": sweep_time}};
     if let Some(user) = user {
         filter.insert("requester_id", user);
@@ -1550,6 +1558,7 @@ pub async fn wait_for_decision(
         tokio::time::sleep(poll_interval).await;
 
         let request = get_request(db, request_id).await?;
+        super::execution_permission_dispatch::proposals::legacy_refusal(&request)?;
 
         match request.status.as_str() {
             "approved" => return Ok(()),
@@ -1728,10 +1737,28 @@ pub async fn list_requests(
     page: u64,
     per_page: u64,
 ) -> AppResult<(Vec<ApprovalRequest>, u64)> {
+    list_requests_with_proposals(db, user_id, admin_branches, statuses, page, per_page, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn list_requests_with_proposals(
+    db: &Database,
+    user_id: &str,
+    admin_branches: &[OrgFilterBranch],
+    statuses: &[&str],
+    page: u64,
+    per_page: u64,
+    human: bool,
+) -> AppResult<(Vec<ApprovalRequest>, u64)> {
     let mut filter = build_requests_filter(user_id, admin_branches);
     // Org group cards have an explicit participant ACL and are projected by
     // the group transcript, not the organization-wide approvals inbox.
-    filter.insert("assistant_group", bson::Bson::Null);
+    if human {
+        filter = doc! {"$and":[filter,{"$or":[{"assistant_group":null,"execution_proposal":null},{"user_id":user_id,"execution_proposal.version":{"$exists":true}}]}]};
+    } else {
+        filter.insert("assistant_group", bson::Bson::Null);
+        filter.insert("execution_proposal", bson::Bson::Null);
+    }
     match statuses {
         [] => {}
         [single] => {
@@ -2833,6 +2860,7 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            execution_proposal: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-1".to_string(),
@@ -3978,6 +4006,9 @@ mod tests {
     ) -> ApprovalGrant {
         let now = Utc::now();
         ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -4002,6 +4033,7 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),

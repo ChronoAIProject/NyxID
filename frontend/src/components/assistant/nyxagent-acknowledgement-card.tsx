@@ -66,10 +66,10 @@ export function NyxAgentAcknowledgementCard({
       <DecisionReceipt acknowledgement={row}
         retired={confirmationsBypassed && acknowledgement.status === "pending"} />
       {row.status === "expired" && !confirmationsBypassed ? <>
-        <p className="text-12 text-muted-foreground">This confirmation can no longer be allowed. Ask for a new request to retry.</p>
+        <p className="text-13 text-muted-foreground">This confirmation can no longer be allowed. Ask for a new request to retry.</p>
         {onRequestAgain ? <Button variant="outline" size="sm" disabled={deciding} onClick={onRequestAgain}>Ask for a new confirmation</Button> : null}
       </> : null}
-      {row.review_path ? <a className="text-12 underline" href={row.review_path}>Open request</a> : null}
+      {row.review_path ? <a className="type-row-title underline" href={row.review_path}>Open request</a> : null}
     </section>;
   }
 
@@ -89,13 +89,13 @@ export function NyxAgentAcknowledgementCard({
       className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
       {routed ? (
-        <p className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+        <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">
           Requested from NyxBot
         </p>
       ) : null}
-      <p className="text-13 font-medium text-foreground">{label}</p>
+      <p className="type-card-title text-foreground">{label}</p>
       {acknowledgement.confirmation ? (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           <span
             className={
               acknowledgement.confirmation.risk === "destructive"
@@ -121,7 +121,7 @@ export function NyxAgentAcknowledgementCard({
         allowing it attaches nothing and wakes nobody. Orchestrator-card help
         (the `routed` branch) is unchanged.
       */}
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         {acknowledgement.kind === "skills"
           ? routed
             ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
@@ -136,9 +136,9 @@ export function NyxAgentAcknowledgementCard({
             : "This permission applies to this chat only."}
         {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
       </p>
-      {acknowledgement.review_path ? <a className="text-12 underline" href={acknowledgement.review_path}>Open request</a> : null}
+      {acknowledgement.review_path ? <a className="type-row-title underline" href={acknowledgement.review_path}>Open request</a> : null}
       {error ? (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {error}
         </p>
       ) : null}
@@ -168,7 +168,7 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
         setError(cause instanceof Error ? cause.message : "Could not create connection link.");
       });
     }}>Connect your own</Button>
-    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
+    {error ? <p role="alert" className="text-14 text-destructive">{error}</p> : null}
     <AssistantLinkModal href={href} onClose={() => setHref(null)} />
   </>;
 }

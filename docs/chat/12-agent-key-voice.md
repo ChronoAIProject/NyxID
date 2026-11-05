@@ -8,7 +8,7 @@ session routes and authentication.
 ## Binding and authorization
 
 The owner publishes one connection for a personal Bot through **Agent details →
-Device voice**. Its existing `UserService.source = nyxbot_voice` and
+Access → Device voice**. Its existing `UserService.source = nyxbot_voice` and
 `source_id = Bot UUID` fix the selected Bot. Publication grants no Key access.
 The owner then grants that exact connection to the board Key through ordinary
 service scope. No new token type, permission table or hardcoded Bot is used.

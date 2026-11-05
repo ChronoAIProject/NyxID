@@ -3837,6 +3837,8 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -3872,6 +3874,8 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,

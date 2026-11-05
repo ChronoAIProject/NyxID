@@ -1,3 +1,4 @@
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useRef, useState, type ReactNode } from "react";
 import { Check, Monitor, Moon, Palette, PanelLeft, RotateCcw, SlidersHorizontal, Sun, SunMoon, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -51,11 +52,11 @@ function DisplaySectionHeader({ icon: Icon, title, children }: {
   readonly children: ReactNode;
 }) {
   return (
-    <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--assistant-density,1))] space-y-0">
+    <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--display-density,1))] space-y-0">
       <Icon data-ui-icon="" aria-hidden="true" className="mt-[0.125em] shrink-0 text-17 text-text-tertiary" />
       <div className="min-w-0 space-y-1.5">
-        <CardTitle className="text-17 leading-snug">{title}</CardTitle>
-        <CardDescription className="leading-relaxed">{children}</CardDescription>
+        <CardTitle className="text-15">{title}</CardTitle>
+        <CardDescription>{children}</CardDescription>
       </div>
     </CardHeader>
   );
@@ -95,9 +96,9 @@ function SegmentedChoice<T extends string | number>({
             event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
           }}
           className={cn(
-            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 text-12 transition-colors",
+            "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 type-button transition-colors",
             value === option.value
-              ? "bg-overlay-strong font-medium text-foreground"
+              ? "bg-overlay-strong text-foreground"
               : "text-muted-foreground hover:text-foreground",
           )}
         >
@@ -121,8 +122,8 @@ function SettingRow({
   return (
     <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
       <div className="min-w-0 flex-1 basis-[18em]">
-        <p className="text-13 font-medium leading-snug">{title}</p>
-        <p className="mt-1 text-12 leading-relaxed text-muted-foreground">{description}</p>
+        <Label asChild><p>{title}</p></Label>
+        <p className="mt-1 text-14 text-muted-foreground">{description}</p>
       </div>
       {children}
     </div>
@@ -191,7 +192,7 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
         onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
         className="min-w-0 max-w-full flex-1 basis-[10em] accent-primary"
       />
-      <span className="min-w-[5ch] text-right font-mono text-11 text-muted-foreground">{width}px</span>
+      <span className="min-w-[5ch] text-right font-mono text-13 text-muted-foreground">{width}px</span>
       <Button
         variant="ghost"
         size="icon"
@@ -216,7 +217,7 @@ function ScaleControl({ id, label, scale, onChange }: {
   const [draft, setDraft] = useState<number | null>(null);
   const dragPointer = useRef<number | null>(null);
   const value = draft ?? scale;
-  const multiplier = `${value}×`;
+  const multiplier = `${Number(value.toFixed(2))}×`;
 
   return (
     <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">
@@ -258,13 +259,13 @@ function ScaleControl({ id, label, scale, onChange }: {
             }}
             className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
           />
-          <div className="flex flex-wrap justify-between gap-x-2 text-11 text-muted-foreground" aria-hidden="true">
+          <div className="flex flex-wrap justify-between gap-x-2 text-13 text-muted-foreground" aria-hidden="true">
             <span>{DISPLAY_SCALE_MIN}×</span>
             <span>{DISPLAY_SCALE_MAX}×</span>
           </div>
-          <p className="text-11 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
+          <p className="text-13 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
         </div>
-        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground">
+        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-13 text-muted-foreground">
           {multiplier}
         </output>
       </div>
@@ -337,14 +338,14 @@ function ColorEditor() {
           className="space-y-3 rounded-xl border p-4"
           style={{ backgroundColor: color("background"), color: color("foreground"), borderColor: color("border") }}
         >
-          <p className="text-12 font-medium">Chat preview · {editMode}</p>
+          <p className="type-row-title">Chat preview · {editMode}</p>
           <UserMessageBubble
             className="ml-auto w-fit max-w-[85%] text-16"
             style={{ backgroundColor: color("chat-bubble"), color: color("chat-bubble-foreground") }}
           >
             Show me the services I have connected.
           </UserMessageBubble>
-          <p className="text-16 leading-relaxed">You can manage your connected services in Plugins.</p>
+          <p className="text-16">You can manage your connected services in Plugins.</p>
         </section>
 
         <ul className="grid gap-x-8 gap-y-2 sm:grid-cols-2" aria-label={`${editMode} theme colors`}>
@@ -353,10 +354,10 @@ function ColorEditor() {
             const customized = key in overrides;
             return (
               <li key={key} className="flex flex-wrap items-center gap-2">
-                <span className="min-w-0 flex-1 text-12">
+                <Label asChild><span className="min-w-0 flex-1">
                   {label}
-                  {customized && <span className="ml-2 text-11 text-text-tertiary">Customized</span>}
-                </span>
+                  {customized && <FieldHelp className="ml-2 text-text-tertiary">Customized</FieldHelp>}
+                </span></Label>
                 <input
                   type="color"
                   aria-label={`${label} color`}
@@ -386,20 +387,20 @@ function ColorEditor() {
         </ul>
 
         <div className="space-y-1.5">
-          <p className="text-12 font-medium">Readability</p>
+          <p className="type-row-title">Readability</p>
           <ul className="space-y-1" aria-label="Contrast checks">
             {CONTRAST_CHECKS.map((check) => {
               const ratio = contrastRatio(color(check.fg), color(check.bg));
               const ok = ratio >= check.target;
               return (
-                <li key={check.label} className="flex items-center gap-2 text-12">
+                <li key={check.label} className="flex items-center gap-2 text-14">
                   {ok ? (
                     <Check data-ui-icon="" className="size-3.5 shrink-0 text-success" aria-hidden />
                   ) : (
                     <TriangleAlert data-ui-icon="" className="size-3.5 shrink-0 text-warning" aria-hidden />
                   )}
                   <span className="flex-1 text-muted-foreground">{check.label}</span>
-                  <span className={cn("font-mono text-11", ok ? "text-muted-foreground" : "text-warning")}>
+                  <span className={cn("font-mono text-13", ok ? "text-muted-foreground" : "text-warning")}>
                     {ratio.toFixed(1)}:1 {ok ? "" : `(needs ${check.target}:1)`}
                   </span>
                 </li>

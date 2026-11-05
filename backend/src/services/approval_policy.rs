@@ -118,6 +118,18 @@ pub fn evaluate(
     }
 }
 
+/// Separately authored marker. Existing unmarked rules keep their mode semantics.
+pub(crate) fn mandatory_review(
+    config: &ServiceApprovalConfig,
+    descriptor: &OperationDescriptor,
+) -> bool {
+    config
+        .rules
+        .iter()
+        .find(|rule| rule_matches(rule, descriptor))
+        .is_some_and(|rule| rule.mandatory_review)
+}
+
 pub fn grant_scope_covers(scope: Option<&str>, descriptor: &OperationDescriptor) -> bool {
     let Some(scope) = scope else {
         return true;

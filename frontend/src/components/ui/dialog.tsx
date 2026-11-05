@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import { DialogFocusReturnContext } from "./dialog-focus-return";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import * as React from "react";
@@ -93,7 +94,7 @@ const DialogContent = React.forwardRef<
       </div>
       <DialogPrimitive.Close
         data-icon-button=""
-        className="absolute right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground"
+        className="inline-flex min-h-control min-w-control items-center justify-center absolute right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground"
         style={{ top: "max(1rem, var(--sat, env(safe-area-inset-top, 0px)))" }}
       >
         <X className="h-4 w-4" />
@@ -137,8 +138,9 @@ const DialogFooter = ({
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
+    data-dialog-footer=""
     className={cn(
-      "mt-auto shrink-0 sticky bottom-0 z-10 -mx-5 bg-surface px-5 pt-4 flex flex-row gap-2 [&>button]:flex-1",
+      "mt-auto shrink-0 sticky bottom-0 z-10 -mx-5 bg-surface px-5 pt-4 flex flex-row flex-wrap gap-2 [&>button]:flex-1 [&>button]:max-w-full [&>button]:whitespace-normal [&>button]:break-words",
       "md:mt-0 md:shrink md:static md:z-auto md:mx-0 md:bg-transparent md:px-0 md:pt-0 md:gap-0 md:flex-row md:justify-end md:space-x-2 md:[&>button]:flex-none",
       className,
     )}
@@ -159,7 +161,7 @@ const DialogTitle = React.forwardRef<
   <DialogPrimitive.Title
     ref={ref}
     className={cn(
-      "text-15 font-semibold leading-none tracking-tight",
+      `${TEXT_STYLES.dialogTitle} unthemed:leading-none tracking-tight`,
       className,
     )}
     {...props}
@@ -173,7 +175,7 @@ const DialogDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DialogPrimitive.Description
     ref={ref}
-    className={cn("text-sm text-muted-foreground", className)}
+    className={cn(`${TEXT_STYLES.body} text-muted-foreground unthemed:text-sm`, className)}
     {...props}
   />
 ));

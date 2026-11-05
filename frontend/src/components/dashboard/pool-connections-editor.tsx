@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { useWatch, type UseFormReturn } from "react-hook-form";
 import { ArrowDown, ArrowUp } from "lucide-react";
@@ -205,10 +206,10 @@ export function PoolConnectionsEditor({
   return (
     <section className="space-y-3" aria-label="Pool connections">
       <div>
-        <h3 className="text-13 font-semibold">
+        <h3 className="type-card-title">
           {priority ? "Connection order" : "Connections"}
         </h3>
-        <p className="mt-1 text-12 text-muted-foreground">
+        <p className="mt-1 text-14 text-muted-foreground">
           {priority
             ? "Lower priority numbers run first. Connections with the same number share traffic."
             : "Add the connections that should share traffic."}
@@ -249,14 +250,14 @@ export function PoolConnectionsEditor({
               void form.trigger();
             }}
           />
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Lower priority numbers are tried first. Ties use this balancing
             mode; unavailable members can still be skipped at request time.
           </p>
         </div>
       )}
       <div className="space-y-2 rounded-xl border border-border/50 p-3">
-        <h4 className="text-12 font-medium">Select connections</h4>
+        <h4 className="type-row-title">Select connections</h4>
         <PoolConnectionPicker
           rows={rows}
           selectedIds={members.map((member) => member.user_service_id!)}
@@ -278,7 +279,7 @@ export function PoolConnectionsEditor({
         />
       </div>
       {members.length === 0 && (
-        <div className="rounded-xl border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <div className="rounded-xl border border-dashed border-border p-4 text-14 text-muted-foreground">
           {!pool && <p>Add at least one connection to create a pool.</p>}
           {priority
             ? "Choose a primary connection, then a backup."
@@ -334,22 +335,22 @@ export function PoolConnectionsEditor({
             className="space-y-3 rounded-xl border border-border/50 bg-card p-3"
           >
             <div className="flex items-start gap-3">
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-overlay font-mono text-11 text-muted-foreground">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-lg bg-overlay font-mono text-13 text-muted-foreground">
                 {position + 1}
               </span>
               <div className="min-w-0 flex-1">
-                <p className="break-words text-12 font-medium">
+                <p className="break-words type-row-title">
                   {labelRow?.name ||
                     labelRow?.slug ||
                     `Connection ${position + 1}`}
                 </p>
-                <p className="break-words text-11 text-muted-foreground">
+                <p className="break-words text-13 text-muted-foreground">
                   {labelRow
                     ? `${labelRow.slug} · ${bindingLabel(labelRow.credential_binding)}`
                     : "Loading connection details…"}
                 </p>
                 {!invalidPriority && (
-                  <p className="mt-1 text-11 text-muted-foreground">
+                  <p className="mt-1 text-13 text-muted-foreground">
                     {member.enabled === false ? (
                       "Disabled · excluded from cycle"
                     ) : (
@@ -372,7 +373,7 @@ export function PoolConnectionsEditor({
                   </p>
                 )}
                 {priority && values.tier_balance === "weighted" && (
-                  <p className="mt-1 text-11 text-muted-foreground">
+                  <p className="mt-1 text-13 text-muted-foreground">
                     {invalidPriority
                       ? "Priority tier needs a valid number · configured share unavailable"
                       : `Priority tier ${member.priority ?? 0} · ${
@@ -385,7 +386,7 @@ export function PoolConnectionsEditor({
                   </p>
                 )}
                 {candidate?.reason && (
-                  <p className="mt-1 text-11 text-warning">
+                  <p className="mt-1 text-13 text-warning">
                     {reason(candidate)}
                   </p>
                 )}
@@ -445,7 +446,7 @@ export function PoolConnectionsEditor({
                 />
               )}
               {aiChat && (
-                <label className="space-y-1 text-12">
+                <Label className="space-y-1">
                   <span>Model (required)</span>
                   <Input
                     aria-label={`Model for member ${position + 1}`}
@@ -455,7 +456,7 @@ export function PoolConnectionsEditor({
                       setMember(id, { model: e.target.value || null })
                     }
                   />
-                </label>
+                </Label>
               )}
               {weighted && (
                 <NumberInput
@@ -468,7 +469,7 @@ export function PoolConnectionsEditor({
               )}
             </div>
             {weighted && weightError && (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {memberLabel(id, position)}: {weightError}
               </p>
             )}
@@ -478,7 +479,7 @@ export function PoolConnectionsEditor({
               onChange={(v) => setMember(id, { enabled: v })}
             />
             {requiresDeclaration && (
-              <label className="flex items-start gap-2 text-12 leading-relaxed">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   className="mt-0.5"
                   aria-label={`Confirm API compatibility for member ${position + 1}`}
@@ -489,14 +490,14 @@ export function PoolConnectionsEditor({
                 />
                 I confirm this connection accepts the same paths and request
                 format as the other connections.
-              </label>
+              </Label>
             )}
           </div>
         );
       })}
       {!aiChat && (
         <details className="rounded-xl border border-border/50 p-3">
-          <summary className="cursor-pointer text-12 font-medium">
+          <summary className="cursor-pointer type-row-title">
             Check an operation (optional)
           </summary>
           <div className="pt-3">

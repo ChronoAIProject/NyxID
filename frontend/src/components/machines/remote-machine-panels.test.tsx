@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -22,6 +23,7 @@ vi.mock("@/lib/api-client", async (load) => ({
   apiClient: http.read,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => (
     <a href={to}>{children}</a>
   ),
@@ -259,7 +261,7 @@ it("a safe review requires acknowledgement and submits the bound decision contra
     screen.getByRole("button", { name: "Approve one retry" }),
   ).toBeDisabled();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),
@@ -564,6 +566,7 @@ it("reports the loaded job page and filters finished results with the real API s
   ).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("option", { name: "finished" }));
   await userEvent.click(screen.getByRole("button", { name: "Apply filters" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(
       http.get.mock.calls.some(([path]) =>

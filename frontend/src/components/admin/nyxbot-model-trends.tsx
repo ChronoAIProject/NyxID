@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import {
   CartesianGrid,
@@ -39,7 +40,7 @@ function Trend({
   const points = modelDailyPoints(data, measure);
   return (
     <div className="min-w-0 space-y-2">
-      <h3 className="text-12 font-semibold">{title} · Daily UTC</h3>
+      <h3 className="type-body-strong">{title} · Daily UTC</h3>
       <div
         className="analytics-plot h-56"
         role="img"
@@ -80,7 +81,7 @@ function Trend({
             <Tooltip
               content={({ active, label: day, payload }) =>
                 active && payload?.length ? (
-                  <div className="max-h-72 max-w-80 overflow-auto rounded-lg border border-border bg-popover p-3 text-11 shadow-lg">
+                  <div className="max-h-72 max-w-80 overflow-auto rounded-lg border border-border bg-popover p-3 text-13 shadow-lg">
                     <p className="mb-1 font-semibold">
                       {day} UTC · {modelMeasureLabels[measure]}
                     </p>
@@ -112,7 +113,7 @@ function Trend({
           </LineChart>
         </ResponsiveContainer>
       </div>
-      <details className="text-11">
+      <details className="text-13">
         <summary className="cursor-pointer text-muted-foreground">
           Exact daily {modelMeasureLabels[measure].toLowerCase()}
         </summary>
@@ -180,12 +181,12 @@ export function ModelTrends({
   return (
     <Card className="min-w-0 space-y-3 p-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Full-period Top 20 models + Other · days without usage show zero ·
           gaps mean cost is unavailable
         </p>
-        <div className="flex items-center gap-2 text-11">
-          <span>{kind === "cost" ? "Cost measure" : "Token measure"}</span>
+        <div className="flex items-center gap-2 text-13">
+          <Label asChild><span>{kind === "cost" ? "Cost measure" : "Token measure"}</span></Label>
           <Select
             value={kind === "cost" ? cost : effectiveTokens}
             onValueChange={(value) =>
@@ -210,7 +211,7 @@ export function ModelTrends({
           </Select>
         </div>
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-11">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-13">
         {data.models.map((m, i) => (
           <span key={i} className="min-w-0 break-all">
             <svg

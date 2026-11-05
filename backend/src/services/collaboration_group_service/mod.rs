@@ -375,6 +375,13 @@ async fn invalidate(db: &Database, group: &str, session: &mut ClientSession) -> 
         .await?;
     db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
         .update_many(doc! {"assistant_group.conversation_id":{"$in":&ids},"status":{"$in":["pending","approved"]}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+    super::execution_permission_dispatch::proposals::cancel_in_session(
+        db,
+        session,
+        doc! {"execution_proposal.v1.conversation_id":{"$in":&ids}},
+        "group_authority_changed",
+    )
+    .await?;
     db.collection::<bson::Document>(shares::CONSENTS_COLLECTION_NAME)
         .update_many(
             doc! {"conversation_id":{"$in":&ids}},

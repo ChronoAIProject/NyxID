@@ -61,7 +61,7 @@ export function OrgJoinPage() {
           {state.status === "pending" && (
             <>
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 Joining organization...
               </p>
             </>
@@ -70,7 +70,7 @@ export function OrgJoinPage() {
           {state.status === "success" && (
             <>
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 Joined. Redirecting...
               </p>
             </>
@@ -80,10 +80,10 @@ export function OrgJoinPage() {
             <>
               <XCircle className="h-8 w-8 text-destructive" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-foreground">
+                <p className="type-row-title text-foreground">
                   Could not join organization
                 </p>
-                <p className="text-xs text-muted-foreground">{state.message}</p>
+                <p className="text-13 text-muted-foreground">{state.message}</p>
               </div>
               <Button
                 variant="outline"

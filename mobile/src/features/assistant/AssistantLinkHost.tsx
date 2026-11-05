@@ -16,7 +16,8 @@ import { useNavigation } from "@react-navigation/native";
 import * as WebBrowser from "expo-web-browser";
 import { X } from "lucide-react-native";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { firstPartyFrontendUrls } from "../../lib/env";
+import { connectLinksApi } from "../../lib/api/connectLinksApi";
 import { useTheme } from "../../theme/ThemeContext";
 import {
   openWorkspaceSheetAction,
@@ -72,6 +73,7 @@ export function ScopedAssistantLinkHost({
       : undefined;
   const [busy, setBusy] = useState(false);
   const trigger = useRef<number | undefined>(undefined);
+  const minting = useRef(false);
   const mounted = useRef(true);
   const available = useRef(availability.available);
   available.current = availability.available;
@@ -83,10 +85,47 @@ export function ScopedAssistantLinkHost({
   }, []);
   const open = useCallback(
     (href: string, source?: number) => {
-      const value = assistantLinkTarget(href, NYXID_FRONTEND_URL);
+      const value = assistantLinkTarget(href, firstPartyFrontendUrls());
       if (!value) return false;
       if (!available.current()) return true;
       trigger.current = source;
+      if (value.kind === "service") {
+        const slug = value.slug;
+        if (!slug) {
+          navigation.dispatch(
+            workspaceNavigateAction("Plugins", { tab: "connectors" }),
+          );
+          return true;
+        }
+        // Like NyxBot's own connect links, start the real connection in the
+        // native sheet; the setup page remains the fallback.
+        if (minting.current) return true;
+        minting.current = true;
+        const epoch = getAuthEpoch();
+        const setup = () =>
+          navigation.dispatch(
+            workspaceNavigateAction("ServiceSetup", { catalogSlug: slug }),
+          );
+        void connectLinksApi
+          .create(slug)
+          .then((link) => {
+            if (!mounted.current || getAuthEpoch() !== epoch) return;
+            const connect = assistantLinkTarget(
+              link.connect_url,
+              firstPartyFrontendUrls(),
+            );
+            if (connect?.kind === "connect")
+              setOpened({ target: connect, scope, epoch });
+            else setup();
+          })
+          .catch(() => {
+            if (mounted.current && getAuthEpoch() === epoch) setup();
+          })
+          .finally(() => {
+            minting.current = false;
+          });
+        return true;
+      }
       if (value.kind === "account" && value.panel !== "nyxbot") {
         if (value.panel === "billing")
           navigation.dispatch(
@@ -169,18 +208,21 @@ export function ScopedAssistantLinkHost({
                 gap: 8,
               }}
             >
-              <Label
-                accessibilityRole="header"
-                numberOfLines={1}
-                maxFontSizeMultiplier={1.25}
-                style={{ flex: 1, fontSize: 18 }}
-              >
-                {target?.kind === "connect"
-                  ? "Connect a service"
-                  : target?.kind === "channel"
+              {target?.kind === "connect" ? (
+                // The connector page's own identity heading names the request.
+                <View style={{ flex: 1 }} />
+              ) : (
+                <Label
+                  accessibilityRole="header"
+                  numberOfLines={1}
+                  maxFontSizeMultiplier={1.25}
+                  style={{ flex: 1, fontSize: 18 }}
+                >
+                  {target?.kind === "channel"
                     ? "Connect a channel"
                     : "NyxBot settings"}
-              </Label>
+                </Label>
+              )}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Close"

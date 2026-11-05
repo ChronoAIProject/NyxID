@@ -1,15 +1,13 @@
 import { ServiceIcon } from "./ServiceIcon";
+import { NYXID_FRONTEND_URL } from "../lib/env";
 import { useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
-import {
-  TOUCH_TARGET,
-  radius,
-  spacing,
-  typeScale,
-} from "../theme/designTokens";
+import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
+import { ChevronRight } from "lucide-react-native";
+import { TOUCH_TARGET, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { StatusBadge } from "./StatusBadge";
+import { GroupedCell } from "./GroupedCell";
+import { SettingsRow } from "./settings/SettingsList";
 import type { ChallengeDetail } from "../lib/api/types";
 
 type ChallengeCardProps = {
@@ -17,6 +15,9 @@ type ChallengeCardProps = {
   grantDurationLabel?: string;
   isMutating?: boolean;
   decisionsDisabled?: boolean;
+  /** Position in its inset group, for the rounded corners and separators. */
+  first?: boolean;
+  last?: boolean;
   onPress?: () => void;
   onApprove?: () => void;
   onDeny?: () => void;
@@ -33,11 +34,91 @@ function formatTimeAgo(dateStr: string): string {
   return `${days}d ago`;
 }
 
+/** Risk tone shared by the request rows and the request detail. */
+export function riskTextColor(
+  colors: ThemeColors,
+  risk: ChallengeDetail["risk_level"],
+) {
+  return risk === "high"
+    ? colors.riskHigh.text
+    : risk === "medium"
+      ? colors.riskMedium.text
+      : risk === "low"
+        ? colors.riskLow.text
+        : colors.textSecondary;
+}
+
+/**
+ * Approve | Deny as one split row of tinted text, like the actions of an iOS
+ * notification: green approval, red denial, no button chrome.
+ */
+export function ApprovalDecisionPair({
+  disabled,
+  divider = true,
+  onApprove,
+  onDeny,
+}: {
+  disabled: boolean;
+  /** Hairline above the pair when it follows the request content. */
+  divider?: boolean;
+  onApprove?: () => void;
+  onDeny?: () => void;
+}) {
+  const { colors } = useTheme();
+  const styles = useMemo(() => createStyles(colors), [colors]);
+  return (
+    <View style={[styles.pair, divider && styles.pairDivider]}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ disabled }}
+        disabled={disabled}
+        onPress={onApprove}
+        style={({ pressed }) => [
+          styles.decision,
+          pressed && !disabled && styles.pressed,
+        ]}
+      >
+        <Text
+          style={[
+            styles.decisionLabel,
+            { color: disabled ? colors.textMuted : colors.success },
+          ]}
+        >
+          Approve
+        </Text>
+      </Pressable>
+      <View style={styles.pairSeparator} />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ disabled }}
+        disabled={disabled}
+        onPress={onDeny}
+        style={({ pressed }) => [
+          styles.decision,
+          pressed && !disabled && styles.pressed,
+        ]}
+      >
+        <Text
+          style={[
+            styles.decisionLabel,
+            { color: disabled ? colors.textMuted : colors.danger },
+          ]}
+        >
+          Deny
+        </Text>
+      </Pressable>
+    </View>
+  );
+}
+
+/** A pending request: an inset-group row that opens its detail, with Approve | Deny below. */
 export function ChallengeCard({
   challenge,
   grantDurationLabel = "30 days",
   isMutating = false,
   decisionsDisabled = false,
+  first = true,
+  last = true,
   onPress,
   onApprove,
   onDeny,
@@ -45,15 +126,7 @@ export function ChallengeCard({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
-  const riskVariant =
-    challenge.risk_level === "high"
-      ? "riskHigh"
-      : challenge.risk_level === "medium"
-        ? "riskMedium"
-        : challenge.risk_level === "low"
-          ? "riskLow"
-          : "orgChip";
-  // DESIGN.md §Interaction Rules: status badges always Title Case.
+  // DESIGN.md §Interaction Rules: status labels always Title Case.
   const riskLabel =
     challenge.risk_level.charAt(0).toUpperCase() +
     challenge.risk_level.slice(1);
@@ -79,140 +152,126 @@ export function ChallengeCard({
     isMutating ||
     expired ||
     challenge.status !== "PENDING";
-  // Render an org chip when the backend marks the request as
-  // created under an org approval policy. The label falls back to
-  // a generic "Org" when the server omitted the name, so old
-  // backends still render something meaningful.
-  const showOrgChip = challenge.from_org_policy === true;
-  const orgChipLabel = challenge.org_name
-    ? `Org · ${challenge.org_name}`
-    : "Org";
+  // The org label falls back to a generic "Org" when the server omitted the
+  // name, so old backends still render something meaningful.
+  const context = [
+    challenge.from_org_policy === true
+      ? challenge.org_name
+        ? `Org · ${challenge.org_name}`
+        : "Org"
+      : undefined,
+    modeLabel,
+  ].filter(Boolean);
+  const showRisk = challenge.risk_level !== "unknown";
 
   return (
-    <Pressable
-      style={styles.card}
-      onPress={onPress}
-      disabled={isMutating}
-      accessibilityRole={onPress ? "button" : undefined}
-      accessibilityLabel={summary}
-      accessibilityHint={onPress ? "View approval request details" : undefined}
-    >
-      <View style={styles.chipRow}>
-        <ServiceIcon slug={challenge.service_slug} size="sm" />
-        {showOrgChip ? (
-          <StatusBadge variant="orgChip" label={orgChipLabel} />
-        ) : null}
-        {challenge.risk_level !== "unknown" ? (
-          <StatusBadge variant={riskVariant} label={`${riskLabel} risk`} />
-        ) : null}
-        <StatusBadge variant="modeChip" label={modeLabel} />
-      </View>
-      <Text style={styles.title} numberOfLines={2}>{challenge.title}</Text>
-      <Text style={styles.resource}>{summary}</Text>
-      {showRequester ? (
-        <Text style={styles.meta}>Requested by {requester}</Text>
-      ) : null}
-      <Text style={styles.meta}>
-        {timeAgo} · {expiryLabel}
-      </Text>
-      <Text style={styles.meta}>
-        {challenge.approval_mode === "grant"
-          ? `Approving allows matching requests for ${grantDurationLabel}.`
-          : "Approval applies only to this request."}
-      </Text>
-      <View style={styles.actions}>
-        <Pressable
-          style={[styles.approveBtn, blocked && styles.btnDisabled]}
-          onPress={onApprove}
+    <GroupedCell first={first} last={last}>
+      <Pressable
+        style={({ pressed }) => [
+          styles.row,
+          pressed && onPress && !isMutating && styles.pressed,
+        ]}
+        onPress={onPress}
+        disabled={isMutating}
+        accessibilityRole={onPress ? "button" : undefined}
+        accessibilityLabel={summary}
+        accessibilityHint={
+          onPress ? "View approval request details" : undefined
+        }
+      >
+        <View style={styles.tile}>
+          <ServiceIcon slug={challenge.service_slug} size="md" />
+        </View>
+        <View style={styles.body}>
+          <Text style={styles.title} numberOfLines={2}>
+            {challenge.title}
+          </Text>
+          <Text style={styles.resource}>{summary}</Text>
+          {showRequester ? (
+            <Text style={styles.meta}>Requested by {requester}</Text>
+          ) : null}
+          <Text style={styles.meta}>
+            {timeAgo} · {expiryLabel}
+          </Text>
+          <Text style={styles.meta}>
+            {showRisk ? (
+              <Text
+                style={{ color: riskTextColor(colors, challenge.risk_level) }}
+              >
+                {`${riskLabel} risk · `}
+              </Text>
+            ) : null}
+            {context.join(" · ")}
+          </Text>
+          <Text style={styles.meta}>
+            {challenge.execution_proposal
+              ? "Review the exact scope and duration in the web app."
+              : challenge.approval_mode === "grant"
+                ? `Approving allows matching requests for ${grantDurationLabel}.`
+                : "Approval applies only to this request."}
+          </Text>
+        </View>
+        {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
+      </Pressable>
+      {challenge.execution_proposal ? (
+        <View style={styles.pairDivider}>
+          <SettingsRow
+            tone="action"
+            label="Review in the web app"
+            accessibilityRole="link"
+            onPress={() =>
+              void Linking.openURL(`${NYXID_FRONTEND_URL}/assistant/approvals`)
+            }
+          />
+        </View>
+      ) : (
+        <ApprovalDecisionPair
           disabled={blocked}
-          accessibilityRole="button"
-        >
-          <Text style={styles.approveBtnText}>Approve</Text>
-        </Pressable>
-        <Pressable
-          style={[styles.denyBtn, blocked && styles.btnDisabled]}
-          onPress={onDeny}
-          disabled={blocked}
-          accessibilityRole="button"
-        >
-          <Text style={styles.denyBtnText}>Deny</Text>
-        </Pressable>
-      </View>
-    </Pressable>
+          onApprove={onApprove}
+          onDeny={onDeny}
+        />
+      )}
+    </GroupedCell>
   );
 }
 
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
-    card: {
-      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border on chrome.
-      borderRadius: radius.lg,
-      backgroundColor: c.card,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      // Pending approval gets a purple left-border accent (mobile-only affordance,
-      // analogous to the desktop active-state purple identity rule).
-      borderLeftWidth: 2,
-      borderLeftColor: c.primary,
-      padding: spacing.xxl,
-      gap: spacing.xs,
-    },
-    title: {
-      ...typeScale.title,
-      color: c.textPrimary,
-    },
-    chipRow: {
+    row: {
       flexDirection: "row",
-      flexWrap: "wrap",
-      gap: spacing.xs,
+      alignItems: "center",
+      gap: spacing.lg,
+      minHeight: 52,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.md,
     },
-    resource: {
-      ...typeScale.label,
-      color: c.textSecondary,
+    pressed: { backgroundColor: c.navActive },
+    tile: {
+      width: 30,
+      alignSelf: "flex-start",
+      alignItems: "center",
+      paddingTop: 2,
     },
-    // Mobile-card metadata rows: text-[11px].
-    meta: {
-      ...typeScale.small,
-      color: c.textMuted,
+    body: { flex: 1, minWidth: 0, gap: 2 },
+    // DESIGN.md: Activity rows lead with the service name at 15px.
+    title: { ...typeScale.title, color: c.textPrimary },
+    resource: { ...typeScale.label, color: c.textSecondary },
+    meta: { ...typeScale.small, color: c.textMuted },
+    pair: { flexDirection: "row", alignItems: "stretch" },
+    pairDivider: {
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: c.borderSoft,
     },
-    actions: {
-      flexDirection: "row",
-      gap: spacing.sm,
-      marginTop: spacing.sm,
+    pairSeparator: {
+      width: StyleSheet.hairlineWidth,
+      backgroundColor: c.borderSoft,
     },
-    // DESIGN.md §Usage Rules: Approve = success green tint, Deny = error red tint.
-    // Purple NOT used on action buttons.
-    approveBtn: {
+    decision: {
       flex: 1,
       minHeight: TOUCH_TARGET,
-      paddingHorizontal: spacing.md,
-      borderRadius: radius.md,
-      backgroundColor: c.successSoft,
-      borderWidth: 1,
-      borderColor: c.success,
       alignItems: "center",
       justifyContent: "center",
-    },
-    approveBtnText: {
-      ...typeScale.label,
-      color: c.success,
-    },
-    denyBtn: {
-      flex: 1,
-      minHeight: TOUCH_TARGET,
       paddingHorizontal: spacing.md,
-      borderRadius: radius.md,
-      backgroundColor: c.dangerSoftBg,
-      borderWidth: 1,
-      borderColor: c.danger,
-      alignItems: "center",
-      justifyContent: "center",
     },
-    denyBtnText: {
-      ...typeScale.label,
-      color: c.danger,
-    },
-    btnDisabled: {
-      opacity: 0.5,
-    },
+    decisionLabel: { ...typeScale.bodyStrong },
   });

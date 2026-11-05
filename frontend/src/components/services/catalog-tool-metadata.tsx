@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useAuthStore } from "@/stores/auth-store";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -115,20 +116,20 @@ export function CatalogToolMetadata({
           </Button>
         )}
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-12">
+          <Label>
             Name
             <Input {...form.register("name")} />
-          </label>
-          <label className="text-12">
+          </Label>
+          <Label>
             Supplier
             <Input {...form.register("supplier")} />
-          </label>
-          <label className="text-12">
+          </Label>
+          <Label>
             Description
             <Input {...form.register("description")} />
-          </label>
+          </Label>
           {admin && (
-            <label className="text-12">
+            <Label>
               Offering kind
               <Select
                 value={form.watch("offering_kind")}
@@ -144,15 +145,15 @@ export function CatalogToolMetadata({
                   <SelectItem value="tool">Tool</SelectItem>
                 </SelectContent>
               </Select>
-            </label>
+            </Label>
           )}
-          <label className="text-12">
+          <Label>
             OpenAPI spec URL
             <Input {...form.register("openapi_spec_url")} />
-          </label>
+          </Label>
         </div>
         <details className="space-y-3">
-          <summary className="cursor-pointer text-12">
+          <summary className="cursor-pointer text-14">
             Documentation and operational notes
           </summary>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -166,28 +167,28 @@ export function CatalogToolMetadata({
                 "known_limitations",
               ] as const
             ).map((field) => (
-              <label key={field} className="text-12">
+              <Label key={field}>
                 {field.replaceAll("_", " ")}
                 <Input {...form.register(field)} />
-              </label>
+              </Label>
             ))}
           </div>
-          <label className="block text-12">
+          <Label className="block">
             Required permissions
             <Input
               placeholder="read:api, write:data"
               {...form.register("required_permissions")}
             />
-          </label>
+          </Label>
           {form.formState.errors.required_permissions && (
-            <p role="alert" className="text-11 text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               {form.formState.errors.required_permissions.message}
             </p>
           )}
-          <p className="text-11 text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             Comma-separated vendor permissions required for the operations.
           </p>
-          <p className="text-12 font-medium">Capabilities</p>
+          <p className="type-row-title">Capabilities</p>
           <div className="grid gap-2 sm:grid-cols-2">
             {(
               [
@@ -200,10 +201,10 @@ export function CatalogToolMetadata({
                 ["supports_streaming", "Streaming"],
               ] as const
             ).map(([key, label]) => (
-              <label
+              <Label
                 key={key}
                 htmlFor={`tool-cap-${service.id}-${key}`}
-                className="flex items-center justify-between rounded-lg border border-border p-2 text-12"
+                className="flex items-center justify-between rounded-lg border border-border p-2"
               >
                 {label}
                 <Switch
@@ -213,11 +214,11 @@ export function CatalogToolMetadata({
                     form.setValue(`capabilities.${key}`, value)
                   }
                 />
-              </label>
+              </Label>
             ))}
           </div>
         </details>
-        <p className="text-12">Topics</p>
+        <p className="text-14">Topics</p>
         <div className="flex flex-wrap gap-1">
           {topics.map((topic) => (
             <Button
@@ -244,7 +245,7 @@ export function CatalogToolMetadata({
           ))}
         </div>
         {service.import_source && (
-          <p className="text-11 text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             Imported from {service.import_source.kind}:{" "}
             {service.import_source.reference} ·{" "}
             {service.import_source.version ?? "Unversioned"}

@@ -62,6 +62,7 @@ const query = (data: unknown, error: unknown = null) => ({
   isError: Boolean(error),
   refetch: vi.fn(),
 });
+let user: ReturnType<typeof userEvent.setup>;
 const PAGE_ROUTES = ["/billing", "/assistant"] as const;
 let pageRoute: (typeof PAGE_ROUTES)[number] = "/billing";
 async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
@@ -96,13 +97,13 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   expect(history.location.pathname).toBe(pageRoute);
   if (exploreGroups) {
     const disclosure = screen.queryByText("Explore by service, model or agent");
-    if (disclosure) await userEvent.click(disclosure);
+    if (disclosure) await user.click(disclosure);
   }
   return { history, router };
 }
 async function select(label: string, option: string) {
-  await userEvent.click(screen.getByRole("combobox", { name: label }));
-  await userEvent.click(screen.getByRole("option", { name: option }));
+  await user.click(screen.getByRole("combobox", { name: label }));
+  await user.click(screen.getByRole("option", { name: option }));
 }
 function serviceFilter() {
   return screen.getByRole("button", { name: "Filter services" });
@@ -116,8 +117,8 @@ const servicesChip = (name?: string) =>
     name: name ? `Edit service filter: ${name}` : /^Edit service filter:/,
   })[0] ?? null;
 async function selectServices(names: string[]) {
-  for (const name of names) await userEvent.click(option(name));
-  await userEvent.click(picker().getByRole("button", { name: "Done" }));
+  for (const name of names) await user.click(option(name));
+  await user.click(picker().getByRole("button", { name: "Done" }));
 }
 function servicesParam(history: { location: { search: string } }) {
   const raw = new URLSearchParams(history.location.search).get(pageRoute === "/assistant" ? "panelServices" : "services");
@@ -137,6 +138,7 @@ function twoServiceRows() {
   ];
 }
 beforeEach(() => {
+  user = userEvent.setup({ delay: null });
   vi.resetAllMocks();
   mocks.wallet.mockReturnValue(query(billingWallet()));
   mocks.usage.mockReturnValue(query(usage()));
@@ -164,7 +166,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       document.querySelector(".expandable-service > summary"),
     ).not.toBeVisible();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    await userEvent.click(
+    await user.click(
       screen.getByText("Explore by service, model or agent"),
     );
     expect(
@@ -179,11 +181,11 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(screen.getByText("95 credits")).toBeVisible();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
-    await userEvent.click(
+    await user.click(
       screen.getByRole("button", { name: "View breakdown" }),
     );
     expect(screen.getByText("100 credits")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Add credits" }));
+    await user.click(screen.getByRole("button", { name: "Add credits" }));
     expect(screen.getByRole("dialog")).toBeVisible();
     expect(screen.getAllByText("Top-up history")).toHaveLength(1);
   });
@@ -204,13 +206,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       screen.getAllByText("0.00244", { exact: false }).length,
     ).toBeGreaterThan(0);
-    await userEvent.click(screen.getByText("All metrics & funding"));
+    await user.click(screen.getByText("All metrics & funding"));
     const funding = screen.getByText("Funding breakdown").parentElement!;
     expect(within(funding).getByText("0.001 credits")).toBeVisible();
     expect(within(funding).getByText("0.0012 credits")).toBeVisible();
     expect(within(funding).getByText("0.00024 credits")).toBeVisible();
     expect(within(funding).getByText("1,200")).toBeVisible();
-    await userEvent.click(
+    await user.click(
       screen.getByText("Example LLM", {
         selector: ".expandable-name > strong",
       }),
@@ -233,7 +235,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByRole("combobox", { name: "Time range" }),
     ).toHaveTextContent("Last 30 days");
     expect(servicesChip()).toBeNull();
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     expect(
       picker().getByText("Services with recorded usage in this period."),
     ).toBeVisible();
@@ -268,7 +270,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         .querySelector(".all-metrics")
         ?.textContent?.includes("Reported requests");
     expect(totals()).toBe(true);
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     await selectServices(["Free service", "Example LLM"]);
     expect(servicesChip("Free service")).toHaveTextContent(
       "Service: Free service",
@@ -286,8 +288,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     const { history } = await renderPage(
       `/billing?tab=usage&services=${encodeURIComponent('["free-service"]')}`,
     );
-    await userEvent.click(serviceFilter());
-    await userEvent.click(option("Example LLM"));
+    await user.click(serviceFilter());
+    await user.click(option("Example LLM"));
     await waitFor(() =>
       expect(servicesParam(history)).toEqual(["free-service", "example-llm"]),
     );
@@ -298,14 +300,14 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       picker().queryByRole("button", { name: "Cancel" }),
     ).not.toBeInTheDocument();
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(picker().getByRole("button", { name: "Done" }));
     expect(history.location.pathname).toBe(pageRoute);
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     expect(option("Example LLM")).toBeChecked();
-    await userEvent.click(picker().getByRole("button", { name: "Clear" }));
+    await user.click(picker().getByRole("button", { name: "Clear" }));
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(option("Example LLM")).not.toBeChecked();
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(picker().getByRole("button", { name: "Done" }));
     expect(servicesChip()).toBeNull();
     expect(serviceFilter()).toHaveTextContent("All");
   });
@@ -314,18 +316,18 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       query(usage([...twoServiceRows(), row({ service_slug: "third" })])),
     );
     const { history } = await renderPage();
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     await selectServices(["Free service", "Example LLM"]);
-    await userEvent.click(servicesChip("Free service")!);
+    await user.click(servicesChip("Free service")!);
     expect(option("Free service")).toBeChecked();
     expect(option("Example LLM")).toBeChecked();
     expect(option("third")).not.toBeChecked();
-    await userEvent.type(
+    await user.type(
       picker().getByRole("textbox", { name: "Search services" }),
       "third",
     );
     expect(picker().getAllByRole("checkbox")).toHaveLength(1);
-    await userEvent.click(option("third"));
+    await user.click(option("third"));
     await waitFor(() =>
       expect(servicesParam(history)).toEqual([
         "free-service",
@@ -333,8 +335,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         "third",
       ]),
     );
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
-    await userEvent.click(
+    await user.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(
       screen.getByRole("button", { name: "Remove service: third" }),
     );
     await waitFor(() =>
@@ -342,13 +344,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     expect(servicesChip("Free service")).toBeVisible();
     expect(servicesChip("Example LLM")).toBeVisible();
-    await userEvent.click(serviceFilter());
+    await user.click(serviceFilter());
     expect(
       picker().getByRole("textbox", { name: "Search services" }),
     ).toHaveValue("");
     expect(option("third")).not.toBeChecked();
-    await userEvent.click(picker().getByRole("button", { name: "Done" }));
-    await userEvent.click(
+    await user.click(picker().getByRole("button", { name: "Done" }));
+    await user.click(
       screen.getAllByRole("button", { name: "Clear filters" })[0]!,
     );
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
@@ -378,8 +380,8 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     const url = `/billing?tab=usage&services=${encodeURIComponent('["example-llm","gone"]')}`;
     const { history } = await renderPage(url);
     const rerender = async () => {
-      await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
-      await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+      await user.click(screen.getByRole("tab", { name: "Billing" }));
+      await user.click(screen.getByRole("tab", { name: "Usage" }));
     };
     expect(servicesParam(history)).toEqual(["example-llm", "gone"]);
     state = { ...query(usage([row()])), isFetching: true };
@@ -401,7 +403,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await select("Time range", "Last 24 hours");
     await waitFor(() => expect(servicesParam(history)).toBeUndefined());
     expect(screen.getByText("No usage in this period.")).toBeVisible();
-    await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
     expect(
       screen.getByRole("combobox", { name: "Top-up history period" }),
     ).toHaveTextContent("Last 30 days");
@@ -412,7 +414,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await waitFor(() =>
       expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
     );
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
@@ -458,7 +460,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       await waitFor(() =>
         expect(history.location.search).not.toMatch(/(?:action|panelAction)=/),
       );
-      await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+      await user.click(screen.getByRole("button", { name: "Cancel" }));
       await waitFor(() =>
         expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
       );
@@ -484,7 +486,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     const { history } = await renderPage("/billing?tab=billing&action=topup");
     // The user picks Usage while the wallet is still loading.
-    await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+    await user.click(screen.getByRole("tab", { name: "Usage" }));
     await waitFor(() => expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage"));
     expect(history.location.pathname).toBe(pageRoute);
     expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
@@ -552,7 +554,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       within(spend).getByText("0.72", { selector: "strong", exact: false }),
     ).toBeVisible();
-    await userEvent.click(screen.getByText("All metrics & funding"));
+    await user.click(screen.getByText("All metrics & funding"));
     const quantities = screen.getByRole("heading", {
       name: "Requests & other units",
     }).parentElement!;
@@ -596,7 +598,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         /^1 charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated\. Amounts marked ≥ are lower bounds\./,
       ).length,
     ).toBeGreaterThan(0);
-    await userEvent.click(
+    await user.click(
       screen.getByText("Example LLM", {
         selector: ".expandable-name > strong",
       }),
@@ -650,7 +652,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByText("Model B", { selector: ".expandable-name > strong" }),
     ).toBeVisible();
     await select("Group by", "Agent");
-    await userEvent.type(
+    await user.type(
       screen.getByRole("textbox", { name: "Search usage groups" }),
       "Research",
     );
@@ -685,7 +687,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     ).toBeVisible();
     await select("Activity time range", "Last 30 days");
     expect(mocks.activity).toHaveBeenLastCalledWith(30);
-    await userEvent.click(screen.getByText("View daily values"));
+    await user.click(screen.getByText("View daily values"));
     const table = screen.getByRole("table", {
       name: "Agent activity per UTC day",
     });
@@ -730,9 +732,9 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(
       screen.queryByText("No usage in this period."),
     ).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(mocks.usage().refetch).toHaveBeenCalled();
-    await userEvent.click(screen.getByRole("tab", { name: "Billing" }));
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
     expect(screen.getByText("Failed to load top-up history.")).toBeVisible();
     expect(screen.queryByText("No top-ups yet.")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add credits" })).toBeDisabled();
@@ -749,7 +751,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage("/billing");
-    await userEvent.click(
+    await user.click(
       screen.getByRole("button", { name: "Provision Wallet" }),
     );
     expect(mocks.provision).toHaveBeenCalledWith({});

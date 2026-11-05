@@ -101,10 +101,10 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary-text" aria-hidden="true" />
         </div>
-        <h1 className="text-28 font-normal tracking-tight">
+        <h1 className="type-metric tracking-tight">
           MFA verification
         </h1>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 unthemed:text-12 text-muted-foreground">
           {verifyMutation.sessionConfirmationPending
             ? "Verification was submitted. Confirm your session to continue."
             : cookieChallenge
@@ -118,7 +118,7 @@ export function MfaVerifyForm({ returnTo, cookieChallenge = false }: MfaVerifyFo
           {form.formState.errors.root && (
             <div
               role="alert"
-              className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+              className="rounded-lg bg-destructive/10 p-3 text-14 unthemed:text-12 text-destructive"
             >
               {form.formState.errors.root.message}
             </div>
@@ -190,7 +190,7 @@ export function MfaCodeFields({
                 aria-label={
                   recoveryMode ? "Recovery code" : "Authenticator code"
                 }
-                className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
+                className="min-w-0 font-mono text-14 tracking-normal sm:text-14"
                 {...field}
                 ref={inputRef ?? field.ref}
               />
@@ -203,7 +203,7 @@ export function MfaCodeFields({
       <Button
         type="button"
         variant="link"
-        className="h-auto p-0 text-12"
+        className="h-auto p-0 text-14 unthemed:text-12"
         disabled={disabled}
         onClick={onToggleRecovery}
       >

@@ -102,13 +102,13 @@ export function AgentKeyPicker({ onSelect }: AgentKeyPickerProps) {
 
   if (isLoading) {
     return (
-      <p className="text-sm text-muted-foreground">Loading keys…</p>
+      <p className="text-14 text-muted-foreground">Loading keys…</p>
     );
   }
 
   if (!activeKeys.length) {
     return (
-      <p className="text-sm text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         No Agent Keys yet.{" "}
         <Link to="/keys" search={{ tab: "nyxid" }} className="underline">
           Create your first Agent Key →

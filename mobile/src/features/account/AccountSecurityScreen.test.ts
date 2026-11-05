@@ -40,7 +40,14 @@ function setup(passwordAccount: boolean) {
       useFocusEffect: (fn: typeof focus) => {
         focus = fn;
       },
+      useNavigation: () => ({ navigate() {} }),
     },
+    "../../components/settings/SettingsList": Object.fromEntries(
+      ["SettingsGroup", "SettingsPage", "SettingsRow", "SettingsTextField"].map(
+        (name) => [name, name],
+      ),
+    ),
+    "./SessionDetailScreen": { formatSessionDate: (value: string) => value },
     "react-native": {
       View: "View",
       AppState: {
@@ -58,10 +65,17 @@ function setup(passwordAccount: boolean) {
     },
     "expo-clipboard": {},
     "../../app/WorkspaceHeader": { useWorkspaceBack() {} },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
+      [
+        "ActionButton",
+        "Card",
+        "Field",
+        "Label",
+        "Notice",
+        "Section",
+        "WorkspacePage",
+      ].map((name) => [name, name]),
     ),
     "@tanstack/react-query": {
       useQueryClient: () => ({
@@ -110,12 +124,15 @@ function setup(passwordAccount: boolean) {
   harness.flush();
   const find = (label: string) => {
     const node = elements(harness.value()).find(
-      (node) => node.props.label === label,
+      (node) =>
+        node.props.label === label ||
+        (node.type === "SettingsTextField" &&
+          node.props.accessibilityLabel === label),
     );
     assert.ok(node, `Missing ${label}`);
     return node;
   };
-  find("Turn off two-factor authentication").props.onPress();
+  find("Turn Off Two-Factor Authentication").props.onPress();
   harness.flush();
   return {
     harness,
@@ -142,19 +159,19 @@ function setup(passwordAccount: boolean) {
 test("password MFA disable requires both code and password and failed verification preserves enabled state", async () => {
   const env = setup(true);
   assert.equal(
-    env.find("Turn off two-factor authentication").props.disabled,
+    env.find("Turn Off Two-Factor Authentication").props.disabled,
     true,
   );
   env.find("Current password").props.onChangeText("password");
   env.harness.flush();
   assert.equal(
-    env.find("Turn off two-factor authentication").props.disabled,
+    env.find("Turn Off Two-Factor Authentication").props.disabled,
     true,
   );
   env.find("Authenticator or recovery code").props.onChangeText("123456");
   env.harness.flush();
   env.fail();
-  env.find("Turn off two-factor authentication").props.onPress();
+  env.find("Turn Off Two-Factor Authentication").props.onPress();
   env.confirm();
   await env.harness.settle();
   assert.deepEqual(JSON.parse(JSON.stringify(env.calls)), [
@@ -180,7 +197,7 @@ test("social account can disable MFA with a recovery code and no password field"
     .find("Authenticator or recovery code")
     .props.onChangeText("recovery-code");
   env.harness.flush();
-  env.find("Turn off two-factor authentication").props.onPress();
+  env.find("Turn Off Two-Factor Authentication").props.onPress();
   env.confirm();
   await env.harness.settle();
   assert.deepEqual(JSON.parse(JSON.stringify(env.calls)), [
@@ -196,7 +213,7 @@ test("a transient inactive state (Face ID, Control Center) keeps the MFA disable
     .find("Authenticator or recovery code")
     .props.onChangeText("recovery-code");
   env.harness.flush();
-  env.find("Turn off two-factor authentication").props.onPress();
+  env.find("Turn Off Two-Factor Authentication").props.onPress();
   env.state("inactive");
   env.state("active");
   env.confirm();
@@ -211,7 +228,7 @@ test("MFA disable confirmation cannot revive after a background round trip", asy
     .find("Authenticator or recovery code")
     .props.onChangeText("recovery-code");
   env.harness.flush();
-  env.find("Turn off two-factor authentication").props.onPress();
+  env.find("Turn Off Two-Factor Authentication").props.onPress();
   env.state("inactive");
   env.state("background");
   env.state("active");
@@ -229,7 +246,7 @@ test("MFA disable cannot dispatch after waiting across a background round trip",
     .find("Authenticator or recovery code")
     .props.onChangeText("recovery-code");
   env.harness.flush();
-  env.find("Turn off two-factor authentication").props.onPress();
+  env.find("Turn Off Two-Factor Authentication").props.onPress();
   env.confirm();
   env.state("background");
   env.state("active");

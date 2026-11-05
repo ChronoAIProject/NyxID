@@ -3,11 +3,13 @@ import type { remoteMachinePlatformReadinessSchema } from "@/schemas/machines";
 
 export function RemoteMachinePlatformReadiness({
   platform,
+  grouped = false,
 }: {
+  readonly grouped?: boolean;
   readonly platform?: z.infer<typeof remoteMachinePlatformReadinessSchema>;
 }) {
   return (
-    <div className="space-y-2 text-12 text-muted-foreground" role="status">
+    <div className={grouped ? "space-y-1" : "space-y-2 text-14 text-muted-foreground"} role="status">
       <p>
         Platform configuration:{" "}
         {platform?.configuration_ready === true

@@ -74,7 +74,7 @@ function VoiceConnection({
   const error = query.error || publish.error;
   return (
     <section aria-label="Device voice" className="space-y-3">
-      <h3 className="text-13 font-semibold text-foreground">Device voice</h3>
+      <h3 className="type-group-heading text-foreground">Device voice</h3>
       <p className="text-12 text-muted-foreground">
         Create a voice connection for {agentTitle(agent)}, then allow this
         connection on your device’s Agent Key. It permits conversations with

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState, useMemo, useCallback } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -50,11 +51,11 @@ function CodeBlock({
 }) {
   return (
     <div className="space-y-2">
-      <Badge variant="secondary" className="text-10">
+      <Badge variant="secondary" className="text-12">
         {label}
       </Badge>
       <div className="relative">
-        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-xs leading-relaxed text-foreground">
+        <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-12 min-h-[44px] font-mono text-14 text-foreground">
           {code}
         </pre>
         <Button
@@ -75,7 +76,7 @@ function EmptyState() {
   return (
     <div className="flex flex-col items-center gap-1 py-12">
       <BrainIcon className="h-48 w-48 text-muted-foreground" />
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Create an OAuth client first to generate AI setup configs.
       </p>
     </div>
@@ -154,7 +155,7 @@ function AiSkillSetupCard({
             <TabsContent key={id} value={id}>
               <div className="space-y-4">
                 <div className="relative">
-                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+                  <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                     {setupPrompt}
                   </pre>
                   <Button
@@ -173,7 +174,7 @@ function AiSkillSetupCard({
                     variant={
                       skillInfo.type === "auto-refresh" ? "default" : "secondary"
                     }
-                    className="text-10"
+                    className="text-12"
                   >
                     {skillInfo.type === "auto-refresh"
                       ? "Auto-refresh"
@@ -183,7 +184,7 @@ function AiSkillSetupCard({
                           ? "Provider-level"
                           : "Per-session"}
                   </Badge>
-                  <span className="text-11 text-muted-foreground">
+                  <span className="text-13 text-muted-foreground">
                     {skillInfo.note}
                   </span>
                 </div>
@@ -192,18 +193,18 @@ function AiSkillSetupCard({
           ))}
         </Tabs>
 
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Skills are powered by the NyxID playbook at{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-10">
+          <code className="rounded bg-muted px-1 py-0.5 text-14">
             {baseUrl}/llms.txt
           </code>
           . Tools with auto-refresh fetch the latest version automatically.
           Check skill status:{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-10">
+          <code className="rounded bg-muted px-1 py-0.5 text-14">
             nyxid ai-setup status
           </code>
           . Update the CLI by re-running the installer:{" "}
-          <code className="rounded bg-muted px-1 py-0.5 text-10">
+          <code className="rounded bg-muted px-1 py-0.5 text-14">
             bash -c &quot;$(curl -fsSL ...install.sh)&quot;
           </code>
         </p>
@@ -289,10 +290,10 @@ export function AiSetupPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+        <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           AI Setup Guide
         </h2>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Configure your AI coding assistant to work with NyxID. Pick a tool and
           an app, copy the config, done.
         </p>
@@ -305,10 +306,10 @@ export function AiSetupPage() {
               <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-13 font-semibold text-foreground">
+              <h3 className="type-card-title text-foreground">
                 Isolate this AI agent before handing it credentials
               </h3>
-              <p className="max-w-2xl text-xs text-muted-foreground">
+              <p className="max-w-2xl text-13 text-muted-foreground">
                 Create a scoped Agent Key, choose allowed services, add
                 credential bindings only when needed, then verify proxy access
                 from the Agent Key detail page.
@@ -353,7 +354,7 @@ export function AiSetupPage() {
             <CardContent className="space-y-6">
               {/* App selector */}
               <div className="space-y-2">
-                <label className="text-12 font-medium">OAuth Client</label>
+                <Label>OAuth Client</Label>
                 <Select
                   value={selectedClient?.id ?? ""}
                   onValueChange={setSelectedClientId}
@@ -366,7 +367,7 @@ export function AiSetupPage() {
                       <SelectItem key={client.id} value={client.id}>
                         <span className="flex items-center gap-2">
                           {client.client_name}
-                          <Badge variant="secondary" className="text-10">
+                          <Badge variant="secondary" className="text-12">
                             {client.client_type}
                           </Badge>
                         </span>
@@ -394,16 +395,16 @@ export function AiSetupPage() {
                   <TabsContent key={tool.id} value={tool.id}>
                     <div className="space-y-4">
                       {tool.configFilePath && (
-                        <p className="text-12 text-muted-foreground">
+                        <p className="text-14 text-muted-foreground">
                           Save to{" "}
-                          <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                          <code className="rounded bg-muted px-1.5 py-0.5 text-14">
                             {tool.configFilePath}
                           </code>
                           {tool.id === "claude-code" && (
                             <span>
                               {" "}
                               or project-level{" "}
-                              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
+                              <code className="rounded bg-muted px-1.5 py-0.5 text-14">
                                 .claude/settings.json
                               </code>
                             </span>
@@ -429,17 +430,17 @@ export function AiSetupPage() {
                 <CardTitle>Client Details</CardTitle>
               </CardHeader>
               <CardContent>
-                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-12">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 text-14">
                   <dt className="text-muted-foreground">Client ID</dt>
-                  <dd className="text-xs">{selectedClient.id}</dd>
+                  <dd className="text-13">{selectedClient.id}</dd>
                   <dt className="text-muted-foreground">Type</dt>
                   <dd>{selectedClient.client_type}</dd>
                   <dt className="text-muted-foreground">Redirect URIs</dt>
-                  <dd className="text-xs">
+                  <dd className="text-13">
                     {selectedClient.redirect_uris.join(", ") || "None"}
                   </dd>
                   <dt className="text-muted-foreground">Scopes</dt>
-                  <dd className="text-xs">
+                  <dd className="text-13">
                     {selectedClient.allowed_scopes || "openid profile email"}
                   </dd>
                 </dl>

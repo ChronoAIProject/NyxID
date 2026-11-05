@@ -1,3 +1,5 @@
+import { TEXT_STYLES } from "@/lib/typography";
+import { FormViewportContext } from "@/lib/form-viewport";
 import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -20,7 +22,7 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none focus:bg-accent data-[state=open]:bg-accent",
+      "flex cursor-pointer select-none items-center rounded-sm px-2 py-1.5 text-14 outline-none focus:bg-accent data-[state=open]:bg-accent",
       inset && "pl-8",
       className,
     )}
@@ -37,12 +39,16 @@ const DropdownMenuSubContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.SubContent>
 >(({ className, style, ...props }, ref) => {
   const layer = useOverlayLayer();
+  const boundary = React.useContext(FormViewportContext);
   return (
   <OverlayLayer layer={layer}>
   <DropdownMenuPrimitive.SubContent
     ref={ref}
+    collisionBoundary={boundary ?? undefined}
+    collisionPadding={4}
     className={cn(
       "z-50 min-w-[8rem] overflow-hidden rounded-xl border border-border bg-surface p-1 text-popover-foreground shadow-lg shadow-primary/5 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+      boundary && "max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto",
       className,
     )}
     {...props}
@@ -59,14 +65,18 @@ const DropdownMenuContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
 >(({ className, sideOffset = 4, style, ...props }, ref) => {
   const layer = useOverlayLayer();
+  const boundary = React.useContext(FormViewportContext);
   return (
   <OverlayLayer layer={layer}>
   <DropdownMenuPrimitive.Portal>
     <DropdownMenuPrimitive.Content
       ref={ref}
+      collisionBoundary={boundary ?? undefined}
+      collisionPadding={4}
       sideOffset={sideOffset}
       className={cn(
         "z-50 min-w-[200px] overflow-hidden rounded-xl border border-border bg-popover p-2 text-popover-foreground shadow-lg shadow-primary/5 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        boundary && "max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto",
         className,
       )}
       {...props}
@@ -87,7 +97,7 @@ const DropdownMenuItem = React.forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-pointer select-none items-center gap-2 rounded-md px-3 py-1.5 text-12 outline-none transition-colors duration-300 focus:bg-overlay-strong focus:text-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:h-3.5 [&_svg]:w-3.5 [&_svg]:text-muted-foreground [&.text-destructive_svg]:text-destructive [&.focus\\:text-destructive:focus_svg]:text-destructive",
+      "relative flex cursor-pointer select-none items-center gap-2 rounded-md px-3 py-1.5 text-14 outline-none transition-colors duration-300 focus:bg-overlay-strong focus:text-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:h-3.5 [&_svg]:w-3.5 [&_svg]:text-muted-foreground [&.text-destructive_svg]:text-destructive [&.focus\\:text-destructive:focus_svg]:text-destructive",
       inset && "pl-8",
       className,
     )}
@@ -105,7 +115,7 @@ const DropdownMenuLabel = React.forwardRef<
   <DropdownMenuPrimitive.Label
     ref={ref}
     className={cn(
-      "px-3.5 py-2 text-13 font-medium text-muted-foreground",
+      `px-3.5 py-2 ${TEXT_STYLES.groupHeading} text-muted-foreground unthemed:text-15`,
       inset && "pl-8",
       className,
     )}

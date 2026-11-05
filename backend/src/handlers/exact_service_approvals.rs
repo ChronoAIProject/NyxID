@@ -141,6 +141,8 @@ mod tests {
 
     fn auth(method: AuthMethod) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,

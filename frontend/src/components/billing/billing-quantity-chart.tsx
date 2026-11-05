@@ -1,3 +1,4 @@
+import { useTextSize } from "@/hooks/use-text-size";
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
@@ -77,6 +78,7 @@ function QuantityPanel({
   comparison: Dimension;
   onChooseMetrics: () => void;
 }) {
+  const tokenSize = useTextSize(13);
   const [page, setPage] = useState(0);
   const empty = metrics.length === 0;
   const totals = metricTotals(rows);
@@ -174,16 +176,21 @@ function QuantityPanel({
             className="h-[200px] w-full aspect-auto"
           >
             <LineChart
+              // Recharts caches measured tick fonts; refresh the chart's axis
+              // registry together when Display changes the root size.
+              key={tokenSize}
               data={visiblePoints}
               margin={{ top: 12, right: 14, left: 0, bottom: 0 }}
             >
               <CartesianGrid vertical={false} strokeDasharray="3 3" />
               <XAxis
+                height={Math.max(30, tokenSize * 2.5)}
                 dataKey="key"
                 tickLine={false}
                 axisLine={false}
-                tick={{ fontSize: 10, fill: "var(--color-muted-foreground)" }}
-                minTickGap={16}
+                tick={{ fontSize: tokenSize, fill: "var(--color-muted-foreground)" }}
+                interval="preserveStartEnd"
+                minTickGap={tokenSize * 1.5}
                 tickFormatter={(value) => {
                   const text =
                     visiblePoints.find((point) => point.key === value)?.tick ??
@@ -195,11 +202,11 @@ function QuantityPanel({
                 tickFormatter={compact}
                 tickLine={false}
                 axisLine={false}
-                width={44}
+                width={Math.max(44, tokenSize * 4)}
                 tick={
                   empty
                     ? false
-                    : { fontSize: 10, fill: "var(--color-muted-foreground)" }
+                    : { fontSize: tokenSize, fill: "var(--color-muted-foreground)" }
                 }
                 domain={[0, empty ? 1 : yMax]}
                 ticks={empty ? [0, 0.25, 0.5, 0.75, 1] : undefined}
@@ -233,10 +240,10 @@ function QuantityPanel({
         {empty && (
           <div className="pointer-events-none absolute inset-x-4 top-3 bottom-8 flex items-center justify-center">
             <div className="pointer-events-auto max-w-xs space-y-2 rounded-lg border border-border bg-card p-3 text-center shadow-sm">
-              <p className="text-12 font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 Select metrics to display usage
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Use the Metrics filter to select one or more metrics.
               </p>
               <Button variant="outline" size="sm" onClick={onChooseMetrics}>

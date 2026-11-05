@@ -1,0 +1,346 @@
+/* Public primitives retain their existing line boxes; themed roles stay universal. */
+@custom-variant unthemed (&:where(html:not(.theme-light):not(.theme-dark) *));
+
+:root {
+  --line-public-body: 1.4;
+  --line-body: 1.5;
+  --line-title: 1.5;
+  --line-page-title: 1.1;
+  --line-metric: 1.25;
+  --line-prose: 1.625;
+}
+
+/* Semantic roles own size, weight and line height. Tokens remain canonical. */
+@utility type-page-title {
+  font-size: var(--text-28);
+  font-weight: 700;
+  line-height: var(--line-page-title);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-compact-page-title {
+  font-size: var(--text-22);
+  font-weight: 700;
+  line-height: var(--line-page-title);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-page-description {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-section-heading {
+  font-size: var(--text-20);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-dialog-title {
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-card-title {
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-row-title {
+  font-size: var(--text-14);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-group-heading {
+  font-size: var(--text-12);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-body {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-secondary {
+  font-size: var(--text-13);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-meta {
+  font-size: var(--text-13);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-group-label {
+  font-size: var(--text-12);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-field-label {
+  font-size: var(--text-14);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+/* Decorative initials follow the avatar's three visual sizes. */
+@utility type-avatar-initials {
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--line-body);
+}
+
+@utility type-avatar-initials-large {
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--line-body);
+}
+
+@utility type-avatar-initials-header {
+  font-size: var(--text-15);
+  font-weight: 600;
+  line-height: var(--line-body);
+}
+
+@utility type-validation-error {
+  font-size: var(--text-13);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-nav-item {
+  font-size: var(--text-15);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-active-nav-item {
+  font-size: var(--text-15);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-button {
+  font-size: var(--text-14);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-tab {
+  font-size: var(--text-14);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-input {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-menu-item {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-badge {
+  font-size: var(--text-12);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-table-header {
+  font-size: var(--text-12);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-table-cell {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-tooltip {
+  font-size: var(--text-13);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-account-name {
+  font-size: var(--text-14);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-account-email {
+  font-size: var(--text-12);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-toast-title {
+  font-size: var(--text-15);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-toast-description {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-toast-action {
+  font-size: var(--text-14);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-chat-message {
+  font-size: var(--text-16);
+  font-weight: 400;
+  line-height: var(--line-prose);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-composer {
+  font-size: var(--text-16);
+  font-weight: 400;
+  line-height: var(--line-prose);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-code {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-prose);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-metric {
+  font-size: var(--text-28);
+  font-weight: 600;
+  line-height: var(--line-metric);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-secondary-emphasis {
+  font-size: var(--text-13);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-secondary-strong {
+  font-size: var(--text-13);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-body-strong {
+  font-size: var(--text-14);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-subheading {
+  font-size: var(--text-16);
+  font-weight: 600;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-prose {
+  font-size: var(--text-14);
+  font-weight: 400;
+  line-height: var(--line-prose);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-chat-mention {
+  font-size: var(--text-16);
+  font-weight: 500;
+  line-height: var(--line-prose);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-prose-heading {
+  font-size: var(--text-24);
+  font-weight: 600;
+  line-height: var(--line-title);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-prose-subheading {
+  font-size: var(--text-17);
+  font-weight: 600;
+  line-height: var(--line-title);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-prose-minor-heading {
+  font-size: var(--text-16);
+  font-weight: 500;
+  line-height: var(--line-title);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-data-total {
+  font-size: var(--text-15);
+  font-weight: 500;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-brand-monogram {
+  font-size: var(--text-14);
+  font-weight: 700;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}
+
+@utility type-brand-letter {
+  font-size: var(--text-28);
+  font-weight: 700;
+  line-height: var(--line-body);
+  @variant unthemed { line-height: inherit; }
+}

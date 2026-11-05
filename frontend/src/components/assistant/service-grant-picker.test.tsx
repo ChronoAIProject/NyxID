@@ -1,0 +1,50 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { expect, it, vi } from "vitest";
+import { ServiceGrantPicker } from "./nyxbot-agent-forms";
+
+vi.mock("@/hooks/use-keys", () => ({
+  useKeys: () => ({
+    data: [
+      {
+        id: "first",
+        slug: "calendar",
+        label: "Calendar one",
+        is_active: true,
+        credential_source: { type: "org", org_id: "team", allowed: true },
+      },
+      {
+        id: "second",
+        slug: "calendar",
+        label: "Calendar two",
+        is_active: true,
+        credential_source: { type: "org", org_id: "team", allowed: true },
+      },
+      { id: "other", slug: "private", label: "Private", is_active: true },
+    ],
+  }),
+}));
+
+it("uses one personal row per slug and retains unavailable grants for removal", async () => {
+  const change = vi.fn();
+  render(<ServiceGrantPicker value={["calendar", "gone"]} onChange={change} />);
+  expect(screen.getAllByRole("checkbox", { name: /Calendar/ })).toHaveLength(1);
+  expect(screen.getByRole("checkbox", { name: /Calendar/ })).toBeChecked();
+  await userEvent
+    .setup()
+    .click(screen.getByRole("checkbox", { name: "gone gone" }));
+  expect(change).toHaveBeenCalledWith(["calendar"]);
+});
+
+it("keeps separate organization connection IDs even when their slugs match", async () => {
+  const change = vi.fn();
+  render(<ServiceGrantPicker org="team" value={["first"]} onChange={change} />);
+  expect(screen.getAllByRole("checkbox", { name: /Calendar/ })).toHaveLength(2);
+  expect(
+    screen.queryByRole("checkbox", { name: /Private/ }),
+  ).not.toBeInTheDocument();
+  await userEvent
+    .setup()
+    .click(screen.getByRole("checkbox", { name: /Calendar two/ }));
+  expect(change).toHaveBeenCalledWith(["first", "second"]);
+});

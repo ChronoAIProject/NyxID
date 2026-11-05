@@ -3362,3 +3362,577 @@ mod people_tests;
 
 #[path = "upload_tests.rs"]
 mod upload_tests;
+
+#[tokio::test]
+async fn execution_permission_group_roots_bind_requester_audience_and_cancel_at_egress() {
+    use crate::models::execution_permission::{Audience, ExecutionFloor, TaskRootKind};
+    use svc::execution_permission_dispatch as dispatch;
+    let (f, mut agent, group) = setup("execution_collaboration_roots").await;
+    let group = join(&f, &group, &f.member).await;
+    // The recipient may consent only to their own connection for a catalog
+    // already granted to the shared agent, never an arbitrary custom service.
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.service_category = "connection".into();
+    f.state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let owner_connection = f.service(&f.admin, "execution-group-owner").await;
+    let connection = f.service(&f.member, "execution-group").await;
+    f.state
+        .db
+        .collection::<bson::Document>("user_services")
+        .update_many(
+            doc! {"_id":{"$in":[&owner_connection,&connection]}},
+            doc! {"$set":{"catalog_service_id":&catalog.id,"identity_propagation_mode":"none"}},
+        )
+        .await
+        .unwrap();
+    agent.grants.service_ids.push(owner_connection);
+    f.state
+        .db
+        .collection::<AssistantAgent>("assistant_agents")
+        .replace_one(doc! {"_id":&agent.id}, &agent)
+        .await
+        .unwrap();
+    share(&f, &agent, &[&f.member]).await;
+    f.state
+        .db
+        .collection::<bson::Document>(USERS)
+        .update_many(
+            doc! {"_id":{"$in":[&f.admin,&f.member]}},
+            doc! {"$set":{"execution_permission_enrollment":1_i32}},
+        )
+        .await
+        .unwrap();
+    let owner_turn = runtime_start(&f, &f.admin, &group, &agent).await;
+    let recipient_turn = runtime_start(&f, &f.member, &group, &agent).await;
+    let root = recipient_turn
+        .conversation
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap();
+    assert_eq!(root.task.root_kind, TaskRootKind::GroupRequest);
+    assert_eq!(root.actor_user_id, f.member);
+    assert_eq!(
+        root.audience,
+        Audience::Group {
+            group_id: group.id.clone(),
+            revision: group.collaboration.as_ref().unwrap().membership_revision
+        }
+    );
+    assert_ne!(
+        root.task,
+        owner_turn
+            .conversation
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap()
+            .task
+    );
+    let key = runtime_key(&f, &recipient_turn.conversation).await;
+    let auth = crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+        .await
+        .unwrap();
+    let chat = auth.assistant_chat.as_deref().unwrap();
+    assert_eq!(chat.execution_group_id.as_deref(), Some(group.id.as_str()));
+    dispatch::tests::seed_for_chat(&f.state, &auth, &connection, &catalog.id, "POST", "/effect")
+        .await;
+    let target = svc::proxy_service::read_proxy_authority_snapshot_with_access(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &connection,
+        None,
+        auth.org_agent_access.as_deref(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .target;
+    let permit = dispatch::prepare(
+        &f.state.db,
+        &f.state.encryption_keys,
+        auth.execution_permission.as_ref(),
+        Some(chat),
+        &key.id,
+        dispatch::Effect {
+            connection: &connection,
+            owner: &f.member,
+            target: &target,
+            method: "POST",
+            path: "effect",
+            query: None,
+            body: b"",
+            content_type: None,
+            headers: &[],
+            endpoint: None,
+            floors: &[
+                ExecutionFloor::AccessModeRisk,
+                ExecutionFloor::SharedConnectionConsent,
+            ],
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    permit.revalidate(&target).await.unwrap();
+    requests::cancel(&f.state.db, &f.member, &group.id, &root.task.root_id)
+        .await
+        .unwrap();
+    assert!(
+        permit.before_send(&target).await.is_err(),
+        "cancelled original requester cannot use persistent permission"
+    );
+    let owner_key = runtime_key(&f, &owner_turn.conversation).await;
+    let owner_auth = crate::mw::auth::api_key_auth_user(&f.state.db, &owner_key, None, None, None)
+        .await
+        .unwrap();
+    owner_auth
+        .assistant_chat
+        .as_deref()
+        .unwrap()
+        .ensure_live_turn(&f.state.db, None, None, "test")
+        .await
+        .unwrap();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn execution_proposal_group_key_convergence_preserves_fence_for_owner_and_shared() {
+    let (f, agent, group) = setup("execution_proposal_group_key").await;
+    let group = join(&f, &group, &f.member).await;
+    share(&f, &agent, &[&f.member]).await;
+    for actor in [&f.admin, &f.member] {
+        let first = runtime_start(&f, actor, &group, &agent).await;
+        let row = &first.conversation;
+        let fence = || async {
+            f.state
+                .db
+                .collection::<bson::Document>("api_keys")
+                .find_one(doc! {"_id":&row.credential_api_key_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i64("machine_external_fence")
+                .unwrap()
+        };
+        let initial_fence = fence().await;
+        svc::assistant_nyxagent::finish_turn(
+            &f.state.db,
+            row,
+            &row.credential_api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &svc::assistant_nyxagent::TurnResult {
+                text: "Done".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        let next = runtime_start(&f, actor, &group, &agent).await;
+        assert_eq!(next.conversation.id, row.id);
+        assert_eq!(
+            next.conversation.credential_api_key_id,
+            row.credential_api_key_id
+        );
+        assert_eq!(
+            fence().await,
+            initial_fence,
+            "identical group admission is not an authority change"
+        );
+        let key = runtime_key(&f, &next.conversation).await;
+        assert!(!key.allow_all_nodes);
+        assert!(key.allowed_node_ids.is_empty());
+        assert_eq!(key.assistant_group_id.as_deref(), Some(group.id.as_str()));
+        assert_eq!(
+            key.scopes,
+            svc::assistant_agent_credential_service::ASSISTANT_SCOPES
+        );
+        runtime::validate_key(&f.state.db, &key).await.unwrap();
+
+        svc::api_key_mutation_service::update_one(
+            &f.state.db,
+            doc! {"_id": &key.id},
+            doc! {"$set": {"allow_all_nodes":true}},
+            None,
+        )
+        .await
+        .unwrap();
+        let changed_fence = fence().await;
+        assert!(changed_fence > initial_fence);
+        svc::assistant_agent_credential_service::load_or_provision(
+            &f.state.db,
+            &f.state.encryption_keys,
+            actor,
+            &row.id,
+        )
+        .await
+        .unwrap();
+        assert!(fence().await > changed_fence);
+        let restored = runtime_key(&f, &next.conversation).await;
+        runtime::validate_key(&f.state.db, &restored).await.unwrap();
+
+        let rotated =
+            svc::key_service::rotate_api_key(&f.state.db, &f.state.encryption_keys, actor, &key.id)
+                .await
+                .unwrap();
+        assert_ne!(rotated.id, key.id);
+        let current = f
+            .state
+            .db
+            .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                "assistant_conversations",
+            )
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.credential_api_key_id, rotated.id);
+        runtime::validate_key(&f.state.db, &runtime_key(&f, &current).await)
+            .await
+            .unwrap();
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_private_review() {
+    use crate::models::approval_request::ApprovalRequest;
+    use axum::{Extension, Router, body::Body, http::Request, routing::any};
+    use svc::execution_permission_dispatch::proposals;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any as any_request};
+    for collaboration in [false, true] {
+        let (f, mut agent, group) = setup(if collaboration {
+            "execution_proposal_collaboration"
+        } else {
+            "execution_proposal_shared"
+        })
+        .await;
+        let group = join(&f, &group, &f.member).await;
+        let upstream = MockServer::start().await;
+        Mock::given(any_request())
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"ok":true,"private_result":"requester only"}),
+                ),
+            )
+            .mount(&upstream)
+            .await;
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.base_url = upstream.uri();
+        catalog.slug = "proposal-shared".into();
+        catalog.service_category = "connection".into();
+        f.state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                "downstream_services",
+            )
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        svc::assistant_settings_service::update(
+            &f.state.db,
+            &f.member,
+            svc::assistant_settings_service::Update {
+                access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        f.state
+            .db
+            .collection("service_approval_configs")
+            .insert_one(
+                crate::models::service_approval_config::ServiceApprovalConfig {
+                    id: Uuid::new_v4().to_string(),
+                    user_id: f.member.clone(),
+                    service_id: catalog.id.clone(),
+                    service_name: catalog.name.clone(),
+                    approval_required: true,
+                    approval_mode: crate::models::service_approval_config::ApprovalMode::PerRequest,
+                    rules: vec![],
+                    default_effect: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap();
+        let owner_connection = f.service(&f.admin, "proposal-owner").await;
+        let connection = f.service(&f.member, "proposal-shared").await;
+        f.state
+            .db
+            .collection::<bson::Document>("user_services")
+            .update_many(
+                doc! {"_id":{"$in":[&owner_connection,&connection]}},
+                doc! {"$set":{"catalog_service_id":&catalog.id,"identity_propagation_mode":"none"}},
+            )
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>("user_endpoints")
+            .update_many(
+                doc! {"user_id":&f.member},
+                doc! {"$set":{"url":upstream.uri()}},
+            )
+            .await
+            .unwrap();
+        agent.grants.service_ids.push(owner_connection);
+        f.state
+            .db
+            .collection::<AssistantAgent>("assistant_agents")
+            .replace_one(doc! {"_id":&agent.id}, &agent)
+            .await
+            .unwrap();
+        share(&f, &agent, &[&f.member]).await;
+        f.state
+            .db
+            .collection::<bson::Document>(USERS)
+            .update_one(
+                doc! {"_id":&f.member},
+                doc! {"$set":{"execution_permission_enrollment":1}},
+            )
+            .await
+            .unwrap();
+        let row = if collaboration {
+            runtime_start(&f, &f.member, &group, &agent)
+                .await
+                .conversation
+        } else {
+            let request = svc::assistant_nyxagent::TurnRequest {
+                conversation_id: None,
+                text: "Read this status".into(),
+                agent_id: Some(agent.id.clone()),
+                model: None,
+                access_mode: None,
+                attachment_ids: vec![],
+                acknowledgement_id: None,
+                retry_of: None,
+            };
+            let mut start = svc::assistant_nyxagent::TurnStart::from(&request);
+            start.execution_enrollment = true;
+            svc::assistant_nyxagent::begin_turn(
+                &f.state.db,
+                &f.member,
+                start,
+                &f.state.encryption_keys,
+            )
+            .await
+            .unwrap()
+        };
+        let credential = svc::assistant_agent_credential_service::load_for_conversation(
+            &f.state.db,
+            &f.state.encryption_keys,
+            &f.member,
+            &row.id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let app = Router::new()
+            .route(
+                "/proxy/s/{slug}/{*path}",
+                any(crate::handlers::proxy::proxy_request_by_slug),
+            )
+            .layer(Extension(
+                svc::billing::route_inventory::BillingRoutePolicy::Metered(
+                    svc::billing::BillingIngress::Proxy,
+                ),
+            ))
+            .layer(axum::middleware::from_fn(
+                crate::mw::telemetry::telemetry_mw,
+            ))
+            .with_state(f.state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/proxy/s/proposal-shared/status")
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":"Note"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let request = f
+            .state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {"execution_proposal.version":1})
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(&body)));
+        let proposal = proposals::proposal(&request).unwrap();
+        assert_eq!(request.user_id, f.member);
+        assert_eq!(
+            proposal.contract.subject.lane,
+            crate::models::execution_permission::ExecutionLane::Shared
+        );
+        assert!(proposal.contract.satisfies.contains(
+            &crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent
+        ));
+        assert!(
+            proposal
+                .contract
+                .satisfies
+                .contains(&crate::models::execution_permission::ExecutionFloor::AccessModeRisk)
+        );
+        assert!(proposal.contract.satisfies.contains(
+            &crate::models::execution_permission::ExecutionFloor::PersonalServiceApproval
+        ));
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("assistant_acknowledgements")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        let choice = &proposal.choices[0];
+        let input = proposals::Decision {
+            approved: true,
+            expected_revision: proposal.revision,
+            choice_id: Some(choice.id.clone()),
+            choice_digest: Some(choice.digest.clone()),
+            idempotency_key: Uuid::new_v4().to_string(),
+        };
+        assert!(
+            proposals::decide(&f.state, &f.admin, &request.id, &input)
+                .await
+                .is_err()
+        );
+        if collaboration {
+            let other =
+                crate::handlers::collaboration_group::messages(&f.state, &f.admin, &group.id, None)
+                    .await
+                    .unwrap();
+            assert!(!other.to_string().contains("execution_proposal"));
+            let own = crate::handlers::collaboration_group::messages(
+                &f.state, &f.member, &group.id, None,
+            )
+            .await
+            .unwrap();
+            assert!(own.to_string().contains(&request.id));
+        }
+        proposals::decide(&f.state, &f.member, &request.id, &input)
+            .await
+            .unwrap();
+        svc::assistant_nyxagent::finish_turn(
+            &f.state.db,
+            &row,
+            &row.credential_api_key_id,
+            &Uuid::new_v4().to_string(),
+            &svc::assistant_nyxagent::TurnResult {
+                text: "Waiting for your review".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        let resumed = if collaboration {
+            runtime::begin_ready(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &f.member,
+                &group.id,
+                &row.collaboration.as_ref().unwrap().request_id,
+                &agent.id,
+            )
+            .await
+            .unwrap()
+            .claim
+            .conversation
+        } else {
+            let request = svc::assistant_nyxagent::TurnRequest {
+                conversation_id: Some(row.id.clone()),
+                text: String::new(),
+                agent_id: None,
+                model: None,
+                access_mode: None,
+                attachment_ids: vec![],
+                acknowledgement_id: None,
+                retry_of: None,
+            };
+            let mut start = svc::assistant_nyxagent::TurnStart::from(&request);
+            start.origin = crate::models::assistant_conversation::TurnOrigin::Event;
+            svc::assistant_nyxagent::begin_turn(
+                &f.state.db,
+                &f.member,
+                start,
+                &f.state.encryption_keys,
+            )
+            .await
+            .unwrap()
+        };
+        let egress = crate::handlers::assistant_nyxagent::http_egress(
+            f.state.clone(),
+            crate::test_utils::test_auth_user(&f.member),
+        );
+        let text = proposals::resume_turn(&f.state, egress.as_ref(), &resumed)
+            .await
+            .unwrap()
+            .expect("resume receipt");
+        assert!(text.contains("HTTP 200"), "{text}");
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+        if collaboration {
+            assert!(!text.contains("private_result"));
+            let own = crate::handlers::approvals::get_request_by_id(
+                axum::extract::State(f.state.clone()),
+                crate::test_utils::test_auth_user(&f.member),
+                axum::extract::Path(request.id.clone()),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert!(
+                own.execution_proposal
+                    .unwrap()
+                    .result_text
+                    .unwrap()
+                    .contains("private_result")
+            );
+            assert!(
+                crate::handlers::approvals::get_request_by_id(
+                    axum::extract::State(f.state.clone()),
+                    crate::test_utils::test_auth_user(&f.admin),
+                    axum::extract::Path(request.id.clone())
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(
+            f.state
+                .db
+                .collection::<bson::Document>("assistant_agent_consents")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        f.state.db.drop().await.unwrap();
+    }
+}

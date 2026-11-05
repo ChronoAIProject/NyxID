@@ -353,7 +353,7 @@ export function AllocateDialog({
                   disabled={servicesError || servicesLoading}
                 />
                 {(servicesError || servicesLoading) && !needsServices ? (
-                  <p className="text-12 text-muted-foreground">
+                  <p className="text-14 text-muted-foreground">
                     Service limits need the service catalog.{" "}
                     <Button
                       variant="link"
@@ -377,7 +377,7 @@ export function AllocateDialog({
                     </FormItem>
                   )}
                 />
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   The amount is shared across eligible services. Service
                   ceilings do not set aside funds.{" "}
                   {value.recurrence !== "one_time"
@@ -386,7 +386,7 @@ export function AllocateDialog({
                 </p>
               </fieldset>
               {mutation.isError ? (
-                <p role="alert" className="text-12 text-destructive">
+                <p role="alert" className="text-14 text-destructive">
                   {mutation.error.message} Retry with unchanged settings to
                   safely resume the same allocation.
                 </p>

@@ -55,7 +55,7 @@ export function DecisionReceipt({
   return (
     <p
       role="status"
-      className="flex items-start gap-1.5 text-11 text-muted-foreground"
+      className="flex items-start gap-1.5 text-13 text-muted-foreground"
     >
       <Glyph aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0" />
       <span className="min-w-0 flex-1 break-words">
@@ -74,7 +74,7 @@ export function DecisionReceipt({
         <time
           dateTime={time}
           title={new Date(time).toLocaleString()}
-          className="text-11 text-text-tertiary"
+          className="text-13 text-text-tertiary"
         >
           {" · "}{relativeTime(time)}
         </time>

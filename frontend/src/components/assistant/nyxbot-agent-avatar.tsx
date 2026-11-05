@@ -8,12 +8,12 @@ import { cn } from "@/lib/utils";
 import type { AssistantAgentKind } from "@/schemas/assistant-nyxagent";
 
 const SIZES = {
-  xs: "h-4 w-4 text-9 tracking-[-0.04em]",
-  sm: "h-5 w-5 text-9",
-  md: "h-6 w-6 text-9",
-  lg: "h-8 w-8 text-11",
+  xs: "h-4 w-4 type-avatar-initials tracking-[-0.04em]",
+  sm: "h-5 w-5 type-avatar-initials",
+  md: "h-6 w-6 type-avatar-initials",
+  lg: "h-8 w-8 type-avatar-initials-large",
   /** Spans a two-line thread header (28px name line + 16px handle line). */
-  xl: "h-11 w-11 text-13",
+  xl: "h-11 w-11 type-avatar-initials-header",
 } as const;
 
 /**
@@ -57,7 +57,7 @@ export function AgentAvatar({
     <span
       {...a11y}
       className={cn(
-        "flex shrink-0 select-none items-center justify-center rounded-full border font-semibold leading-none",
+        "flex shrink-0 select-none items-center justify-center rounded-full border",
         SIZES[size],
         AGENT_AVATAR_TINTS[agentTintIndex(agent.id)],
         className,
@@ -98,9 +98,10 @@ export function AgentAvatarStack({
       {hidden > 0 ? (
         <span
           className={cn(
-            "flex items-center justify-center rounded-full border border-hairline bg-muted font-medium text-muted-foreground ring-2",
+            "flex items-center justify-center rounded-full border border-hairline bg-muted text-muted-foreground ring-2",
             ring,
             SIZES[size],
+            size === "xl" ? "type-data-total" : size === "lg" ? "type-secondary-emphasis" : "type-group-label",
           )}
         >
           +{hidden}

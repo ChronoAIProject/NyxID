@@ -38,7 +38,9 @@ export function groupRows(
         : dimension === "operation"
           ? `${row.service_id ?? row.service_slug ?? "unknown"}:${row.operation ?? ""}`
           : dimension === "agent"
-            ? (row.api_key_id ?? "unrecorded")
+            ? row.org_channel_guest
+              ? `org-channel:${row.org_channel_guest.channel_id}`
+              : (row.api_key_id ?? "unrecorded")
             : dimension === "model"
               ? (row.model ?? "unrecorded")
               : dimension === "layer"
@@ -50,8 +52,12 @@ export function groupRows(
         : dimension === "operation"
           ? `${serviceName(catalog, row.service_slug)} · ${row.operation ?? "Base price"}`
           : dimension === "agent"
-            ? (row.api_key_name ??
-              (row.api_key_id ? "Unnamed agent key" : "No agent key recorded"))
+            ? row.org_channel_guest
+              ? `Channel guests · ${row.org_channel_guest.channel_id.slice(0, 8)}`
+              : (row.api_key_name ??
+                (row.api_key_id
+                  ? "Unnamed agent key"
+                  : "No agent key recorded"))
             : dimension === "model"
               ? (row.model ?? "No model recorded")
               : dimension === "layer"

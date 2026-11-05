@@ -110,6 +110,18 @@ impl Admission {
         connection: &str,
         target: Option<&crate::services::proxy_service::ProxyTarget>,
     ) -> AppResult<()> {
+        if let Some(permit) = self
+            .chat
+            .execution_permission
+            .as_ref()
+            .and_then(|c| c.permit())
+        {
+            permit
+                .revalidate(target.ok_or_else(|| {
+                    AppError::Forbidden("Execution permission requires HTTP egress".into())
+                })?)
+                .await?;
+        }
         if self.chat.guest && self.operation_identity["kind"] == "raw_inference" {
             super::guest_model::require(
                 db,
@@ -198,6 +210,36 @@ impl Admission {
             crate::services::user_service_service::find_user_service_by_id(db, connection)
                 .await?
                 .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?;
+        if let Some(original) = self
+            .chat
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.channel())
+        {
+            let fresh = crate::services::org_channel_service::validate(
+                db,
+                original.origin(),
+                &self.chat.user_id,
+                &self.chat.agent_id,
+            )
+            .await?;
+            let channel = fresh
+                .channel()
+                .ok_or_else(crate::services::org_channel_service::denied)?;
+            let model = matches!(
+                self.operation_identity["kind"].as_str(),
+                Some("raw_inference" | "legacy_inference")
+            );
+            if channel.execution().guest
+                && ((self.job_id.is_some() || self.native_execution.is_some())
+                    || service.node_id.is_some()
+                    || service.service_type != "http"
+                    || !(fresh.allows_service(&service)
+                        || (model && service.user_id == channel.execution().org_id)))
+            {
+                return Err(crate::services::org_channel_service::denied());
+            }
+        }
         if let Some(original) = self.chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
             if self.job_id.is_some() || self.native_execution.is_some() {
                 return Err(AppError::Forbidden(
@@ -225,6 +267,11 @@ impl Admission {
             }
             if service.user_id == self.chat.user_id
                 && !shared_platform_model(&self.chat, &service, &self.operation_identity, target)
+                && !crate::services::execution_permission_dispatch::covers(
+                    &self.chat,
+                    crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent,
+                    connection,
+                )
             {
                 self.shared_permit
                     .as_ref()
