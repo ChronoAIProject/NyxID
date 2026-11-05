@@ -649,7 +649,25 @@ coordinator continuations, normal model billing, and a fixed one-hour hard
 deadline (`COORDINATOR_DEADLINE_SECONDS`) starting at initial admission. History
 shows the waiting deadline and the terminal `coordinator_timeout` reason. Result
 publication wakes the run; a 60–300 second backstop recovers missed callbacks
-without replaying an admitted child. Admission uses a separate 120-second lease.
+without replaying an admitted child. Admission uses a separate 120-second lease, checked transactionally with its
+claim fence. Its future runs through driver spawn without a wall-clock timeout,
+so a committed turn cannot be orphaned by dropping admission. Child confirmation
+and async fences write the child's thread; only registration, settlement and
+coordinator continuation admission contend on the run row. New indexes on
+existing collections are partial indexes covering enrolled work only.
+
+Direct assignments retain the acting person's live org/shared-agent authority
+and the target's own grants. Personal groups accept available owned, org and
+shared specialists, resolving recipients by mentions, then the group's saved
+selection, then its lead. Organization-group posting remains unavailable to
+NyxBot, as on the legacy path; collaboration groups keep their separate routing.
+
+On a thread that has hosted v2 work, Stop cancels ordinary watches and machine
+jobs, including background work from earlier turns, while preserving work bound
+to other live runs. Machine jobs retain an optional run ID for this lifecycle
+selection. Scoped machine cancellation uses exact job/turn cancellation; older
+nodes receive individual job cancellations rather than a conversation-wide
+cancellation that could stop another run.
 
 Stop targets the captured active turn; an idle Stop does not select a waiting
 run. Use Cancel on a waiting run in Automations history, or the first-party human
