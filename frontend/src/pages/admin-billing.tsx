@@ -1,3 +1,4 @@
+import { CmaRateCards } from "@/components/admin-billing/cma-rate-cards";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -112,6 +113,7 @@ export function AdminBillingPage() {
         </TabsContent>
         <TabsContent value="settings" className="space-y-4">
           <SettingsTab canWrite={canWrite} />
+          <CmaRateCards canWrite={canWrite} />
         </TabsContent>
       </Tabs>
     </div>

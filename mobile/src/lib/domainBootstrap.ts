@@ -74,24 +74,32 @@ function firstValidFlag(
  * Select the production domain set from the `mobile:new-domains` admin flag.
  * Runs once per launch before the app renders. Both API hosts are asked in
  * parallel and the first valid answer wins. When neither answers in time, the
- * last answer saved on this device applies, else the original domains.
+ * last answer saved on this device applies, else the original domains. Storage
+ * failures never replace a remote answer; every exit selects a domain set.
  */
 export async function initializeDomains(
   deps: DomainBootstrapDeps = defaultDeps,
 ): Promise<void> {
-  const next = DOMAIN_SETS.new;
-  if (!next) return;
+  let remote: boolean | undefined;
+  let saved: string | null = null;
+  try {
+    const next = DOMAIN_SETS.new;
+    if (!next) return;
 
-  const [remote, saved] = await Promise.all([
-    firstValidFlag([DOMAIN_SETS.legacy.apiBaseUrl, next.apiBaseUrl], deps),
-    deps.getItem(SELECTION_KEY).catch(() => null),
-  ]);
-  if (remote === undefined) {
-    selectNewDomains(saved === "true");
-    return;
-  }
-  selectNewDomains(remote);
-  if (saved !== String(remote)) {
-    await deps.setItem(SELECTION_KEY, String(remote)).catch(() => {});
+    // Isolate synchronous throws and rejections without losing another result.
+    const savedAnswer = Promise.resolve()
+      .then(() => deps.getItem(SELECTION_KEY))
+      .then((value) => { saved = value; }, () => {});
+    const remoteAnswer = Promise.resolve()
+      .then(() => firstValidFlag([DOMAIN_SETS.legacy.apiBaseUrl, next.apiBaseUrl], deps))
+      .then((value) => { remote = value; }, () => {});
+    await Promise.all([remoteAnswer, savedAnswer]);
+    if (remote !== undefined && saved !== String(remote)) {
+      await Promise.resolve()
+        .then(() => deps.setItem(SELECTION_KEY, String(remote)))
+        .catch(() => {});
+    }
+  } finally {
+    selectNewDomains(remote ?? (saved === "true"));
   }
 }

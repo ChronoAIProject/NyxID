@@ -10,7 +10,7 @@ use crate::models::service_account::COLLECTION_NAME;
 use crate::mw::auth::{LLM_PROXY_SCOPE, PROXY_SCOPE, WIDE_PROXY_SCOPE};
 use crate::services::curation_grant_service::{READ_SCOPE, WRITE_SCOPE};
 
-pub const DEFINITION_VERSION: &str = "service-account-suggestions-v6";
+pub const DEFINITION_VERSION: &str = "service-account-suggestions-v7";
 pub const MAX_OWNER_ACCOUNTS: i64 = 1_000;
 pub const MAX_CONFIGURED_SCOPES: usize = 10_000;
 const MAX_SOURCE_BYTES: usize = 1024 * 1024;
@@ -61,6 +61,11 @@ pub const DEFINITIONS: &[ScopeDefinition] = &[
         value: "groups",
         label: "Group claims (empty for service accounts)",
         description: "Include groups in OAuth userinfo. Service accounts have no group memberships, so the group list is empty; this grants no access.",
+    },
+    ScopeDefinition {
+        value: super::billing::sandbox_runtime::WRITE_SCOPE,
+        label: "CMA Sandbox billing",
+        description: "Request prepaid Sandbox windows and submit retained allocation evidence. Only the explicitly configured CMA producer account is authorized; this scope alone grants no billing access.",
     },
 ];
 

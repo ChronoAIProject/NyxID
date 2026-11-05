@@ -20,7 +20,7 @@ import {
   inviteToken,
   invitationLink,
 } from "../../lib/api/collaborationTransport";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 import { useCollaborationSession } from "./useCollaborationSession";
 import type { Group, GroupMember } from "./groupContracts";
 import type {
@@ -258,7 +258,7 @@ export function CollaborationGroupControls({
               {invite && (
                 <>
                   <Label selectable>
-                    {invitationLink(NYXID_FRONTEND_URL, invite.token) ??
+                    {invitationLink(getFrontendUrl(), invite.token) ??
                       invite.token}
                   </Label>
                   <Label muted>
@@ -266,14 +266,14 @@ export function CollaborationGroupControls({
                   </Label>
                   <ActionButton
                     label={
-                      invitationLink(NYXID_FRONTEND_URL, invite.token)
+                      invitationLink(getFrontendUrl(), invite.token)
                         ? "Copy invitation link"
                         : "Copy invitation token"
                     }
                     disabled={disabled}
                     onPress={() =>
                       void Clipboard.setStringAsync(
-                        invitationLink(NYXID_FRONTEND_URL, invite.token) ??
+                        invitationLink(getFrontendUrl(), invite.token) ??
                           invite.token,
                       )
                     }

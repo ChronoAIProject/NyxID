@@ -85,6 +85,15 @@ fn config_response(
         environment: vec![
             env_value("BILLING_ENABLED", Some(c.billing_enabled.to_string())),
             env_value(
+                "CMA_BILLING_ENABLED",
+                Some(c.cma_billing_enabled.to_string()),
+            ),
+            env_value("CMA_BILLING_SERVICE_ID", c.cma_billing_service_id.clone()),
+            env_value(
+                "CMA_BILLING_SERVICE_ACCOUNT_ID",
+                c.cma_billing_service_account_id.clone(),
+            ),
+            env_value(
                 "BILLING_RESALE_ENABLED",
                 Some(c.billing_resale_enabled.to_string()),
             ),

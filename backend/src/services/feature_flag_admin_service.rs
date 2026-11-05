@@ -590,11 +590,12 @@ mod tests {
         assert_eq!(normalize_tags(&vec!["a".into(); 13]).unwrap(), vec!["a"]);
     }
     #[tokio::test]
-    async fn pre_sign_in_flags_accept_only_a_global_override() {
+    async fn global_only_flags_reject_scoped_overrides() {
         let (db, actor) = setup("flag_global_only").await;
         for key in [
             flags::INVITATION_CODE_FLAG_KEY,
             flags::MOBILE_NEW_DOMAINS_FLAG_KEY,
+            flags::CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
         ] {
             for kind in [FlagTargetKind::Org, FlagTargetKind::User] {
                 let refused = mutate(

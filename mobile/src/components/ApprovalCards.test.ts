@@ -9,7 +9,11 @@ import type { ChallengeDetail } from "../lib/api/types";
 type Element = { type: string; props: Record<string, any> };
 
 // Exercise the real card source; replace only native rendering and theme.
-function loadCard(name: "HistoryCard" | "ChallengeCard", openedUrls: string[] = []) {
+function loadCard(
+  name: "HistoryCard" | "ChallengeCard",
+  openedUrls: string[] = [],
+  getFrontendUrl = () => "https://app.example.test",
+) {
   const filename = fileURLToPath(new URL(`./${name}.tsx`, import.meta.url));
   const output = ts.transpileModule(readFileSync(filename, "utf8"), {
     compilerOptions: {
@@ -28,7 +32,7 @@ function loadCard(name: "HistoryCard" | "ChallengeCard", openedUrls: string[] = 
     "./ServiceIcon": { ServiceIcon: "ServiceIcon" },
     "./GroupedCell": { GroupedCell: "GroupedCell" },
     "./settings/SettingsList": { SettingsRow: "SettingsRow" },
-    "../lib/env": { NYXID_FRONTEND_URL: "https://app.example.test" },
+    "../lib/env": { getFrontendUrl },
     "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
       Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
@@ -138,7 +142,8 @@ const ChallengeCard = loadCard("ChallengeCard");
 
 test("execution proposals keep the grouped card and only offer web review", () => {
   const openedUrls: string[] = [];
-  const Card = loadCard("ChallengeCard", openedUrls);
+  let frontendUrl = "https://app.example.test";
+  const Card = loadCard("ChallengeCard", openedUrls, () => frontendUrl);
   const tree = Card({
     challenge: {
       ...request,
@@ -161,6 +166,12 @@ test("execution proposals keep the grouped card and only offer web review", () =
   assert.equal(link.props.accessibilityRole, "link");
   link.props.onPress();
   assert.deepEqual(openedUrls, ["https://app.example.test/assistant/approvals"]);
+  frontendUrl = "https://selected.example.test";
+  link.props.onPress();
+  assert.deepEqual(openedUrls, [
+    "https://app.example.test/assistant/approvals",
+    "https://selected.example.test/assistant/approvals",
+  ]);
 });
 
 test("pending card shows the complete operation, requester and service, and opens its detail", () => {
