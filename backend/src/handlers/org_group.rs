@@ -271,6 +271,7 @@ pub(crate) async fn member_settled(
                 &state.db, row, &message,
             ))
             .await?;
+            crate::services::crm::artifacts::publish_group(&state.db, row, &message).await?;
             let agents = groups::resolve_agents(
                 &state.db,
                 &access.group.user_id,

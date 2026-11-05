@@ -79,6 +79,7 @@ async fn append(
         doc! {"$inc": {"message_count": 1}, "$set": {"updated_at": bson::DateTime::from_chrono(now), "last_message_at": bson::DateTime::from_chrono(now)}}
     ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or_else(stale)?;
     let message = GroupMessage {
+        crm_artifacts: Vec::new(),
         id: uuid::Uuid::new_v4().to_string(),
         group_id: group.id.clone(),
         user_id: group.user_id.clone(),

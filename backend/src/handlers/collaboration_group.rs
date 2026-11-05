@@ -408,7 +408,7 @@ pub(crate) async fn messages(
                         .map(|p| p.display_name.clone())
                 });
             }
-            super::assistant_group::message_response(r, &agents)
+            super::assistant_group::message_response(r, &agents, false)
         })
         .collect();
     super::assistant_feedback::attach(&mut messages, feedback, |m| {
@@ -463,7 +463,9 @@ async fn public_message_response(
     let group = groups::get(&state.db, actor, group_id).await?;
     let participants = groups::participants(&state.db, &group).await?;
     message.text = groups::people::public_text(&message.text, &participants, agents);
-    Ok(super::assistant_group::message_response(message, agents))
+    Ok(super::assistant_group::message_response(
+        message, agents, false,
+    ))
 }
 
 #[derive(Clone, Deserialize)]

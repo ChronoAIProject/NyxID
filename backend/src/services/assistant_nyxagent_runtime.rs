@@ -312,10 +312,19 @@ where
     let metadata = db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
         .find_one(doc! {"_id": saved_message_id, "conversation_id": &row.id, "user_id": &row.user_id, "turn_id": turn_id})
         .await.ok().flatten().and_then(|message| message.turn_metadata);
-    events.emit(
-        "turn.completed",
-        json!({"turn_id": turn_id, "status": status, "error": error, "turn_metadata": metadata}),
-    );
+    let mut terminal =
+        json!({"turn_id": turn_id, "status": status, "error": error, "turn_metadata": metadata});
+    if !row.guest_turn
+        && row.collaboration.is_none()
+        && super::crm::enabled(db, &row.user_id).await.unwrap_or(false)
+    {
+        terminal["crm_artifacts"] = json!(
+            super::crm::artifacts::settled(db, &row.user_id, &row.id, turn_id)
+                .await
+                .unwrap_or_default()
+        );
+    }
+    events.emit("turn.completed", terminal);
     drop(permit);
     settled
 }

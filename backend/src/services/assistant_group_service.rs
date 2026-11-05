@@ -633,6 +633,7 @@ pub async fn append_following(
                     .await?
                     .ok_or_else(not_found)?;
                 let message = GroupMessage {
+                    crm_artifacts: Vec::new(),
                     collaboration: None,
                     activities: Vec::new(),
                     org_group: false,
@@ -746,6 +747,7 @@ pub async fn append_with_recipients(
     ))
     .await?;
     let message = GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: None,
         activities: Vec::new(),
         org_group: false,

@@ -2684,6 +2684,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            crm_artifacts: lost.crm_artifacts.clone(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -2891,6 +2892,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        crm_artifacts: retry
+            .as_ref()
+            .map(|r| r.crm_artifacts.clone())
+            .unwrap_or_default(),
         business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),
@@ -3269,6 +3274,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids,
         media_queue_notice_id: None,
@@ -4066,6 +4072,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+crm_artifacts: settled_turn.as_ref().map(|t| t.crm_artifacts.clone()).unwrap_or_default(),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
                         publication_refusal: None,
@@ -4951,6 +4958,7 @@ const RETRY_NOTE_CHARS: usize = 6000;
 
 /// What an owner Retry inherits from the failed turn it retries.
 pub struct RetryContext {
+    pub crm_artifacts: Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>,
     pub digests: Vec<String>,
     pub attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     pub note: String,
@@ -4974,6 +4982,8 @@ struct RetryActivityEvidence {
 
 #[derive(Clone, Deserialize)]
 struct RetryEvidence {
+    #[serde(default)]
+    crm_artifacts: Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>,
     #[serde(rename = "_id")]
     id: String,
     turn_id: String,
@@ -4992,6 +5002,7 @@ struct RetryEvidence {
 impl From<&AssistantMessage> for RetryEvidence {
     fn from(row: &AssistantMessage) -> Self {
         Self {
+            crm_artifacts: row.crm_artifacts.clone(),
             id: row.id.clone(),
             turn_id: row.turn_id.clone(),
             seq: row.seq,
@@ -5019,7 +5030,7 @@ fn retry_evidence_projection() -> bson::Document {
     doc! {
         "turn_id": 1, "seq": 1, "role": 1, "status": 1, "error_code": 1,
         "origin": 1, "retry_of": 1, "retry_claimed_by": 1,
-        "activity_count": 1, "activities.label": 1,
+        "crm_artifacts": 1, "activity_count": 1, "activities.label": 1,
         "activities.digest": 1, "activities.status": 1,
     }
 }
@@ -5118,6 +5129,7 @@ fn retry_evidence(
     }
     note.push(']');
     Ok(RetryContext {
+        crm_artifacts: failed.crm_artifacts.clone(),
         digests,
         attachments: input.attachments.clone(),
         note: excerpt(&note, RETRY_NOTE_CHARS),

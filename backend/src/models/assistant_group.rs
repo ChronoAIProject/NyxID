@@ -63,6 +63,8 @@ pub struct AssistantGroup {
 /// One message in a group transcript.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupMessage {
+    #[serde(default)]
+    pub crm_artifacts: Vec<super::assistant_crm_artifact::TurnCrmArtifact>,
     /// Independent of author/owner, including system notices.
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::MessageBinding>,

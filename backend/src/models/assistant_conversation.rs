@@ -326,6 +326,8 @@ pub struct StreamReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default)]
+    pub crm_artifacts: Vec<super::assistant_crm_artifact::TurnCrmArtifact>,
+    #[serde(default)]
     pub business_system_success: bool,
     #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,

@@ -169,3 +169,5 @@ pub fn validation_result(errors: Vec<CrmValidationIssue>) -> AppResult<()> {
 
 #[cfg(test)]
 mod regression_tests;
+
+pub mod artifacts;

@@ -230,6 +230,8 @@ impl From<crate::models::assistant_conversation::StreamReply> for StreamReplyRes
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    crm_artifacts: Option<Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reply: Option<StreamReplyResponse>,
     /// Waiting for one of the owner's running slots; also reported through
     /// the capacity-wait fields for clients that predate it.
@@ -372,6 +374,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 .cloned()
                 .map(ActivityResponse::from)
                 .collect(),
+            crm_artifacts: None,
             attachments: turn
                 .attachments
                 .iter()
@@ -508,6 +511,8 @@ pub struct TurnFailureReasonResponse {
 
 #[derive(Serialize)]
 pub struct MessageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    crm_artifacts: Option<Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
@@ -595,6 +600,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .into_iter()
                 .map(ActivityResponse::from)
                 .collect(),
+            crm_artifacts: (!row.crm_artifacts.is_empty()).then_some(row.crm_artifacts),
             attachments: row
                 .attachments
                 .into_iter()
@@ -995,11 +1001,18 @@ pub async fn history(
         .active_turn
         .as_mut()
         .and_then(|turn| turn.reply.take());
+    let crm_enabled = crate::services::crm::enabled(&state.db, &user_id).await?;
+    let crm_artifacts = conversation
+        .active_turn
+        .as_ref()
+        .map(|t| t.crm_artifacts.clone())
+        .unwrap_or_default();
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
     if let Some(turn) = conversation.active_turn.as_mut() {
         turn.reply = reply.map(Into::into);
+        turn.crm_artifacts = crm_enabled.then_some(crm_artifacts);
     }
     conversation.pending_acknowledgements = acknowledgements
         .iter()
@@ -1038,6 +1051,14 @@ pub async fn history(
         attachments.extend(turn.attachments.iter_mut());
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
+    if !crm_enabled {
+        for message in &mut messages {
+            message.crm_artifacts = None;
+        }
+        if let Some(turn) = conversation.active_turn.as_mut() {
+            turn.crm_artifacts = None;
+        }
+    }
     Ok(Json(HistoryResponse {
         cma_operations,
         conversation,

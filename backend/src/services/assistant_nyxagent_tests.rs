@@ -460,6 +460,7 @@ fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            crm_artifacts: Vec::new(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -618,6 +619,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            crm_artifacts: Vec::new(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -656,6 +658,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            crm_artifacts: Vec::new(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -705,6 +708,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -784,6 +788,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -851,6 +856,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -918,6 +924,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -1261,6 +1268,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            crm_artifacts: Vec::new(),
             business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),
@@ -2638,6 +2646,16 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     .await
     .unwrap();
     let failed_turn = failed.active_turn.as_ref().unwrap().turn_id.clone();
+    let crm_artifact = crate::models::assistant_crm_artifact::TurnCrmArtifact {
+        kind: crate::models::assistant_crm_artifact::CrmArtifactKind::Object,
+        id: Uuid::new_v4().to_string(),
+        owner_id: user.clone(),
+        object_key: Some("asset".into()),
+        title: "Assets".into(),
+        role: crate::models::assistant_crm_artifact::CrmArtifactRole::Created,
+    };
+    db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&failed.id},doc! {"$set":{"active_turn.crm_artifacts":bson::to_bson(&vec![crm_artifact.clone()]).unwrap()}}).await.unwrap();
+
     let sent =
         test_activity_started_with_digest(&db, &user, &first.id, "mail__send", Some("digest-send"))
             .await
@@ -2728,6 +2746,7 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     .await
     .unwrap();
     let turn = retried.active_turn.as_ref().unwrap();
+    assert_eq!(turn.crm_artifacts, vec![crm_artifact]);
     assert_eq!(turn.retry_of.as_deref(), Some(failed_turn.as_str()));
     assert_eq!(turn.retry_digests, ["digest-send"]);
     let note = turn.note.as_deref().unwrap();
@@ -3521,6 +3540,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4602,6 +4622,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4664,6 +4685,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,

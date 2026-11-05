@@ -246,6 +246,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                crm_artifacts: Vec::new(),
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
@@ -405,6 +406,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+crm_artifacts: Vec::new(),
                         delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
                         media_queue_notice_id: None,
@@ -656,6 +658,7 @@ pub(crate) async fn result_message(
         return Ok(None);
     }
     Ok(Some(AssistantMessage {
+        crm_artifacts: Vec::new(),
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -897,6 +900,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            crm_artifacts: Vec::new(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,

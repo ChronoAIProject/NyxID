@@ -13,6 +13,8 @@ pub enum MessageAuthor {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     #[serde(default)]
+    pub crm_artifacts: Vec<super::assistant_crm_artifact::TurnCrmArtifact>,
+    #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_queue_notice_id: Option<String>,

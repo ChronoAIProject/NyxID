@@ -472,6 +472,15 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     )
     .await;
     let text = super::images::append_failure(&text, &report);
+    let text = if crate::services::crm::enabled(&state.db, &message.user_id).await? {
+        crate::services::crm::artifacts::append_links(
+            &text,
+            &message.crm_artifacts,
+            &state.config.frontend_url,
+        )
+    } else {
+        text
+    };
     let result = if text.trim().is_empty() {
         // Image-only output has already been dispatched through its own claims.
         Ok(report.unknown == 0 && report.failed == 0)
@@ -853,6 +862,7 @@ async fn dispatch(
 fn successful_silence(message: &AssistantMessage) -> bool {
     message.status == "completed"
         && message.error_code.is_none()
+        && message.crm_artifacts.is_empty()
         && message.text.trim().is_empty()
         && !message.attachments.iter().any(engine::chat_tool_image)
 }

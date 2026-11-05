@@ -685,6 +685,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
         },
     );
     let message = GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: None,
         activities: vec![],
         org_group: false,
