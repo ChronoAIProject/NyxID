@@ -1366,7 +1366,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             review_path: crate::services::assistant_links::AssistantPage::ReviewCard { conversation: &row.conversation_id, card: &row.id }.path(),
             creation_turn_id: row.creation_turn_id,
             activity_id: row.activity_id,
-            continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
+            continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some() || row.automation_work.is_some()).then_some("server"),
             authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
@@ -1536,9 +1536,24 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    engine::request_stop(&state.db, &user_id, &id).await?;
-    super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
-    super::machine_cancel::conversation(&state, &user_id, &id).await?;
+    if let Some(snapshot) = engine::request_stop_target(&state.db, &user_id, &id).await? {
+        if let Some(turn) = snapshot.active_turn.as_ref() {
+            super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
+                .await?;
+            let descendants = crate::services::trigger_schedule::continuation::stopped_targets(
+                &state.db, &snapshot,
+            )
+            .await?;
+            if descendants.is_empty() {
+                crate::services::machine_service::cancel_turn(&state, &user_id, &id, turn).await?;
+            } else {
+                super::trigger_scheduler::cancel_transports(&state, &descendants).await?;
+            }
+        }
+    } else {
+        super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
+        super::machine_cancel::conversation(&state, &user_id, &id).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

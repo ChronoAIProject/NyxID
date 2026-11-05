@@ -1115,6 +1115,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::health::security_readiness),
         )
         .route(
+            "/automation-continuations/readiness",
+            get(handlers::health::automation_continuations),
+        )
+        .route(
             "/feature-flag-targets",
             get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
@@ -3020,6 +3024,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/triggers/{id}/runs/{run_id}/cancel",
+            post(handlers::triggers::cancel_run),
+        )
         .route(
             "/channel-adapter-bindings",
             get(handlers::call_adapters::list).post(handlers::call_adapters::create),

@@ -708,6 +708,43 @@ pub(crate) async fn cancel_conversation(state: &AppState, user: &str, id: &str) 
     Ok(())
 }
 
+/// Scope transport cancellation to the captured turn, including after it settled.
+pub(crate) async fn cancel_turn(
+    state: &AppState,
+    user: &str,
+    id: &str,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> AppResult<()> {
+    let filter = doc! {"conversation_id": id, "user_id": user, "issuing_turn_id": &turn.turn_id, "state": "running"};
+    let mut nodes: std::collections::HashSet<String> =
+        turn.machine_node_ids.iter().cloned().collect();
+    let mut jobs = state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .find(filter.clone())
+        .await?;
+    while let Some(job) = jobs.next().await {
+        nodes.insert(job?.node_id);
+    }
+    state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .update_many(
+            filter,
+            doc! {"$set": {"state": "finished", "finished_at": bson::DateTime::now()}},
+        )
+        .await?;
+    for node in nodes {
+        send_cancel(
+            state,
+            &node,
+            json!({"conversation_id": id, "turn_id": turn.turn_id}),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Value) {
     let work = async {
         if let Some(node) = state
