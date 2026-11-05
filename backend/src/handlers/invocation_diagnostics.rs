@@ -36,6 +36,12 @@ impl Target {
             target.record(id);
         }
     }
+
+    pub(crate) fn clear_extensions(extensions: &axum::http::Extensions) {
+        if let Some(target) = extensions.get::<Self>() {
+            target.record(None);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

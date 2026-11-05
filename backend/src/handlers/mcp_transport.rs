@@ -3555,7 +3555,7 @@ fn dispatch_service_tool<'a>(
         )
         .await;
 
-        let execution = mcp_service::execute_tool_response(
+        let mut execution = mcp_service::execute_tool_response(
             &state.http_client,
             &state.db,
             &state.encryption_keys,
@@ -3585,6 +3585,13 @@ fn dispatch_service_tool<'a>(
         {
             tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
         }
+        // A failed response must release its service slot before the diagnostic
+        // re-enters the same service through chrono-probe. Successful responses
+        // put the lease back below and retain the existing slow-client fence.
+        let released_concurrency = execution
+            .as_mut()
+            .ok()
+            .and_then(|response| response.concurrency.take());
         let diagnostic = service_failure_diagnostic(state, auth, service, &execution).await;
         let mut response = match execution {
             Ok(r) => r,
@@ -3627,7 +3634,11 @@ fn dispatch_service_tool<'a>(
             auth.api_key_name.clone(),
         );
 
-        let concurrency = response.concurrency.take();
+        let concurrency = if diagnostic.is_none() {
+            released_concurrency.or_else(|| response.concurrency.take())
+        } else {
+            None
+        };
         let is_policy_refusal = response.is_policy_refusal();
         let (mut content, is_error, failure) = if is_policy_refusal {
             if let (Some((row, output)), Some(chat)) = (&resource, auth.chat.as_ref())
@@ -5263,7 +5274,7 @@ async fn handle_meta_call_tool(
     )
     .await;
 
-    let execution = mcp_service::execute_tool_response(
+    let mut execution = mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -5293,6 +5304,12 @@ async fn handle_meta_call_tool(
     {
         tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
     }
+    // Release a failed tool's service slot before the caller-scoped probe is
+    // admitted; otherwise a one-slot service reports a self-inflicted 12600.
+    let released_concurrency = execution
+        .as_mut()
+        .ok()
+        .and_then(|response| response.concurrency.take());
     let diagnostic = service_failure_diagnostic(state, auth, service, &execution).await;
     let mut response = match execution {
         Ok(r) => r,
@@ -5336,7 +5353,11 @@ async fn handle_meta_call_tool(
         auth.api_key_name.clone(),
     );
 
-    let concurrency = response.concurrency.take();
+    let concurrency = if diagnostic.is_none() {
+        released_concurrency.or_else(|| response.concurrency.take())
+    } else {
+        None
+    };
     let is_policy_refusal = response.is_policy_refusal();
     let (mut content, is_error, failure) =
         box_tool_future(|| service_tool_content(state, auth, tool_name, response, result_query))

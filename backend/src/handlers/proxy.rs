@@ -1738,6 +1738,10 @@ async fn proxy_request_through_pool(
     let mut visited_tier = None;
     let mut tier_tick = 0;
     for index in 0..plan.max_attempts.min(plan.candidates.len()) {
+        // A pool retry may time out during resolution before the next member
+        // records its exact UserService. Do not let the previous member be
+        // diagnosed as the final failed selection.
+        super::invocation_diagnostics::Target::clear_extensions(&extensions);
         if pool_cancellation.is_cancelled() {
             return Err(AppError::ClientDisconnected);
         }
@@ -3887,7 +3891,7 @@ fn execute_resolved_proxy<'a>(
                 None => response,
             };
             match lease {
-                Some(lease) => Ok(lease.hold_response(response)),
+                Some(lease) => Ok(lease.hold_response_unless_failed(response)),
                 None => Ok(response),
             }
         }
