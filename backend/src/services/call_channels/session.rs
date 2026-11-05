@@ -423,6 +423,8 @@ pub async fn admit(
             db.collection::<EventReceipt>(EVENTS).insert_one(receipt).session(&mut *tx).await?;
             let existing=db.collection::<AssistantConversation>(THREADS).find_one(doc!{"_id":&s.conversation_id,"user_id":&b.user_id}).session(&mut *tx).await?.is_some();
             let start=engine::TurnStart{
+            automation_work: None,
+            automation_parent: None,
         execution_enrollment: false,
         execution_parent: None,
         owner_instruction_source: None,channel_uploads:Vec::new(),invocation_id:None,

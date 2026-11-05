@@ -131,6 +131,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        automation_work: None,
         execution_task: None,
         delegated_result: None,
         media_event_ids: Vec::new(),
@@ -766,6 +767,7 @@ async fn create_thread_with_kind(
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        automation_v2: false,
         collaboration: collaboration.clone(),
         owner_model_route: None,
         invocation_controlled: false,

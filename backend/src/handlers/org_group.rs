@@ -190,6 +190,8 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        automation_work: None,
+        automation_parent: None,
         execution_enrollment: request.execution_task.is_some(),
         execution_parent: None,
         owner_instruction_source: None,

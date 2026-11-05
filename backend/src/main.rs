@@ -801,26 +801,29 @@ async fn server_main() {
             platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
         },
     );
-    services::security_readiness_service::observe(
+    services::security_readiness_service::observe_with_automation(
         &db,
         &replica_identity,
         &config.security_rollout,
         services::proxy_service::actor_addressed_policy_required(),
+        config.automation_continuation_v2_enabled,
     )
     .await
     .expect("security replica observation failed");
     let readiness_db = db.clone();
     let readiness_identity = replica_identity.clone();
     let readiness_config = config.security_rollout.clone();
+    let automation_enabled = config.automation_continuation_v2_enabled;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
-            if let Err(error) = services::security_readiness_service::observe(
+            if let Err(error) = services::security_readiness_service::observe_with_automation(
                 &readiness_db,
                 &readiness_identity,
                 &readiness_config,
                 services::proxy_service::actor_addressed_policy_required(),
+                automation_enabled,
             )
             .await
             {
