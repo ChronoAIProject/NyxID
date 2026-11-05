@@ -17,6 +17,8 @@ pub struct ContentSeries {
     pub source_path_sha256: String,
     pub sha256: String,
     pub revision: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub purge_after: DateTime<Utc>,
 }
 impl std::fmt::Debug for ContentSeries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,8 +82,7 @@ pub struct AcceptedFile {
     pub pending_id: String,
     pub attachment_id: String,
     pub filename: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_path_sha256: Option<String>,
+    pub source_path_sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_revision: Option<String>,
 }
@@ -100,8 +101,6 @@ pub struct ResultManifest {
     pub rejected: Vec<RejectedFile>,
     pub source_result_identity: String,
     pub source_status_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content_revision: Option<String>,
     pub count: usize,
     pub delivery_reason: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -120,8 +119,7 @@ pub struct PendingArtifact {
     pub source_result_identity: String,
     pub artifact_index: usize,
     pub filename: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_path_sha256: Option<String>,
+    pub source_path_sha256: String,
     pub content_type: String,
     pub size: i64,
     pub sha256: String,
@@ -139,6 +137,8 @@ pub struct PendingArtifact {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub purge_after: DateTime<Utc>,
 }
 impl std::fmt::Debug for PendingArtifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -161,6 +161,9 @@ pub struct Delivery {
     pub attachment_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub purge_after: DateTime<Utc>,
+    pub seq: i64,
 }
 
 /// A settled owner reply keeps bounded outcomes, not acquisition authority.
@@ -174,4 +177,11 @@ impl std::fmt::Debug for SavedOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("SavedArtifactOutcome([REDACTED])")
     }
+}
+
+/// Compact tombstone survives delivery TTL: never silently select an older result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryHead {
+    pub message_id: String,
+    pub seq: i64,
 }

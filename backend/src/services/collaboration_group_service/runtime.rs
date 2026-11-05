@@ -378,7 +378,8 @@ pub(super) async fn begin_ready(
             if !decisions.is_empty() {start.text.push_str(&format!("\nAction card decisions (retry only the exact action, using its acknowledgement_id): {:?}",decisions));}
 
             start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. {} Handoffs retain that requester. Agents: {roster}. Address people and agents only by the exact @handle shown above, never by account or agent IDs. For handoffs, copy the agent handle exactly. Recheck requested consent and action-card decisions before resuming an interrupted operation.",people::context(&participants,actor)));
-            let ids = engine::OwnerTurnIds {conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
+            let ids = engine::OwnerTurnIds {
+ artifact_budget: Default::default(),conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
             let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None).await?.into_started()?;
             row=claim.conversation.clone();
             bind_key(db,&row,session).await?;

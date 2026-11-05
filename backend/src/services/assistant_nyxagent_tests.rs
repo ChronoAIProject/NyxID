@@ -1249,6 +1249,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        artifact_head: None,
         collaboration: None,
         owner_model_route: None,
         invocation_controlled: false,
@@ -1274,6 +1275,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            artifact_watch_id: None,
             execution_task: None,
             business_system_success: false,
             delegated_images: Default::default(),
@@ -1592,6 +1594,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
     template.agent_id = Some(agent.id.clone());
     let proof = platform_test_origin(&template);
     let ids = OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: template.id,
         turn_id: Uuid::new_v4().to_string(),
         message_id: Uuid::new_v4().to_string(),

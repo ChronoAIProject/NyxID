@@ -257,6 +257,7 @@ async fn exact_stop_settles_revoked_turn_and_retains_independent_work() {
             .unwrap();
     let request = engine::parse_turn(br#"{"text":"work"}"#).unwrap();
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -344,6 +345,7 @@ async fn personal_credential_recovery_adopts_exact_successor_and_revocation_prev
             .unwrap();
     let start = engine::TurnStart::from(&engine::parse_turn(br#"{"text":"work"}"#).unwrap());
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -477,6 +479,7 @@ async fn execution_factory_resumes_exact_input_once_across_competing_workers() {
             .unwrap();
     let start = engine::TurnStart::from(&engine::parse_turn(br#"{"text":"work"}"#).unwrap());
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -714,6 +717,7 @@ async fn claimed_input(
             .await
             .unwrap();
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -896,6 +900,7 @@ async fn fresh_event_read_cannot_commit_after_concurrent_revocation() {
     .unwrap();
     let row = engine::get(&state.db, owner, id).await.unwrap();
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: id.clone(),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
