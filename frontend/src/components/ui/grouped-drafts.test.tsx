@@ -9,6 +9,26 @@ import { useGroupedDraft } from "@/lib/grouped-drafts";
 vi.mock("@tanstack/react-router", async (original) => ({ ...await original<typeof import("@tanstack/react-router")>(), useRouter: vi.fn() }));
 afterEach(cleanup);
 
+it("retains a pending request without opening a discard prompt, then restores the dirty guard", async () => {
+  const history = createMemoryHistory({ initialEntries: ["/settings?tab=security"] });
+  vi.mocked(useRouter).mockReturnValue({ history } as ReturnType<typeof useRouter>);
+  function Settings({ pending }: { pending: boolean }) {
+    const [dirty, setDirty] = useState(true);
+    useGroupedDraft({ dirty, pending, discard: () => setDirty(false) });
+    return <><GroupedDraftNavigation active /><GroupedDraftDialog /></>;
+  }
+  const { rerender } = render(<GroupedDraftBoundary><Settings pending /></GroupedDraftBoundary>);
+  await act(async () => history.push("/keys"));
+  expect(history.location.pathname).toBe("/settings");
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  rerender(<GroupedDraftBoundary><Settings pending={false} /></GroupedDraftBoundary>);
+  await act(async () => history.push("/keys"));
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(history.location.pathname).toBe("/keys"));
+  history.destroy();
+});
+
 it("guards URL Back before the sheet unmounts and permits it only after Discard", async () => {
   window.history.replaceState(null, "", "/assistant");
   const history = createBrowserHistory();
@@ -53,5 +73,29 @@ it("retains dirty drafts without prompting during the same drawer's latest-threa
   await act(async () => history.replace("/assistant?c=latest"));
   expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Keep editing" }));
+  history.destroy();
+});
+
+it.each([
+  ["/settings?tab=profile", "/settings?tab=security", "/keys"],
+  ["/assistant?panel=settings&panelTab=profile", "/assistant?panel=settings&panelTab=security&c=adopted", "/assistant?c=adopted"],
+])("retains settings drafts across tab replacement and guards leaving %s", async (initial, tab, leave) => {
+  const history = createMemoryHistory({ initialEntries: [initial!] });
+  vi.mocked(useRouter).mockReturnValue({ history } as ReturnType<typeof useRouter>);
+  function Settings() {
+    const [dirty, setDirty] = useState(true);
+    useGroupedDraft({ dirty, discard: () => setDirty(false) });
+    return <><GroupedDraftNavigation active /><GroupedDraftDialog /><p>{dirty ? "Draft retained" : "Draft discarded"}</p></>;
+  }
+  render(<GroupedDraftBoundary><Settings /></GroupedDraftBoundary>);
+  await act(async () => history.replace(tab!));
+  await waitFor(() => expect(history.location.href).toBe(tab));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.getByText("Draft retained")).toBeInTheDocument();
+  await act(async () => history.replace(leave!));
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(history.location.href).toBe(leave));
+  expect(screen.getByText("Draft discarded")).toBeInTheDocument();
   history.destroy();
 });

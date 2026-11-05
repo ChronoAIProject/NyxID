@@ -25,7 +25,11 @@ const { api, ApiError, storeState, stepState } = vi.hoisted(() => {
   return {
     api: { post: vi.fn(), get: vi.fn() },
     ApiError,
-    storeState: { isAuthenticated: true, isLoading: false },
+    storeState: {
+      isAuthenticated: true,
+      isLoading: false,
+      user: { id: "user" } as { id: string } | null,
+    },
     // Captured from the stubbed WizardShell so tests can assert which
     // step the resolver picked for the current (flow, phase).
     stepState: { current: null as null | { current: number; total: number; label: string } },
@@ -247,6 +251,7 @@ beforeEach(() => {
   vi.useRealTimers();
   storeState.isAuthenticated = true;
   storeState.isLoading = false;
+  storeState.user = { id: "user" };
   stepState.current = null;
   window.history.pushState({}, "", "/cli/pair");
   assignSpy = vi
@@ -406,6 +411,23 @@ describe("CliPairPage forward navigation per flow", () => {
 });
 
 describe("CliPairPage DisplayOnce complete wiring", () => {
+  it("clears the claim and displayed secret on account replacement", async () => {
+    const user = userEvent.setup();
+    const view = render(<CliPairPage />);
+    await enterCode(user, makeClaim("api-key-create"));
+    api.post.mockResolvedValue({});
+    await user.click(await screen.findByTestId("confirm-api-key-create"));
+    expect(await screen.findByTestId("display-once")).toHaveAttribute(
+      "data-secret",
+      "nyxid_ak_secret",
+    );
+    const writes = api.post.mock.calls.length;
+    storeState.user = { id: "another-user" };
+    view.rerender(<CliPairPage />);
+    expect(screen.queryByTestId("display-once")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/Pairing code/i)).toHaveValue("");
+    expect(api.post).toHaveBeenCalledTimes(writes);
+  });
   it("posts /complete with the api_key_id ack, shows the secret, then advances to done on ack", async () => {
     const user = userEvent.setup();
     render(<CliPairPage />);
