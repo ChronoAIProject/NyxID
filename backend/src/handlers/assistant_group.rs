@@ -474,8 +474,16 @@ pub(crate) async fn member_settled(
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
         let agent = team::agent_for_conversation(&state.db, row).await?;
+        let has_artifacts = match row.active_turn.as_ref() {
+            Some(turn) => {
+                !crate::services::crm::artifacts::settled(&state.db, owner, &row.id, &turn.turn_id)
+                    .await?
+                    .is_empty()
+            }
+            None => false,
+        };
         match error_code {
-            None if !text.trim().is_empty() => {
+            None if !text.trim().is_empty() || has_artifacts => {
                 let attachments = match row.active_turn.as_ref() {
                     Some(turn) => {
                         engine::settled_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)

@@ -36,6 +36,62 @@ fn crm_group_message_dto_omits_artifacts_for_flag_off_viewers() {
     assert_eq!(on["crm_artifacts"][0]["object_key"], "asset");
 }
 
+#[tokio::test]
+async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
+    use crate::models::assistant_crm_artifact::{
+        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
+    };
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("crm_group_artifact_only")
+            .await;
+    let group = groups::create(
+        &f.state.db,
+        &f.owner,
+        "Artifacts",
+        std::slice::from_ref(&f.chat.agent_id),
+        "user",
+    )
+    .await
+    .unwrap();
+    let artifact = TurnCrmArtifact {
+        kind: CrmArtifactKind::Object,
+        id: Uuid::new_v4().to_string(),
+        owner_id: f.owner.clone(),
+        object_key: Some("asset".into()),
+        title: "Assets".into(),
+        role: CrmArtifactRole::Created,
+    };
+    crate::services::crm::artifacts::record(&f.state.db, &f.chat, artifact.clone())
+        .await
+        .unwrap();
+    engine::finish_turn(
+        &f.state.db,
+        &f.row,
+        &f.chat.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let mut row = f.row.clone();
+    row.group_id = Some(group.id.clone());
+    member_settled(&f.state, &row, "", None).await;
+    let messages = groups::messages(&f.state.db, &f.owner, &group.id, 10, None)
+        .await
+        .unwrap();
+    let reply = messages
+        .iter()
+        .find(|message| message.role == "agent")
+        .expect("artifact-only reply must be visible");
+    assert_eq!(reply.crm_artifacts, vec![artifact]);
+    f.state.db.drop().await.unwrap();
+}
+
 type Calls = Arc<Mutex<Vec<Value>>>;
 
 /// A NyxAgent stand-in that answers as whichever member is speaking.
