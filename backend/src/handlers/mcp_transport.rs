@@ -1406,10 +1406,7 @@ async fn verify_user_active_with_enrollment(
     match user {
         Some(u) if u.is_active => Ok((
             user_id,
-            u.user_type
-                .is_person()
-                .then_some(u.execution_permission_enrollment)
-                .flatten(),
+            state.execution_enrollment.candidate(&u, &[]).then_some(1),
         )),
         _ => Err(Box::new(mcp_401(&state.config.base_url))),
     }
@@ -2510,9 +2507,55 @@ async fn refuse_retry_duplicate(
     )
 }
 
-/// Chat-key tool calls are recorded on the live turn as metadata-only activity
-/// so the browser can show what the assistant is doing before its reply streams.
+tokio::task_local! { static GENERATED_ARTIFACTS_ENABLED: tokio::sync::OnceCell<bool>; }
+async fn artifacts_enabled(
+    state: &AppState,
+    chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
+) -> bool {
+    if !crate::services::generated_artifacts::eligible(chat) {
+        return false;
+    }
+    if let Ok(Some(value)) = GENERATED_ARTIFACTS_ENABLED.try_with(|cell| cell.get().copied()) {
+        return value;
+    }
+    crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+        .await
+        .unwrap_or(false)
+}
 async fn handle_tools_call(
+    state: &AppState,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
+    request: &JsonRpcRequest,
+    client_accepts_sse: bool,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> Response {
+    // Ineligible callers do not resolve the flag or add a database command.
+    let enabled = match auth.chat.as_ref() {
+        Some(chat) if crate::services::generated_artifacts::eligible(chat) => {
+            crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+                .await
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+    let cell = tokio::sync::OnceCell::new();
+    let _ = cell.set(enabled);
+    GENERATED_ARTIFACTS_ENABLED
+        .scope(
+            cell,
+            handle_tools_call_inner(
+                state,
+                auth,
+                session_id,
+                request,
+                client_accepts_sse,
+                billing_egress_permit,
+            ),
+        )
+        .await
+}
+async fn handle_tools_call_inner(
     state: &AppState,
     auth: &McpAuthContext,
     session_id: Option<&str>,
@@ -2865,6 +2908,18 @@ async fn dispatch_tools_call(
             &arguments,
             request.id.clone(),
             billing_egress_permit,
+        ))
+        .await;
+    }
+    if tool_name == "nyx__artifact_delivery"
+        && let Some(chat) = &auth.chat
+        && artifacts_enabled(state, chat).await
+    {
+        return Box::pin(handle_artifact_delivery(
+            state,
+            auth,
+            &arguments,
+            request.id.clone(),
         ))
         .await;
     }
@@ -3385,8 +3440,13 @@ fn dispatch_service_tool<'a>(
                         .as_ref()
                         .is_none_or(|contract| contract.presentation.is_none())
             }) {
-                match crate::services::async_service_operation::reserve_with_arguments(
-                    &state.db, chat, service, endpoint, &arguments,
+                match crate::services::async_service_operation::reserve_with_artifacts(
+                    &state.db,
+                    chat,
+                    service,
+                    endpoint,
+                    &arguments,
+                    artifacts_enabled(state, chat).await,
                 )
                 .await
                 {
@@ -3588,6 +3648,7 @@ fn mcp_exec_context<'a>(auth: &'a McpAuthContext) -> mcp_service::McpExecContext
     );
     restrictions.oauth_lineage = auth.oauth_lineage.clone();
     mcp_service::McpExecContext {
+        strict_response_utf8: false,
         execution_permission: auth.execution_permission.as_ref(),
         assistant_chat: auth.chat.as_ref(),
         response_body_limit: None,
@@ -4378,6 +4439,113 @@ async fn handle_account_tool(
     tool_result(request_id, &result.value.to_string(), result.is_error)
 }
 
+async fn handle_artifact_delivery(
+    state: &AppState,
+    auth: &McpAuthContext,
+    args: &serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> Response {
+    use crate::services::assistant_acknowledgement_service as acks;
+    let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) else {
+        return tool_result(
+            id,
+            "Artifact recovery requires an owner Web chat turn",
+            true,
+        );
+    };
+    if !args.as_object().is_some_and(|args| args.is_empty()) {
+        return tool_result(id, "Artifact recovery accepts no arguments", true);
+    }
+    if let Err(error) =
+        crate::services::generated_artifacts::preflight_for_chat(&state.db, chat, args).await
+    {
+        return app_error_to_rpc(id, &error);
+    }
+    crate::services::generated_artifacts::audit_recovery_request(
+        &state.db,
+        &audit_service::AuditActor {
+            user_id: auth.user_id.clone(),
+            ip_address: auth.ip_address.clone(),
+            user_agent: auth.user_agent.clone(),
+            api_key_id: auth.api_key_id.clone(),
+            api_key_name: auth.api_key_name.clone(),
+        },
+        false,
+    )
+    .await;
+    // Both direct and wrapped calls use the same owner acknowledgement gate.
+    let facts = acks::ActionFacts::of(acks::OwnerActionClass::Change);
+    let summary = "Recover the saved cloud attachments on the preceding reply";
+    let confirmation_args =
+        match crate::services::generated_artifacts::recovery_confirmation_arguments(&state.db, chat)
+            .await
+        {
+            Ok(args) => args,
+            Err(_) => {
+                return tool_result(
+                    id,
+                    "Artifact recovery requires an owner Web user turn",
+                    true,
+                );
+            }
+        };
+    let auto = match acks::confirmation_needed(&state.db, chat, facts, false).await {
+        Ok(acks::Gate::Ask(need)) => {
+            match acks::confirm_action(
+                &state.db,
+                chat,
+                "nyx__artifact_delivery",
+                &confirmation_args,
+                &need,
+                summary,
+            )
+            .await
+            {
+                Ok(Some(refusal)) => return tool_result(id, &refusal.to_string(), true),
+                Ok(None) => None,
+                Err(_) => return tool_result(id, "Confirmation could not be checked", true),
+            }
+        }
+        Ok(acks::Gate::AutoAllowed(auto)) => Some(auto),
+        Ok(acks::Gate::Proceed) => None,
+        Err(_) => return tool_result(id, "Confirmation could not be checked", true),
+    };
+    match crate::services::generated_artifacts::recover_for_chat(
+        &state.db,
+        &state.encryption_keys,
+        chat,
+        args,
+    )
+    .await
+    {
+        Ok(()) => {
+            if let Some(auto) = auto {
+                acks::record_auto_allowed(
+                    &state.db,
+                    chat,
+                    "nyx__artifact_delivery",
+                    args,
+                    &auto,
+                    summary,
+                )
+                .await;
+            }
+            tool_result(
+                id,
+                "The saved cloud result is materialized on the preceding reply. Use its private attachment card; no new execution was submitted.",
+                false,
+            )
+        }
+        Err(error) => tool_result(
+            id,
+            &crate::services::assistant_account_tools::error_result(error)
+                .value
+                .to_string(),
+            true,
+        ),
+    }
+}
+
 async fn handle_attachment_list(
     state: &AppState,
     auth: &McpAuthContext,
@@ -4650,6 +4818,18 @@ async fn handle_meta_call_tool(
         ))
         .await;
     }
+    if tool_name == "nyx__artifact_delivery"
+        && let Some(chat) = &auth.chat
+        && artifacts_enabled(state, chat).await
+    {
+        return Box::pin(handle_artifact_delivery(
+            state,
+            auth,
+            &inner_args,
+            request_id,
+        ))
+        .await;
+    }
     if tool_name == "nyx__attachment_read" {
         return Box::pin(handle_attachment_read(state, auth, &inner_args, request_id)).await;
     }
@@ -4873,12 +5053,13 @@ async fn handle_meta_call_tool(
                     .as_ref()
                     .is_none_or(|contract| contract.presentation.is_none())
         }) {
-            match crate::services::async_service_operation::reserve_with_arguments(
+            match crate::services::async_service_operation::reserve_with_artifacts(
                 &state.db,
                 chat,
                 service,
                 endpoint,
                 &inner_args,
+                artifacts_enabled(state, chat).await,
             )
             .await
             {
@@ -5042,6 +5223,9 @@ async fn chat_native_definitions(
     tools.push(crate::services::assistant_upload_service::definition());
     tools.push(crate::services::assistant_upload_service::list_definition());
     tools.push(crate::services::assistant_nyxagent::conversation_history_definition());
+    if artifacts_enabled(state, chat).await {
+        tools.push(crate::services::generated_artifacts::recovery_definition());
+    }
     tools
 }
 
@@ -10982,6 +11166,258 @@ mod skill_authoring_discovery_tests {
     }
 
     #[tokio::test]
+    async fn generated_artifacts_ineligible_discovery_adds_no_flag_reads_and_off_call_stays_unknown()
+     {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find").ok()
+                    == Some(feature_flag_override::COLLECTION_NAME)
+            {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let db = connect_test_database_with_command_handler("artifactparity2037", handler)
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let mut group = chat_auth(AgentRole::Orchestrator, false);
+        group.chat.as_mut().unwrap().execution_group_id = Some("group".into());
+        let mut platform = chat_auth(AgentRole::Orchestrator, false);
+        platform.chat.as_mut().unwrap().platform_thread = true;
+        for auth in [
+            chat_auth(AgentRole::Orchestrator, true),
+            group,
+            platform,
+            McpAuthContext::user("owner".into(), AuthMethod::ApiKey),
+        ] {
+            reads.store(0, Ordering::SeqCst);
+            if let Some(chat) = auth.chat.as_ref() {
+                assert!(!artifacts_enabled(&state, chat).await);
+            }
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
+            let names = tool_names(&state, &auth).await;
+            assert!(!names.iter().any(|n| n == "nyx__artifact_delivery"));
+        }
+        reads.store(0, Ordering::SeqCst);
+        let auth = McpAuthContext::user("owner".into(), AuthMethod::ApiKey);
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".into(),
+            params: Some(serde_json::json!({"name":"nyx__artifact_delivery","arguments":{}})),
+        };
+        let response = dispatch_tools_call(
+            &state,
+            &auth,
+            None,
+            &request,
+            false,
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value["result"]["content"][0]["text"],
+            "Unknown tool: nyx__artifact_delivery. Use nyx__search_tools to find and activate tools."
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn generated_recovery_disabled_direct_and_wrapped_calls_keep_main_unknown_responses() {
+        let f =
+            crate::services::assistant_authority_tests::orchestrator_fixture("artifact_off_calls")
+                .await;
+        let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+        for (name, arguments, expected) in [
+            (
+                "nyx__artifact_delivery",
+                serde_json::json!({}),
+                "Unknown tool: nyx__artifact_delivery. Use nyx__search_tools to find and activate tools.",
+            ),
+            (
+                "nyx__call_tool",
+                serde_json::json!({"tool_name":"nyx__artifact_delivery","arguments_json":"{}"}),
+                "Unknown tool: nyx__artifact_delivery. Use nyx__search_tools to find available tools.",
+            ),
+        ] {
+            let response = dispatch_tools_call(
+                &f.state,
+                &auth,
+                None,
+                &JsonRpcRequest {
+                    jsonrpc: JSONRPC_VERSION.into(),
+                    id: Some(serde_json::json!(1)),
+                    method: "tools/call".into(),
+                    params: Some(serde_json::json!({"name":name,"arguments":arguments})),
+                },
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )
+            .await;
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["result"]["content"][0]["text"], expected);
+        }
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(
+                    mongodb::bson::doc! {"event_data.tool_name":"nyx__artifact_delivery"}
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        f.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn generated_recovery_preflight_missing_frozen_target_never_audits_or_prompts_or_falls_back()
+     {
+        let f =
+            crate::services::assistant_authority_tests::orchestrator_fixture("artifact_preflight")
+                .await;
+        let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+        let messages = f.state.db.collection::<mongodb::bson::Document>(
+            crate::models::assistant_message::COLLECTION_NAME,
+        );
+        assert_eq!(messages.update_one(mongodb::bson::doc!{"conversation_id":&f.row.id,"role":"user","turn_id":f.chat.turn_id.as_deref()},mongodb::bson::doc!{"$set":{"turn_metadata.artifact_recovery_target":"purged-newest"}}).await.unwrap().matched_count,1);
+        f.state.db.collection::<mongodb::bson::Document>(crate::models::generated_artifact::DELIVERIES)
+            .insert_one(mongodb::bson::doc!{"_id":"older","user_id":&f.owner,"conversation_id":&f.row.id,"seq":0}).await.unwrap();
+        assert!(matches!(
+            crate::services::generated_artifacts::preflight_for_chat(
+                &f.state.db,
+                auth.chat.as_ref().unwrap(),
+                &serde_json::json!({}),
+            )
+            .await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+        for arguments in [
+            serde_json::json!({"message_id":"older"}),
+            serde_json::json!({}),
+        ] {
+            let response =
+                handle_artifact_delivery(&f.state, &auth, &arguments, Some(serde_json::json!(1)))
+                    .await;
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                value.get("error").is_some() || value["result"]["isError"] == true,
+                "{value}"
+            );
+        }
+        // A later head cannot change the target frozen by the owner request.
+        use mongodb::bson::{Document, doc};
+        let now = chrono::Utc::now();
+        messages.update_one(doc!{"conversation_id":&f.row.id,"role":"user","turn_id":f.chat.turn_id.as_deref()},doc!{"$set":{"seq":10_i64,"turn_metadata.artifact_recovery_target":"expired-newest"}}).await.unwrap();
+        f.state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .update_one(doc!{"_id":&f.row.id},doc!{"$set":{"active_turn.initiating_message_seq":10_i64,"artifact_head":{"message_id":"arrived-later","seq":12_i64}}}).await.unwrap();
+        let delivery = crate::models::generated_artifact::Delivery {
+            message_id: "expired-newest".into(),
+            user_id: f.owner.clone(),
+            conversation_id: f.row.id.clone(),
+            originating_turn_id: "source-turn".into(),
+            event_turn_id: "event-turn".into(),
+            watch_id: "expired-watch".into(),
+            operation_id: "expired-operation".into(),
+            source_result_identity: "expired-result".into(),
+            expires_at: now - chrono::Duration::seconds(1),
+            purge_after: now + chrono::Duration::days(30),
+            seq: 8,
+            attachment_ids: Vec::new(),
+        };
+        let deliveries = f
+            .state
+            .db
+            .collection::<Document>(crate::models::generated_artifact::DELIVERIES);
+        deliveries
+            .insert_one(mongodb::bson::to_document(&delivery).unwrap())
+            .await
+            .unwrap();
+        deliveries.insert_many((0..128).map(|n|doc!{"_id":format!("unrelated-{n}"),"user_id":&f.owner,"conversation_id":"other-conversation","seq":n,"watch_id":format!("unrelated-watch-{n}"),"event_turn_id":format!("unrelated-event-{n}")})).await.unwrap();
+        messages.insert_one(doc!{"_id":"expired-newest","user_id":&f.owner,"conversation_id":&f.row.id,"turn_id":"event-turn","role":"assistant","origin":"event","seq":8_i64,"text":"saved result","status":"completed","created_at":mongodb::bson::DateTime::now(),"attachments":[]}).await.unwrap();
+        assert!(matches!(
+            crate::services::generated_artifacts::preflight_for_chat(
+                &f.state.db,
+                auth.chat.as_ref().unwrap(),
+                &serde_json::json!({}),
+            )
+            .await,
+            Err(crate::errors::AppError::AssistantAttachmentExpired)
+        ));
+        let explain=f.state.db.run_command(doc!{"explain":{"find":crate::models::generated_artifact::DELIVERIES,"filter":{"_id":"expired-newest","user_id":&f.owner,"conversation_id":&f.row.id,"seq":{"$lt":10_i64}}},"verbosity":"executionStats"}).await.unwrap();
+        let stats = explain.get_document("executionStats").unwrap();
+        assert_eq!(
+            stats
+                .get_i64("totalDocsExamined")
+                .or_else(|_| stats.get_i32("totalDocsExamined").map(i64::from))
+                .unwrap(),
+            1
+        );
+        assert!(
+            stats
+                .get_i64("totalKeysExamined")
+                .or_else(|_| stats.get_i32("totalKeysExamined").map(i64::from))
+                .unwrap()
+                <= 1
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(
+                    mongodb::bson::doc! {"event_data.tool_name":"nyx__artifact_delivery"}
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            f.state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::assistant_acknowledgement::COLLECTION_NAME
+                )
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        f.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
     async fn only_owner_agent_tools_list_reads_authoring_flag() {
         let (state, reads) = observed_state("authoring_discovery_reads").await;
         feature_flag_service::set_platform_override(
@@ -11395,5 +11831,74 @@ mod schedule_retry_identity_tests {
         let other =
             json!({"name":"service__write", "arguments":{"acknowledgement_id":"provider-field"}});
         assert_eq!(chat_retry_digest(&other), chat_activity_digest(&other));
+    }
+}
+
+#[cfg(test)]
+mod broad_enrollment_tests {
+    use super::*;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn global_mcp_auth_uses_loaded_person_and_adds_no_reads() {
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let observed = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                observed.lock().unwrap().push(collection.to_owned());
+            }
+        });
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "broad_mcp_auth",
+            handler,
+        )
+        .await
+        .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "mcp",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let state = crate::test_utils::test_app_state(db);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key.full_key.parse().unwrap());
+        reads.lock().unwrap().clear();
+        let legacy = authenticate_mcp(&state, &headers, false).await.unwrap();
+        assert!(legacy.execution_permission.is_none());
+        let baseline = reads.lock().unwrap().clone();
+        crate::services::execution_permission_dispatch::phase_b_tests::enroll_global(
+            &state.db, &owner,
+        )
+        .await;
+        reads.lock().unwrap().clear();
+        let broad = authenticate_mcp(&state, &headers, false).await.unwrap();
+        assert!(broad.execution_permission.is_some());
+        assert_eq!(*reads.lock().unwrap(), baseline);
+        state.db.drop().await.unwrap();
     }
 }

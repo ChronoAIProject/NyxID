@@ -486,3 +486,75 @@ variables. Retention is the runtime admin policy above:
 An ingress-generated HTTP 413 below these limits indicates that a proxy's body
 limit needs updating. Invalid/encrypted documents and extraction deadlines return
 HTTP 400 with a fixed actionable message. No filenames or content are logged.
+
+
+## Generated Sandbox files
+
+The default-off `assistant:generated-artifacts` flag uses the normal personal,
+organization and global resolution. It admits files only for the owner's private
+Web NyxAgent chat, from the compiled Sandbox catalog and its exact submit/status/
+result contract. Shared, guest, group, channel, voice and invocation lanes retain
+the ordinary watch path. Async watches preserve main’s execution-permission Phase B task lineage and live
+permission checks; legacy unmarked watches keep their existing authority.
+
+The result adapter reads status, result and status again through the existing
+async execution authority. Operation identity, catalog/target/contract, lifecycle
+version presence/value, lease and source expiry must agree. It never fetches an
+output URL. The envelope is at most 13 MiB with eight entries, 9 MiB accepted
+bytes total, 5 MiB per raster and 8 MiB per other file. Actual decoded bytes decide
+size/type; unsupported preview types download as octet-stream. Paths are hashed
+for content identity and reduced to a sanitized basename; the full path is never
+stored. Process stdout/stderr are discarded. Only success, exit code and verified
+file count enter the encrypted model summary.
+
+Two acquisitions may run concurrently per process. A separate two-permit CPU
+semaphore bounds blocking parser work. MP4 validation indexes media extents and
+shares box, track, sample, table-entry and step limits across the entire file.
+A byte reservation begins before response buffering and stays with the blocking
+task through cancellation. Materialization and recovery acquire their reservation
+outside MongoDB transactions and retain it across transaction retries.
+
+Encrypted pending bytes live in `async_service_operation_artifacts`. Completion
+atomically materializes immutable `assistant_attachments`, saves the per-file
+outcome on the reply, and writes `assistant_artifact_deliveries`. The conversation
+keeps the newest delivery's ID/sequence even after its TTL; an owner's initiating
+message freezes that ID. Recovery and action-card continuation can therefore never
+fall back to an older result. `generated_artifact_content_series` tracks successful
+same-path content revisions. Failed modifications do not advance earlier revisions.
+New content-series UUIDs after idle cleanup start a new lineage.
+
+Rasters use `image_days`; videos and other files use `document_days`.
+`tool_image_days` applies only to tool images. Every generated read and cleanup
+uses the earlier of its immutable stored cap and attachment creation time plus the
+current kind policy. Shortening takes effect immediately; extending cannot exceed
+the stored cap. Source acquisition expiry is independent of materialized-file
+retention. Pending/delivery metadata has a `purge_after` TTL with 30 days' grace;
+content-series metadata expires after 395 idle days. Conversation deletion and
+personal erasure include all three collections. Operator encryption walks register
+pending bytes and generated attachments with their contextual AAD.
+
+Generated GETs return the complete 200 response, ignore Range/If-Range, and hold
+the memory permit with the actual HTTP buffer. Headers are private/no-store,
+nosniff and sandboxed, with safe UTF-8 Content-Disposition. Verified rasters and
+supported MP4 can render inline; other files download. A conversation key can read
+generated files only in its bound conversation. Existing uploads/tool images keep
+their exact legacy read and response path.
+
+An empty-body human-owner POST to
+`/api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery`
+recovers the saved result onto that reply while the conversation is idle.
+`nyx__artifact_delivery` accepts exactly `{}` during a live owner Web turn and uses
+the frozen server target. Both transports preflight retained authority/bytes before
+an artifact audit or action card, revalidate transactionally and reuse file IDs.
+They never submit another Sandbox execution. Recovery updates the saved outcome
+and association atomically. Missing/expired bytes cannot be recreated.
+
+Ship tolerant frontend readers first, then every API/async writer/worker and normal
+startup indexes. Configure the existing replica roster/drain readiness before
+enabling `assistant:generated-artifacts`; acquisition requires that capability.
+Disabling hides generated rows/outcomes from history and active turns and disables
+both recovery transports. Admitted watches drain and retained owner GETs remain
+readable until expiry. Re-enabling restores exposure/recovery. Keep upgraded
+binaries for draining and the compatible frontend floor; disabling does not make
+old binaries safe against newly admitted generated state. Real Sandbox-to-Web
+acceptance, including video playback and exact-byte recovery, is a pre-enable gate.

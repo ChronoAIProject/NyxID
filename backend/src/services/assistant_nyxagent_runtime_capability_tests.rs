@@ -129,6 +129,7 @@ async fn failed_owner_lookup_does_not_suppress_another_owners_image_and_success_
     let b = owner(&state).await;
     let egress = egress(vec![Ok(StatusCode::BAD_GATEWAY.into_response()), success()]);
     let image = TurnAttachment {
+        artifact: Default::default(),
         id: Uuid::new_v4().to_string(),
         content_type: "image/png".into(),
         label: "pasted-image.png".into(),

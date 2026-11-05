@@ -312,7 +312,14 @@ export function useAssistant(
     let current = true;
     const operation = ++reopenSequence.current;
     const localEpoch = epoch.current;
-    setLoading(true);
+    // iOS microphone permission briefly makes the app inactive. Returning to
+    // already loaded history is a refresh, not a new selection: blocking the
+    // composer here would discard its in-flight dictation and error feedback.
+    // Preserve an initial load or explicit reopen interrupted by that transition.
+    setLoading(
+      (blocking) =>
+        blocking || latestHistory.current?.conversation.id !== conversationId,
+    );
     void refreshHistory(conversationId)
       .catch((cause) => {
         if (

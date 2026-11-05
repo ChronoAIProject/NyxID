@@ -3,16 +3,14 @@ import {
   ActivityIndicator,
   AppState,
   Image,
-  Modal,
   Pressable,
   StyleSheet,
   View,
 } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Directory, File, Paths } from "expo-file-system";
 import * as Sharing from "expo-sharing";
-import { Download, FileText, ImageIcon, X } from "lucide-react-native";
+import { Download, FileText, ImageIcon } from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { requestAuthenticatedBytes } from "../../lib/api/http";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
@@ -20,6 +18,7 @@ import { useTheme } from "../../theme/ThemeContext";
 import { radius, TOUCH_TARGET } from "../../theme/designTokens";
 import { useAuthSession } from "../auth/AuthSessionContext";
 import type { AssistantAttachment } from "./assistantTypes";
+import { AssistantImagePreview } from "./AssistantImagePreview";
 import { assistantAttachmentPath } from "./assistantUploads";
 import {
   ATTACHMENT_EXPIRED_MESSAGE,
@@ -146,6 +145,7 @@ export function AssistantAttachmentView({
         return;
       cancel();
       setPreview(undefined);
+      setEnlarged(false);
       setBusy(false);
     });
     return () => subscription.remove();
@@ -334,56 +334,43 @@ export function AssistantAttachmentView({
         ) : null}
       </Pressable>
       {(unavailable || error) && (
-        <Label muted accessibilityLiveRegion="polite" style={[styles.detail, captionColor ? { color: captionColor } : undefined]}>
+        <Label
+          muted
+          accessibilityLiveRegion="polite"
+          style={[
+            styles.detail,
+            captionColor ? { color: captionColor } : undefined,
+          ]}
+        >
           {unavailable ? ATTACHMENT_EXPIRED_MESSAGE : error}
         </Label>
       )}
       {!unavailable && attachment.image_input === "unavailable" && (
-        <Label muted style={[styles.detail, captionColor ? { color: captionColor } : undefined]}>
+        <Label
+          muted
+          style={[
+            styles.detail,
+            captionColor ? { color: captionColor } : undefined,
+          ]}
+        >
           {attachment.origin === "user_upload"
             ? IMAGE_INPUT_UNAVAILABLE_MESSAGE
             : "The agent couldn't view this image."}
         </Label>
       )}
-      <Modal
-        visible={enlarged && !!preview}
-        animationType="fade"
-        onRequestClose={closePreview}
-      >
-        <SafeAreaView
-          style={[styles.previewPage, { backgroundColor: colors.bg }]}
-        >
-          <View style={[styles.previewHeader, { borderColor: colors.border }]}>
-            <Label numberOfLines={1} style={styles.metadata}>
-              {label}
-            </Label>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Close attachment preview"
-              onPress={closePreview}
-              hitSlop={4}
-              style={styles.close}
-            >
-              <X size={22} color={colors.textPrimary} />
-            </Pressable>
-          </View>
-          {preview && (
-            <Image
-              accessibilityLabel={label}
-              source={{ uri: preview }}
-              resizeMode="contain"
-              style={styles.previewImage}
-              onError={() => {
-                if (cached.current?.file?.uri !== preview) return;
-                cancel();
-                setPreview(undefined);
-                closePreview();
-                setError(ATTACHMENT_UNAVAILABLE_MESSAGE);
-              }}
-            />
-          )}
-        </SafeAreaView>
-      </Modal>
+      <AssistantImagePreview
+        uri={enlarged ? preview : undefined}
+        label={label}
+        closeLabel="Close attachment preview"
+        onClose={closePreview}
+        onError={() => {
+          if (cached.current?.file?.uri !== preview) return;
+          cancel();
+          setPreview(undefined);
+          closePreview();
+          setError(ATTACHMENT_UNAVAILABLE_MESSAGE);
+        }}
+      />
     </View>
   );
 }
@@ -402,20 +389,4 @@ const styles = StyleSheet.create({
   },
   metadata: { flex: 1, minWidth: 0 },
   detail: { fontSize: 11, lineHeight: 16 },
-  previewPage: { flex: 1 },
-  previewHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-  },
-  close: {
-    width: TOUCH_TARGET,
-    height: TOUCH_TARGET,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  previewImage: { flex: 1, width: "100%" },
 });

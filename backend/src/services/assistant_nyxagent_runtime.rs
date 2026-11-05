@@ -1607,6 +1607,34 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
+    if !row.guest_model_setup
+        && !row.guest_turn
+        && row.group_id.is_none()
+        && row.collaboration.is_none()
+        && row.agent_owner_id.is_none()
+        && row.platform_thread.is_none()
+        && !row.invocation_controlled
+        && row.channel.is_none()
+        && row.reply_channel.is_none()
+        && row.group_request_id.is_none()
+        && row.active_turn.as_ref().is_some_and(|t| {
+            t.voice_request_id.is_none()
+                && t.trigger_run_id.is_none()
+                && t.invocation_id.is_none()
+                && t.platform_origin.is_none()
+                && t.channel_adapter_origin.is_none()
+                && t.asked_from.is_none()
+                && t.report_to.is_none()
+                && !t.with_nyxbot
+                && t.also_deliver.is_empty()
+        })
+        && crate::services::generated_artifacts::enabled(&state.db, &row.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        guidance.push_str(crate::services::generated_artifacts::GUIDANCE);
+    }
+
     if row
         .active_turn
         .as_ref()

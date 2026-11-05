@@ -1005,12 +1005,15 @@ pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
 }
 
 pub async fn require_enabled(db: &Database, user_id: &str) -> AppResult<()> {
-    if feature_flag_service::resolve_personal_features(db, user_id)
-        .await?
+    require_enabled_features(db, user_id).await.map(|_| ())
+}
+pub async fn require_enabled_features(db: &Database, user_id: &str) -> AppResult<Vec<String>> {
+    let features = feature_flag_service::resolve_personal_features(db, user_id).await?;
+    if features
         .iter()
         .any(|key| key == feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY)
     {
-        Ok(())
+        Ok(features)
     } else {
         Err(AppError::NotFound("Assistant route not found.".into()))
     }
@@ -1157,6 +1160,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
+    super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
@@ -2099,7 +2103,11 @@ pub async fn begin_turn(
 }
 
 /// IDs allocated before entering the transaction retry driver.
+#[derive(Clone)]
 pub(crate) struct OwnerTurnIds {
+    pub artifact_budget: std::sync::Arc<
+        std::sync::OnceLock<super::assistant_upload_service::byte_budget::ByteReservation>,
+    >,
     pub conversation_id: String,
     pub turn_id: String,
     pub message_id: String,
@@ -2178,6 +2186,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            artifact_head: None,
             collaboration: None,
             owner_model_route: None,
             invocation_controlled: false,
@@ -2977,6 +2986,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        artifact_watch_id: None,
         execution_task: retry.as_ref().and_then(|r| r.execution_task.clone()),
         business_system_success: false,
         delegated_images: Default::default(),
@@ -3169,7 +3179,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     Box::pin(super::async_service_operation::bind_in_session(
-        db, &mut row, session,
+        db,
+        keys,
+        &mut row,
+        session,
+        ids.artifact_budget.get(),
     ))
     .await?;
     Box::pin(super::assistant_invocation_service::bind_in_session(
@@ -3385,6 +3399,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                artifact_recovery_target: row
+                    .artifact_head
+                    .as_ref()
+                    .map(|head| head.message_id.clone()),
+                artifact_delivery: None,
                 work: Some(super::assistant_real_work::evidence(&row, turn, None)),
                 ..Default::default()
             }
@@ -3480,6 +3499,7 @@ pub async fn begin_turn_with_voice(
         .or_else(|| start.new_id.clone().filter(|id| valid_id(id)))
         .unwrap_or_else(|| format!("nyxa-{}", Uuid::new_v4().simple()));
     let ids = OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: id,
         turn_id: Uuid::new_v4().to_string(),
         message_id: Uuid::new_v4().to_string(),
@@ -3542,31 +3562,57 @@ pub async fn begin_turn_with_voice(
     let start = start.clone();
     let audit_db = db.clone();
     let audit_user = user_id.clone();
-    let claim = session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let db = &db;
-            let user_id = user_id.as_str();
-            let start = &start;
-            // MongoDB's retry driver stores and polls this callback through
-            // several frames. Keep the turn/message/upload transaction on the heap.
-            let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
-                db,
-                session,
-                &keys,
-                user_id,
-                start,
-                &ids,
-                &new_agent,
-                learning_epoch,
-                None,
-                voice_request_id.as_deref(),
-            ))
-            .await;
-            transactions::transaction_result(operation)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)?;
+    let budget = ids.artifact_budget.clone();
+    let claim = loop {
+        let (db, user_id, keys, start, ids, new_agent, voice_request_id) = (
+            db.clone(),
+            user_id.clone(),
+            keys.clone(),
+            start.clone(),
+            ids.clone(),
+            new_agent.clone(),
+            voice_request_id.clone(),
+        );
+        let outcome = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let db = &db;
+                let user_id = user_id.as_str();
+                let start = &start;
+                // MongoDB's retry driver stores and polls this callback through
+                // several frames. Keep the turn/message/upload transaction on the heap.
+                let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
+                    db,
+                    session,
+                    &keys,
+                    user_id,
+                    start,
+                    &ids,
+                    &new_agent,
+                    learning_epoch,
+                    None,
+                    voice_request_id.as_deref(),
+                ))
+                .await;
+                transactions::transaction_result(operation)
+            })
+            .await
+            .map_err(transactions::map_transaction_error);
+        match outcome {
+            Err(AppError::Conflict(reason))
+                if reason == super::generated_artifacts::PREPARE_BUDGET
+                    && budget.get().is_none() =>
+            {
+                let reservation = super::assistant_upload_service::byte_budget::reserve(
+                    super::generated_artifacts::sandbox::RESERVATION,
+                )
+                .await?;
+                let _ = budget.set(reservation);
+            }
+            outcome => break outcome?,
+        }
+    };
+
     let claim = claim.into_started()?;
     claim.log_reclaimed();
     super::assistant_agent_credential_service::audit_provision(
@@ -4020,6 +4066,8 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+artifact_recovery_target: None,
+                                artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
@@ -4069,11 +4117,14 @@ async fn finish_turn_inner(
                     || error.clone(),
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
+                super::generated_artifacts::prepare_settlement_in_session(&db, &mut current, session).await?;
+                let artifact_outcome = super::generated_artifacts::settled_outcome_in_session(&db, &current, session).await?;
                 let turn = current.active_turn.as_ref().expect("matched turn");
                 let settled_at = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
                     Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
                 });
                 let mut turn_metadata = super::assistant_turn_observability::metadata(turn, settled_at);
+                turn_metadata.artifact_delivery = artifact_outcome;
                 turn_metadata.work = Some(super::assistant_real_work::evidence(&current, turn, Some(settled_at)));
                 turn_metadata.failure_reason = error.as_ref().and_then(|error|
                     super::assistant_model_observer::failure_reason(error, turn, Utc::now()));
@@ -4148,6 +4199,7 @@ async fn finish_turn_inner(
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                super::generated_artifacts::associate_in_session(&db, &mut current, &message_id, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
@@ -4667,6 +4719,7 @@ pub async fn attach_routed_image(
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: Some(chat_delivery),
         image_input: None,
         image_input_reason: None,
@@ -4711,6 +4764,7 @@ pub async fn attach_routed_image(
     );
     let stored = async {
         let mut attachment = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             origin: "tool".into(),
             id: meta.id.clone(),
@@ -4769,6 +4823,7 @@ pub(crate) async fn attach_resource_image(
         assistant_resource::{AssistantResource, COLLECTION_NAME as RESOURCES},
     };
     let meta = media.map(|media| TurnAttachment {
+        artifact: Default::default(),
         id: resource.attachment_id.clone(),
         label: resource
             .source
@@ -4791,6 +4846,7 @@ pub(crate) async fn attach_resource_image(
     let attachment = if let Some(media) = media {
         let meta = meta.as_ref().ok_or_else(resources::missing)?;
         let mut row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: meta.id.clone(),
             origin: "tool".into(),
@@ -5027,6 +5083,10 @@ pub async fn read_group_tool_attachment(
 }
 
 /// Decrypt an attachment for its owner. Other owners and conversations are not found.
+pub enum AttachmentRead {
+    Legacy(String, Vec<u8>),
+    Generated(super::generated_artifacts::GeneratedRead),
+}
 pub async fn read_attachment(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
@@ -5034,17 +5094,42 @@ pub async fn read_attachment(
     conversation_id: &str,
     attachment_id: &str,
 ) -> AppResult<(String, Vec<u8>)> {
+    match read_attachment_for_caller(db, keys, user_id, conversation_id, attachment_id, None)
+        .await?
+    {
+        AttachmentRead::Legacy(kind, bytes) => Ok((kind, bytes)),
+        AttachmentRead::Generated(mut read) => {
+            Ok((read.content_type.clone(), std::mem::take(&mut *read.bytes)))
+        }
+    }
+}
+pub async fn read_attachment_for_caller(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    conversation_id: &str,
+    attachment_id: &str,
+    bound_conversation: Option<&str>,
+) -> AppResult<AttachmentRead> {
     use crate::models::assistant_attachment::{
         AssistantAttachment, COLLECTION_NAME as ATTACHMENTS,
     };
     get(db, user_id, conversation_id).await?;
-    Box::pin(super::assistant_upload_retention::require_available(
+    let metadata = Box::pin(super::assistant_upload_retention::available_row(
         db,
         doc! {
             "_id":attachment_id,"user_id":user_id,"conversation_id":conversation_id,
         },
     ))
     .await?;
+    if metadata.get_str("origin").ok() == Some("generated_artifact") {
+        if bound_conversation.is_some_and(|bound| bound != conversation_id) {
+            return Err(not_found());
+        }
+        return super::generated_artifacts::read(db, keys, user_id, conversation_id, attachment_id)
+            .await
+            .map(AttachmentRead::Generated);
+    }
     if db
         .collection::<bson::Document>(ATTACHMENTS)
         .find_one(doc! {"_id": attachment_id, "origin": "user_upload"})
@@ -5059,7 +5144,8 @@ pub async fn read_attachment(
             conversation_id,
             attachment_id,
         )
-        .await;
+        .await
+        .map(|(kind, bytes)| AttachmentRead::Legacy(kind, bytes));
     }
     let filter = doc! {
         "_id": attachment_id, "user_id": user_id, "conversation_id": conversation_id,
@@ -5081,7 +5167,7 @@ pub async fn read_attachment(
         db, filter,
     ))
     .await?;
-    Ok((row.content_type, bytes))
+    Ok(AttachmentRead::Legacy(row.content_type, bytes))
 }
 
 pub const MAX_TURN_ACTIVITIES: i64 = 40;
@@ -5982,6 +6068,9 @@ pub(crate) async fn delete_in_session(
         }
         for collection in [
             crate::models::async_service_operation::COLLECTION_NAME,
+            crate::models::generated_artifact::COLLECTION_NAME,
+            crate::models::generated_artifact::DELIVERIES,
+            crate::models::generated_artifact::SERIES,
             crate::models::cma_session_origin::COLLECTION_NAME,
             crate::models::assistant_voice::REQUESTS,
             crate::models::assistant_voice_session::COLLECTION_NAME,

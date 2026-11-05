@@ -400,6 +400,7 @@ pub async fn admit(
     let text = text.to_owned();
     let event = event.to_owned();
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: s.conversation_id.clone(),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
