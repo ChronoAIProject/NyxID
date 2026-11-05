@@ -839,6 +839,57 @@ mod tests {
     };
 
     #[test]
+    fn sandbox_units_reuse_service_component_prices_and_pending_sync() {
+        use crate::models::service_billing::{BillingMetric, LanePriceComponent, LanePricing};
+        let mut billing = ServiceBilling {
+            platform_key_pricing: Some(LanePricing {
+                metric: BillingMetric::SandboxCpuMillisSeconds,
+                credits_per_unit: "0.000000010000".into(),
+                lago_metric_code: String::new(),
+                sync_status: PricingSyncStatus::Pending,
+                sync_error: None,
+                operations: vec![],
+                components: vec![
+                    LanePriceComponent {
+                        metric: BillingMetric::SandboxMemoryMibSeconds,
+                        credits_per_unit: "0.000000001000".into(),
+                        lago_metric_code: String::new(),
+                        sync_status: PricingSyncStatus::Pending,
+                        sync_error: None,
+                    },
+                    LanePriceComponent {
+                        metric: BillingMetric::SandboxDiskGibSeconds,
+                        credits_per_unit: "0.000000040000".into(),
+                        lago_metric_code: String::new(),
+                        sync_status: PricingSyncStatus::Pending,
+                        sync_error: None,
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        super::normalize_lane_pricing("cma-allocation", None, &mut billing).unwrap();
+        let lane = billing.platform_key_pricing.as_ref().unwrap();
+        assert_eq!(lane.credits_per_unit, "0.00000001");
+        assert_eq!(lane.sync_status, PricingSyncStatus::Pending);
+        assert_eq!(lane.components.len(), 2);
+        assert!(lane.lago_metric_code.starts_with("platform_svc_"));
+        assert!(
+            lane.components
+                .iter()
+                .all(|part| part.sync_status == PricingSyncStatus::Pending
+                    && part.lago_metric_code.starts_with("platform_svc_")
+                    && part.lago_metric_code != lane.lago_metric_code)
+        );
+        let previous = billing.clone();
+        billing.platform_key_pricing.as_mut().unwrap().components[1].credits_per_unit =
+            "0.0000000400001".into();
+        assert!(
+            super::normalize_lane_pricing("cma-allocation", Some(&previous), &mut billing).is_err()
+        );
+    }
+
+    #[test]
     fn machine_runtime_cannot_be_authored_as_a_service_lane() {
         use crate::models::service_billing::{BillingMetric, LanePriceComponent, LanePricing};
         for component in [false, true] {

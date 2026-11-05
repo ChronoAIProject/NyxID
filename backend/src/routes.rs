@@ -1405,6 +1405,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
         .route(
+            "/billing/cma-rate-cards",
+            get(handlers::admin_sandbox_rates::list).post(handlers::admin_sandbox_rates::publish),
+        )
+        .route(
             "/remote-machines/platform",
             get(handlers::admin_remote_machine_platform::get),
         )
@@ -3555,6 +3559,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let api_v1 = api_v1_public
+        .nest("/billing/sandboxes", handlers::sandbox_billing::router())
         .nest("/catalog-curation", handlers::catalog_curation::router())
         .merge(api_v1_delegated)
         .merge(api_v1_shared)

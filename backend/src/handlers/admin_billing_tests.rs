@@ -77,6 +77,11 @@ mod tests {
             .unwrap();
         let writes = [
             (
+                "POST",
+                "/api/v1/admin/billing/cma-rate-cards".to_string(),
+                json!({"expected_version":1,"effective_from":"2099-01-01T00:00:00Z","rates":{}}),
+            ),
+            (
                 "PUT",
                 "/api/v1/admin/billing/config".to_string(),
                 json!({"default_overdraft_cap_credits": 7}),
@@ -93,6 +98,7 @@ mod tests {
             ),
         ];
         let reads = [
+            "/api/v1/admin/billing/cma-rate-cards".to_string(),
             "/api/v1/admin/billing/config".to_string(),
             "/api/v1/admin/billing/rates".to_string(),
             "/api/v1/admin/billing/overview".to_string(),
@@ -577,5 +583,63 @@ mod tests {
         .await;
         assert!(status.is_client_error(), "{status} {body}");
         assert_eq!(audit_rows(&f, "service_updated").await.len(), 2);
+    }
+    #[tokio::test]
+    async fn cma_rates_publish_as_admin_with_atomic_history_and_audit() {
+        let f = fixture("admin_cma_rates", false).await;
+        crate::services::billing::sandbox_rates::seed(
+            &f.state.db,
+            &f.state.config.lago_plan_code,
+            f.state.audit_chain_hmac_key.as_slice(),
+        )
+        .await
+        .unwrap();
+        let effective =
+            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 600, 0).unwrap();
+        let rates = json!({"sandbox_cpu_millis_seconds":"0.00000002","sandbox_memory_mib_seconds":"0.000000001","sandbox_disk_gib_seconds":"0.00000004"});
+        let input = json!({"expected_version":1,"effective_from":effective,"rates":rates});
+        let endpoint = "/api/v1/admin/billing/cma-rate-cards";
+        let (status, card) = request(
+            &f.state,
+            "POST",
+            endpoint,
+            &f.human_token,
+            Some(input.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{card}");
+        assert_eq!(card["version"], 2);
+        assert_eq!(card["sync_status"], "pending");
+        assert_eq!(card["created_by"], f.owner);
+        let (status, history) = request(&f.state, "GET", endpoint, &f.human_token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(history.as_array().unwrap().len(), 2);
+        assert_eq!(
+            history[1]["rates"]["sandbox_cpu_millis_seconds"],
+            "0.00000001"
+        );
+        assert_eq!(audit_rows(&f, "cma_rate_card_published").await.len(), 1);
+        assert_eq!(
+            request(
+                &f.state,
+                "POST",
+                endpoint,
+                &f.human_token,
+                Some(input.clone())
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let mut invalid = input;
+        invalid["expected_version"] = json!(2);
+        invalid["rates"]["sandbox_cpu_millis_seconds"] = json!("-1");
+        assert_eq!(
+            request(&f.state, "POST", endpoint, &f.human_token, Some(invalid))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(audit_rows(&f, "cma_rate_card_published").await.len(), 1);
     }
 }

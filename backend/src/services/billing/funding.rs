@@ -40,7 +40,9 @@ const WALLET_ADMISSION_BUSY: &str = "Purchased credit settlement is completing; 
 
 mod machine;
 pub use machine::{
-    MachineFundingCandidates, prepare_machine_window_funding, reserve_machine_window_in_session,
+    MachineFundingCandidates, RuntimeFundingCandidates, prepare_machine_window_funding,
+    prepare_sandbox_window_funding, reserve_machine_window_in_session,
+    reserve_runtime_window_in_session,
 };
 
 /// Pool admission has a cancellation deadline. Commit every funding hold and
@@ -418,7 +420,7 @@ pub async fn release_usage_reservations(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<()> {
-    if machine::is_machine_runtime(row) {
+    if machine::is_runtime_allocation(row) {
         return Err(AppError::BillingProviderUnavailable(
             "Machine liability requires evidence-backed settlement, including zero usage".into(),
         ));
@@ -645,7 +647,7 @@ pub fn settle_usage_funding<'a>(
     row: &'a UsageMeterRow,
 ) -> futures::future::BoxFuture<'a, AppResult<FundingSettlement>> {
     Box::pin(async move {
-        machine::validate_machine_settlement(row)?;
+        machine::validate_runtime_settlement(row)?;
         if let Some(funding) = row.funding.as_ref()
             && funding.settled
         {
@@ -733,8 +735,8 @@ pub fn settle_usage_funding<'a>(
 
         finish_usage_resource_locks(db, &claimed.id).await?;
         refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
-        machine::validate_machine_settlement(&claimed)?;
-        let reserved_only = machine::is_machine_runtime(&claimed);
+        machine::validate_runtime_settlement(&claimed)?;
+        let reserved_only = machine::is_runtime_allocation(&claimed);
 
         let quantity = claimed.quantity.unwrap_or(0).max(0);
         let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
