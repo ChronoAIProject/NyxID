@@ -1542,20 +1542,30 @@ pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantC
     get_authorized(db, user_id, id).await.map(|(row, _)| row)
 }
 
-pub(crate) async fn get_authorized(
+type AuthorizedConversation = (
+    AssistantConversation,
+    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+);
+
+pub(crate) fn get_authorized<'a>(
+    db: &'a Database,
+    user_id: &'a str,
+    id: &'a str,
+) -> futures::future::BoxFuture<'a, AppResult<AuthorizedConversation>> {
+    Box::pin(get_authorized_inner(db, user_id, id))
+}
+
+async fn get_authorized_inner(
     db: &Database,
     user_id: &str,
     id: &str,
-) -> AppResult<(
-    AssistantConversation,
-    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
-)> {
+) -> AppResult<AuthorizedConversation> {
     let row = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one(owner_filter(user_id, id)?)
         .await?
         .ok_or_else(not_found)?;
-    let access = authorize_thread_read(db, &row).await?;
+    let access = Box::pin(authorize_thread_read(db, &row)).await?;
     Ok((row, access))
 }
 
