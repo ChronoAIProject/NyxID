@@ -17,10 +17,8 @@ import {
 } from "react-native";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import {
-  Check,
   ChevronDown,
   ChevronRight,
-  MessageSquare,
   Plus,
   RefreshCw,
   Users,
@@ -41,6 +39,7 @@ import { groupsApi } from "../../lib/api/groupsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { SkeletonRows } from "../Skeleton";
 import { WorkspaceChatBrowser } from "./WorkspaceChatBrowser";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 import {
@@ -146,7 +145,9 @@ export function WorkspaceChatList({
     refetchInterval: active ? 30_000 : false,
     retry: false,
   });
-  const refreshingAgents = pullRefreshing || agents.isFetching;
+  // Only the person's own refresh spins; the 30s poll and event refetches
+  // update rows silently.
+  const refreshingAgents = pullRefreshing;
   const refreshAgents = async () => {
     if (
       refreshLock.current ||
@@ -341,14 +342,19 @@ export function WorkspaceChatList({
       onPress={() => openGroup(row)}
     />
   );
-  const historyStatus = (
+  // The full browser shows its own first-load skeleton in place of the list.
+  const historyStatus = (showLoading: boolean) => (
     <>
       {agent?.can_use === false ? (
         <DrawerMessage text="View only · chat access isn’t available for this agent." />
       ) : (
         <>
-          {history.isPending ? (
-            <DrawerMessage text="Loading chats…" loading={active} />
+          {showLoading && history.isPending ? (
+            <SkeletonRows
+              rows={3}
+              icon={false}
+              accessibilityLabel="Loading chats"
+            />
           ) : null}
           {history.isError ? (
             <DrawerMessage
@@ -438,7 +444,7 @@ export function WorkspaceChatList({
           <DrawerMessage text="Offline · showing saved chats" />
         ) : null}
         {agents.isPending ? (
-          <DrawerMessage text="Loading agents…" loading={active} />
+          <SkeletonRows rows={3} accessibilityLabel="Loading agents" />
         ) : null}
         {agents.isError ? (
           <DrawerMessage
@@ -519,7 +525,7 @@ export function WorkspaceChatList({
         <View
           key={`threads:${row.id}`}
           accessibilityLabel={`Threads with ${chatAgentLabel(row)}`}
-          style={[styles.children, { borderColor: colors.border }]}
+          style={[styles.children, { borderColor: colors.borderSoft }]}
           onLayout={(event) => {
             const { y, height } = event.nativeEvent.layout;
             sticky.current.bottom = y + height;
@@ -529,7 +535,7 @@ export function WorkspaceChatList({
             );
           }}
         >
-          {historyStatus}
+          {historyStatus(true)}
           {currentRow}
           {previewChats.map(chatRow)}
           {threads.bots.map((bot) => {
@@ -577,7 +583,7 @@ export function WorkspaceChatList({
                 />
                 {open ? (
                   <View
-                    style={[styles.children, { borderColor: colors.border }]}
+                    style={[styles.children, { borderColor: colors.borderSoft }]}
                   >
                     {[
                       ...new Set(
@@ -688,7 +694,7 @@ export function WorkspaceChatList({
     rows.push(
       <View key="crew-rows">
         {groups.isPending ? (
-          <DrawerMessage text="Loading crews..." loading={active} />
+          <SkeletonRows rows={2} accessibilityLabel="Loading crews" />
         ) : null}
         {groups.isError ? (
           <DrawerMessage
@@ -754,6 +760,11 @@ export function WorkspaceChatList({
                   ? chatAgentLabel(agent)
                   : "Agent chats"
           }
+          titleIcon={
+            browser.kind === "chats" && agent ? (
+              <AgentAvatar agent={agent} size="md" />
+            ) : undefined
+          }
           scopeKey={
             browser.kind === "chats" ? `chats:${agent?.id}` : browser.kind
           }
@@ -813,6 +824,19 @@ export function WorkspaceChatList({
           refreshing={refreshingAgents}
           refreshDisabled={!active}
           refreshLabel="Refresh agents"
+          loadingLabel={
+            browser.kind === "agents"
+              ? agents.isPending
+                ? "Loading agents"
+                : undefined
+              : browser.kind === "groups"
+                ? groups.isPending
+                  ? "Loading crews"
+                  : undefined
+                : agent && agent.can_use !== false && history.isPending
+                  ? "Loading chats"
+                  : undefined
+          }
           onClose={() => dismissBrowser()}
           onDismiss={() => finishBrowserDismissal(browserClosing)}
           primaryAction={
@@ -844,13 +868,11 @@ export function WorkspaceChatList({
                   ? "This agent is no longer available."
                   : agent.can_use === false
                     ? "Chat access isn’t available for this agent."
-                    : history.isPending
-                      ? "Loading chats…"
-                      : history.isError && !history.data
-                        ? "Couldn’t load chats. You can retry below."
-                        : agent.status === "destroyed"
-                          ? "No saved chats for this deleted agent."
-                          : "No chats yet. Start your first conversation above."
+                    : history.isError && !history.data
+                      ? "Couldn’t load chats. You can retry below."
+                      : agent.status === "destroyed"
+                        ? "No saved chats for this deleted agent."
+                        : "No chats yet. Start your first conversation above."
           }
           footer={
             browser.kind === "agents" && agents.isError ? (
@@ -865,7 +887,7 @@ export function WorkspaceChatList({
               />
             ) : browser.kind === "chats" ? (
               <>
-                {historyStatus}
+                {historyStatus(false)}
                 {currentRow}
                 {history.hasNextPage ? (
                   <MoreButton
@@ -1079,8 +1101,11 @@ function DisclosureRow({
       style={({ pressed }) => [
         styles.row,
         {
+          // An expanded agent's current thread carries the highlight instead.
           backgroundColor:
-            pressed || selected ? colors.navActive : "transparent",
+            pressed || (selected && !expanded)
+              ? colors.navActive
+              : "transparent",
         },
       ]}
     >
@@ -1129,7 +1154,6 @@ function DisclosureRow({
           </Text>
         ) : null}
       </View>
-      {selected ? <Check size={16} color={colors.primaryOnTint} /> : null}
       <Chevron size={16} color={colors.textMuted} />
     </Pressable>
   );
@@ -1153,7 +1177,6 @@ function ChatRow({
   create?: boolean;
 }) {
   const { colors } = useTheme();
-  const Icon = create ? Plus : MessageSquare;
   return (
     <Pressable
       accessibilityRole="button"
@@ -1168,40 +1191,41 @@ function ChatRow({
         },
       ]}
     >
-      <Icon size={14} color={selected ? colors.primary : colors.textMuted} />
+      {create ? <Plus size={14} color={colors.textMuted} /> : null}
       <View style={styles.label}>
-        <Text
-          numberOfLines={2}
-          style={[
-            styles.chatTitle,
-            { color: selected ? colors.primaryOnTint : colors.textSecondary },
-          ]}
-        >
-          {label}
-        </Text>
-        {selected || status ? (
+        <View style={styles.chatLine}>
+          <Text
+            numberOfLines={2}
+            style={[
+              styles.chatTitle,
+              {
+                color: selected ? colors.textPrimary : colors.textSecondary,
+                fontFamily: selected ? fonts.bodySemi : fonts.body,
+              },
+            ]}
+          >
+            {label}
+          </Text>
+          {detail ? (
+            <Text
+              numberOfLines={1}
+              style={[styles.chatTime, { color: colors.textMuted }]}
+            >
+              {detail}
+            </Text>
+          ) : null}
+        </View>
+        {status ? (
           <Text
             style={[
               styles.detail,
               {
                 color:
-                  status === "Needs you"
-                    ? colors.warning
-                    : colors.primaryOnTint,
+                  status === "Needs you" ? colors.warning : colors.primaryOnTint,
               },
             ]}
           >
-            {[selected ? "Current" : undefined, status]
-              .filter(Boolean)
-              .join(" · ")}
-          </Text>
-        ) : null}
-        {detail ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.detail, { color: colors.textMuted }]}
-          >
-            {detail}
+            {status}
           </Text>
         ) : null}
       </View>
@@ -1211,21 +1235,16 @@ function ChatRow({
 
 function DrawerMessage({
   text,
-  loading,
   retry,
   disabled,
 }: {
   text: string;
-  loading?: boolean;
   retry?: () => void;
   disabled?: boolean;
 }) {
   const { colors } = useTheme();
   return (
     <View style={styles.message}>
-      {loading ? (
-        <ActivityIndicator size="small" color={colors.primary} />
-      ) : null}
       <Text style={[styles.messageText, { color: colors.textMuted }]}>
         {text}
       </Text>
@@ -1314,7 +1333,19 @@ const styles = StyleSheet.create({
     minHeight: 44,
     borderRadius: 8,
   },
-  chatTitle: { fontFamily: fonts.body, fontSize: 12, lineHeight: 18 },
+  chatLine: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "baseline",
+    columnGap: 8,
+  },
+  chatTitle: { flexGrow: 1, flexShrink: 1, fontSize: 12, lineHeight: 18 },
+  chatTime: {
+    flexShrink: 0,
+    fontFamily: fonts.bodyRegular,
+    fontSize: 10,
+    lineHeight: 15,
+  },
   message: {
     flexDirection: "row",
     alignItems: "center",

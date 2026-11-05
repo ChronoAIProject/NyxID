@@ -66,7 +66,12 @@ function EventRow({
   const head = (
     <>
       <Icon size={14} color={tone} />
-      <Label muted numberOfLines={1} style={{ fontSize: 11, flex: 1 }}>
+      <Label
+        muted
+        numberOfLines={1}
+        maxFontSizeMultiplier={1.3}
+        style={{ fontSize: 12, flex: 1 }}
+      >
         {notice.summary}
       </Label>
       {notice.detail ? (
@@ -82,9 +87,9 @@ function EventRow({
     flexDirection: "row" as const,
     alignItems: "center" as const,
     gap: 8,
-    minHeight: 44,
+    minHeight: 34,
     paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingVertical: 4,
   };
   return (
     <View>
@@ -93,6 +98,7 @@ function EventRow({
           accessibilityRole="button"
           accessibilityLabel={label}
           accessibilityState={{ expanded: open }}
+          hitSlop={{ top: 5, bottom: 5 }}
           onPress={() => setOpen((value) => !value)}
           style={style}
         >
@@ -106,10 +112,9 @@ function EventRow({
       {open && notice.detail ? (
         <View
           style={{
-            borderTopWidth: 1,
-            borderColor: colors.border,
-            padding: 12,
-            gap: 6,
+            paddingHorizontal: 12,
+            paddingBottom: 8,
+            gap: 4,
           }}
         >
           <Label muted style={{ fontSize: 11 }}>
@@ -119,10 +124,13 @@ function EventRow({
             <Pressable
               accessibilityRole="link"
               accessibilityLabel="Open Automations"
-              style={{ minHeight: 44, justifyContent: "center" }}
+              hitSlop={{ top: 7, bottom: 7 }}
+              style={{ minHeight: 30, justifyContent: "center", alignSelf: "flex-start" }}
               onPress={onOpenAutomations}
             >
-              <Label muted>Open Automations</Label>
+              <Label style={{ fontSize: 13, color: colors.primary }}>
+                Open Automations
+              </Label>
             </Pressable>
           ) : null}
         </View>
@@ -185,10 +193,8 @@ export function AssistantSystemMessage({
       accessibilityLabel="NyxID updates"
       accessibilityLiveRegion="polite"
       style={{
-        borderWidth: 1,
-        borderColor: colors.border,
-        backgroundColor: colors.cardSoft,
-        borderRadius: 8,
+        backgroundColor: colors.segmentTrack,
+        borderRadius: 12,
         overflow: "hidden",
       }}
     >

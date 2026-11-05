@@ -3128,6 +3128,7 @@ async fn update_notifications_action(
         State(state.clone()),
         auth_user,
         Json(notifications::UpdateNotificationSettingsRequest {
+            group_mentions_enabled: None,
             telegram_enabled: body.telegram_enabled,
             approval_required: body.approval_required,
             global_approval_mode: body.global_approval_mode,
@@ -3533,6 +3534,7 @@ mod wave4_effect_tests {
                 State(state.clone()),
                 crate::test_utils::test_auth_user(&actor),
                 Json(notifications::UpdateNotificationSettingsRequest {
+                    group_mentions_enabled: None,
                     telegram_enabled: None,
                     approval_required: legacy,
                     global_approval_mode: mode,
@@ -5530,6 +5532,7 @@ mod wave4_effect_tests {
         let mode = ApprovalMode::PerRequest;
         let default_effect = ApprovalEffect::RequireApproval;
         let rules = vec![ApprovalRule {
+            mandatory_review: false,
             methods: vec!["POST".to_string()],
             resource_pattern: "/v1/*".to_string(),
             verbs: vec![ApprovalVerb::Write],

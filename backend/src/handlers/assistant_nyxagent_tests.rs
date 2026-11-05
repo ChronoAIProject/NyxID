@@ -1,4 +1,6 @@
 use super::*;
+#[path = "assistant_first_byte_outcome_tests.rs"]
+mod first_byte_outcome_tests;
 #[path = "assistant_guest_turn_tests.rs"]
 mod guest_turn_tests;
 use crate::services::assistant_engine_policy as engine_policy;
@@ -61,6 +63,7 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -580,6 +583,12 @@ async fn delayed_headers_fail_as_first_byte_with_internal_stage() {
         reply.upstream_error_code, None,
         "a NyxID timeout is not an upstream code"
     );
+    let outcome = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();
+    assert_eq!(
+        outcome["action_outcome"]["summary"],
+        "No actions were taken."
+    );
+    assert_eq!(outcome["action_outcome"]["retry_warning"], Value::Null);
     let detail = reply.error_detail.unwrap();
     assert_eq!(detail.stage, "first_byte");
     assert_eq!(detail.response_id, None);
@@ -2729,6 +2738,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        execution_task: None,
         connect_own: None,
         activity_id: None,
         invocation_id: None,
@@ -2832,7 +2842,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
             .unwrap()
             .starts_with(engine::SYSTEM_PROMPT)
     );
-    assert!(first.contains("Chat card decisions the user made since your previous reply"));
+    assert!(first.contains("Chat card states recorded since your previous reply"));
     assert!(first.contains(prepared.binding.marker.as_deref().unwrap()));
     assert!(calls[0].body["conversation"].as_str() == Some(SESSION));
     assert!(first.contains("\n- allowed: service github"));
@@ -2849,7 +2859,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
     assert!(!first.contains("IGNORE") && !first.contains("Summary text"));
     // The next turn does not repeat decisions it has already been told about.
     let second = calls[1].body["input"].as_str().unwrap();
-    assert!(!second.contains("Chat card decisions"));
+    assert!(!second.contains("Chat card states"));
     server.abort();
 }
 
@@ -3315,6 +3325,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     // A claimed turn can retain this snapshot after its channel is removed
     // while first-turn history or upload preparation is in flight.
     row.channel = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "removed-channel".into(),
         partition: "thread_v1_removed".into(),
@@ -4513,6 +4524,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            retry_identity: None,
             digest: None,
             machine: None,
             id: "activity".into(),

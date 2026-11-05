@@ -50,6 +50,10 @@ export function createTranscriptScrollFollower(bottomThreshold = 80) {
 
   return {
     isFollowing: () => following,
+    /** How far the last reported offset is above the end, for choosing a smooth or instant correction. */
+    distanceToEnd: () =>
+      Math.max(0, transcriptEndOffset(contentHeight, viewportHeight) - offset),
+    viewport: () => viewportHeight,
     isAwayFromEnd: () =>
       !following &&
       viewportHeight > 0 &&

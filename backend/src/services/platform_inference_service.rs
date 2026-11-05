@@ -644,7 +644,7 @@ async fn guide_text_inner(
             state
                 .billing
                 .owner_resolver()
-                .resolve_for_execution(
+                .resolve_for_ordinary_execution(
                     &installation.owner_user_id,
                     &installation.owner_user_id,
                     CredentialClass::NyxidManagedMaster,

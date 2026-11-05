@@ -1,13 +1,11 @@
-import { useNativeSheetDismiss } from "../../../components/workspace/useNativeSheetDismiss";
 import { useReducedMotion } from "../../../lib/accessibility/useReducedMotion";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
-  Modal,
+  Animated,
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   View,
 } from "react-native";
@@ -15,43 +13,59 @@ import { useIsFocused } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import * as WebBrowser from "expo-web-browser";
 import {
-  ChevronDown,
-  ChevronLeft,
+  Ellipsis,
   Mic,
   MicOff,
-  Minus,
   PhoneOff,
   Volume2,
   VolumeX,
   X,
 } from "lucide-react-native";
-import { WorkspaceSheetSurface } from "../../../components/workspace/WorkspaceSheetSurface";
 import {
   ActionButton,
   Card,
   Label,
   Notice,
 } from "../../../components/workspace/WorkspaceUI";
+import {
+  ScrollEdgeFades,
+  useScrollEdges,
+} from "../../../components/workspace/ScrollEdgeFades";
 import { nativeVoiceEnvironment } from "../../../lib/api/assistantVoiceApi";
 import { useNetworkStatus } from "../../../hooks/useNetworkStatus";
 import { useTheme } from "../../../theme/ThemeContext";
 import { fonts } from "../../../theme/designTokens";
+import { ChatComposerFrame } from "../ChatComposer";
 import { useNativeVoice } from "./useNativeVoice";
+import { useVoiceLevels } from "./useVoiceLevels";
+import { VoiceComposerAura } from "./VoiceComposerAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
+import { voiceAuraPhase, voiceAuraStatus } from "./voiceAuraState";
 import { chooseVoiceOption, voiceElapsed, voiceTariff } from "./voiceSelection";
-import type { VoicePreferences } from "./voiceContracts";
+import type { VoicePreferences, VoiceSnapshot } from "./voiceContracts";
 
 type Props = {
   thread: string;
   agentName: string;
   onClose: () => void;
   onUpdate: () => void;
+  /** Scrolls the chat above to a card the call is waiting on. */
   onReview: (acknowledgementId?: string) => void;
 };
-type Picker = "voice" | "mode";
+type Task = VoiceSnapshot["tasks"][number];
 
+/**
+ * The voice composer keeps one size whether a call is idle or live and in
+ * either mode: the middle area and the hint line are always reserved.
+ */
+const BODY_HEIGHT = 136;
+
+/**
+ * Voice mode is a composer: it slides up in place of the message composer,
+ * so the chat above, with its cards and links, stays on screen and usable
+ * during the call.
+ */
 export function AssistantVoiceConversation(props: Props) {
-  const sheet = useNativeSheetDismiss(props.onClose);
   const [setup] = useState(() => {
     try {
       return { environment: nativeVoiceEnvironment() };
@@ -65,23 +79,21 @@ export function AssistantVoiceConversation(props: Props) {
   return setup.environment ? (
     <VoiceConversation {...props} environment={setup.environment} />
   ) : (
-    <Modal
-      {...sheet.modalProps}
-      transparent
-      onRequestClose={() => sheet.close()}
-    >
-      <WorkspaceSheetSurface nativePresentation onClose={() => sheet.close()}>
-        <View style={styles.body}>
-          <Notice
-            message={setup.error ?? "Voice is unavailable."}
-            tone="error"
-          />
-          <ActionButton label="Return to chat" onPress={() => sheet.close()} />
-        </View>
-      </WorkspaceSheetSurface>
-    </Modal>
+    <ChatComposerFrame style={styles.frame} bounce={false}>
+      <Notice message={setup.error ?? "Voice is unavailable."} tone="error" />
+      <ActionButton label="Return to chat" variant="secondary" onPress={props.onClose} />
+    </ChatComposerFrame>
   );
 }
+
+// The same plain words as the web voice panel.
+const TASK_STATE: Record<Task["state"], string> = {
+  queued: "Queued",
+  claimed: "Running",
+  awaiting_confirmation: "Needs your OK",
+  completed: "Done",
+  cancelled: "Cancelled",
+};
 
 function VoiceConversation({
   thread,
@@ -93,21 +105,23 @@ function VoiceConversation({
 }: Props & {
   environment: ReturnType<typeof nativeVoiceEnvironment>;
 }) {
-  const { colors } = useTheme();
-  const sheet = useNativeSheetDismiss(onClose);
+  const { colors, mode } = useTheme();
   const reducedMotion = useReducedMotion();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
   const voice = useNativeVoice(thread, environment, onUpdate);
-  const [minimized, setMinimized] = useState(false);
-  const [picker, setPicker] = useState<Picker>();
-  const [preferredVoice, setPreferredVoice] = useState<string>();
-  const [mode, setMode] = useState<VoicePreferences["input_mode"]>();
-  const [notify, setNotify] = useState<boolean>();
-  const [expandedCaptions, setExpandedCaptions] = useState(false);
+  const levels = useVoiceLevels(voice.media);
+  const [hold] = useState(() => new Animated.Value(0));
+  const [holdStartedAt, setHoldStartedAt] = useState<number>();
+  const [rise] = useState(() => new Animated.Value(reducedMotion ? 0 : 1));
+  const transcriptEdges = useScrollEdges();
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [pricingOpen, setPricingOpen] = useState(false);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [billingOpenError, setBillingOpenError] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const transcript = useRef<ScrollView>(null);
   const options = useQuery({
     queryKey: ["workspace", "voice-options", environment.epoch, thread],
     queryFn: ({ signal }) => environment.api.options(thread, signal),
@@ -124,33 +138,45 @@ function VoiceConversation({
   const choices = options.data?.options ?? [];
   const option = chooseVoiceOption(choices);
   const isGrok = option?.voice.protocol === "xai_realtime";
+  const [modeChoice, setModeChoice] =
+    useState<VoicePreferences["input_mode"]>();
   const inputMode = isGrok
     ? "push_to_talk"
-    : (mode ?? saved?.input_mode ?? "push_to_talk");
+    : (modeChoice ?? saved?.input_mode ?? "push_to_talk");
   const voiceId =
-    option?.voice.voices.find(
-      (row) => row.id === (preferredVoice ?? saved?.voice),
-    )?.id ??
+    option?.voice.voices.find((row) => row.id === saved?.voice)?.id ??
     option?.voice.voices[0]?.id ??
     null;
   const voiceLabel = option?.voice.voices.find(
     (row) => row.id === voiceId,
   )?.label;
-  const notifyOnCompletion = notify ?? saved?.notify_on_completion ?? false;
   const active = voice.starting || voice.connected;
   const session = voice.snapshot?.session;
   const muted = session?.muted ?? false;
   const microphoneBlocked =
     muted ||
-    session?.input_muted ||
-    session?.end_requested ||
+    !!session?.input_muted ||
+    !!session?.end_requested ||
     session?.state !== "active";
+  const captions = voice.snapshot?.captions ?? [];
+  const tasks = voice.snapshot?.tasks ?? [];
+  const phase = voiceAuraPhase({
+    starting: voice.starting,
+    connected: voice.connected,
+    inputMode,
+    holding: voice.holding,
+    microphoneBlocked,
+    muted,
+    outputActive: levels.speaking,
+    captions,
+    tasks,
+  });
   const status = voice.starting
     ? "Connecting…"
     : voice.connected
       ? session?.state === "closing"
         ? "Ending…"
-        : "Connected"
+        : voiceAuraStatus(phase, inputMode)
       : voice.recovery || (voice.error && !voice.snapshot)
         ? "Unable to start"
         : voice.conflict
@@ -159,9 +185,9 @@ function VoiceConversation({
             ? "Call ended"
             : "Ready to talk";
   const duration = voiceElapsed(session?.created_at, session?.closed_at, now);
-  const captions = voice.snapshot?.captions ?? [];
-  const shownCaptions = expandedCaptions ? captions : captions.slice(-2);
-  const tasks = voice.snapshot?.tasks ?? [];
+  const talking = holdStartedAt
+    ? voiceElapsed(new Date(holdStartedAt).toISOString(), null, now)
+    : undefined;
   const canStart =
     !!option?.available &&
     !active &&
@@ -169,10 +195,10 @@ function VoiceConversation({
     isConnected &&
     options.isSuccess &&
     settings.isSuccess;
-  const theme = useMemo(
-    () => ({ color: colors.textPrimary }),
-    [colors.textPrimary],
+  const running = tasks.some(
+    (task) => task.state === "queued" || task.state === "claimed",
   );
+  const needsOk = tasks.some((task) => task.state === "awaiting_confirmation");
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
@@ -187,35 +213,89 @@ function VoiceConversation({
     setShowErrorDetails(false);
   }, [voice.error]);
 
+  useEffect(() => {
+    setHoldStartedAt(voice.holding ? Date.now() : undefined);
+    if (voice.holding) setNow(Date.now());
+  }, [voice.holding]);
+  // Holding the microphone swells the button and lifts a soft halo around it;
+  // releasing settles it back. Reduce Motion switches without animating.
+  useEffect(() => {
+    if (reducedMotion) {
+      hold.setValue(voice.holding ? 1 : 0);
+      return;
+    }
+    const animation = voice.holding
+      ? Animated.spring(hold, {
+          toValue: 1,
+          speed: 16,
+          bounciness: 9,
+          useNativeDriver: true,
+        })
+      : Animated.timing(hold, {
+          toValue: 0,
+          duration: 220,
+          useNativeDriver: true,
+        });
+    animation.start();
+    return () => animation.stop();
+  }, [voice.holding, reducedMotion]);
+
+  // The voice composer slides up from where the message composer was.
+  useEffect(() => {
+    if (reducedMotion) return;
+    const animation = Animated.spring(rise, {
+      toValue: 0,
+      speed: 14,
+      bounciness: 4,
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, []);
+
+  /** Closing voice ends the call; accepted agent tasks keep running. */
   function close() {
+    if (voice.holding) voice.hold(false);
     void voice.end();
-    if (minimized) onClose();
-    else sheet.close();
+    onClose();
   }
-  function minimize() {
-    voice.hold(false);
-    setMinimized(true);
-  }
+  /** The chat stays on screen above the call, so a card is shown in place. */
   function review(acknowledgementId?: string) {
-    minimize();
+    if (voice.holding) voice.hold(false);
     onReview(acknowledgementId);
   }
+  function preferences(
+    mode: VoicePreferences["input_mode"],
+  ): VoicePreferences | undefined {
+    if (!option) return undefined;
+    return {
+      service_id: option.service_id,
+      connection_id: option.connection_id,
+      key_source: option.key_source,
+      model: option.model,
+      voice: voiceId,
+      input_mode: mode,
+      language: saved?.language ?? null,
+      notify_on_completion: saved?.notify_on_completion ?? false,
+    };
+  }
   async function start() {
-    if (!canStart || !option) return;
+    const chosen = preferences(inputMode);
+    if (!canStart || !option || !chosen) return;
     setBillingOpenError(false);
-    await voice.start(
-      {
-        service_id: option.service_id,
-        connection_id: option.connection_id,
-        key_source: option.key_source,
-        model: option.model,
-        voice: voiceId,
-        input_mode: inputMode,
-        language: saved?.language ?? null,
-        notify_on_completion: notifyOnCompletion,
-      },
-      option.voice.protocol,
-    );
+    await voice.start(chosen, option.voice.protocol);
+  }
+  /** Hands-free or Hold to talk, from the call itself; saved for next time. */
+  function changeMode(mode: VoicePreferences["input_mode"]) {
+    if (isGrok || mode === inputMode) return;
+    if (active && !voice.setInputMode(mode)) return;
+    setModeChoice(mode);
+    const chosen = preferences(mode);
+    if (chosen)
+      void environment.api
+        .savePreferences(chosen)
+        .then(() => settings.refetch())
+        .catch(() => {});
   }
   async function openBilling() {
     setBillingOpenError(false);
@@ -227,40 +307,41 @@ function VoiceConversation({
       setBillingOpenError(true);
     }
   }
-  const pickerRows =
-    picker === "voice"
-      ? (option?.voice.voices ?? []).map((row) => ({
-          id: row.id,
-          title: row.label,
-          detail: "",
-          selected: row.id === voiceId,
-          disabled: false,
-          choose: () => setPreferredVoice(row.id),
-        }))
-      : [
-          {
-            id: "push_to_talk",
-            title: "Hold to talk",
-            detail:
-              "Your microphone sends audio only while you hold the button.",
-            selected: inputMode === "push_to_talk",
-            disabled: false,
-            choose: () => setMode("push_to_talk"),
-          },
-          ...(!isGrok
-            ? [
-                {
-                  id: "automatic",
-                  title: "Automatic",
-                  detail:
-                    "Keep talking naturally. Your microphone stays on during the call.",
-                  selected: inputMode === "automatic",
-                  disabled: false,
-                  choose: () => setMode("automatic" as const),
-                },
-              ]
-            : []),
-        ];
+  function taskRow(task: Task) {
+    return (
+      <View key={task.id} style={styles.taskRow}>
+        <View style={styles.fill}>
+          <Label numberOfLines={1}>{task.title || "Agent task"}</Label>
+          <Label muted style={styles.taskState} numberOfLines={2}>
+            {TASK_STATE[task.state]}
+            {task.progress?.detail ? ` · ${task.progress.detail}` : ""}
+          </Label>
+        </View>
+        {task.state === "awaiting_confirmation" ? (
+          <ActionButton
+            label="Review in chat"
+            variant="secondary"
+            compact
+            onPress={() => review(task.pending_acknowledgement_ids[0])}
+          />
+        ) : null}
+        {task.state === "queued" || task.state === "claimed" ? (
+          <ActionButton
+            label="Stop task"
+            variant="secondary"
+            compact
+            onPress={() => void voice.stopTask(task.id)}
+          />
+        ) : null}
+      </View>
+    );
+  }
+
+  const quiet = { color: colors.textTertiary };
+  const surface = colors.segmentTrack;
+  const main = colors.textPrimary;
+  const onMain = colors.bg;
+  const tray = tasksOpen || moreOpen;
   return (
     <>
       {voice.media ? (
@@ -270,576 +351,566 @@ function VoiceConversation({
           origin={environment.origin}
         />
       ) : null}
-      {minimized ? (
-        <View
-          style={[
-            styles.minimized,
+      <Animated.View
+        accessibilityLabel="Voice mode"
+        style={{
+          transform: [
             {
-              backgroundColor: colors.primaryTone.bg,
-              borderColor: colors.primaryTone.border,
+              translateY: rise.interpolate({
+                inputRange: [0, 1],
+                outputRange: [0, 240],
+              }),
             },
-          ]}
-        >
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Restore voice call"
-            onPress={() => setMinimized(false)}
-            style={styles.restore}
-          >
-            <Mic size={20} color={colors.primaryOnTint} />
-            <Label>
-              {status} · {agentName}
-              {active ? ` · ${duration}` : ""}
-            </Label>
-            <ChevronDown size={18} color={colors.textSecondary} />
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="End voice and close"
-            onPress={close}
-            style={styles.iconButton}
-          >
-            <PhoneOff size={20} color={colors.danger} />
-          </Pressable>
-        </View>
-      ) : null}
-      <Modal
-        {...sheet.modalProps}
-        visible={!minimized && sheet.modalProps.visible}
-        transparent
-        animationType={reducedMotion ? "none" : "slide"}
-        presentationStyle="overFullScreen"
-        onRequestClose={() => (picker ? setPicker(undefined) : close())}
+          ],
+          opacity: rise.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
+        }}
       >
-        <WorkspaceSheetSurface nativePresentation onClose={close}>
-          <View style={[styles.header, { borderBottomColor: colors.border }]}>
-            {picker ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Back to voice call"
-                onPress={() => setPicker(undefined)}
-                style={styles.iconButton}
-              >
-                <ChevronLeft size={22} color={colors.textSecondary} />
-              </Pressable>
-            ) : null}
-            <Text accessibilityRole="header" style={[styles.heading, theme]}>
-              {picker
-                ? picker === "voice"
-                  ? "Voice"
-                  : "Microphone mode"
-                : "Voice conversation"}
-            </Text>
-            {!picker && active ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel="Minimize voice call"
-                onPress={minimize}
-                style={styles.iconButton}
-              >
-                <Minus size={22} color={colors.textSecondary} />
-              </Pressable>
-            ) : null}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={
-                active ? "End voice and close" : "Close voice"
-              }
-              onPress={close}
-              style={styles.iconButton}
-            >
-              <X size={22} color={colors.textSecondary} />
-            </Pressable>
-          </View>
-          <ScrollView
-            style={styles.fill}
-            contentContainerStyle={styles.body}
-            keyboardShouldPersistTaps="handled"
-          >
-            {picker ? (
-              <>
-                {pickerRows.map((row) => (
-                  <Pressable
-                    key={row.id}
-                    accessibilityRole="radio"
-                    accessibilityState={{
-                      checked: !!row.selected,
-                      disabled: row.disabled,
-                    }}
-                    disabled={row.disabled}
-                    accessibilityLabel={
-                      row.title + (row.detail ? `. ${row.detail}` : "")
-                    }
-                    onPress={() => {
-                      row.choose();
-                      setPicker(undefined);
-                    }}
-                    style={[
-                      styles.choice,
-                      {
-                        backgroundColor: row.selected
-                          ? colors.primaryTone.bg
-                          : colors.card,
-                        borderColor: row.selected
-                          ? colors.primaryTone.border
-                          : colors.border,
-                      },
-                    ]}
-                  >
-                    <Label style={styles.choiceTitle}>{row.title}</Label>
-                    {row.detail ? <Label muted>{row.detail}</Label> : null}
-                  </Pressable>
-                ))}
-              </>
-            ) : (
-              <>
-                <View style={styles.hero}>
-                  <View
-                    style={[
-                      styles.orb,
-                      {
-                        backgroundColor: voice.holding
-                          ? colors.primary
-                          : colors.primaryTone.bg,
-                      },
-                    ]}
-                  >
-                    {voice.starting ? (
-                      <ActivityIndicator size="large" color={colors.primary} />
-                    ) : muted ? (
-                      <MicOff size={34} color={colors.primaryOnTint} />
-                    ) : (
-                      <Mic
-                        size={34}
-                        color={
-                          voice.holding
-                            ? colors.onPrimary
-                            : colors.primaryOnTint
-                        }
-                      />
-                    )}
-                  </View>
-                  <Text style={[styles.agentTitle, theme]}>
-                    Talk with {agentName}
+        {/* The aura around the composer says it is in voice mode and moves
+            with NyxBot's voice and yours. */}
+        <VoiceComposerAura
+          phase={phase}
+          input={levels.input}
+          output={levels.output}
+          reducedMotion={reducedMotion}
+        >
+        <ChatComposerFrame style={styles.frame} bounce={false}>
+          <View style={styles.header}>
+            <View style={styles.headerText}>
+              <Text numberOfLines={1} style={[styles.title, { color: colors.textPrimary }]}>
+                {agentName}
+              </Text>
+              <Text numberOfLines={1} style={[styles.status, { color: voice.error && !voice.connected ? colors.danger : colors.textSecondary }]}>
+                <Text accessibilityLiveRegion="polite">{status}</Text>
+                {active && inputMode === "automatic" ? (
+                  <Text accessibilityLabel={`Call time ${duration}`} style={[styles.elapsed, quiet]}>
+                    {`  ${duration}`}
                   </Text>
-                  <Label muted>Uses this chat’s context</Label>
-                  <Text
-                    accessibilityLiveRegion="polite"
-                    style={[
-                      styles.status,
-                      {
-                        color: voice.connected
-                          ? colors.success
-                          : voice.error
-                            ? colors.danger
-                            : colors.textSecondary,
-                      },
-                    ]}
-                  >
-                    {status}
-                    {active ? ` · ${duration}` : ""}
+                ) : active && talking ? (
+                  <Text accessibilityLabel={`Talking for ${talking}`} style={[styles.elapsed, quiet]}>
+                    {`  ${talking}`}
                   </Text>
-                </View>
-                {voice.recovery ? (
-                  <Card>
-                    <Notice message={voice.recovery.message} tone="error" />
-                    <ActionButton
-                      label="Review billing on Web"
-                      variant="secondary"
-                      onPress={openBilling}
-                    />
-                    <ActionButton
-                      label="Continue with text"
-                      variant="secondary"
-                      onPress={close}
-                    />
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={
-                        showErrorDetails
-                          ? "Hide error details"
-                          : "Show error details"
-                      }
-                      accessibilityState={{ expanded: showErrorDetails }}
-                      onPress={() => setShowErrorDetails((value) => !value)}
-                      style={styles.textButton}
-                    >
-                      <Label muted>
-                        {showErrorDetails
-                          ? "Hide error details"
-                          : "Show error details"}
-                      </Label>
-                    </Pressable>
-                    {showErrorDetails ? (
-                      <Label muted>{voice.error}</Label>
-                    ) : null}
-                  </Card>
-                ) : voice.error ? (
-                  <Notice message={voice.error} tone="error" />
                 ) : null}
-                {billingOpenError ? (
-                  <Notice
-                    message="Billing could not open. Visit Billing & Usage on the NyxID website to review your available credits and benefits."
-                    tone="error"
+              </Text>
+            </View>
+            {tasks.length ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={tasksOpen ? "Hide agent tasks" : "Show agent tasks"}
+                accessibilityState={{ expanded: tasksOpen }}
+                onPress={() => {
+                  setMoreOpen(false);
+                  setTasksOpen((value) => !value);
+                }}
+                style={[
+                  styles.chip,
+                  { backgroundColor: needsOk ? colors.warningTone.bg : surface },
+                ]}
+              >
+                {running ? (
+                  <ActivityIndicator size="small" color={colors.textSecondary} />
+                ) : null}
+                <Text style={[styles.chipText, { color: needsOk ? colors.warningTone.text : colors.textPrimary }]}>
+                  {needsOk
+                    ? "Needs your OK"
+                    : `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`}
+                </Text>
+              </Pressable>
+            ) : null}
+            {active ? (
+              <>
+                <IconButton
+                  label={voice.speakerMuted ? "Enable speaker" : "Mute speaker"}
+                  selected={voice.speakerMuted}
+                  disabled={voice.starting}
+                  onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
+                >
+                  {voice.speakerMuted ? (
+                    <VolumeX size={18} color={colors.textPrimary} />
+                  ) : (
+                    <Volume2 size={18} color={colors.textPrimary} />
+                  )}
+                </IconButton>
+                <IconButton
+                  label={moreOpen ? "Hide call options" : "Call options"}
+                  selected={moreOpen}
+                  onPress={() => {
+                    setTasksOpen(false);
+                    setMoreOpen((value) => !value);
+                  }}
+                >
+                  <Ellipsis size={18} color={colors.textPrimary} />
+                </IconButton>
+              </>
+            ) : null}
+          </View>
+          {/* Task list and call options open inside the composer, never over the chat. */}
+          <View style={styles.body}>
+          {tray ? (
+            <ScrollView
+              style={[styles.tray, { backgroundColor: surface }]}
+              contentContainerStyle={styles.trayContent}
+            >
+              {tasksOpen ? (
+                <>
+                  <Label style={styles.trayTitle}>{`Agent tasks · ${tasks.length}`}</Label>
+                  {tasks.slice(-5).map(taskRow)}
+                  <Text style={[styles.footnote, quiet]}>
+                    Ending the call leaves accepted tasks running. Stop a task
+                    here to cancel it.
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text style={[styles.footnote, { color: colors.textSecondary }]}>
+                    {inputMode === "automatic"
+                      ? "Your microphone is on while unmuted."
+                      : "Audio is sent only while you hold the microphone."}{" "}
+                    Use headphones if you hear echo.
+                    {option && (option.pricing || option.key_source === "own")
+                      ? ` ${voiceTariff(option)}`
+                      : ""}
+                  </Text>
+                  <ActionButton
+                    label="No sound? Resume audio"
+                    variant="secondary"
+                    compact
+                    disabled={voice.starting}
+                    onPress={() => {
+                      setMoreOpen(false);
+                      void voice.resumeAudio();
+                    }}
+                  />
+                </>
+              )}
+            </ScrollView>
+          ) : (
+          <View style={styles.transcriptFrame}>
+            <ScrollView
+              ref={transcript}
+              style={styles.fill}
+              contentContainerStyle={[
+                styles.transcriptContent,
+                !active && !captions.length && styles.idleContent,
+              ]}
+              keyboardShouldPersistTaps="handled"
+              scrollEventThrottle={32}
+              onLayout={(event) =>
+                transcriptEdges.layout(event.nativeEvent.layout.height)
+              }
+              onScroll={(event) =>
+                transcriptEdges.scroll(event.nativeEvent.contentOffset.y)
+              }
+              // The newest words stay in view; scroll up for the rest.
+              onContentSizeChange={(_width, height) => {
+                transcriptEdges.content(height);
+                transcript.current?.scrollToEnd?.({ animated: !reducedMotion });
+              }}
+            >
+            {voice.recovery ? (
+              <Card>
+                <Notice message={voice.recovery.message} tone="error" />
+                <ActionButton
+                  label="Review billing on Web"
+                  variant="secondary"
+                  onPress={openBilling}
+                />
+                <ActionButton
+                  label="Continue with text"
+                  variant="secondary"
+                  onPress={close}
+                />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    showErrorDetails ? "Hide error details" : "Show error details"
+                  }
+                  accessibilityState={{ expanded: showErrorDetails }}
+                  onPress={() => setShowErrorDetails((value) => !value)}
+                  style={styles.textButton}
+                >
+                  <Label muted>
+                    {showErrorDetails
+                      ? "Hide error details"
+                      : "Show error details"}
+                  </Label>
+                </Pressable>
+                {showErrorDetails ? <Label muted>{voice.error}</Label> : null}
+              </Card>
+            ) : voice.error ? (
+              <Notice message={voice.error} tone="error" />
+            ) : null}
+            {billingOpenError ? (
+              <Notice
+                message="Billing could not open. Visit Billing & Usage on the NyxID website to review your available credits and benefits."
+                tone="error"
+              />
+            ) : null}
+            {!isConnected ? (
+              <Notice message="You’re offline. Reconnect to start a voice call." />
+            ) : null}
+            {voice.conflict ? (
+              <Card>
+                <Label>
+                  A voice call is already open. End it before starting another
+                  call here.
+                </Label>
+                <ActionButton
+                  label="End existing call"
+                  variant="danger"
+                  loading={voice.endingConflict}
+                  onPress={() => void voice.endConflict()}
+                />
+              </Card>
+            ) : null}
+            {session?.idle_warning ? (
+              <Notice
+                message={
+                  inputMode === "automatic"
+                    ? "The call will end soon because you haven’t spoken. Say something to continue."
+                    : "The call will end soon because you haven’t spoken. Hold to talk to continue."
+                }
+              />
+            ) : null}
+            {!active ? (
+              <>
+                {options.isPending || settings.isPending ? (
+                  <ActivityIndicator
+                    accessibilityLabel="Loading voice options"
+                    color={colors.primary}
                   />
                 ) : null}
-                {!isConnected ? (
-                  <Notice message="You’re offline. Reconnect to start a voice call." />
-                ) : null}
-                {voice.conflict ? (
-                  <Card>
-                    <Label>
-                      A voice call is already open. End it before starting
-                      another call here.
-                    </Label>
-                    <ActionButton
-                      label="End existing call"
-                      variant="danger"
-                      loading={voice.endingConflict}
-                      onPress={() => void voice.endConflict()}
-                    />
-                  </Card>
-                ) : null}
-                {session?.idle_warning ? (
-                  <Notice message="The call will end soon because you haven’t spoken. Hold to talk to continue." />
-                ) : null}
-                {!active ? (
+                {options.error || settings.error ? (
                   <>
-                    {options.isPending || settings.isPending ? (
-                      <ActivityIndicator
-                        accessibilityLabel="Loading voice options"
-                        color={colors.primary}
-                      />
-                    ) : null}
-                    {options.error || settings.error ? (
-                      <>
-                        <Notice
-                          message={
-                            options.error instanceof Error
-                              ? options.error.message
-                              : settings.error instanceof Error
-                                ? settings.error.message
-                                : "Voice options could not load."
-                          }
-                          tone="error"
-                        />
-                        <ActionButton
-                          label="Retry voice options"
-                          variant="secondary"
-                          onPress={() => {
-                            void options.refetch();
-                            void settings.refetch();
-                          }}
-                        />
-                      </>
-                    ) : null}
-                    {options.isSuccess && !choices.length ? (
-                      <Notice message="No voice sources are available for this chat. Voice needs an eligible connected provider or platform connection." />
-                    ) : null}
-                    <Card>
-                      <SettingRow
-                        label="Voice"
-                        value={voiceLabel ?? "Choose a voice"}
-                        onPress={() => setPicker("voice")}
-                        disabled={!option}
-                      />
-                      <SettingRow
-                        label="Microphone"
-                        value={
-                          inputMode === "automatic"
-                            ? "Automatic"
-                            : "Hold to talk"
-                        }
-                        onPress={() => setPicker("mode")}
-                        disabled={!option}
-                      />
-                      <View style={styles.switchRow}>
-                        <View style={styles.fill}>
-                          <Label>Notify when tasks finish</Label>
-                          <Label muted>
-                            Work can continue after the call ends.
-                          </Label>
-                        </View>
-                        <Switch
-                          accessibilityLabel="Notify when voice tasks finish"
-                          value={notifyOnCompletion}
-                          onValueChange={setNotify}
-                          trackColor={{ true: colors.primary }}
-                        />
-                      </View>
-                    </Card>
-                    {option ? (
-                      <>
-                        {!option.available ? (
-                          <Notice
-                            message={
-                              option.unavailable_reason ??
-                              "Voice is unavailable. Reconnect your provider and try again."
-                            }
-                          />
-                        ) : null}
-                        <Label muted>
-                          {option.key_source === "platform"
-                            ? "Platform connection"
-                            : "Your provider connection"}{" "}
-                          ·{" "}
-                          {option.billing_owner === "acting_person"
-                            ? "Billed to your account"
-                            : `Billed to ${option.billing_owner}`}
-                        </Label>
-                        <Label muted>{voiceTariff(option)}</Label>
-                        {option.pricing ? (
-                          <Label muted>
-                            Starting a call reserves the first 30 seconds of
-                            usage plus any start fee. Applicable benefits are
-                            applied first.
-                          </Label>
-                        ) : null}
-                        <Label muted>
-                          Silence and mute still count toward call time. Agent
-                          tasks are billed separately.
-                        </Label>
-                      </>
-                    ) : null}
-                    <Label muted>
-                      Microphone access is requested when you start. NyxID saves
-                      the text conversation, not an audio recording.
-                    </Label>
-                  </>
-                ) : (
-                  <>
-                    {voice.connected && inputMode === "push_to_talk" ? (
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel="Hold to talk"
-                        accessibilityState={{
-                          disabled: !!microphoneBlocked,
-                          selected: voice.holding,
-                        }}
-                        disabled={!!microphoneBlocked}
-                        onPressIn={() => voice.hold(true)}
-                        onPressOut={() => voice.hold(false)}
-                        onAccessibilityAction={({ nativeEvent }) => {
-                          if (nativeEvent.actionName === "activate")
-                            voice.hold(!voice.holding);
-                        }}
-                        accessibilityActions={[
-                          {
-                            name: "activate",
-                            label: voice.holding
-                              ? "Stop talking"
-                              : "Start talking",
-                          },
-                        ]}
-                        style={[
-                          styles.holdButton,
-                          {
-                            backgroundColor: voice.holding
-                              ? colors.primary
-                              : colors.primaryTone.bg,
-                            borderColor: colors.primaryTone.border,
-                            opacity: microphoneBlocked ? 0.4 : 1,
-                          },
-                        ]}
-                      >
-                        <Mic
-                          size={22}
-                          color={
-                            voice.holding
-                              ? colors.onPrimary
-                              : colors.primaryOnTint
-                          }
-                        />
-                        <Text
-                          style={[
-                            styles.holdText,
-                            {
-                              color: voice.holding
-                                ? colors.onPrimary
-                                : colors.primaryOnTint,
-                            },
-                          ]}
-                        >
-                          {voice.holding ? "Release to send" : "Hold to talk"}
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                    <View style={styles.controls}>
-                      <CallControl
-                        label={muted ? "Unmute microphone" : "Mute microphone"}
-                        disabled={voice.starting}
-                        onPress={() => void voice.mute(!muted)}
-                      >
-                        {muted ? (
-                          <MicOff size={21} color={colors.textPrimary} />
-                        ) : (
-                          <Mic size={21} color={colors.textPrimary} />
-                        )}
-                      </CallControl>
-                      <CallControl
-                        label={
-                          voice.speakerMuted ? "Enable speaker" : "Mute speaker"
-                        }
-                        disabled={voice.starting}
-                        onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
-                      >
-                        {voice.speakerMuted ? (
-                          <VolumeX size={21} color={colors.textPrimary} />
-                        ) : (
-                          <Volume2 size={21} color={colors.textPrimary} />
-                        )}
-                      </CallControl>
-                    </View>
+                    <Notice
+                      message={
+                        options.error instanceof Error
+                          ? options.error.message
+                          : settings.error instanceof Error
+                            ? settings.error.message
+                            : "Voice options could not load."
+                      }
+                      tone="error"
+                    />
                     <ActionButton
-                      label="Resume audio"
+                      label="Retry voice options"
                       variant="secondary"
-                      disabled={voice.starting}
-                      onPress={() => void voice.resumeAudio()}
+                      onPress={() => {
+                        void options.refetch();
+                        void settings.refetch();
+                      }}
                     />
-                    <ActionButton
-                      label="End voice session"
-                      variant="danger"
-                      onPress={() => void voice.end()}
-                    />
-                    <Label muted>
-                      {inputMode === "automatic"
-                        ? "Your microphone is on while unmuted. Use headphones for the clearest audio."
-                        : "Audio is sent only while holding the button. Use headphones if you hear echo."}
-                    </Label>
                   </>
-                )}
-                {captions.length ? (
-                  <Card>
-                    <View style={styles.sectionRow}>
-                      <Label style={styles.choiceTitle}>Transcript</Label>
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel={
-                          expandedCaptions
-                            ? "Show latest captions"
-                            : "Show full voice transcript"
-                        }
-                        onPress={() => setExpandedCaptions(!expandedCaptions)}
-                        style={styles.textButton}
-                      >
-                        <Label style={{ color: colors.primaryOnTint }}>
-                          {expandedCaptions ? "Show latest" : "Show all"}
-                        </Label>
-                      </Pressable>
-                    </View>
-                    {shownCaptions.map((caption) => (
-                      <View key={caption.id} style={styles.caption}>
-                        <Label muted>
-                          {caption.speaker === "user" ? "You" : agentName}
-                          {caption.complete ? "" : " · Speaking"}
-                        </Label>
-                        <Text selectable style={[styles.captionText, theme]}>
-                          {caption.text}
-                        </Text>
-                      </View>
-                    ))}
-                  </Card>
                 ) : null}
-                {tasks.length ? (
-                  <Card>
-                    <Label style={styles.choiceTitle}>Agent tasks</Label>
-                    {tasks.slice(-5).map((task) => (
-                      <View
-                        key={task.id}
-                        style={[styles.task, { borderColor: colors.border }]}
-                      >
-                        <Label>{task.title || "Agent task"}</Label>
-                        <Label muted>{task.state.replaceAll("_", " ")}</Label>
-                        {task.state === "awaiting_confirmation" ? (
-                          <ActionButton
-                            label="Review in chat"
-                            variant="secondary"
-                            onPress={() =>
-                              review(task.pending_acknowledgement_ids[0])
-                            }
-                          />
-                        ) : null}
-                        {task.state === "queued" || task.state === "claimed" ? (
-                          <ActionButton
-                            label="Stop task"
-                            variant="secondary"
-                            onPress={() => void voice.stopTask(task.id)}
-                          />
-                        ) : null}
-                      </View>
-                    ))}
-                    <ActionButton
-                      label="View in chat"
-                      variant="secondary"
-                      onPress={() => review()}
-                    />
-                    <Label muted>
-                      Ending the call leaves accepted tasks running. Stop a task
-                      here to cancel it.
-                    </Label>
-                  </Card>
+                {options.isSuccess && !choices.length ? (
+                  <Notice message="No voice sources are available for this chat. Voice needs an eligible connected provider or platform connection." />
+                ) : null}
+                {option && !option.available ? (
+                  <Notice
+                    message={
+                      option.unavailable_reason ??
+                      "Voice is unavailable. Reconnect your provider and try again."
+                    }
+                  />
                 ) : null}
               </>
-            )}
-          </ScrollView>
-          {!picker && !active ? (
+            ) : null}
+            {!active && !captions.length ? (
+              <View style={styles.idle}>
+                <Text style={[styles.idleTitle, { color: colors.textPrimary }]}>
+                  Hey, what can I do for you today?
+                </Text>
+                {option ? (
+                  <Text style={[styles.footnote, styles.center, quiet]}>
+                    {voiceLabel ? `${voiceLabel} voice · ` : ""}
+                    {isGrok ? "Hold to talk · " : ""}
+                    Change in Settings › Voice{"\n"}
+                    {voiceTariff(option)}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+            {captions.map((caption, index) => {
+                const user = caption.speaker === "user";
+                // Like chat: your words in a bubble, the agent's as plain text.
+                return user ? (
+                  <View key={caption.id} style={[styles.userBubble, { backgroundColor: surface }]}>
+                    <Text selectable style={[styles.bubbleText, { color: caption.complete ? colors.textPrimary : colors.textSecondary }]}>
+                      {caption.text}
+                    </Text>
+                  </View>
+                ) : (
+                  <Text
+                    key={caption.id}
+                    selectable
+                    style={[
+                      index === captions.length - 1 ? styles.agentText : styles.agentEarlier,
+                      { color: caption.complete ? colors.textPrimary : colors.textSecondary },
+                    ]}
+                  >
+                    {caption.text}
+                  </Text>
+                );
+              })}
+              {tasks
+                .filter((task) => task.state === "queued" || task.state === "claimed")
+                .map((task) => (
+                  <View key={`work:${task.id}`} style={styles.workLine}>
+                    <ActivityIndicator size="small" color={colors.textTertiary} />
+                    <Text numberOfLines={2} style={[styles.workText, quiet]}>
+                      {TASK_STATE[task.state]}
+                      {" · "}
+                      {task.progress?.detail || task.title || "Agent task"}
+                    </Text>
+                  </View>
+                ))}
+            </ScrollView>
+            <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.composerBg} />
+          </View>
+          )}
+          </View>
+          {/* Grok runs on explicit holds only, so it has no mode to choose. */}
+          {option && !isGrok ? (
             <View
-              style={[styles.startActions, { borderTopColor: colors.border }]}
+              accessibilityRole="radiogroup"
+              accessibilityLabel="Listening mode"
+              style={[styles.modes, { backgroundColor: surface }]}
             >
-              <ActionButton
-                label={voice.error ? "Try again" : "Start voice"}
-                disabled={!canStart}
-                onPress={() => void start()}
-              />
+              {(["automatic", "push_to_talk"] as const).map((mode) => {
+                const selected = inputMode === mode;
+                return (
+                  <Pressable
+                    key={mode}
+                    accessibilityRole="radio"
+                    accessibilityLabel={
+                      mode === "automatic" ? "Hands-free mode" : "Hold to talk mode"
+                    }
+                    accessibilityHint={
+                      mode === "automatic"
+                        ? "NyxBot listens and answers when you pause"
+                        : "NyxBot listens while you hold the microphone"
+                    }
+                    accessibilityState={{
+                      selected,
+                      checked: selected,
+                      disabled: voice.starting,
+                    }}
+                    disabled={voice.starting}
+                    onPress={() => changeMode(mode)}
+                    style={[
+                      styles.mode,
+                      selected && { backgroundColor: colors.segmentSelected },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.modeLabel,
+                        { color: selected ? colors.textPrimary : colors.textSecondary },
+                      ]}
+                    >
+                      {mode === "automatic" ? "Hands-free" : "Hold to talk"}
+                    </Text>
+                  </Pressable>
+                );
+              })}
             </View>
-          ) : null}
-        </WorkspaceSheetSurface>
-      </Modal>
+          ) : (
+            <View style={styles.modesPlaceholder}>
+              {isGrok ? (
+                <Text style={[styles.modeLabel, { color: colors.textSecondary }]}>
+                  Hold to talk
+                </Text>
+              ) : null}
+            </View>
+          )}
+          <View style={styles.controls}>
+            {active && inputMode === "push_to_talk" ? (
+              <IconButton
+                large
+                label={muted ? "Unmute microphone" : "Mute microphone"}
+                selected={muted}
+                disabled={voice.starting}
+                onPress={() => void voice.mute(!muted)}
+              >
+                {/* Always the mute symbol, so it never reads as a second mic. */}
+                <MicOff size={20} color={colors.textPrimary} />
+              </IconButton>
+            ) : (
+              <View style={styles.sideSpacer} />
+            )}
+            {!active ? (
+              <View style={styles.holdColumn}>
+                <MainButton
+                  label={voice.error ? "Try again" : "Start voice"}
+                  fill={main}
+                  disabled={!canStart}
+                  onPress={() => void start()}
+                >
+                  <Mic size={26} color={onMain} />
+                </MainButton>
+                <Text style={[styles.holdHint, { color: colors.textSecondary }]}>
+                  {voice.error ? "Try again" : "Tap to start"}
+                </Text>
+              </View>
+            ) : inputMode === "push_to_talk" ? (
+              <View style={styles.holdColumn}>
+                <View style={styles.holdStage}>
+                  <Animated.View
+                    pointerEvents="none"
+                    style={[
+                      styles.halo,
+                      {
+                        backgroundColor: main,
+                        opacity: hold.interpolate({ inputRange: [0, 1], outputRange: [0, 0.22] }),
+                        transform: [{ scale: hold.interpolate({ inputRange: [0, 1], outputRange: [1, 1.5] }) }],
+                      },
+                    ]}
+                  />
+                  <Animated.View
+                    style={{
+                      transform: [{ scale: hold.interpolate({ inputRange: [0, 1], outputRange: [1, 1.1] }) }],
+                    }}
+                  >
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Hold to talk"
+                      accessibilityHint={voice.holding ? "Release to send" : undefined}
+                      accessibilityState={{
+                        disabled: microphoneBlocked || !voice.connected,
+                        selected: voice.holding,
+                      }}
+                      disabled={microphoneBlocked || !voice.connected}
+                      onPressIn={() => voice.hold(true)}
+                      onPressOut={() => voice.hold(false)}
+                      onAccessibilityAction={({ nativeEvent }) => {
+                        if (nativeEvent.actionName === "activate")
+                          voice.hold(!voice.holding);
+                      }}
+                      accessibilityActions={[
+                        {
+                          name: "activate",
+                          label: voice.holding ? "Stop talking" : "Start talking",
+                        },
+                      ]}
+                      style={[
+                        styles.main,
+                        {
+                          backgroundColor: main,
+                          opacity: microphoneBlocked || !voice.connected ? 0.4 : 1,
+                        },
+                      ]}
+                    >
+                      <Mic size={26} color={onMain} />
+                    </Pressable>
+                  </Animated.View>
+                </View>
+                {/* The instruction sits under the microphone it describes. */}
+                <Text
+                  accessibilityElementsHidden
+                  importantForAccessibility="no"
+                  style={[styles.holdHint, { color: colors.textSecondary }]}
+                >
+                  {microphoneBlocked && voice.connected
+                    ? "Muted"
+                    : voice.holding
+                      ? "Release to send"
+                      : "Hold to talk"}
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.holdColumn}>
+                <MainButton
+                  label={muted ? "Unmute microphone" : "Mute microphone"}
+                  fill={muted ? colors.danger : main}
+                  disabled={voice.starting}
+                  onPress={() => void voice.mute(!muted)}
+                >
+                  {muted ? (
+                    <MicOff size={26} color={colors.onPrimary} />
+                  ) : (
+                    <Mic size={26} color={onMain} />
+                  )}
+                </MainButton>
+                {/* The same line as Hold to talk's instruction keeps one size. */}
+                <Text
+                  accessibilityElementsHidden
+                  importantForAccessibility="no"
+                  style={[styles.holdHint, { color: colors.textSecondary }]}
+                >
+                  {muted ? "Muted" : ""}
+                </Text>
+              </View>
+            )}
+            <IconButton
+              large
+              label={active ? "End voice and close" : "Close voice"}
+              onPress={close}
+            >
+              {active && inputMode === "automatic" ? (
+                <PhoneOff size={20} color={colors.danger} />
+              ) : (
+                <X size={20} color={active ? colors.danger : colors.textPrimary} />
+              )}
+            </IconButton>
+          </View>
+        </ChatComposerFrame>
+        </VoiceComposerAura>
+      </Animated.View>
     </>
   );
 }
 
-function SettingRow({
+/** A round control inside the voice composer; selected toggles fill. */
+function IconButton({
   label,
-  value,
-  disabled,
+  selected,
+  disabled = false,
+  large = false,
   onPress,
+  children,
 }: {
   label: string;
-  value: string;
+  selected?: boolean;
   disabled?: boolean;
+  large?: boolean;
   onPress: () => void;
+  children: ReactNode;
 }) {
   const { colors } = useTheme();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${label}: ${value}`}
-      accessibilityState={{ disabled }}
+      accessibilityLabel={label}
+      accessibilityState={{ disabled, selected: !!selected }}
       disabled={disabled}
+      hitSlop={large ? 4 : 6}
       onPress={onPress}
-      style={styles.settingRow}
+      style={({ pressed }) => [
+        large ? styles.iconLarge : styles.icon,
+        {
+          backgroundColor: selected ? colors.segmentSelected : colors.segmentTrack,
+          opacity: disabled ? 0.4 : pressed ? 0.7 : 1,
+        },
+      ]}
     >
-      <View style={styles.fill}>
-        <Label muted>{label}</Label>
-        <Label>{value}</Label>
-      </View>
-      <ChevronDown size={18} color={colors.textMuted} />
+      {children}
     </Pressable>
   );
 }
-function CallControl({
+
+/** The centre action: Start, then the microphone. */
+function MainButton({
   label,
+  fill,
   disabled,
   onPress,
   children,
 }: {
   label: string;
+  fill: string;
   disabled: boolean;
   onPress: () => void;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
-  const { colors } = useTheme();
   return (
     <Pressable
       accessibilityRole="button"
@@ -847,128 +918,89 @@ function CallControl({
       accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={onPress}
-      style={[
-        styles.control,
-        {
-          backgroundColor: colors.cardSoft,
-          borderColor: colors.border,
-          opacity: disabled ? 0.4 : 1,
-        },
+      style={({ pressed }) => [
+        styles.main,
+        { backgroundColor: fill, opacity: disabled ? 0.4 : pressed ? 0.8 : 1 },
       ]}
     >
       {children}
-      <Label>{label}</Label>
     </Pressable>
   );
 }
+
 const styles = StyleSheet.create({
   fill: { flex: 1 },
-  body: { padding: 20, gap: 16, paddingBottom: 44 },
-  startActions: {
-    paddingHorizontal: 20,
-    paddingTop: 12,
-    paddingBottom: 34,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
-  header: {
+  center: { textAlign: "center" },
+  frame: { gap: 10, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 10 },
+  header: { flexDirection: "row", alignItems: "center", gap: 10, minHeight: 36, paddingLeft: 4 },
+  body: { height: BODY_HEIGHT },
+  idle: { alignItems: "center", gap: 8 },
+  idleContent: { flexGrow: 1, justifyContent: "center" },
+  idleTitle: { fontFamily: fonts.displaySemi, fontSize: 18, lineHeight: 24, textAlign: "center" },
+  trayContent: { padding: 12, gap: 10 },
+  modesPlaceholder: { minHeight: 38, alignItems: "center", justifyContent: "center" },
+  headerText: { flex: 1, minWidth: 0 },
+  title: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 20 },
+  status: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
+  elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
+  chip: {
     flexDirection: "row",
     alignItems: "center",
+    gap: 6,
+    minHeight: 32,
+    borderRadius: 16,
+    paddingHorizontal: 10,
+  },
+  chipText: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 16 },
+  icon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  iconLarge: { width: 48, height: 48, borderRadius: 24, alignItems: "center", justifyContent: "center" },
+  tray: { flex: 1, borderRadius: 14 },
+  trayTitle: { fontFamily: fonts.bodySemi, fontSize: 14 },
+  taskRow: { flexDirection: "row", alignItems: "center", gap: 10 },
+  taskState: { fontSize: 12 },
+  transcriptFrame: { flex: 1, position: "relative" },
+  transcriptContent: { gap: 10, paddingHorizontal: 2, paddingBottom: 2 },
+  userBubble: {
+    alignSelf: "flex-end",
+    maxWidth: "85%",
+    borderRadius: 18,
+    borderBottomRightRadius: 6,
     paddingHorizontal: 12,
-    minHeight: 52,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  heading: {
-    flex: 1,
-    fontFamily: fonts.displaySemi,
-    fontSize: 19,
-    paddingLeft: 8,
-  },
-  iconButton: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  hero: { alignItems: "center", gap: 8, paddingVertical: 12 },
-  orb: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 8,
-  },
-  agentTitle: { fontFamily: fonts.display, fontSize: 24, textAlign: "center" },
-  status: { fontFamily: fonts.bodySemi, fontSize: 14, marginTop: 4 },
-  settingRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingVertical: 10,
-    minHeight: 56,
-  },
-  switchRow: {
-    flexDirection: "row",
-    gap: 12,
-    alignItems: "center",
     paddingVertical: 8,
   },
-  choice: {
-    gap: 6,
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 16,
-    minHeight: 56,
-  },
-  choiceTitle: { fontFamily: fonts.bodySemi, fontSize: 15 },
-  holdButton: {
-    minHeight: 72,
-    borderWidth: 1,
-    borderRadius: 12,
-    gap: 10,
-    flexDirection: "row",
+  bubbleText: { fontFamily: fonts.bodyRegular, fontSize: 15, lineHeight: 21 },
+  agentText: { fontFamily: fonts.bodyRegular, fontSize: 16, lineHeight: 23 },
+  agentEarlier: { fontFamily: fonts.bodyRegular, fontSize: 14, lineHeight: 20 },
+  workLine: { flexDirection: "row", alignItems: "center", gap: 8 },
+  workText: { flex: 1, fontFamily: fonts.body, fontSize: 12, lineHeight: 17 },
+  textButton: { minHeight: 32, justifyContent: "center", alignSelf: "center" },
+  footnote: { fontFamily: fonts.body, fontSize: 12, lineHeight: 17 },
+  modes: { flexDirection: "row", alignSelf: "center", borderRadius: 18, padding: 3 },
+  mode: {
+    minHeight: 32,
+    minWidth: 108,
+    paddingHorizontal: 12,
+    borderRadius: 15,
     alignItems: "center",
     justifyContent: "center",
   },
-  holdText: { fontFamily: fonts.bodySemi, fontSize: 17 },
-  controls: { flexDirection: "row", gap: 12 },
-  control: {
-    flex: 1,
-    minHeight: 80,
-    gap: 6,
-    padding: 10,
-    borderWidth: 1,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  minimized: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderRadius: 12,
-    marginBottom: 10,
-    paddingLeft: 12,
-  },
-  restore: {
-    flex: 1,
-    minHeight: 48,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  sectionRow: {
+  modeLabel: { fontFamily: fonts.bodySemi, fontSize: 13, lineHeight: 18 },
+  controls: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    paddingHorizontal: 8,
   },
-  textButton: { minHeight: 44, justifyContent: "center", paddingHorizontal: 8 },
-  caption: { gap: 4, paddingVertical: 8 },
-  captionText: { fontFamily: fonts.bodyRegular, fontSize: 15, lineHeight: 23 },
-  task: {
-    gap: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 12,
-    marginTop: 12,
+  sideSpacer: { width: 48, height: 48 },
+  main: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    alignItems: "center",
+    justifyContent: "center",
   },
+  holdColumn: { alignItems: "center", gap: 6 },
+  holdStage: { width: 64, height: 64, alignItems: "center", justifyContent: "center" },
+  halo: { position: "absolute", width: 64, height: 64, borderRadius: 32 },
+  holdHint: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 16, minHeight: 16 },
 });

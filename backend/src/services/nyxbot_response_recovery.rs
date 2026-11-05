@@ -154,12 +154,28 @@ pub async fn load(
     {
         return Ok(None);
     }
-    db.collection::<GatewayResponse>(RESPONSES)
+    let response = db
+        .collection::<GatewayResponse>(RESPONSES)
         .find_one(doc! {"response_id":id,"channel_id":&channel.id,
         "user_id":&channel.user_id,"binding_id":&channel.binding_id,
         "expires_at":{"$gt":bson::DateTime::now()}})
-        .await
-        .map_err(Into::into)
+        .await?;
+    if channel.org_specialist.is_some()
+        && let Some(response) = &response
+        && let Some(event) = db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&response.event_key,"channel_id":&channel.id})
+            .await?
+        && let Some(d) = event.delivery.as_ref()
+    {
+        let e = d
+            .origin
+            .org_execution
+            .as_ref()
+            .ok_or_else(super::org_channel_service::denied)?;
+        super::org_channel_service::validate(db, &d.origin, &e.actor_id, &e.agent_id).await?;
+    }
+    Ok(response)
 }
 pub async fn finish(
     db: &Database,
@@ -255,11 +271,12 @@ where
     };
     if let (Some(conversation), Some(turn)) = (&event.conversation_id, &event.turn_id) {
         use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES};
-        if let Some(message) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"user_id":&row.user_id,
+        if let Some(message) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"user_id":super::org_channel_service::event_actor(&event),
             "conversation_id":conversation,"turn_id":turn,"role":"assistant", "status":{"$in":["completed","failed","cancelled","interrupted"]}}).await? {
-            let start_refused = message.error_code.as_deref() == Some("assistant_start_unavailable");
-            let mut text = if start_refused { super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message } else { message.text };
-            let images=super::assistant_nyxagent::turn_tool_attachments(db,&row.user_id,conversation,turn).await?;
+            let guest_refused=event.delivery.as_ref().and_then(|d|d.origin.org_execution.as_ref()).is_some_and(|e|e.guest) && message.status!="completed";
+            let start_refused = message.error_code.as_deref() == Some("assistant_start_unavailable") || guest_refused;
+            let mut text = if guest_refused {super::org_channel_service::UNAVAILABLE.into()} else if start_refused { super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message } else { message.text };
+            let images=super::assistant_nyxagent::turn_tool_attachments(db,super::org_channel_service::event_actor(&event),conversation,turn).await?;
             if event.relay_message_id.is_none() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
                 text.push_str("\n\nImages are unavailable on this native gateway connection. View them in NyxID.");

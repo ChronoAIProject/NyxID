@@ -35,3 +35,30 @@ it("groups usage by service operation and labels base-priced requests", () => {
       .name,
   ).toBe("X · Base price");
 });
+
+it("identifies org-funded channel guest usage without exposing the sender", () => {
+  const base = billingUsageRowSchema.parse(
+    billingRow({ api_key_id: "member-key", api_key_name: "Member agent" }),
+  );
+  const guest = billingUsageRowSchema.parse({
+    ...base,
+    api_key_id: "guest-key",
+    org_channel_guest: {
+      channel_id: "12345678-binding",
+      sender_hash: "private-sender-hash",
+    },
+  });
+  const groups = groupRows(
+    [],
+    [base, guest, { ...guest, api_key_id: "setup-key" }],
+    "agent",
+  );
+  expect(groups.map((group) => group.name)).toContain("Member agent");
+  const visitors = groups.find(
+    (group) => group.name === "Channel guests · 12345678",
+  );
+  expect(visitors?.rows).toHaveLength(2);
+  expect(
+    groups.every((group) => !group.name.includes("private-sender-hash")),
+  ).toBe(true);
+});

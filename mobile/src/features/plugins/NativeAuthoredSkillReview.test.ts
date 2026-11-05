@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
+import * as designTokens from "../../theme/designTokens";
 
 type Element = { type: unknown; props: Record<string, any> };
 function find(
@@ -51,6 +52,7 @@ function setup(kind: "review" | "launcher" | "page" = "review") {
         addEventListener: () => ({ remove: () => {} }),
       },
       View: "View",
+      Text: "Text",
       ScrollView: "ScrollView",
       ActivityIndicator: "ActivityIndicator",
       StyleSheet: { create: (styles: unknown) => styles },
@@ -79,10 +81,23 @@ function setup(kind: "review" | "launcher" | "page" = "review") {
       }),
     },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
+      ["ActionButton", "Label", "Notice", "WorkspacePage"].map((name) => [
+        name,
+        name,
+      ]),
     ),
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
+    "../../hooks/usePullRefresh": {
+      usePullRefresh: (refetch: () => Promise<unknown>) => ({
+        refreshing: false,
+        onRefresh: () => void refetch(),
+      }),
+    },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
+    "lucide-react-native": { BookOpen: "BookOpen" },
     "../../app/WorkspaceHeader": {
       useWorkspaceBack: (options: unknown) => {
         guard = options;
@@ -110,7 +125,7 @@ function setup(kind: "review" | "launcher" | "page" = "review") {
     },
     "../../lib/api/pluginSkillsApi": { pluginSkillsApi: {} },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./authoredSkillReviewState": {
       AUTHORED_SKILL_ACTIONS: [{ action: "allow", label: "Allow publication" }],
@@ -143,6 +158,7 @@ function setup(kind: "review" | "launcher" | "page" = "review") {
     decision,
     pushed,
     history,
+    query,
     guard: () => {
       harness.flush();
       return guard;
@@ -171,7 +187,9 @@ test("owner review shows readable files and NyxBot guidance, with no inline edit
   );
   const guidance = find(
     env.harness.flush(),
-    (row) => row.props.children === "To change this skill, ask NyxBot.",
+    (row) =>
+      row.props.children === "To change this skill, ask NyxBot." ||
+      row.props.footer === "To change this skill, ask NyxBot.",
   );
   assert.ok(guidance);
   assert.deepEqual(env.pushed, []);
@@ -197,5 +215,19 @@ test("review page resolves its acknowledgement from authoritative history and ke
   env.history.acknowledgements = [];
   env.harness.render();
   assert.throws(() => env.content(), /Element not found/);
+  env.harness.unmount();
+});
+test("publication polling never shows a loader over a loaded draft", () => {
+  const env = setup();
+  Object.assign(env.query, { isFetching: true });
+  env.harness.render();
+  assert.throws(
+    () =>
+      find(
+        env.harness.flush(),
+        (row) => row.props.accessibilityLabel === "Loading complete skill draft",
+      ),
+    /Element not found/,
+  );
   env.harness.unmount();
 });

@@ -106,19 +106,30 @@ export function needsClientContinuation(
   );
 }
 
+/** The turn that resumes the assistant after an allowed card; matches the web. */
 export function continuationText(row: AssistantAcknowledgement): string {
+  return `${continuationInstruction(row)} Then tell the user in one or two plain sentences what you did and the result.`;
+}
+
+function continuationInstruction(row: AssistantAcknowledgement): string {
   switch (row.kind) {
     case "service":
       return `Approved: this chat may use ${row.service_name ?? row.service_slug ?? "the service"}. Continue.`;
     case "skills":
-      return `Skill proposal reviewed: ${row.summary} NyxBot will resolve the exact version and ask you to confirm attaching it on a separate card. Do not request the skill again.`;
+      // An unrouted skills card attaches nothing and wakes nobody.
+      return row.decider === "orchestrator"
+        ? `Skill proposal reviewed: ${row.summary} NyxBot will resolve the exact version and apply the governing mode to attach it (automatic in Full access, otherwise an owner card). Do not request the skill again.`
+        : `Skill proposal reviewed: ${row.summary} Nothing was attached and nobody else was asked; the user adds the skill from this agent's Skills editor. Do not request the skill again.`;
     case "operations":
       return `Approved: ${row.summary} Continue within the updated operation scope.`;
+    case "machine":
+    case "saved_login":
+      return `Approved: ${row.summary} Continue within the updated machine and saved-login grants.`;
     case "account":
       return "Approved: account management for this chat. Continue.";
     case "action":
-    case "machine":
-    case "saved_login":
+      if (row.authored_skill)
+        return `The skill publication was allowed: ${row.summary}. Check the attached skills and tell the user which skill/version was attached to which agent. Do not publish it again.`;
       return `Confirmed: ${row.summary} (acknowledgement_id ${row.id}). Retry it now.`;
   }
 }

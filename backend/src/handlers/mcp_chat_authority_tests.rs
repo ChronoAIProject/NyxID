@@ -1763,6 +1763,8 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
             crate::models::approval_grant::COLLECTION_NAME,
         )
         .insert_one(crate::models::approval_grant::ApprovalGrant {
+            execution_use: None,
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             service_id: service.clone(),
@@ -2660,6 +2662,212 @@ async fn assistant_operation_scopes_auto_requires_exact_one_use_owner_card() {
 }
 
 #[tokio::test]
+async fn assistant_operation_scopes_native_input_rules_save_and_enforce_without_partial_write() {
+    use crate::models::{
+        agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
+        service_endpoint::ServiceEndpoint,
+    };
+    use crate::services::{
+        agent_operation_scope_service as scopes, assistant_team_service as team,
+        proxy_authorization::CanonicalPath,
+    };
+    let f = fixture("operation_scope_input_rules").await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "receipt-service",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    let endpoint_id = uuid::Uuid::new_v4().to_string();
+    let endpoint: ServiceEndpoint = mongodb::bson::from_document(doc! {
+        "_id": &endpoint_id,
+        "service_id": &service,
+        "name": "record_create",
+        "description": null,
+        "method": "POST",
+        "path": "/items/{item_id}",
+        "parameters": null,
+        "request_body_schema": null,
+        "request_content_type": "application/json",
+        "request_body_required": true,
+        "response_description": null,
+        "risk": "write",
+        "supports_idempotency_key": false,
+        "is_active": true,
+        "created_at": mongodb::bson::DateTime::now(),
+        "updated_at": mongodb::bson::DateTime::now()
+    })
+    .unwrap();
+    f.state
+        .db
+        .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+        .insert_one(endpoint)
+        .await
+        .unwrap();
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    scopes::set(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        &service,
+        &OperationSelection {
+            expected_revision: 0,
+            all_operations: false,
+            endpoint_ids: vec![],
+            rules: vec![],
+            contract_digest: None,
+            inputs: Default::default(),
+        },
+        true,
+    )
+    .await
+    .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let input_rules = json!({
+        "path": {"item_id": {"type": "exact", "value": "receipt"}},
+        "body": {"type": "object", "properties": {
+            "fields": {"type": "object", "required": ["Type"], "properties": {
+                "Type": {"type": "one_of", "values": ["Expense", "Refund"]}
+            }}
+        }, "required": ["fields"]}
+    });
+    let mut inputs = serde_json::Map::new();
+    inputs.insert(endpoint_id.clone(), input_rules.clone());
+    let args = json!({
+        "subagent": "worker",
+        "service_id": service,
+        "selection": {
+            "expected_revision": 1,
+            "all_operations": false,
+            "endpoint_ids": [&endpoint_id],
+            "inputs": inputs
+        }
+    });
+    let card = result(
+        call(&f, &auth, "nyxid__set_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    assert_eq!(card["kind"], "action");
+    let acknowledgement_id = card["acknowledgement_id"].as_str().unwrap();
+    acks::decide(
+        &f.state.db,
+        &f.owner,
+        &f.nyxbot_thread,
+        acknowledgement_id,
+        true,
+    )
+    .await
+    .unwrap();
+    let mut retry = card["retry_arguments"].clone();
+    retry["acknowledgement_id"] = json!(acknowledgement_id);
+    result(
+        call(&f, &auth, "nyxid__set_agent_operations", retry).await,
+        false,
+    )
+    .await;
+
+    let agent = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let saved_scope = agent.operation_scopes.get(&service).unwrap();
+    assert_eq!(saved_scope.revision, 2);
+    assert_eq!(
+        saved_scope.operations[0].inputs,
+        Some(serde_json::from_value(input_rules.clone()).unwrap())
+    );
+
+    let path = CanonicalPath::from_mcp_literal("/items/receipt").unwrap();
+    let scopes_map = agent.operation_scopes.clone();
+    assert!(
+        scopes::check_inputs(
+            &scopes_map,
+            &service,
+            None,
+            Some(&endpoint_id),
+            "POST",
+            &path,
+            None,
+            br#"{"fields":{"Type":"Expense"}}"#,
+            Some("application/json"),
+        )
+        .is_ok()
+    );
+    assert!(
+        scopes::check_inputs(
+            &scopes_map,
+            &service,
+            None,
+            Some(&endpoint_id),
+            "POST",
+            &path,
+            None,
+            br#"{"fields":{"Type":"Other"}}"#,
+            Some("application/json"),
+        )
+        .is_err()
+    );
+
+    let mut invalid_inputs = serde_json::Map::new();
+    invalid_inputs.insert(
+        endpoint_id.clone(),
+        json!({"body": {
+            "type": "object",
+            "properties": {"fields": {"type": "string"}}
+        }}),
+    );
+    let invalid = json!({
+        "subagent": "worker",
+        "service_id": service,
+        "selection": {
+            "expected_revision": 2,
+            "endpoint_ids": [&endpoint_id],
+            "inputs": invalid_inputs
+        }
+    });
+    let refused = result(
+        call(&f, &auth, "nyxid__set_agent_operations", invalid).await,
+        true,
+    )
+    .await;
+    assert_eq!(refused["error"], "validation_error");
+    assert!(
+        refused["message"]
+            .as_str()
+            .unwrap()
+            .contains("selection.inputs")
+    );
+    let unchanged = team::live_specialist(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.operation_scopes[&service], *saved_scope);
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webhook_fences() {
     use crate::models::{
         agent_operation_scope::OperationSelection, assistant_agent::AgentGrants,
@@ -2883,6 +3091,8 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
                     crate::models::approval_grant::COLLECTION_NAME,
                 )
                 .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    execution_use: None,
+                    execution: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: catalog.id.clone(),

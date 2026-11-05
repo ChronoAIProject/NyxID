@@ -324,6 +324,10 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_task: None,
+        execution_permission: None,
         business_system_success: false,
         collaboration_thread: false,
         channel_adapter_origin: None,
@@ -401,7 +405,7 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
         a["instructions"]
             .as_str()
             .unwrap()
-            .starts_with("NyxID asked your orchestrator for this permission.")
+            .starts_with("This pending request is for your orchestrator to decide.")
     );
     let id = a["acknowledgement_id"].as_str().unwrap();
     for (user, conversation) in [

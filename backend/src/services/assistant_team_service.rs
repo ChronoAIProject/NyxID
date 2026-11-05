@@ -131,6 +131,7 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        execution_task: None,
         delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,
@@ -530,6 +531,23 @@ pub async fn agent_for_conversation(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<AssistantAgent> {
+    if let Some(access) = super::org_channel_service::conversation_access(db, row).await? {
+        let mut agent = access
+            .channel()
+            .ok_or_else(super::org_channel_service::denied)?
+            .agent()
+            .clone();
+        if row.guest_turn {
+            agent.memory.clear();
+            agent.machine_node_ids.clear();
+            agent.saved_login_ids.clear();
+            agent.machine_access = None;
+            agent.home_conversation_id = None;
+            agent.grants.account_read = false;
+        }
+        return Ok(agent);
+    }
+
     if row.collaboration.is_some() {
         return Box::pin(super::collaboration_group_service::runtime::agent_for_thread(db, row))
             .await;
@@ -577,12 +595,12 @@ pub async fn agent_for_conversation(
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
         doc! {"user_id": actor, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
-            "voice_parent_conversation_id": bson::Bson::Null, "$or": [
+            "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
         doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
-        "voice_parent_conversation_id": bson::Bson::Null}
+        "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null}
     }
 }
 
@@ -1730,6 +1748,21 @@ pub enum MachineGrantMode {
 }
 
 impl GrantChange {
+    fn changes_guest_policy(&self, current: &AssistantAgent) -> bool {
+        match self {
+            Self::GuestOperations { base, selections } => {
+                !selections.is_empty() || base.changes_guest_policy(current)
+            }
+            Self::Machine { base, .. } => base.changes_guest_policy(current),
+            Self::Replace { guests, .. } | Self::Guests(guests) => {
+                guests.iter().any(|(id, level)| {
+                    current.guest_access.get(id).copied().unwrap_or_default() != *level
+                })
+            }
+            Self::Add(_) | Self::Remove(_) => false,
+        }
+    }
+
     /// The grants and guest access levels after this change.
     pub fn apply(
         &self,
@@ -1838,6 +1871,49 @@ pub(crate) async fn sync_thread_authority(
     for row in rows {
         let authority = if row.guest_model_setup {
             KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if let Some(origin) = super::org_channel_service::origin(row)
+            && origin.org_execution.as_ref().is_some_and(|e| e.guest)
+        {
+            // Grant maintenance must not expand a guest key to the specialist's
+            // full service/node authority. A retired binding yields no grants.
+            let execution = origin.org_execution.as_ref().expect("guest execution");
+            let channel = db
+                .collection::<crate::models::nyxbot_channel::NyxbotChannel>("nyxbot_channels")
+                .find_one(doc! {"_id":&origin.nyxbot_channel_id,"status":"active",
+                "org_specialist.revision":&execution.revision,
+                "org_specialist.guests.revision":&execution.guest_revision,
+                "org_specialist.guests.enabled":true})
+                .session(&mut *session)
+                .await?;
+            let policy = channel
+                .as_ref()
+                .and_then(|c| c.org_specialist.as_ref())
+                .map(|b| &b.guests);
+            let grants = AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| {
+                        policy.is_some_and(|p| {
+                            p.service_ids.contains(id)
+                                && p.service_authority.get(*id).is_some_and(|digest| {
+                                    *digest
+                                        == super::org_channel_service::management::service_digest(
+                                            agent, id,
+                                        )
+                                })
+                        })
+                    })
+                    .cloned()
+                    .collect(),
+                ..Default::default()
+            };
+            KeyAuthority::OrgChannelGuest(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
         } else if row.shared_agent_thread {
             let grants = crate::models::assistant_agent::AgentGrants {
                 service_ids: agent
@@ -1887,6 +1963,9 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if change.changes_guest_policy(&agent) {
+        super::org_agent_service::authorize_guest_change(db, owner, &agent, session).await?;
+    }
     let previous_machines = agent.machine_node_ids.clone();
     let previous_logins = agent.saved_login_ids.clone();
     if let GrantChange::Machine {
@@ -2410,6 +2489,53 @@ pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -
     Ok(())
 }
 
+/// Write, replace or (with `None`) remove one NyxID-authored note on the
+/// owner's NyxBot, under a fixed ID. The owner sees and can delete it like any
+/// note. A memory that is full without it keeps its notes and skips the write.
+pub async fn set_nyxbot_fixed_note(
+    db: &Database,
+    owner: &str,
+    note_id: &str,
+    text: Option<&str>,
+) -> AppResult<()> {
+    let nyxbot = ensure_nyxbot(db, owner).await?;
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": &nyxbot.id, "user_id": owner};
+    // Remove any current copy. A replacement is pushed to the end: instructions
+    // keep the newest notes within their budget, so a fresh answer must not
+    // age out first.
+    let mut pull = filter.clone();
+    pull.insert("memory.id", note_id);
+    collection
+        .update_one(pull, doc! {"$pull": {"memory": {"id": note_id}}})
+        .await?;
+    let Some(text) = text else {
+        return Ok(());
+    };
+    let now = Utc::now();
+    let note = MemoryNote {
+        id: note_id.into(),
+        text: text.into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut push = filter;
+    push.insert("destroyed_at", bson::Bson::Null);
+    push.insert("memory.id", doc! {"$ne": note_id});
+    push.insert(
+        format!("memory.{}", MAX_MEMORY_NOTES - 1),
+        doc! {"$exists": false},
+    );
+    collection
+        .update_one(
+            push,
+            doc! {"$push": {"memory": bson::to_bson(&note)
+            .map_err(|_| AppError::Internal("Memory encoding failed".into()))?}},
+        )
+        .await?;
+    Ok(())
+}
+
 /// The agent's memory as an instructions note, newest kept within a budget.
 pub fn memory_note(agent: &AssistantAgent) -> String {
     if agent.memory.is_empty() {
@@ -2506,6 +2632,9 @@ impl AgentSummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestSummary {
+    pub status: String,
+    pub code: String,
+    pub review_path: String,
     pub request_id: String,
     pub agent: String,
     pub agent_id: Option<String>,
@@ -2523,7 +2652,21 @@ pub fn request_summary(
     row: &AssistantAcknowledgement,
     agent: Option<&AssistantAgent>,
 ) -> RequestSummary {
+    let presentation = super::assistant_acknowledgement_service::refusal(row);
     RequestSummary {
+        status: presentation["status"]
+            .as_str()
+            .unwrap_or("unavailable")
+            .into(),
+        code: presentation["code"]
+            .as_str()
+            .unwrap_or("acknowledgement_unavailable")
+            .into(),
+        review_path: super::assistant_links::AssistantPage::ReviewCard {
+            conversation: &row.conversation_id,
+            card: &row.id,
+        }
+        .path(),
         request_id: row.id.clone(),
         agent: agent.map(|agent| agent.name.clone()).unwrap_or_default(),
         agent_id: agent.map(|agent| agent.id.clone()),

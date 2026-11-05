@@ -9,6 +9,7 @@ fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     UsageMeterRow {
+        org_channel_guest: None,
         rollup_pending: true,
         id: id.clone(),
         transaction_id: id.clone(),
@@ -946,7 +947,7 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
         .unwrap();
     let resolver = BillingOwnerResolver::new(db.clone());
     let personal = resolver
-        .resolve_for_execution(&actor, &org, CredentialClass::NyxidManagedMaster)
+        .resolve_for_ordinary_execution(&actor, &org, CredentialClass::NyxidManagedMaster)
         .await
         .unwrap();
     assert_eq!(personal.owner_id, actor);
@@ -959,7 +960,7 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
         CredentialClass::NoAuth,
     ] {
         let resolved = resolver
-            .resolve_for_execution(&actor, &org, class)
+            .resolve_for_ordinary_execution(&actor, &org, class)
             .await
             .unwrap();
         assert_eq!(resolved.owner_id, org);
@@ -970,12 +971,14 @@ async fn execution_owner_preserves_org_acl_for_non_master_credentials() {
             }
         );
         assert!(matches!(
-            resolver.resolve_for_execution(&outsider, &org, class).await,
+            resolver
+                .resolve_for_ordinary_execution(&outsider, &org, class)
+                .await,
             Err(AppError::Forbidden(_))
         ));
         assert_eq!(
             resolver
-                .resolve_for_execution(&actor, &actor, class)
+                .resolve_for_ordinary_execution(&actor, &actor, class)
                 .await
                 .unwrap(),
             personal

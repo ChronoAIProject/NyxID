@@ -506,8 +506,104 @@ pub struct TurnFailureReasonResponse {
     nyxid_error_code: Option<u32>,
 }
 
+/// Presentation derived only from durable activity evidence, never model text.
+/// A completed call is not a promise about all of its downstream effects.
+#[derive(Serialize)]
+pub struct ActionOutcomeResponse {
+    summary: String,
+    complete: bool,
+    actions: Vec<ActionOutcomeItem>,
+    retry_warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ActionOutcomeItem {
+    activity_id: String,
+    label: String,
+    status: &'static str,
+    summary: String,
+}
+
+impl ActionOutcomeResponse {
+    fn from_message(row: &AssistantMessage) -> Option<Self> {
+        if row.role != "assistant" || row.status != "failed" {
+            return None;
+        }
+        // Old writers did not retain a completeness counter. An empty legacy
+        // list proves nothing; preserve the old UI rather than claiming no work.
+        if row.activity_count.is_none() && row.activities.is_empty() {
+            return None;
+        }
+        let complete = row.error_code.as_deref() != Some("outcome_unknown")
+            && row.activity_count == Some(row.activities.len() as i64)
+            && row.activity_total <= row.activities.len() as i64;
+        let actions: Vec<_> = row
+            .activities
+            .iter()
+            .map(|activity| {
+                let completed = activity.status == "completed";
+                let duplicate = activity
+                    .failure
+                    .as_ref()
+                    .is_some_and(|failure| failure.kind == engine::RETRY_DUPLICATE_ACTION);
+                let summary = if duplicate {
+                    format!("Previously completed; not repeated: {}", activity.label)
+                } else if completed && activity.label == "nyxid__create_schedule" {
+                    "Created a scheduled automation".into()
+                } else if completed {
+                    format!("Completed tool call: {}", activity.label)
+                } else {
+                    format!("Outcome uncertain: {}", activity.label)
+                };
+                ActionOutcomeItem {
+                    activity_id: activity.id.clone(),
+                    label: activity.label.clone(),
+                    status: if completed { "completed" } else { "uncertain" },
+                    summary,
+                }
+            })
+            .collect();
+        let none = complete && actions.is_empty();
+        let uncertain = !complete || actions.iter().any(|a| a.status == "uncertain");
+        let summary = if none {
+            "No actions were taken."
+        } else if uncertain {
+            "Some actions may have taken effect. Review their results before trying again."
+        } else {
+            "These actions completed before the reply failed."
+        }
+        .into();
+        let retry_warning = if none {
+            None
+        } else if uncertain {
+            Some("Some actions may already have taken effect. Retrying may repeat them.".into())
+        } else {
+            let mut completed = actions
+                .iter()
+                .take(3)
+                .map(|a| a.summary.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if actions.len() > 3 {
+                completed.push_str("; and other recorded calls");
+            }
+            Some(format!(
+                "This request already did the following: {completed}. Retrying may repeat it."
+            ))
+        };
+        Some(Self {
+            summary,
+            complete,
+            actions,
+            retry_warning,
+        })
+    }
+}
+
 #[derive(Serialize)]
 pub struct MessageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_outcome: Option<ActionOutcomeResponse>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
     pub feedback: Option<crate::handlers::assistant_feedback::FeedbackResponse>,
@@ -547,6 +643,7 @@ pub struct AutomationRunResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            action_outcome: ActionOutcomeResponse::from_message(&row),
             platform_origin: row
                 .platform_origin
                 .as_ref()
@@ -825,6 +922,8 @@ pub struct HistoryResponse {
     /// Pending proxy approvals raised by this chat's key; decided through
     /// `POST /approvals/requests/{id}/decide`.
     approvals: Vec<ChatApprovalResponse>,
+    /// Additive history; old clients keep receiving pending-only `approvals`.
+    approval_history: Vec<ChatApprovalResponse>,
     /// Things outside the chat this thread is waiting for (a bot being
     /// created, a service being connected, the owner verifying a chat app).
     /// NyxID resumes the thread by itself when each happens.
@@ -849,8 +948,10 @@ pub struct CmaOperationResponse {
     checked_at: Option<DateTime<Utc>>,
     cma_url: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ChatApprovalResponse {
+    status: String,
+    review_path: String,
     id: String,
     service_slug: String,
     service_name: String,
@@ -863,6 +964,8 @@ pub struct ChatApprovalResponse {
 impl From<engine::ChatApproval> for ChatApprovalResponse {
     fn from(row: engine::ChatApproval) -> Self {
         Self {
+            status: row.status,
+            review_path: row.review_path,
             id: row.id,
             service_slug: row.service_slug,
             service_name: row.service_name,
@@ -915,7 +1018,7 @@ pub async fn history(
         .await?;
     }
     let approvals =
-        engine::pending_approvals(&state.db, &user_id, &conversation.credential_api_key_id).await?;
+        engine::approval_history(&state.db, &user_id, &conversation.credential_api_key_id).await?;
     // Best effort: the transcript never fails because of the waiting list.
     let waiting = super::nyxbot::waiting(&state, &user_id, &conversation.id)
         .await
@@ -1038,11 +1141,18 @@ pub async fn history(
         attachments.extend(turn.attachments.iter_mut());
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
+    let approval_history: Vec<ChatApprovalResponse> =
+        approvals.into_iter().map(Into::into).collect();
     Ok(Json(HistoryResponse {
         cma_operations,
         conversation,
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
-        approvals: approvals.into_iter().map(Into::into).collect(),
+        approvals: approval_history
+            .iter()
+            .filter(|row| row.status == "pending")
+            .cloned()
+            .collect(),
+        approval_history,
         waiting,
         messages,
         before_seq,
@@ -1205,6 +1315,7 @@ pub async fn attachment(
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
+    review_path: String,
     connect_own: Option<serde_json::Value>,
     creation_turn_id: Option<String>,
     /// The tool call (turn activity ID) this card or receipt belongs to.
@@ -1237,7 +1348,9 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
     for AcknowledgementResponse
 {
     fn from(row: crate::models::assistant_acknowledgement::AssistantAcknowledgement) -> Self {
+        let status = acknowledgements::presentation_status(&row).to_owned();
         Self {
+            review_path: crate::services::assistant_links::AssistantPage::ReviewCard { conversation: &row.conversation_id, card: &row.id }.path(),
             creation_turn_id: row.creation_turn_id,
             activity_id: row.activity_id,
             continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
@@ -1245,7 +1358,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
             kind: row.kind,
-            status: row.status,
+            status,
             summary: row.summary,
             link: row.link,
             trigger_run_id: row.trigger_run_id,
@@ -1964,6 +2077,7 @@ pub async fn turns(
     let permit = state.direct_chat_limiter.admit(&user_id).await?;
     let policy = parts.extensions.get::<BillingRoutePolicy>().copied();
     let mut start = engine::TurnStart::from(&input);
+    start.execution_enrollment = auth.execution_enrolled;
     start.org_access = org_access;
     if super::login_client_context::require_first_party_human(&auth).is_ok() {
         start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);

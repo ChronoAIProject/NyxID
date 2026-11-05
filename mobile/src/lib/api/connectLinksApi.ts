@@ -2,11 +2,22 @@ import {
   connectLinkPreviewSchema,
   connectLinkStatusResponseSchema,
   completeConnectLinkResponseSchema,
+  createConnectLinkResponseSchema,
   type CompleteConnectLinkInput,
 } from "../../features/assistant/connectLinkContracts";
 import { requestJson } from "./http";
 
 export const connectLinksApi = {
+  /** Mint a hosted connect link for a catalog service on the signed-in account. */
+  async create(serviceSlug: string, signal?: AbortSignal) {
+    return createConnectLinkResponseSchema.parse(
+      await requestJson("/connect-links", {
+        method: "POST",
+        body: { service_slug: serviceSlug, requested_by: "NyxBot chat" },
+        signal,
+      }),
+    );
+  },
   async preview(token: string, signal?: AbortSignal) {
     return connectLinkPreviewSchema.parse(
       await requestJson("/connect-links/preview", {

@@ -56,6 +56,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "link_channel_bot",
     "list_channel_agents",
     "disconnect_channel_bot",
+    "retry_channel_gateway",
     "list_channel_chats",
     "list_channel_threads",
     "stop_following_thread",
@@ -355,7 +356,7 @@ pub fn schema(name: &str) -> Value {
                     "path_template":string(2048)},"required":["method","path_template"],"additionalProperties":false}},
                 // Value limits keyed by endpoint ID (validated server-side), and
                 // the reviewed contract a card's retry_arguments carry back.
-                "inputs":{"type":"object","additionalProperties":{"type":"object"}},
+                "inputs":{"type":"object","additionalProperties":input_rules_schema()},
                 "contract_digest":string(64)
             },"required":["expected_revision"],"additionalProperties":false},
             "acknowledgement_id":string(64)}),
@@ -418,8 +419,7 @@ pub fn schema(name: &str) -> Value {
             json!({"channel_agent_id": string(64),
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" or one of the user's personal specialist names \
-                    or IDs; organization specialists cannot be linked to channel bots \
-                    or chats"}}),
+                    or IDs; when enabled, an organization specialist ID is allowed only for a bot owned by that same organization and a live admin"}}),
             vec!["channel_agent_id", "agent"],
         ),
         "remember" => (
@@ -470,7 +470,7 @@ pub fn schema(name: &str) -> Value {
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\", one of the user's personal specialist names \
                     or IDs, or \"default\" for the channel bot's agent; organization \
-                    specialists cannot be linked to channel bots or chats"}}),
+                    specialists require an enabled same-org binding managed by a live admin"}}),
             vec!["chat_id"],
         ),
         "update_channel_access" => (
@@ -564,8 +564,7 @@ pub fn schema(name: &str) -> Value {
                     "description": "Optional bot name"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" (default) or one of the user's personal \
-                    specialist names or IDs; organization specialists cannot be linked \
-                    to channel bots or chats"}}),
+                    specialist names or IDs; new-bot setup links create personal bots. Use connect_channel_bot for an existing same-org bot"}}),
             vec!["platform"],
         ),
         "connect_channel_bot" => (
@@ -576,12 +575,11 @@ pub fn schema(name: &str) -> Value {
                     "description": "Deprecated alias of bot"},
                 "agent": {"type": "string", "minLength": 1, "maxLength": 64,
                     "description": "\"nyxbot\" (default) or one of the user's personal \
-                    specialist names or IDs; organization specialists cannot be linked \
-                    to channel bots or chats"}}),
+                    specialist names or IDs, or an organization specialist ID with a same-org bot and live admin authority when enabled"}}),
             vec![],
         ),
         "list_channel_agents" => (json!({}), vec![]),
-        "disconnect_channel_bot" => (
+        "disconnect_channel_bot" | "retry_channel_gateway" => (
             json!({"channel_agent_id": string(64)}),
             vec!["channel_agent_id"],
         ),
@@ -818,14 +816,13 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Help the user create a new channel bot: returns NyxID's one-page setup link (for \
             Telegram, bot creation inside Telegram when available). Secrets are entered on that \
             page, never in chat. Once the bot exists NyxID links it to you or the named \
-            personal specialist automatically and tells you; organization specialists cannot be \
-            linked to channel bots or chats."
+            personal specialist automatically and tells you. For an organization specialist, use an existing same-org bot with connect_channel_bot."
         }
         "connect_channel_bot" => {
             "Link a channel bot to you or to one of the user's personal specialists: the \
             user's own bots and those of organizations they administer \
             (nyxid__list_channel_bots lists both, with each org). Organization \
-            specialists cannot be linked to channel bots or chats. Name it by id or \
+            specialists may be linked to a same-org bot by a live admin when enabled. Each member verifies their own chat account; guests require explicit admin delegation and an org-funded budget. Name it by id or \
             label. The user's Telegram bots use the Agent Event Gateway; other \
             platforms use the selected live transport; a gateway flag alone does not \
             prove platform support. Returns a link the user opens once in the chat app \
@@ -833,13 +830,15 @@ pub(crate) fn description(name: &str) -> &'static str {
         }
         "link_channel_bot" => {
             "Move a connected channel bot to NyxBot or one of the user's personal \
-            specialists; organization specialists cannot be linked to channel bots or \
-            chats."
+            specialists. When enabled, same-org admins may relink an organization binding to another specialist of that org; member links and guest exposure reset. Changing between personal and org targets requires disconnect/reconnect."
         }
         "list_channel_agents" => {
             "List connected channel bots, the agent each one reaches, and status."
         }
         "disconnect_channel_bot" => "Disconnect a channel bot from its agent and remove its route.",
+        "retry_channel_gateway" => {
+            "Retry native Discord gateway activation now for an owner-verified channel on NyxID relay. Requires the existing gateway flag, live org-admin authority and no active answer; limited to once per channel per ten minutes. Reports actual transport and bounded activation diagnostics. Relay replies do not prove native acceptance. Never change flags or recreate the bot to retry."
+        }
         "remember" => {
             "Save a durable fact about the user or your work (preferences, people, goals, how \
             they like things done) so you recall it in every thread and chat app. Never store \
@@ -874,7 +873,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             mentions and replies (groups default to mentions); let members other than the user \
             talk to the agent (default once the user has talked to the bot there); allow \
             posting there (per-chat off always overrides the new-chat default); use nyxid__update_channel_access private_chat_posts to allow new customer chats automatically, with apply_to_existing to include existing private chats; or give the chat its own personal specialist. Organization specialists \
-            cannot be linked to channel bots or chats. Guests never act for the user: you \
+            require an enabled same-org binding managed by a live admin. Guests never act for the user: you \
             answer them without tools, and a specialist given the chat uses only its own \
             services, as far as nyxid__set_guest_access lets guests (by default looking up, \
             creating and acting, never changing or deleting what exists), so give a chat a \
@@ -926,6 +925,38 @@ fn skill_reference_schema() -> Value {
     json!({"type":"object","properties":properties,"required":["source","skill_id","name","version","sha256"],"additionalProperties":false})
 }
 
+fn any_value_schema() -> Value {
+    // An empty schema is the JSON-Schema "anything" schema.  The matcher
+    // handles it explicitly below; this is used only for exact/one_of values.
+    json!({})
+}
+
+fn input_value_rule_schema() -> Value {
+    json!({"oneOf":[
+        {"type":"object","properties":{"type":{"const":"exact"},"value":any_value_schema()},"required":["type","value"],"additionalProperties":false},
+        {"type":"object","properties":{"type":{"const":"one_of"},"values":{"type":"array","maxItems":100,"items":any_value_schema()}},"required":["type","values"],"additionalProperties":false}
+    ]})
+}
+
+fn input_query_parameter_schema() -> Value {
+    json!({"type":"object","properties":{"required":{"type":"boolean"},"rule":input_value_rule_schema()},"required":["rule"],"additionalProperties":false})
+}
+
+fn json_shape_schema() -> Value {
+    // JsonShape is a bounded, tagged vocabulary. Its recursive details are
+    // checked by serde below so this advertised object remains small enough
+    // for MCP clients to consume without duplicating the recursive tree.
+    json!({"type":"object","additionalProperties":true})
+}
+
+fn input_rules_schema() -> Value {
+    json!({"type":"object","properties":{
+        "path":{"type":"object","additionalProperties":input_value_rule_schema()},
+        "query":{"type":"object","additionalProperties":input_query_parameter_schema()},
+        "body":json_shape_schema()
+    },"additionalProperties":false})
+}
+
 /// Strict validation mirroring the schemas: unknown keys, wrong types and
 /// out-of-range values are rejected before any state is read.
 pub fn validate(name: &str, args: &Value) -> AppResult<()> {
@@ -938,6 +969,7 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
             return Err(invalid());
         }
     }
+    validate_input_rules(name, object, &schema)?;
     for (key, value) in object {
         let spec = properties.get(key).ok_or_else(invalid)?;
         if !matches_spec(value, spec) {
@@ -945,6 +977,112 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+/// Validate the shape of the advertised per-operation input dictionary before
+/// dispatch.  Keeping this separate from the general tool validator lets us
+/// return a bounded field path for malformed rules without exposing any of the
+/// rule values (which may contain service identifiers or other sensitive data).
+fn validate_input_rules(
+    name: &str,
+    args: &serde_json::Map<String, Value>,
+    schema: &Value,
+) -> AppResult<()> {
+    if !matches!(name, "set_agent_operations" | "request_agent_operations") {
+        return Ok(());
+    }
+    let Some(selection) = args.get("selection").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let Some(inputs) = selection.get("inputs") else {
+        return Ok(());
+    };
+    let Some(inputs) = inputs.as_object() else {
+        return Err(AppError::ValidationError(
+            "selection.inputs: expected an object keyed by operation ID".into(),
+        ));
+    };
+    let rules_schema =
+        &schema["properties"]["selection"]["properties"]["inputs"]["additionalProperties"];
+    for (operation, rules) in inputs {
+        let operation = field_segment(operation, "operation");
+        let prefix = format!("selection.inputs.{operation}");
+        let Some(rules) = rules.as_object() else {
+            return Err(AppError::ValidationError(format!(
+                "{prefix}: expected path/query/body rules"
+            )));
+        };
+        for (part, value) in rules {
+            let part_path = match part.as_str() {
+                "path" | "query" | "body" => format!("{prefix}.{part}"),
+                _ => {
+                    return Err(AppError::ValidationError(format!(
+                        "{prefix}.{}: expected path/query/body rules",
+                        field_segment(part, "field")
+                    )));
+                }
+            };
+            let spec = &rules_schema["properties"][part];
+            if !matches_spec(value, spec) {
+                return Err(AppError::ValidationError(format!(
+                    "{part_path}: expected path/query/body rules"
+                )));
+            }
+        }
+        let invalid_part = rules
+            .get("path")
+            .filter(|value| {
+                serde_json::from_value::<
+                    std::collections::BTreeMap<String, nyxid_permissions::ValueRule>,
+                >((*value).clone())
+                .is_err()
+            })
+            .map(|_| "path")
+            .or_else(|| {
+                rules
+                    .get("query")
+                    .filter(|value| {
+                        serde_json::from_value::<
+                            std::collections::BTreeMap<
+                                String,
+                                nyxid_permissions::google::QueryParameter,
+                            >,
+                        >((*value).clone())
+                        .is_err()
+                    })
+                    .map(|_| "query")
+            })
+            .or_else(|| {
+                rules
+                    .get("body")
+                    .filter(|value| {
+                        serde_json::from_value::<nyxid_permissions::google::JsonShape>(
+                            (*value).clone(),
+                        )
+                        .is_err()
+                    })
+                    .map(|_| "body")
+            });
+        if let Some(offending) = invalid_part {
+            return Err(AppError::ValidationError(format!(
+                "{prefix}.{offending}: expected path/query/body rules"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn field_segment(value: &str, fallback: &str) -> String {
+    if value.len() <= 128
+        && !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+    {
+        value.to_owned()
+    } else {
+        format!("<{fallback}>")
+    }
 }
 
 pub(crate) fn schedule_schema() -> Value {
@@ -981,6 +1119,9 @@ pub(crate) fn delivery_schema() -> Value {
 }
 
 fn matches_spec(value: &Value, spec: &Value) -> bool {
+    if spec.as_object().is_some_and(|object| object.is_empty()) {
+        return true;
+    }
     if let Some(options) = spec["oneOf"].as_array() {
         return options.iter().any(|option| matches_spec(value, option));
     }
@@ -1100,6 +1241,107 @@ mod tests {
             "role": "user"
         }]);
         assert!(validate("set_agent_sharing", &email_args).is_ok());
+    }
+
+    #[test]
+    fn dictionary_schemas_validate_values_without_properties_and_keep_closed_objects_closed() {
+        let dictionary = json!({
+            "type": "object",
+            "additionalProperties": {"type": "string"}
+        });
+        assert!(matches_spec(
+            &json!({"one": "value", "two": "value"}),
+            &dictionary
+        ));
+        assert!(!matches_spec(&json!({"one": 7}), &dictionary));
+
+        let mixed = json!({
+            "type": "object",
+            "properties": {"known": {"type": "integer"}},
+            "additionalProperties": {"type": "string"}
+        });
+        assert!(matches_spec(&json!({"known": 7, "extra": "value"}), &mixed));
+        assert!(!matches_spec(&json!({"known": 7, "extra": 9}), &mixed));
+
+        let closed = json!({
+            "type": "object",
+            "properties": {"known": {"type": "integer"}},
+            "additionalProperties": false
+        });
+        assert!(matches_spec(&json!({"known": 7}), &closed));
+        assert!(!matches_spec(
+            &json!({"known": 7, "extra": "value"}),
+            &closed
+        ));
+    }
+
+    #[test]
+    fn set_agent_operations_accepts_receipt_input_rules() {
+        let args = json!({
+            "subagent": "receipt-bot",
+            "service_id": "lark-service",
+            "selection": {
+                "expected_revision": 3,
+                "all_operations": false,
+                "endpoint_ids": ["fields-endpoint", "create-endpoint"],
+                "inputs": {
+                    "fields-endpoint": {
+                        "path": {
+                            "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+                            "table_id": {"type": "exact", "value": "tblReceipts"}
+                        }
+                    },
+                    "create-endpoint": {
+                        "path": {
+                            "app_token": {"type": "exact", "value": "bascnReceiptApp"},
+                            "table_id": {"type": "exact", "value": "tblReceipts"}
+                        },
+                        "body": {
+                            "type": "object",
+                            "required": ["fields"],
+                            "properties": {
+                                "fields": {
+                                    "type": "object",
+                                    "required": ["Type", "Date", "Amount", "Card Number"],
+                                    "properties": {
+                                        "Type": {"type": "one_of", "values": ["Expense", "Refund"]},
+                                        "Date": {"type": "integer", "minimum": 1767225600000i64, "maximum": 1798761599999i64},
+                                        "Amount": {"type": "number", "minimum": 0, "maximum": 1000000, "max_fraction_digits": 2},
+                                        "Card Number": {"type": "one_of", "values": ["1234", "5678"]}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert!(validate("set_agent_operations", &args).is_ok());
+    }
+
+    #[test]
+    fn set_agent_operations_rejects_json_schema_body_with_a_bounded_field_path() {
+        let args = json!({
+            "subagent": "receipt-bot",
+            "service_id": "lark-service",
+            "selection": {
+                "expected_revision": 3,
+                "inputs": {
+                    "create-endpoint": {
+                        "body": {
+                            "type": "object",
+                            "properties": {"fields": {"type": "string"}}
+                        }
+                    }
+                }
+            }
+        });
+        let error = validate("set_agent_operations", &args)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("selection.inputs.create-endpoint.body"));
+        assert!(error.contains("expected path/query/body rules"));
+        assert!(!error.contains("fields"));
     }
 
     #[test]

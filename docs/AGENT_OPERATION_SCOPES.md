@@ -55,6 +55,14 @@ body, so a body limit refuses them. Authoring is through the API or CLI
 (`--inputs`); the UI shows a "Value limits" mark and preserves saved limits for
 operations that stay selected.
 
+Native `nyxid__set_agent_operations` and `nyxid__request_agent_operations`
+validate the `selection.inputs` dictionary before reading or changing scope
+state. Malformed entries return a bounded field path such as
+`selection.inputs.<endpoint-id>.body: expected path/query/body rules`; the
+error names only the rule location and never echoes rule values. A failed
+validation leaves the existing permission unchanged. The body vocabulary above
+is NyxID's tagged `JsonShape` form, rather than standard JSON Schema.
+
 The **contract digest** (`contract_digest`) is a SHA-256 over the compiled
 catalog identity and operations, excluding the revision. A selection that
 carries `contract_digest` fails with a conflict if it now compiles differently.
@@ -317,12 +325,22 @@ new call. See the guide for all outcomes, the 400-day protection horizon, and
 ## Relationship to permission-bound keys
 
 Permission-bound keys (`purpose: permission_bound`) remain an immutable,
-single-connection pilot with their own ingress and Drive folder adapter. Both
-systems now share one input-rule evaluator (`permissions/src/values.rs`); the
-Google adapter's query and body checks call the same functions. The intended
-next steps are to express Google policies as scoped operations with input
-limits, move the Drive ancestry check into the shared pipeline as a resource
-adapter, and fold `/permission-execution` into `/proxy`.
+single-connection pilot with their own ingress and existing personal Google/Drive
+adapters. Both systems share the input-rule evaluator
+(`permissions/src/values.rs`). Operation scopes and input limits are access
+ceilings; they do not themselves supply affirmative execution consent.
+
+The [execution permission contract](EXECUTION_PERMISSIONS.md) (#2193) adds an
+optional versioned `ApprovalGrant.execution`, server-only task references, a
+pure coverage/validity/binding evaluator, and reader fields for native policy
+indirection and separately authored mandatory org review. The default-off
+`permissions:execution-v1` flag is readiness-gated. This step enables no new
+writer or dispatch behavior, does not fold `/permission-execution` into `/proxy`,
+and does not extend resource adapters. Existing keys, scopes, service approvals,
+Full/Auto/Ask behavior and exact/durable claims retain their contracts. The
+contract names exactly three prompt floors that future integration may satisfy;
+webhook, Machine, sign-in, delegation, org-instruction/mandatory and guest gates
+remain separate.
 
 ## Compatibility
 
@@ -344,3 +362,10 @@ compiled copies on keys, before rolling back to a binary without this variant.
 
 Scopes contain no person-specific ownership assumptions; execution and billing
 remain the acting person's.
+
+Execution-permission dispatch (default-off #2194 Phase A) can satisfy only the
+three eligible discretionary floors for a fully covered, exact actor/account
+operation. Operation and input scopes remain ceilings and always run first.
+Gaps use the existing cards until #2195. Activation is per-user only and requires
+both execution reader and dispatch readiness; see
+[the execution contract](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-a).

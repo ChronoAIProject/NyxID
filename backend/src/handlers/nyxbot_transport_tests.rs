@@ -957,3 +957,6 @@ async fn discord_definitive_create_refusal_restores_relay_after_bounded_drain() 
     complete_native_drain(&state, &before).await;
     agent.abort();
 }
+
+#[path = "nyxbot_gateway_retry_tests.rs"]
+mod retry_tests;

@@ -79,6 +79,9 @@ pub struct PublicConfigResponse {
     pub social_providers: Vec<String>,
     pub invite_code_required: bool,
     pub email_auth_enabled: bool,
+    /// Global `mobile:new-domains` admin flag. Mobile builds that embed both
+    /// production domain sets read it from both API hosts at launch.
+    pub mobile_new_domains: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
     /// when telemetry is off. See docs/TELEMETRY.md §3.
@@ -102,6 +105,7 @@ pub struct PublicConfigResponse {
 /// Returns public configuration needed by the frontend (no auth required).
 pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<PublicConfigResponse>> {
     let invite_code_required = feature_flag_service::invitation_code_required(&state.db).await?;
+    let mobile_new_domains = feature_flag_service::mobile_new_domains_enabled(&state.db).await?;
     let base = state.config.base_url.trim_end_matches('/');
 
     let mut social_providers = Vec::new();
@@ -160,6 +164,7 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
         social_providers,
         invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
+        mobile_new_domains,
         telemetry_dsn,
         telemetry_host,
         telemetry_share_analytics,
@@ -247,6 +252,7 @@ mod tests {
             social_providers: vec!["github".to_string()],
             invite_code_required: true,
             email_auth_enabled: true,
+            mobile_new_domains: true,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -258,6 +264,7 @@ mod tests {
         assert_eq!(json["social_providers"], serde_json::json!(["github"]));
         assert_eq!(json["invite_code_required"], true);
         assert_eq!(json["email_auth_enabled"], true);
+        assert_eq!(json["mobile_new_domains"], true);
     }
 
     #[test]
@@ -270,6 +277,7 @@ mod tests {
             social_providers: vec![],
             invite_code_required: false,
             email_auth_enabled: false,
+            mobile_new_domains: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -280,6 +288,8 @@ mod tests {
         assert!(json.get("telemetry_host").is_none());
         // telemetry_share_analytics false => skipped (Not::not)
         assert!(json.get("telemetry_share_analytics").is_none());
+        // Mobile launches must distinguish an explicit off from an older backend.
+        assert_eq!(json["mobile_new_domains"], false);
     }
 
     #[test]
@@ -292,6 +302,7 @@ mod tests {
             social_providers: vec![],
             invite_code_required: false,
             email_auth_enabled: false,
+            mobile_new_domains: false,
             telemetry_dsn: Some("phc_test123".to_string()),
             telemetry_host: Some("https://us.i.posthog.com".to_string()),
             telemetry_share_analytics: true,

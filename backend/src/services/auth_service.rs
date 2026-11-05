@@ -199,6 +199,7 @@ pub async fn register_user(
     let default_role_ids = role_service::get_default_role_ids(db).await?;
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id.clone(),
         email: email.to_lowercase(),
         password_hash: Some(password_hash),
@@ -563,6 +564,7 @@ mod tests {
     fn make_person() -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: Uuid::new_v4().to_string(),
             email: "alice@example.com".to_string(),
             password_hash: Some("$argon2id$hash".to_string()),

@@ -404,6 +404,8 @@ export class NyxAgentTransport {
       this.requests.delete(controller);
     }
     const page = nyxAgentHistorySchema.parse(response);
+    // New servers keep `approvals` pending-only for older clients.
+    page.approvals = page.approval_history ?? page.approvals;
     this.current(generation);
     if (rowRevision !== this.rowRevisions.get(id) || card !== this.reviewCards.get(id)) {
       throw new DOMException("Conversation changed", "AbortError");
@@ -612,6 +614,7 @@ export class NyxAgentTransport {
       if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
+        actionOutcome: message.action_outcome,
         recovery: message.recovery,
         id: message.id,
         feedback: message.feedback ?? undefined,
@@ -656,7 +659,7 @@ export class NyxAgentTransport {
           live: Boolean(live),
           pendingApproval: Boolean(
             (history?.acknowledgements ?? []).some((row) => row.status === "pending")
-            || (history?.approvals ?? []).length,
+            || (history?.approvals ?? []).some((row) => !row.status || row.status === "pending"),
           ),
           retrying: Boolean(live?.retrying),
           interrupted: this.interrupted.has(id ?? "draft"),
@@ -675,6 +678,7 @@ export class NyxAgentTransport {
         const cached = streaming ? undefined : this.liveViews.get(message);
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
+          actionOutcome: settled?.action_outcome,
           recovery: settled?.recovery,
           id: message.id,
           role: settled?.role ?? message.role,
@@ -756,7 +760,7 @@ export class NyxAgentTransport {
     }
     // Build a linear, exact-turn join. A settled decision folds into its
     // reply's turn summary (beside the tool call that raised it); pending
-    // cards and authored-skill reviews keep their own virtual row and stable
+    // cards, expired requests and authored-skill reviews keep their own virtual row and stable
     // card ID, so deep links and offscreen focusing keep working.
     const replies = new Map(messages.filter((m) => m.role === "assistant" && m.turnId)
       .map((m) => [m.turnId!, m.id]));
@@ -769,7 +773,7 @@ export class NyxAgentTransport {
         role: "system", content: acknowledgement.summary, timestamp, status: "complete",
       };
       const reply = acknowledgement.creation_turn_id && replies.get(acknowledgement.creation_turn_id);
-      if (acknowledgement.status !== "pending" && reply && !acknowledgement.authored_skill) {
+      if (acknowledgement.status !== "pending" && acknowledgement.status !== "expired" && reply && !acknowledgement.authored_skill) {
         folded.set(reply, [...(folded.get(reply) ?? []), acknowledgement]);
       } else if (acknowledgement.status !== "pending" && reply) {
         const rows = footers.get(reply) ?? [];

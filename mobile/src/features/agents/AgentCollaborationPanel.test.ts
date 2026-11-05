@@ -76,6 +76,10 @@ function setup(queryOverride: Record<string, unknown> = {}) {
         return query;
       },
     },
+    "../../components/Skeleton": {
+      SkeletonCards: "SkeletonCards",
+      SkeletonRows: "SkeletonRows",
+    },
     "../../components/workspace/WorkspaceUI": {
       ActionButton: "ActionButton",
       Card: "Card",

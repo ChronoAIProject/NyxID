@@ -49,6 +49,8 @@ pub enum TurnOrigin {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_event_ids: Vec<String>,
@@ -124,6 +126,8 @@ pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<Stri
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_execution: Option<Box<super::org_channel::Execution>>,
     /// Original native provider event for asynchronous updates; never a capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_event_id: Option<String>,
@@ -225,6 +229,9 @@ pub struct TurnActivity {
     pub label: String,
     #[serde(default)]
     pub digest: Option<String>,
+    /// Additive semantic retry identity; `digest` retains the legacy exact call.
+    #[serde(default)]
+    pub retry_identity: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]
@@ -325,6 +332,8 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub business_system_success: bool,
     #[serde(default)]

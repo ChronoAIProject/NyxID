@@ -195,7 +195,11 @@ impl ChannelBilling {
         let owner = self
             .billing
             .owner_resolver()
-            .resolve_for_execution(&self.owner_id, &self.owner_id, X_CHANNEL_CREDENTIAL_CLASS)
+            .resolve_for_ordinary_execution(
+                &self.owner_id,
+                &self.owner_id,
+                X_CHANNEL_CREDENTIAL_CLASS,
+            )
             .await?;
         route.billing_owner_id = owner.owner_id;
         self.billing.open_required(&route).await

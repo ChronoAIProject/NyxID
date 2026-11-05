@@ -172,6 +172,8 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub(crate) execution_permission:
+        Option<&'a std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
     /// Original authenticated turn fence. Credential/catalog awaits must never
     /// downgrade a live foreground request to legacy idle compatibility.
     pub assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
@@ -3793,6 +3795,84 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) async fn admit_execution_permission(
+        &self,
+        state: &crate::AppState,
+        auth: &crate::mw::auth::AuthUser,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<()> {
+        if auth.execution_permission.is_none()
+            || endpoint.async_operation.is_some()
+            || self.async_submission.is_some()
+            || self.async_continuation.is_some()
+            || self.managed_base.is_some()
+        {
+            return Ok(());
+        }
+        let McpToolSource::UserManaged {
+            user_service_id,
+            effective_owner_id,
+            ..
+        } = &service.source
+        else {
+            return Ok(());
+        };
+        let mut resolved = proxy_service::read_proxy_authority_snapshot_with_access(
+            &state.db,
+            &state.encryption_keys,
+            &auth.user_id.to_string(),
+            user_service_id,
+            None,
+            auth.org_agent_access.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?;
+        self.resolve_destination(&mut resolved.target)?;
+        let mut headers = axum::http::HeaderMap::new();
+        for (name, value) in &self.parameter_headers {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| AppError::BadRequest("Invalid header".into()))?,
+                axum::http::HeaderValue::from_str(value)
+                    .map_err(|_| AppError::BadRequest("Invalid header".into()))?,
+            );
+        }
+        if let Some(content_type) = &self.body_content_type {
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_str(content_type)
+                    .map_err(|_| AppError::BadRequest("Invalid content type".into()))?,
+            );
+        }
+        let mut operation = super::assistant_service_execution::http_operation(
+            &resolved.target,
+            self.method.as_str(),
+            &self.path,
+            self.query.as_deref(),
+            self.body.as_deref().unwrap_or_default(),
+        );
+        super::assistant_service_execution::bind_headers(&mut operation, &self.parameter_headers);
+        operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
+        operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
+        super::execution_permission_dispatch::admit_http(
+            state,
+            auth,
+            Some(user_service_id),
+            Some(effective_owner_id),
+            &mut resolved.target,
+            self.method.as_str(),
+            &self.path,
+            self.query.as_deref(),
+            self.body.as_deref().unwrap_or_default(),
+            &headers,
+            Some(&endpoint.endpoint_id),
+            &self.operation_descriptor(),
+            resolved.is_auto_connected,
+            Some(&operation),
+        )
+        .await
+    }
     pub(crate) fn bind_resource(
         &mut self,
         source: crate::models::assistant_resource::ResourceSource,
@@ -5120,6 +5200,13 @@ fn resolve_tool_target(
             catalog_service_slug,
         ) = resolved;
         prepared.resolve_destination(&mut target)?;
+        target.execution_request = exec_ctx
+            .execution_permission
+            .filter(|c| c.participating())
+            .cloned();
+        if let Some(permit) = exec_ctx.execution_permission.and_then(|c| c.permit()) {
+            target.execution_permission = Some(permit.clone());
+        }
         Ok(ResolvedToolTarget {
             target,
             node_route,
@@ -5861,7 +5948,7 @@ async fn execute_tool_resolved_inner(
         }
         if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
-                admission.bind_async_submission(db, watch).await?;
+                admission.bind_async_submission(db, watch, &target).await?;
             }
             admission
                 .materialize_http(
@@ -5882,6 +5969,17 @@ async fn execute_tool_resolved_inner(
 
     target.require_credential_materialized()?;
     box_mcp_forwarding(move || async move {
+        if let Some(permit) = &target.execution_permission {
+            let mut headers = axum::http::HeaderMap::new();
+            for (name, value) in &prepared.parameter_headers {
+                headers.insert(axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| AppError::BadRequest("Invalid header".into()))?,
+                    axum::http::HeaderValue::from_str(value).map_err(|_| AppError::BadRequest("Invalid header".into()))?);
+            }
+            if let Some(content_type) = &prepared.body_content_type {
+                headers.insert(axum::http::header::CONTENT_TYPE, content_type.parse().map_err(|_| AppError::BadRequest("Invalid content type".into()))?);
+            }
+            permit.validate_prepared_headers(&headers)?;
+        }
         let PreparedProxyCall {
             lark_message: _,
             managed_base,
@@ -6379,15 +6477,31 @@ async fn execute_tool_resolved_inner(
                 } else if super::lark_im_tool::kind(endpoint).is_some() {
                     super::lark_attachment_tool::validate_contract(db,service,endpoint).await?;
                 }
-                match node_ws_manager
+                if let Some(context) = &target.execution_request
+                    && let Err(error) = context.check_drain().await {
+                        billing.reject_before_send(&metered, "execution_enrollment_changed", false).await?;
+                        return Err(error);
+                }
+                if let Some(permit) = &target.execution_permission {
+                    let validation = async {
+                        permit.validate_effect(&target, method.as_str(), &path, query.as_deref(), body.as_deref().unwrap_or_default(), &req_headers)?;
+                        permit.before_send(&target).await
+                    }.await;
+                    if let Err(error) = validation {
+                        billing.reject_before_send(&metered, "execution_permission_changed", false).await?;
+                        return Err(error);
+                    }
+                }
+                let node_result = node_ws_manager
                     .send_proxy_request_classified(
                         nid,
                         attempt,
                         signing_secret.as_ref().map(|s| s.as_slice()),
                         billing_egress_permit,
                     )
-                    .await
-                {
+                    .await;
+                if let Some(permit) = &target.execution_permission { permit.complete(node_result.is_ok()).await?; }
+                match node_result {
                     Ok(ProxyResponseType::Complete(resp)) => {
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
@@ -7830,6 +7944,7 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        execution_permission: None,
                         assistant_chat: None,
                         response_body_limit: None,
                         actor_user_id: None,
@@ -9570,6 +9685,10 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_task: None,
+            execution_permission: None,
             business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
@@ -14424,6 +14543,8 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                execution_request: None,
+                execution_permission: None,
                 credential_deferred: false,
                 workspace_destinations_pending: false,
                 target_id: None,
