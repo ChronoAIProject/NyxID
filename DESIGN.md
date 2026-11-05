@@ -426,7 +426,13 @@ primary action through `GroupedDialogActions` (or `GroupedFormBar dialog` for a
 coordinated edit). They never show Unsaved or Discard. Edit Save additionally requires
 a dirty form; Create can submit valid pristine defaults. Cancel follows the same
 discard guard as X, Escape and the overlay. Dirty-only bars are for inline drawer
-tabs/drill-ins, the NyxBot settings panel and machine settings sheets. Persisted
+tabs/drill-ins, the Account Settings and NyxBot settings panels and machine
+settings sheets. Account Settings uses the same background for its header and
+body, segmented tabs, and one save bar outside the tab scroll viewports.
+Visited tabs remain mounted to preserve drafts, and tab changes retain them
+without a discard prompt. Studio `/settings` shares these grouped sections
+and reviewed saves; its page header and route remain intact. Display and
+privacy controls retain their immediate persistence. Persisted
 request retries stay explicit actions, available without a new draft;
 they preserve the existing acceptance, idempotency and revision checks.
 Light-theme destructive text uses the darker semantic red so field errors in
@@ -451,19 +457,29 @@ Drawer deep links focus the selected panel heading; detail Back restores focus
 to its disclosure. Keep the drawer full width on mobile and `sm:max-w-lg` on
 desktop. All spacing, text and icons follow the shared Display scale.
 
-The conversation index floats at the transcript's right edge with no panel
-fill or hairline. Right-aligned, round-capped ticks use a 7px uniform pitch
+The conversation index floats at the chat column’s outer right edge next to
+the transcript, before its scrollbar and any preview, CMA or machine column,
+with no panel fill or hairline. Its containing viewport belongs to the chat
+column, so sidebar visibility and saved preview widths move it with the chat.
+Below 768px the rail is hidden and reserves no space; touch readers navigate
+with the transcript and jump-to-latest control. Right-aligned, round-capped ticks use a 7px uniform pitch
 at 1× text, 16px long assistant ticks and 8px short user ticks. Thickness is
 1px on retina displays, increased to 1.5px at 1dppx for crispness. Geometry
 scales with text independently of spacing. This dense graphical navigator
 explicitly opts out of text-button minimum dimensions. Resting decorative
 ticks use `text-text-tertiary` at 50% opacity; their accessible message labels
 remain fully available. Hover, press and keyboard focus use full-opacity
-`text-muted-foreground`, and only the current tick uses the long length and
-full-opacity `text-nyx-secondary-400`. Tick lengths and thickness scale with
+`text-muted-foreground`, and only the current tick uses full-opacity
+`text-nyx-secondary-400`. Selection changes color only: assistant ticks remain
+16px and user ticks remain 8px, including during focus and dragging. Tick lengths and thickness scale with
 text independently of pitch.
 
-Long rails have a real scroll viewport with bounded tick rendering. Reuse the
+The rail’s scroll viewport fills the available transcript height below the
+toolbar and above the composer or bottom inset. Measure these visible bounds
+in the chat column; never subtract the composer reservation twice. Short tick
+sequences stay centered at the same 7px pitch, and longer sequences overflow
+inside the rail without stretching or compressing their slots. Keep tick
+rendering bounded to that viewport and its overscan. Reuse the
 transcript's edge-aware mask pattern: fade only an edge with more ticks beyond
 it, and remove that fade at the revealed edge. Wheel browsing, dragging (with
 edge autoscroll), and keyboard navigation scroll the rail; transcript navigation
@@ -857,6 +873,8 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |
+| 2026-11-05 | Conversation index belongs to the chat viewport | Anchor to the transcript column before every preview/CMA/machine aside, independent of sidebar and saved column width. Fill the space below the toolbar and above the composer, retain 7px pitch and bounded scrolling with edge-aware fades, and change only the current tick’s accent color. Hide the rail below 768px without reserving a gutter. |
 | 2026-11-04 | One control treatment and page rhythm in both shells | Shared themed controls and portals use the same density, padding, gaps, minimums, icons and radii. WorkspacePageHeader composes PageHeader; content insets, section gaps and card gaps share shell classes. Assistant-only root CSS is limited to transcript tick slots. Browser parity covers real shells and portals at all supported audit scales. |
 | 2026-11-05 | Roles own line boxes and form captions | One field-label implementation serves all themed forms, including custom editor captions. Shared role utilities own size, weight and line height; source checks reject local overrides. Service summaries share header, description gap and two-line reservation. Actual create dialogs, settings forms and full service descriptions join the cross-shell parity matrix. |
 | 2026-11-04 | Custom role and enlarged-text guarantees | Custom onboarding actions are text-14/500 and prominent analytics values are text-28/600. The shared 24px hit-area floor covers custom Studio actions as well as primitives. Toast actions and analytics filters reflow; chart axes refresh cached font measurement after Display changes. Active recipes reference the semantic role table. |

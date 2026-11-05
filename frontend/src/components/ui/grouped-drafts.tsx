@@ -105,7 +105,12 @@ export function GroupedDraftNavigation({ active }: { readonly active: boolean })
           current.get("agent") === next.get("agent") &&
           current.get("details") === next.get("details") &&
           current.get("proposal") === next.get("proposal");
-        return sameDrawer ? false : !(await confirm());
+        // Account tabs and canonical chat adoption retain their mounted drafts.
+        const sameSettings = action === "REPLACE" && currentLocation.pathname === nextLocation.pathname && (
+          (currentLocation.pathname === "/settings" && current.get("tab") !== next.get("tab")) ||
+          (current.get("panel") === "settings" && next.get("panel") === "settings")
+        );
+        return sameDrawer || sameSettings ? false : !(await confirm());
       },
       enableBeforeUnload: () => dirty,
     });

@@ -100,9 +100,112 @@ async function open(
   return { router, history };
 }
 
+async function saveSettings() {
+  await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(review).not.toBeInTheDocument());
+}
+
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
+    it("uses sibling groups across all six tabs with no nested cards or groups", async () => {
+      await open(route);
+      for (const label of ["Profile", "Security", "Sessions", "MCP", "Display", "Privacy"]) {
+        await userEvent.click(screen.getByRole("tab", { name: label }));
+        const panel = screen.getByRole("tabpanel");
+        await waitFor(() => expect(panel.querySelector("[data-grouped-list]")).not.toBeNull());
+        expect(panel.querySelector("[data-grouped-list] [data-grouped-list], [data-slot=card]")).toBeNull();
+        if (label === "security") await screen.findByText(/No active onboarding bindings/);
+      }
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+    });
+
+    it("keeps profile drafts across tabs, reviews only the name, and preserves the update API", async () => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"
+        ? new Response(JSON.stringify({ ...securityUser, id: "owner", display_name: "Updated Reader" })) : original(url, options));
+      await open(route);
+      const name = screen.getByRole("textbox", { name: "Name" });
+      expect(name).toHaveValue("Reader");
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+      await userEvent.clear(name);
+      await userEvent.type(name, "Updated Reader");
+      expect(screen.getAllByRole("region", { name: "Unsaved changes" })).toHaveLength(1);
+      await userEvent.click(screen.getByRole("tab", { name: "MCP" }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: "Profile" }));
+      expect(name).toHaveValue("Updated Reader");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      const review = screen.getByRole("dialog", { name: "Review changes" });
+      expect(review).toHaveTextContent("Name: Reader → Updated Reader");
+      expect(review).not.toHaveTextContent(securityUser.email);
+      await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
+      expect(transport).toHaveBeenCalledWith("/api/v1/users/me", expect.objectContaining({ method: "PUT", body: JSON.stringify({ display_name: "Updated Reader" }) }));
+      expect(useAuthStore.getState().user?.display_name).toBe("Updated Reader");
+    });
+
+    it("retains profile edits made while a save is pending against the saved baseline", async () => {
+      let finish!: (response: Response) => void;
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"
+        ? new Promise<Response>(resolve => { finish = resolve; }) : original(url, options));
+      await open(route);
+      const name = screen.getByRole("textbox", { name: "Name" });
+      await userEvent.clear(name);
+      await userEvent.type(name, "Saved name");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      const review = screen.getByRole("dialog", { name: "Review changes" });
+      await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
+      await waitFor(() => expect(finish).toBeTypeOf("function"));
+      // The review traps focus, but an already queued native input can still commit.
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+        setter.call(name, "Newer draft");
+        name.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => finish(new Response(JSON.stringify({ ...securityUser, id: "owner", display_name: "Saved name" }))));
+      await waitFor(() => expect(review).not.toBeInTheDocument());
+      expect(name).toHaveValue("Newer draft");
+      expect(screen.getByRole("region", { name: "Unsaved changes" })).toBeVisible();
+      await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect(name).toHaveValue("Saved name");
+    });
+
+    it("retains failed profile edits and discards without calling the API again", async () => {
+      const original = transport.getMockImplementation()!;
+      transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"
+        ? new Response(JSON.stringify({ error: "validation_error", error_code: 1000, message: "Name rejected" }), { status: 400 }) : original(url, options));
+      await open(route);
+      await userEvent.type(screen.getByRole("textbox", { name: "Name" }), " draft");
+      await saveSettings();
+      expect(await screen.findByRole("alert")).toHaveTextContent("Name rejected");
+      expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Reader draft");
+      await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+      expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("Reader");
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
+      expect(transport.mock.calls.filter(([, options]) => options?.method === "PUT")).toHaveLength(1);
+    });
+
+    it("keeps password validation and hides passwords from the change review", async () => {
+      useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } });
+      await open(route, "security");
+      await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "short");
+      await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+      const review = screen.getByRole("dialog", { name: "Review changes" });
+      expect(review).toHaveTextContent("Password: Current password → Changed");
+      expect(review).not.toHaveTextContent("short");
+      await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
+      expect(await screen.findByText("Password must be at least 8 UTF-8 bytes")).toBeVisible();
+      expect(screen.getByLabelText("New Password", { exact: true })).toHaveAttribute("aria-invalid", "true");
+      const errorId = screen.getByText("Password must be at least 8 UTF-8 bytes").id;
+      expect(screen.getByLabelText("New Password", { exact: true }).getAttribute("aria-describedby")).toContain(errorId);
+      expect(transport.mock.calls.some(([url]) => url === "/api/v1/auth/password/change")).toBe(false);
+    });
+
     it.each([400, 429])("shows password-change %i errors without signing out", async (status) => {
       useAuthStore.setState({
         user: { ...useAuthStore.getState().user!, has_password: true },
@@ -123,7 +226,7 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.type(screen.getByLabelText("Current Password"), "old");
       await userEvent.type(screen.getByLabelText("New Password", { exact: true }), "abcdefé");
       await userEvent.type(screen.getByLabelText("Confirm New Password"), "abcdefé");
-      await userEvent.click(screen.getByRole("button", { name: "Change Password" }));
+      await saveSettings();
       expect(await screen.findByRole("alert")).toHaveTextContent(status === 400 ? "Current password is incorrect" : "Rate limited");
       expect(useAuthStore.getState().isAuthenticated).toBe(true);
       expect(useAuthStore.getState().user?.id).toBe("owner");
@@ -142,10 +245,10 @@ describe.each(["/settings", "/assistant"] as const)(
       for (const label of ["Current Password", "New Password", "Confirm New Password"]) {
         await userEvent.type(screen.getByLabelText(label, { exact: true }), "samepassword");
       }
-      await userEvent.click(screen.getByRole("button", { name: "Change Password" }));
+      await saveSettings();
       await waitFor(() => expect(screen.getByLabelText("Current Password")).toHaveValue(""));
       expect(screen.getByLabelText("New Password", { exact: true })).toHaveValue("");
-      expect(screen.getByRole("button", { name: "Change Password" })).toBeDisabled();
+      expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
     });
 
     it("saves the QR MFA preference when TOTP is enabled", async () => {
@@ -280,14 +383,12 @@ describe.each(["/settings", "/assistant"] as const)(
         await open(route, "security");
         if (credentials.has_password) {
           expect(
-            screen.getByText("Change Password", { selector: "div" }),
+            screen.getByRole("heading", { name: "Change password" }),
           ).toBeInTheDocument();
           expect(screen.getByLabelText("Current Password")).toBeEnabled();
-          expect(
-            screen.getByRole("button", { name: "Change Password" }),
-          ).toBeInTheDocument();
+          expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
         } else {
-          expect(screen.queryAllByText("Change Password")).toHaveLength(0);
+          expect(screen.queryByRole("heading", { name: "Change password" })).not.toBeInTheDocument();
           expect(
             screen.queryByLabelText("Current Password"),
           ).not.toBeInTheDocument();

@@ -1,10 +1,24 @@
 import { Label, FieldHelp } from "@/components/ui/label";
 import { useRef, useState, type ReactNode } from "react";
-import { Check, Monitor, Moon, Palette, PanelLeft, RotateCcw, SlidersHorizontal, Sun, SunMoon, TriangleAlert, type LucideIcon } from "lucide-react";
+import {
+  Check,
+  Monitor,
+  Moon,
+  RotateCcw,
+  Sun,
+  TriangleAlert,
+  type LucideIcon,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { ChatWidthControl, ComposerHeightControl } from "@/components/assistant/chat-width-control";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput as Input,
+} from "@/components/ui/grouped-list";
+import {
+  ChatWidthControl,
+  ComposerHeightControl,
+} from "@/components/assistant/chat-width-control";
 import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { useResolvedTheme } from "@/hooks/use-theme";
 import {
@@ -30,7 +44,11 @@ import {
   type ThemeMode,
 } from "@/stores/theme-store";
 
-const THEME_OPTIONS: readonly { value: ThemeMode; label: string; icon: LucideIcon }[] = [
+const THEME_OPTIONS: readonly {
+  value: ThemeMode;
+  label: string;
+  icon: LucideIcon;
+}[] = [
   { value: "system", label: "System", icon: Monitor },
   { value: "light", label: "Light", icon: Sun },
   { value: "dark", label: "Dark", icon: Moon },
@@ -41,26 +59,14 @@ const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
   { value: "reduce", label: "Reduce" },
 ];
 
-const COLOR_MODE_OPTIONS: readonly { value: ColorMode; label: string; icon: LucideIcon }[] = [
+const COLOR_MODE_OPTIONS: readonly {
+  value: ColorMode;
+  label: string;
+  icon: LucideIcon;
+}[] = [
   { value: "light", label: "Light", icon: Sun },
   { value: "dark", label: "Dark", icon: Moon },
 ];
-
-function DisplaySectionHeader({ icon: Icon, title, children }: {
-  readonly icon: LucideIcon;
-  readonly title: string;
-  readonly children: ReactNode;
-}) {
-  return (
-    <CardHeader className="flex-row items-start gap-[calc(0.75em*var(--display-density,1))] space-y-0">
-      <Icon data-ui-icon="" aria-hidden="true" className="mt-[0.125em] shrink-0 text-17 text-text-tertiary" />
-      <div className="min-w-0 space-y-1.5">
-        <CardTitle className="text-15">{title}</CardTitle>
-        <CardDescription>{children}</CardDescription>
-      </div>
-    </CardHeader>
-  );
-}
 
 function SegmentedChoice<T extends string | number>({
   label,
@@ -74,7 +80,11 @@ function SegmentedChoice<T extends string | number>({
   readonly onChange: (value: T) => void;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="flex max-w-full flex-wrap gap-1 rounded-lg border border-hairline p-0.5">
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="flex max-w-full flex-wrap gap-1 rounded-lg bg-muted p-1"
+    >
       {options.map(({ icon: Icon, ...option }, index) => (
         <button
           key={option.value}
@@ -84,26 +94,38 @@ function SegmentedChoice<T extends string | number>({
           tabIndex={value === option.value ? 0 : -1}
           onClick={() => onChange(option.value)}
           onKeyDown={(event) => {
-            const direction = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1
-              : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
-            if (!direction && event.key !== "Home" && event.key !== "End") return;
+            const direction =
+              event.key === "ArrowRight" || event.key === "ArrowDown"
+                ? 1
+                : event.key === "ArrowLeft" || event.key === "ArrowUp"
+                  ? -1
+                  : 0;
+            if (!direction && event.key !== "Home" && event.key !== "End")
+              return;
             event.preventDefault();
-            const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
-              : (index + direction + options.length) % options.length;
+            const next =
+              event.key === "Home"
+                ? 0
+                : event.key === "End"
+                  ? options.length - 1
+                  : (index + direction + options.length) % options.length;
             const nextOption = options[next];
             if (!nextOption) return;
             onChange(nextOption.value);
-            event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus();
+            const radios = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+            radios?.[next]?.focus();
           }}
           className={cn(
             "min-h-control inline-flex max-w-full items-center justify-center gap-2 rounded-md px-3 py-1 type-button transition-colors",
             value === option.value
-              ? "bg-overlay-strong text-foreground"
+              ? "bg-card text-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground",
           )}
         >
           {Icon ? <Icon aria-hidden="true" /> : null}
-          <span className="min-w-0 [overflow-wrap:anywhere]">{option.label}</span>
+          <span className="min-w-0 [overflow-wrap:anywhere]">
+            {option.label}
+          </span>
         </button>
       ))}
     </div>
@@ -120,13 +142,15 @@ function SettingRow({
   readonly children: ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+    <GroupedRow>
       <div className="min-w-0 flex-1 basis-[18em]">
-        <Label asChild><p>{title}</p></Label>
-        <p className="mt-1 text-14 text-muted-foreground">{description}</p>
+        <Label asChild>
+          <p>{title}</p>
+        </Label>
+        <p className="mt-1 text-13 text-text-tertiary">{description}</p>
       </div>
-      {children}
-    </div>
+      <div className="ml-auto min-w-0 max-w-full">{children}</div>
+    </GroupedRow>
   );
 }
 
@@ -177,7 +201,13 @@ const SIDEBAR_MODE_OPTIONS: readonly { value: SidebarMode; label: string }[] = [
   { value: "hover", label: "Expand on hover" },
 ];
 
-function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; readonly label: string }) {
+function SidebarWidthControl({
+  sidebar,
+  label,
+}: {
+  readonly sidebar: SidebarId;
+  readonly label: string;
+}) {
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   return (
@@ -192,7 +222,9 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
         onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
         className="min-w-0 max-w-full flex-1 basis-[10em] accent-primary"
       />
-      <span className="min-w-[5ch] text-right font-mono text-13 text-muted-foreground">{width}px</span>
+      <span className="min-w-[5ch] text-right font-mono text-13 text-muted-foreground">
+        {width}px
+      </span>
       <Button
         variant="ghost"
         size="icon"
@@ -208,7 +240,12 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
   );
 }
 
-function ScaleControl({ id, label, scale, onChange }: {
+function ScaleControl({
+  id,
+  label,
+  scale,
+  onChange,
+}: {
   readonly id: string;
   readonly label: string;
   readonly scale: number;
@@ -259,13 +296,22 @@ function ScaleControl({ id, label, scale, onChange }: {
             }}
             className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
           />
-          <div className="flex flex-wrap justify-between gap-x-2 text-13 text-muted-foreground" aria-hidden="true">
+          <div
+            className="flex flex-wrap justify-between gap-x-2 text-13 text-muted-foreground"
+            aria-hidden="true"
+          >
             <span>{DISPLAY_SCALE_MIN}×</span>
             <span>{DISPLAY_SCALE_MAX}×</span>
           </div>
-          <p className="text-13 text-muted-foreground">Default: {DISPLAY_SCALE_DEFAULT}×</p>
+          <p className="text-13 text-muted-foreground">
+            Default: {DISPLAY_SCALE_DEFAULT}×
+          </p>
         </div>
-        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-13 text-muted-foreground">
+        <output
+          htmlFor={id}
+          aria-live="off"
+          className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-13 text-muted-foreground"
+        >
           {multiplier}
         </output>
       </div>
@@ -277,27 +323,37 @@ function SidebarSettings() {
   const sidebarMode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
   return (
-    <Card>
-      <DisplaySectionHeader icon={PanelLeft} title="Sidebar">
-        Choose how navigation opens and how much space it uses. You can also drag a sidebar&apos;s edge to resize it.
-      </DisplaySectionHeader>
-      <CardContent className="space-y-5">
-        <SettingRow title="Main sidebar" description="Expanded, icons only, or icons that expand on hover.">
-          <SegmentedChoice
-            label="Main sidebar"
-            options={SIDEBAR_MODE_OPTIONS}
-            value={sidebarMode}
-            onChange={setSidebarMode}
-          />
-        </SettingRow>
-        <SettingRow title="Main sidebar width" description="Used when the main sidebar is expanded.">
-          <SidebarWidthControl sidebar="dashboard" label="Main sidebar width" />
-        </SettingRow>
-        <SettingRow title="Assistant sidebar width" description="The agents and chats list in the assistant.">
-          <SidebarWidthControl sidebar="assistant" label="Assistant sidebar width" />
-        </SettingRow>
-      </CardContent>
-    </Card>
+    <GroupedList
+      title="Sidebar"
+      footer="Choose how navigation opens and how much space it uses. You can also drag a sidebar’s edge to resize it."
+    >
+      <SettingRow
+        title="Main sidebar"
+        description="Expanded, icons only, or icons that expand on hover."
+      >
+        <SegmentedChoice
+          label="Main sidebar"
+          options={SIDEBAR_MODE_OPTIONS}
+          value={sidebarMode}
+          onChange={setSidebarMode}
+        />
+      </SettingRow>
+      <SettingRow
+        title="Main sidebar width"
+        description="Used when the main sidebar is expanded."
+      >
+        <SidebarWidthControl sidebar="dashboard" label="Main sidebar width" />
+      </SettingRow>
+      <SettingRow
+        title="Assistant sidebar width"
+        description="The agents and chats list in the assistant."
+      >
+        <SidebarWidthControl
+          sidebar="assistant"
+          label="Assistant sidebar width"
+        />
+      </SettingRow>
+    </GroupedList>
   );
 }
 
@@ -314,12 +370,12 @@ function ColorEditor() {
   const color = (key: ColorKey) => resolveColor(editMode, overrides, key);
 
   return (
-    <Card>
-      <DisplaySectionHeader icon={Palette} title="Colors">
-        Make each theme your own. Preview changes below and check that your text stays readable.
-      </DisplaySectionHeader>
-      <CardContent className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+    <div className="space-y-6">
+      <GroupedList
+        title="Colors"
+        footer="Make each theme your own. Preview changes below and check that your text stays readable."
+      >
+        <GroupedRow>
           <SegmentedChoice
             label="Theme to edit"
             options={COLOR_MODE_OPTIONS}
@@ -327,91 +383,136 @@ function ColorEditor() {
             onChange={setEditMode}
           />
           {editMode !== resolved && (
-            <Button variant="outline" size="sm" onClick={() => setMode(editMode)}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setMode(editMode)}
+            >
               Switch to {editMode} theme to preview
             </Button>
           )}
-        </div>
+        </GroupedRow>
+      </GroupedList>
 
-        <section
-          aria-label="Chat appearance preview"
-          className="space-y-3 rounded-xl border p-4"
-          style={{ backgroundColor: color("background"), color: color("foreground"), borderColor: color("border") }}
+      <section
+        aria-label="Chat appearance preview"
+        className="space-y-3 rounded-xl border p-4"
+        style={{
+          backgroundColor: color("background"),
+          color: color("foreground"),
+          borderColor: color("border"),
+        }}
+      >
+        <p className="type-row-title">Chat preview · {editMode}</p>
+        <UserMessageBubble
+          className="ml-auto w-fit max-w-[85%] text-16"
+          style={{
+            backgroundColor: color("chat-bubble"),
+            color: color("chat-bubble-foreground"),
+          }}
         >
-          <p className="type-row-title">Chat preview · {editMode}</p>
-          <UserMessageBubble
-            className="ml-auto w-fit max-w-[85%] text-16"
-            style={{ backgroundColor: color("chat-bubble"), color: color("chat-bubble-foreground") }}
-          >
-            Show me the services I have connected.
-          </UserMessageBubble>
-          <p className="text-16">You can manage your connected services in Plugins.</p>
-        </section>
+          Show me the services I have connected.
+        </UserMessageBubble>
+        <p className="text-16">
+          You can manage your connected services in Plugins.
+        </p>
+      </section>
 
-        <ul className="grid gap-x-8 gap-y-2 sm:grid-cols-2" aria-label={`${editMode} theme colors`}>
+      <GroupedList
+        title={`${editMode === "light" ? "Light" : "Dark"} theme colors`}
+      >
+        <ul aria-label={`${editMode} theme colors`}>
           {EDITABLE_COLORS.map(({ key, label }) => {
             const value = color(key);
             const customized = key in overrides;
             return (
-              <li key={key} className="flex flex-wrap items-center gap-2">
-                <Label asChild><span className="min-w-0 flex-1">
-                  {label}
-                  {customized && <FieldHelp className="ml-2 text-text-tertiary">Customized</FieldHelp>}
-                </span></Label>
-                <input
-                  type="color"
-                  aria-label={`${label} color`}
-                  value={value.toLowerCase()}
-                  onChange={(e) => setCustomColor(editMode, key, e.target.value)}
-                  className="h-7 w-9 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
-                />
-                <HexField
-                  label={label}
-                  value={value}
-                  onCommit={(next) => setCustomColor(editMode, key, next)}
-                />
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  aria-label={`Reset ${label}`}
-                  title="Reset to default"
-                  disabled={!customized}
-                  onClick={() => resetCustomColors(editMode, key)}
-                  className={cn(!customized && "invisible")}
-                >
-                  <RotateCcw className="size-3" />
-                </Button>
-              </li>
+              <GroupedRow asChild key={key}>
+                <li>
+                  <Label asChild>
+                    <span className="min-w-0 flex-1">
+                      {label}
+                      {customized && (
+                        <FieldHelp className="ml-2 text-text-tertiary">
+                          Customized
+                        </FieldHelp>
+                      )}
+                    </span>
+                  </Label>
+                  <input
+                    type="color"
+                    aria-label={`${label} color`}
+                    value={value.toLowerCase()}
+                    onChange={(e) =>
+                      setCustomColor(editMode, key, e.target.value)
+                    }
+                    className="h-7 w-9 cursor-pointer rounded-md border-0 bg-transparent p-0.5"
+                  />
+                  <HexField
+                    label={label}
+                    value={value}
+                    onCommit={(next) => setCustomColor(editMode, key, next)}
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={`Reset ${label}`}
+                    title="Reset to default"
+                    disabled={!customized}
+                    onClick={() => resetCustomColors(editMode, key)}
+                    className={cn(!customized && "invisible")}
+                  >
+                    <RotateCcw className="size-3" />
+                  </Button>
+                </li>
+              </GroupedRow>
             );
           })}
         </ul>
+      </GroupedList>
 
-        <div className="space-y-1.5">
-          <p className="type-row-title">Readability</p>
-          <ul className="space-y-1" aria-label="Contrast checks">
-            {CONTRAST_CHECKS.map((check) => {
-              const ratio = contrastRatio(color(check.fg), color(check.bg));
-              const ok = ratio >= check.target;
-              return (
-                <li key={check.label} className="flex items-center gap-2 text-14">
+      <GroupedList title="Readability">
+        <ul aria-label="Contrast checks">
+          {CONTRAST_CHECKS.map((check) => {
+            const ratio = contrastRatio(color(check.fg), color(check.bg));
+            const ok = ratio >= check.target;
+            return (
+              <GroupedRow asChild key={check.label}>
+                <li>
                   {ok ? (
-                    <Check data-ui-icon="" className="size-3.5 shrink-0 text-success" aria-hidden />
+                    <Check
+                      data-ui-icon=""
+                      className="size-3.5 shrink-0 text-success"
+                      aria-hidden
+                    />
                   ) : (
-                    <TriangleAlert data-ui-icon="" className="size-3.5 shrink-0 text-warning" aria-hidden />
+                    <TriangleAlert
+                      data-ui-icon=""
+                      className="size-3.5 shrink-0 text-warning"
+                      aria-hidden
+                    />
                   )}
-                  <span className="flex-1 text-muted-foreground">{check.label}</span>
-                  <span className={cn("font-mono text-13", ok ? "text-muted-foreground" : "text-warning")}>
+                  <span className="flex-1 text-muted-foreground">
+                    {check.label}
+                  </span>
+                  <span
+                    className={cn(
+                      "font-mono text-13",
+                      ok ? "text-muted-foreground" : "text-warning",
+                    )}
+                  >
                     {ratio.toFixed(1)}:1 {ok ? "" : `(needs ${check.target}:1)`}
                   </span>
                 </li>
-              );
-            })}
-          </ul>
-        </div>
+              </GroupedRow>
+            );
+          })}
+        </ul>
+      </GroupedList>
 
-        <div className="flex justify-end">
+      <GroupedList>
+        <GroupedRow className="justify-end">
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
             disabled={customizedCount === 0}
             onClick={() => resetCustomColors(editMode)}
@@ -419,9 +520,9 @@ function ColorEditor() {
             <RotateCcw className="size-3" />
             Reset {editMode} colors
           </Button>
-        </div>
-      </CardContent>
-    </Card>
+        </GroupedRow>
+      </GroupedList>
+    </div>
   );
 }
 
@@ -438,46 +539,78 @@ export function DisplaySettings() {
 
   return (
     <div className="space-y-6">
-      <Card>
-        <DisplaySectionHeader icon={SunMoon} title="Display">
-          Make NyxID comfortable to read. Your choices are saved in this browser.
-        </DisplaySectionHeader>
-        <CardContent>
-          <div className="space-y-5">
-            <SettingRow title="Theme" description="System follows your device's light or dark setting.">
-              <SegmentedChoice label="Theme" options={THEME_OPTIONS} value={mode} onChange={setMode} />
-            </SettingRow>
-            <SettingRow title="Text size" description="Resize text and icons together. Controls adapt to keep them readable.">
-              <ScaleControl id="text-size" label="Text size" scale={textScale} onChange={setTextScale} />
-            </SettingRow>
-            <SettingRow title="Spacing" description="Choose how much room sits between controls and content.">
-              <ScaleControl id="spacing" label="Spacing" scale={density} onChange={setDensity} />
-            </SettingRow>
-            <SettingRow title="Motion" description="Follow your device preference or use fewer animations.">
-              <SegmentedChoice label="Motion" options={MOTION_OPTIONS} value={motion} onChange={setMotion} />
-            </SettingRow>
-          </div>
-          <div className="mt-4 flex justify-end">
-            <Button variant="ghost" size="sm" onClick={resetDisplay}>
-              <RotateCcw className="size-3" />
-              Reset display settings
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <DisplaySectionHeader icon={SlidersHorizontal} title="Chat layout">
-          Set a comfortable reading width and writing area for all your chats.
-        </DisplaySectionHeader>
-        <CardContent className="space-y-5">
-          <SettingRow title="Chat content width" description="Maximum width for messages and the composer. Smaller screens fit automatically.">
-            <ChatWidthControl />
-          </SettingRow>
-          <SettingRow title="Maximum composer height" description="How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen.">
-            <ComposerHeightControl />
-          </SettingRow>
-        </CardContent>
-      </Card>
+      <GroupedList
+        title="Display"
+        footer="Make NyxID comfortable to read. Your choices are saved in this browser."
+      >
+        <SettingRow
+          title="Theme"
+          description="System follows your device's light or dark setting."
+        >
+          <SegmentedChoice
+            label="Theme"
+            options={THEME_OPTIONS}
+            value={mode}
+            onChange={setMode}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Text size"
+          description="Resize text and icons together. Controls adapt to keep them readable."
+        >
+          <ScaleControl
+            id="text-size"
+            label="Text size"
+            scale={textScale}
+            onChange={setTextScale}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Spacing"
+          description="Choose how much room sits between controls and content."
+        >
+          <ScaleControl
+            id="spacing"
+            label="Spacing"
+            scale={density}
+            onChange={setDensity}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Motion"
+          description="Follow your device preference or use fewer animations."
+        >
+          <SegmentedChoice
+            label="Motion"
+            options={MOTION_OPTIONS}
+            value={motion}
+            onChange={setMotion}
+          />
+        </SettingRow>
+        <GroupedRow className="justify-end">
+          <Button variant="ghost" size="sm" onClick={resetDisplay}>
+            <RotateCcw className="size-3" />
+            Reset display settings
+          </Button>
+        </GroupedRow>
+      </GroupedList>
+      <GroupedList
+        title="Chat layout"
+        footer="Set a comfortable reading width and writing area for all your chats."
+      >
+        <SettingRow
+          title="Chat content width"
+          description="Maximum width for messages and the composer. Smaller screens fit automatically."
+        >
+          <ChatWidthControl />
+        </SettingRow>
+        <SettingRow
+          title="Maximum composer height"
+          description="How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen."
+        >
+          <ComposerHeightControl />
+        </SettingRow>
+      </GroupedList>
       <SidebarSettings />
       <ColorEditor />
     </div>

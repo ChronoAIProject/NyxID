@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { QueryClient } from "@tanstack/react-query";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import { openAssistant, sendMessage, composerInput } from "./helpers";
 import {
   cmaFrame,
@@ -671,10 +672,25 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
     name: "Preview",
     exact: true,
   });
+  const rail = page.getByRole("navigation", { name: "Conversation index" });
+  async function expectRailInChat() {
+    await expect(async () => {
+      const transcript = (await page.locator("[data-chat-transcript]").boundingBox())!;
+      const toolbar = (await page.locator("[data-chat-header-controls]").boundingBox())!;
+      const composer = (await page.locator("[data-composer-dock]").boundingBox())!;
+      const bounds = (await rail.boundingBox())!;
+      expect(bounds.x + bounds.width).toBeCloseTo(transcript.x + transcript.width, 0);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual((await preview.boundingBox())!.x + 1);
+      expect(bounds.y).toBeCloseTo(Math.max(transcript.y, toolbar.y + toolbar.height + 8), 0);
+      expect(bounds.y + bounds.height).toBeCloseTo(Math.min(transcript.y + transcript.height, composer.y), 0);
+      expect(bounds.height).toBeGreaterThan(300);
+    }).toPass();
+  }
   const machine = preview.getByRole("region", { name: "Live machine desktop" });
   await expect(machine).toBeVisible();
   const panel = card(page);
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  await expectRailInChat();
   const machineBounds = (await machine.boundingBox())!;
   const cmaBounds = (await panel.boundingBox())!;
   expect(cmaBounds.x).toBeCloseTo(machineBounds.x - 12, 0);
@@ -695,6 +711,7 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   await divider.focus();
   await page.keyboard.press("ArrowLeft");
   await expect(divider).toHaveAttribute("aria-valuenow", "52");
+  await expectRailInChat();
   const resizedPreview = (await preview.boundingBox())!;
   const resizedCmaBounds = (await panel.boundingBox())!;
   expect(resizedCmaBounds.width).toBeCloseTo(
@@ -711,9 +728,15 @@ test("stacks CMA and machine cards in one resizable preview column", async ({
   await expect(preview).toBeVisible();
   await expect(panel.getByRole("status")).toHaveText("Working");
   await expect(divider).toHaveAttribute("aria-valuenow", "52");
+  await expectRailInChat();
+  const reviewScreenshots = join(homedir(), ".heca/plans/assistant-settings-rail-ui/after");
+  await mkdir(reviewScreenshots, { recursive: true });
+  await page.screenshot({ path: join(reviewScreenshots, "rail-desktop-cma-only.png"), animations: "disabled" });
   await page.getByRole("button", { name: "Show machine", exact: true }).click();
   await expect(machine).toBeVisible();
   await panel.getByRole("button", { name: "Maximise CMA session" }).click();
+  await expectRailInChat();
+  await page.screenshot({ path: join(reviewScreenshots, "rail-desktop-cma-and-machine.png"), animations: "disabled" });
   await page.screenshot({ path: "/tmp/nyxid-cma-with-machine.png" });
 });
 

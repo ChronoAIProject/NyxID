@@ -67,14 +67,25 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
   useLayoutEffect(() => {
     const element = container.current;
     const measureElement = pitchMeasure.current;
-    if (!element || !measureElement || typeof ResizeObserver === "undefined") return;
+    const transcript = scrollRef.current;
+    const parent = element?.parentElement;
+    if (!element || !measureElement || !transcript || !parent || typeof ResizeObserver === "undefined") return;
+    const layoutRoot = transcript.closest("[data-chat-content-layout]");
+    const controls = layoutRoot?.querySelector("[data-chat-header-controls]");
+    const composer = layoutRoot?.querySelector("[data-composer-dock], [data-composer-surface], [data-composer-band]");
     let frame = 0;
     const measure = () => {
       frame = 0;
-      // Keep the floating rail below the toolbar, including wrapped headers.
-      const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
-      const parent = element.parentElement;
-      element.style.top = `${controls && parent ? Math.max(0, controls.getBoundingClientRect().bottom - parent.getBoundingClientRect().top + 8) : 0}px`;
+      const bounds = parent.getBoundingClientRect();
+      const viewport = transcript.getBoundingClientRect();
+      const top = Math.max(viewport.top, controls ? controls.getBoundingClientRect().bottom + 8 : viewport.top);
+      const bottom = Math.max(top, Math.min(viewport.bottom, composer ? composer.getBoundingClientRect().top : viewport.bottom - bottomInset));
+      // Use the transcript's actual column and visible viewport. The composer
+      // can already be outside that viewport; subtracting its inset again
+      // would shorten the rail, especially beside a preview column.
+      element.style.top = `${Math.max(0, top - bounds.top)}px`;
+      element.style.bottom = `${Math.max(0, bounds.bottom - bottom)}px`;
+      element.style.right = `${Math.max(0, bounds.right - viewport.right + transcript.offsetWidth - transcript.clientWidth)}px`;
       const pitch = measureElement.getBoundingClientRect().height || 7;
       const height = element.clientHeight;
       setLayout((current) => current.height === height && current.pitch === pitch ? current : { height, pitch });
@@ -86,11 +97,13 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
     });
     observer.observe(element);
     observer.observe(measureElement);
-    const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
+    observer.observe(parent);
+    observer.observe(transcript);
     if (controls) observer.observe(controls);
+    if (composer) observer.observe(composer);
     measure();
     return () => { observer.disconnect(); cancelAnimationFrame(frame); };
-  }, [scrollRef]);
+  }, [scrollRef, bottomInset]);
 
   const reveal = useCallback((index: number) => {
     const element = rail.current;
@@ -180,7 +193,7 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
     setHover(null);
   }
   return (
-    <div ref={container} data-chat-index-container="" className="pointer-events-none absolute top-0 right-[var(--assistant-scrollbar-width,0px)] z-30 hidden w-[var(--chat-index-track-width)] items-center justify-end md:flex" style={{ bottom: `var(--assistant-composer-inset, ${bottomInset}px)` }}>
+    <div ref={container} data-chat-index-container="" className="pointer-events-none absolute inset-y-0 right-0 z-30 hidden w-[var(--chat-index-track-width)] items-center justify-end md:flex">
       <span ref={pitchMeasure} aria-hidden="true" data-chat-index-pitch="" className="pointer-events-none absolute w-0" style={{ height: "var(--chat-index-pitch)" }} />
       <nav
         ref={rail}
@@ -270,7 +283,7 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
               >
                 <span aria-hidden="true" className={cn(
                   "h-[var(--chat-index-tick-thickness)] shrink-0 rounded-full bg-current transition-[color,opacity] duration-150 motion-reduce:transition-none",
-                  selected || entry.role === "assistant" ? "w-[var(--chat-index-tick-width)]" : "w-[calc(var(--chat-index-tick-width)/2)]",
+                  entry.role === "assistant" ? "w-[var(--chat-index-tick-width)]" : "w-[calc(var(--chat-index-tick-width)/2)]",
                   selected ? "text-nyx-secondary-400 opacity-100" : "text-text-tertiary opacity-50 group-hover:text-muted-foreground group-hover:opacity-100 group-focus-visible:text-muted-foreground group-focus-visible:opacity-100 group-active:text-muted-foreground group-active:opacity-100",
                 )} />
               </button>
