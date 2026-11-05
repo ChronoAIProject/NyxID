@@ -53,6 +53,8 @@ pub struct AgentEvent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_contexts: Vec<ChannelTurnContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
@@ -361,6 +363,8 @@ pub struct StreamReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_watch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
@@ -546,6 +550,9 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Hot-path hint only. Receipt cleanup never depends on this marker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automation_v2: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_head: Option<super::generated_artifact::DeliveryHead>,
     #[serde(default)]

@@ -171,6 +171,26 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
     }))
 }
 
+/// Read-only metadata; no transcript, instruction, credentials or result bodies.
+pub async fn automation_continuations(
+    State(state): State<AppState>,
+    auth: crate::mw::auth::AuthUser,
+) -> AppResult<Json<crate::services::trigger_schedule::continuation::Diagnostic>> {
+    crate::handlers::admin_helpers::require_admin_or_operator(
+        &state,
+        &auth,
+        "admin.automation_continuations.get",
+    )
+    .await?;
+    Ok(Json(
+        crate::services::trigger_schedule::continuation::diagnostic(
+            &state.db,
+            state.config.automation_continuation_v2_enabled,
+        )
+        .await?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

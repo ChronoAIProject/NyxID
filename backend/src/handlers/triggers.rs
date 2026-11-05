@@ -628,6 +628,12 @@ pub struct RunsQuery {
 
 #[derive(Serialize)]
 pub struct RunResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinator_deadline: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_cancel: Option<bool>,
     pub id: String,
     pub scheduled_at: String,
     pub started_at: Option<String>,
@@ -660,6 +666,16 @@ pub struct MissedResponse {
 
 pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunResponse {
     RunResponse {
+        coordinator_deadline: run.coordinator.as_ref().map(|c| c.deadline.to_rfc3339()),
+        wait_kind: run.coordinator.as_ref().and_then(|c| c.wait_kind.clone()),
+        can_cancel: run.coordinator.as_ref().map(|c| {
+            c.protocol == 2
+                && matches!(
+                    run.outcome,
+                    crate::models::trigger_run::RunOutcome::Started
+                        | crate::models::trigger_run::RunOutcome::Waiting
+                )
+        }),
         id: run.id,
         scheduled_at: run.scheduled_at.to_rfc3339(),
         started_at: run.started_at.map(|t| t.to_rfc3339()),
@@ -778,6 +794,28 @@ pub async fn setup(
         thread_policy: prefill.thread_policy,
         confirmation_policy: prefill.confirmation_policy,
     }))
+}
+
+pub async fn cancel_run(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, run_id)): Path<(String, String)>,
+) -> AppResult<Json<RunResponse>> {
+    require_first_party_human(&auth)?;
+    let run = schedules::continuation::cancel(
+        &state.db,
+        &auth.user_id.to_string(),
+        &id,
+        &run_id,
+        "cancelled",
+        &state.config.frontend_url,
+    )
+    .await?;
+    let targets =
+        schedules::continuation::owned_targets(&state.db, &auth.user_id.to_string(), &id, &run_id)
+            .await?;
+    super::trigger_scheduler::cancel_transports(&state, &targets).await?;
+    Ok(Json(run_response(run)))
 }
 
 #[cfg(test)]

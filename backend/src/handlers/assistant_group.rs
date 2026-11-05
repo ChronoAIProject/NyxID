@@ -240,6 +240,13 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
             Box::pin(super::org_group::advance(state, &group)).await;
             return Ok(());
         }
+        if group.followers.iter().any(|f| f.automation.is_some()) {
+            crate::services::trigger_schedule::group::recover(&state.db, &group).await?;
+            let current = groups::get(&state.db, owner, group_id).await?;
+            for (work, agent_id) in crate::services::trigger_schedule::group::queued(&current) {
+                run_member_with_work(state, owner, &current, &agent_id, Some(work)).await?;
+            }
+        }
         let now = Utc::now();
         for agent_id in &group.pending_agent_ids {
             // A member still answering picks up its next message afterwards.
@@ -329,6 +336,16 @@ async fn run_member(
     group: &AssistantGroup,
     agent_id: &str,
 ) -> AppResult<()> {
+    run_member_with_work(state, owner, group, agent_id, None).await
+}
+
+async fn run_member_with_work(
+    state: &AppState,
+    owner: &str,
+    group: &AssistantGroup,
+    agent_id: &str,
+    work: Option<crate::models::trigger_run::AutomationWork>,
+) -> AppResult<()> {
     if !group.member_agent_ids.iter().any(|id| id == agent_id) {
         return Ok(());
     }
@@ -350,11 +367,20 @@ async fn run_member(
     }
     let thread = groups::member_thread(&state.db, owner, &group.id, agent_id).await?;
     let since = thread.as_ref().map_or(0, |row| row.group_seen_seq);
-    let (transcript, newest) = groups::transcript_since(&state.db, owner, &group.id, since).await?;
+    let (transcript, newest) = if let Some(work) = work.as_ref() {
+        (
+            crate::services::trigger_schedule::group::transcript(&state.db, group, work).await?,
+            since + 1,
+        )
+    } else {
+        groups::transcript_since(&state.db, owner, &group.id, since).await?
+    };
     if newest <= since {
         return Ok(());
     }
     let start = TurnStart {
+        automation_work: work.clone(),
+        automation_parent: None,
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
@@ -368,10 +394,14 @@ async fn run_member(
         org_access: None,
         attachment_ids: Vec::new(),
         group_request_id: None,
-        group_attachments: crate::services::assistant_upload_service::group_attachments(
-            &state.db, owner, &group.id, since,
-        )
-        .await?,
+        group_attachments: if work.is_some() {
+            Vec::new()
+        } else {
+            crate::services::assistant_upload_service::group_attachments(
+                &state.db, owner, &group.id, since,
+            )
+            .await?
+        },
         trigger: None,
         conversation_id: thread.as_ref().map(|row| row.id.clone()),
         text: engine::excerpt(
@@ -407,11 +437,16 @@ async fn run_member(
     };
     match started {
         Started::Turn { conversation, .. } => {
-            groups::set_seen(&state.db, owner, &conversation.id, newest).await?;
+            if work.is_none() {
+                groups::set_seen(&state.db, owner, &conversation.id, newest).await?;
+            }
         }
         // Retried when the member settles or by the sweep.
         Started::Busy | Started::PoolFull => {
-            groups::address(&state.db, owner, &group.id, std::slice::from_ref(&agent.id)).await?;
+            if work.is_none() {
+                groups::address(&state.db, owner, &group.id, std::slice::from_ref(&agent.id))
+                    .await?;
+            }
         }
     }
     Ok(())
@@ -457,6 +492,25 @@ pub(crate) async fn member_settled(
         return;
     };
     let owner = row.user_id.as_str();
+    if row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.as_ref())
+        .is_some_and(|w| w.role == "group")
+    {
+        match groups::get(&state.db, owner, group_id).await {
+            Ok(group) => {
+                if let Err(error) =
+                    crate::services::trigger_schedule::group::recover(&state.db, &group).await
+                {
+                    tracing::debug!(%error, "Automation group result deferred");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "Automation group unavailable"),
+        }
+        Box::pin(advance(state, owner, group_id)).await;
+        return;
+    }
     if row.agent_owner_id.is_some() {
         match crate::services::org_group_service::get(&state.db, owner, group_id, None).await {
             Ok(access) if access.org.is_some() => {

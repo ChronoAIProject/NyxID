@@ -169,6 +169,8 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        automation_work: None,
+        automation_parent: None,
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
@@ -230,7 +232,18 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         if row.pending_events.is_empty() || live_turn(&row, Utc::now()).is_some() {
             return Ok(());
         }
-        if !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
+        if row.pending_events.iter().all(|e| {
+            e.kind != crate::services::async_service_operation::EVENT_KIND
+                && e.automation_work
+                    .as_ref()
+                    .is_some_and(|w| w.role == "coordinator")
+        }) {
+            return Ok(());
+        }
+        let automation =
+            crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
+                .await?;
+        if !automation && !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
             return Ok(());
         }
         // A destroyed agent never runs again; events that reached it late are dropped.
@@ -253,15 +266,16 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         let Some(permit) = acquire(state, pool).await? else {
             return Ok(());
         };
-        if !RateWindowStore::admit(
-            &state.db,
-            "assistant_event_turns",
-            owner,
-            team::EVENT_TURNS_PER_HOUR,
-            Duration::from_secs(3600),
-        )
-        .await?
-        .allowed
+        if !automation
+            && !RateWindowStore::admit(
+                &state.db,
+                "assistant_event_turns",
+                owner,
+                team::EVENT_TURNS_PER_HOUR,
+                Duration::from_secs(3600),
+            )
+            .await?
+            .allowed
         {
             return Ok(());
         }
@@ -343,6 +357,9 @@ pub(crate) async fn owner_denial_decided(
     owner: &str,
     row: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
 ) {
+    if row.automation_work.is_some() {
+        return;
+    }
     if row.decider != "user"
         || row.status != "denied"
         || row.trigger_run_id.is_some()
@@ -479,7 +496,19 @@ pub(crate) async fn after_turn(
         super::assistant_group::member_settled(state, row, text, error.map(|error| error.code))
             .await;
     }
+    if turn
+        .automation_work
+        .as_ref()
+        .is_some_and(|w| w.role == "direct")
+        && let Err(error) = crate::services::trigger_schedule::direct::settled(&state.db, row).await
+    {
+        tracing::debug!(%error, "Automation handoff publication deferred");
+    }
     if row.is_subagent()
+        && !turn
+            .automation_work
+            .as_ref()
+            .is_some_and(|w| matches!(w.role.as_str(), "direct" | "group"))
         && !row.guest_turn
         && let Some((target, published_assignment)) =
             match settled_report_target(state, row, turn).await {
@@ -681,6 +710,10 @@ pub(crate) async fn permission_decided(
     owner: &str,
     request: &AssistantAcknowledgement,
 ) {
+    if request.automation_work.is_some() {
+        Box::pin(wake(state, owner, &request.conversation_id)).await;
+        return;
+    }
     let allowed = request.status == "allowed";
     let target = match request.kind.as_str() {
         "service" => format!(
@@ -920,6 +953,19 @@ fn started_json(started: Started) -> Value {
     }
 }
 
+fn started_for_work(started: Started, chat: &ChatAuthority) -> AppResult<Value> {
+    if chat.automation_work.is_some() {
+        match &started {
+            Started::Busy => return Err(AppError::Conflict("automation_child_busy".into())),
+            Started::PoolFull => {
+                return Err(AppError::Conflict("automation_child_pool_full".into()));
+            }
+            Started::Turn { .. } => {}
+        }
+    }
+    Ok(started_json(started))
+}
+
 /// Give a specialist work in its home thread, reporting to `report_to`.
 pub(crate) async fn assign(
     state: &AppState,
@@ -949,6 +995,9 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            automation_work: None,
+            automation_parent: execution_parent
+                .and_then(crate::services::trigger_schedule::direct::parent),
             execution_enrollment: false,
             execution_parent: execution_parent
                 .and_then(crate::services::execution_permission_dispatch::tasks::parent),
@@ -1668,7 +1717,7 @@ async fn dispatch_specialists(
                 ),
                 Ok((agent, _)) => {
                     let task = match args["task"].as_str() {
-                        Some(task) => started_json(
+                        Some(task) => started_for_work(
                             Box::pin(assign(
                                 state,
                                 owner,
@@ -1679,7 +1728,8 @@ async fn dispatch_specialists(
                                 Some(chat),
                             ))
                             .await?,
-                        ),
+                            chat,
+                        )?,
                         None => json!({"status": "idle",
                             "note": "Give it work with nyxid__message_subagent."}),
                     };
@@ -1695,7 +1745,7 @@ async fn dispatch_specialists(
         "message_subagent" => {
             let agent = team::delegable_specialist(db, owner, text_arg(args, "subagent")).await?;
             (
-                started_json(
+                started_for_work(
                     Box::pin(assign(
                         state,
                         owner,
@@ -1706,7 +1756,8 @@ async fn dispatch_specialists(
                         Some(chat),
                     ))
                     .await?,
-                ),
+                    chat,
+                )?,
                 false,
             )
         }
@@ -2498,6 +2549,20 @@ async fn dispatch_groups(
             if engine::get(db, owner, caller).await?.group_id.as_deref() == Some(&group.id) {
                 return Err(AppError::ValidationError(
                     "You are in this group: reply directly instead of posting to it".into(),
+                ));
+            }
+            if chat.automation_work.is_some() {
+                let (message, addressed) = crate::services::trigger_schedule::group::post(
+                    db,
+                    chat,
+                    &group,
+                    text_arg(args, "text"),
+                )
+                .await?;
+                Box::pin(super::assistant_group::advance(state, owner, &group.id)).await;
+                return Ok((
+                    json!({"posted": message.seq, "addressed_agent_ids": addressed, "note": "Tracked automation work accepted. End your turn; NyxID resumes this coordinator after the group's work and handoffs settle."}),
+                    false,
                 ));
             }
             let author = team::ensure_nyxbot(db, owner).await?;

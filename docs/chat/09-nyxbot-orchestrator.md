@@ -1871,7 +1871,6 @@ home reply binding and guest execution lane; adoption is atomic and keeps the
 relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
 workers, then enable for an admin. Disable and retire before binary downgrade.
 
-
 ### Finding organization channel member verification (#2242)
 
 On a Lark / Feishu Channel bot detail page, **Setup status** separates app credentials,
@@ -1883,3 +1882,17 @@ in a private message to the bot, waits for observation, then confirms in their o
 first-party NyxID session. Expired codes must be regenerated. Connection success,
 a callback challenge, or delivery receipt does not complete member verification or
 prove an agent answer; membership and expiry checks remain mandatory.
+
+## Automation coordinator completion
+
+Coordinator completion is an optional, default-off enrollment protocol; see
+[Automations](../NYXBOT_SCHEDULES.md#coordinator-completion-v2) for rollout,
+limits, history and cancellation. The delivery-selected thread coordinates:
+NyxBot home, a dedicated NyxBot/specialist webhook thread, or a per-run thread.
+Run now follows the same selection. Accepted assignments and group requests,
+including member @mention handoffs, carry server-derived run/work lineage through
+confirmation cards and async results. Their durable results resume that
+coordinator before final completion. This lineage grants no execution authority;
+webhook confirmation floors also apply to v2 children. Initial occurrence budgets
+are charged once; continuations use per-run bounds and ordinary model billing.
+A disabled option blocks new enrollment while persisted work continues draining.

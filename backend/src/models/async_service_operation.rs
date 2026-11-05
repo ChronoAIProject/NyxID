@@ -58,6 +58,8 @@ pub struct CmaOperation {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeliveryBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     #[serde(default)]
     pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,

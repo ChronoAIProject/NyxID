@@ -3529,6 +3529,8 @@ async fn start_chat_turn(
         note.push_str(&telegram_input.note);
     }
     let start = TurnStart {
+        automation_work: None,
+        automation_parent: None,
         execution_enrollment: false,
         execution_parent: None,
         channel_context: Some(source_context.clone()),
