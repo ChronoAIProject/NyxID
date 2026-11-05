@@ -158,7 +158,7 @@ async fn invocation_diagnostic_disconnect_aborts_in_flight_http_work() {
     };
     let started = std::time::Instant::now();
     let (result, ()) = tokio::join!(finished, disconnect);
-    assert!(started.elapsed() < std::time::Duration::from_millis(750));
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
     let response = result.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(

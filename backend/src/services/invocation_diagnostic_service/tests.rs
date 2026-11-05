@@ -335,7 +335,7 @@ async fn monitoring_outage_and_timeout_are_unknown_and_bounded() {
         let (state, actor, id, server) = fixture().await;
         let template = if slow {
             ResponseTemplate::new(200)
-                .set_delay(Duration::from_secs(2))
+                .set_delay(Duration::from_secs(4))
                 .set_body_json(status(&id, "healthy", true, "ok"))
         } else {
             ResponseTemplate::new(503).set_body_string("secret internal failure")
@@ -364,7 +364,7 @@ async fn monitoring_outage_and_timeout_are_unknown_and_bounded() {
                 Outcome::Unavailable
             }
         );
-        assert!(start.elapsed() < Duration::from_millis(1100));
+        assert!(start.elapsed() < Duration::from_millis(3500));
     }
 }
 

@@ -23,7 +23,9 @@ use crate::{
 };
 
 /// Includes feature/ACL reads, cluster admission, both upstream requests and body reads.
-pub(crate) const BUDGET: Duration = Duration::from_millis(750);
+/// The probe path includes caller authorization and one live downstream check.
+/// Keep it bounded, but allow a normal remote provider round trip to finish.
+pub(crate) const BUDGET: Duration = Duration::from_secs(3);
 static IN_FLIGHT: Semaphore = Semaphore::const_new(32);
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]

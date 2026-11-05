@@ -184,7 +184,7 @@ cannot undo upstream discovery. Eliminating this configuration race requires
 an additive chrono-probe API contract.
 
 The entire diagnostic (feature/ACL reads, rate admission, both upstream
-requests and response reads) has a 750ms budget. Client disconnect cancels the
+requests and response reads) has a 3-second budget. Client disconnect cancels the
 HTTP work; no detached task retains the bearer. Metrics admission has an
 additional maximum of 25ms. Redirects and ambient HTTP proxies remain disabled,
 and responses retain the existing 64KiB bound. A MongoDB token bucket permits
