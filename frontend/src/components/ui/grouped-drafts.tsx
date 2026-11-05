@@ -27,7 +27,9 @@ export function GroupedDraftBoundary({
   }, []);
   const confirmDiscard = useCallback((owner?: string) => {
     if (request.current) return request.current.promise;
-    const dirty = [...current.current.values()].some((entry) => entry.dirty && (!owner || entry.owner === owner || entry.owner.startsWith(`${owner}/`)));
+    const relevant = [...current.current.values()].filter((entry) => !owner || entry.owner === owner || entry.owner.startsWith(`${owner}/`));
+    if (relevant.some((entry) => entry.pending)) return Promise.resolve(false);
+    const dirty = relevant.some((entry) => entry.dirty);
     if (!dirty) return Promise.resolve(true);
     let resolve!: (discard: boolean) => void;
     const promise = new Promise<boolean>((done) => { resolve = done; });
@@ -105,7 +107,12 @@ export function GroupedDraftNavigation({ active }: { readonly active: boolean })
           current.get("agent") === next.get("agent") &&
           current.get("details") === next.get("details") &&
           current.get("proposal") === next.get("proposal");
-        return sameDrawer ? false : !(await confirm());
+        // Account tabs and canonical chat adoption retain their mounted drafts.
+        const sameSettings = action === "REPLACE" && currentLocation.pathname === nextLocation.pathname && (
+          (currentLocation.pathname === "/settings" && current.get("tab") !== next.get("tab")) ||
+          (current.get("panel") === "settings" && next.get("panel") === "settings")
+        );
+        return sameDrawer || sameSettings ? false : !(await confirm());
       },
       enableBeforeUnload: () => dirty,
     });
