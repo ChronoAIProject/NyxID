@@ -40,8 +40,9 @@ original allocation-authoring presentation changes.
 The customer Billing and Usage tabs now share an available balance preview,
 including the embedded account panel. It combines nonnegative wallet availability
 and realizable active grant credits with exact arithmetic. Suspended or missing
-wallets restrict the displayed spendable balance. Allowances remain beside this
-balance in their native units. The expanded breakdown preserves grouped allowance
-details and paginates individual grant history independently of the full grant
+wallets restrict the displayed spendable balance. The compact default shows one
+primary total and wallet action, followed by a View breakdown chevron. Wallet and
+grant subtotals, accounting states and native-unit allowances appear below that
+disclosure. The expanded breakdown preserves grouped allowance details and paginates individual grant history independently of the full grant
 summary. See [the Billing UI glossary](../BILLING_UI_GLOSSARY.md) for the current
 read contract and state handling; funding precedence and mutations are unchanged.

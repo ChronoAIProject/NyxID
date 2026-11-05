@@ -44,7 +44,8 @@ const MEMBER_ORG = "33333333-3333-4333-8333-333333333333";
 vi.mock("@/hooks/use-orgs", () => ({ useOrgs: mocks.orgs }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: Object.assign(
-    (select: (state: { user: { id: string } }) => unknown) => select({ user: { id: ACTOR } }),
+    (select: (state: { user: { id: string } }) => unknown) =>
+      select({ user: { id: ACTOR } }),
     { getState: () => ({ user: { id: ACTOR } }) },
   ),
 }));
@@ -127,7 +128,8 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   );
   await act(() => router.load());
   await screen.findByText("Billing owner");
-  if (pageRoute === "/assistant") expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
+  if (pageRoute === "/assistant")
+    expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
   expect(history.location.pathname).toBe(pageRoute);
   if (exploreGroups) {
     const disclosure = screen.queryByText("Explore by service, model or agent");
@@ -195,12 +197,24 @@ beforeEach(() => {
     }),
   );
   sessionStorage.clear();
-  mocks.orgs.mockReturnValue(query([
-    { id: ORG, display_name: "Merchant organization", your_role: "admin" },
-    { id: MEMBER_ORG, display_name: "Member organization", your_role: "member" },
-    { id: "44444444-4444-4444-8444-444444444444", display_name: "Viewer organization", your_role: "viewer" },
-  ]));
-  mocks.wallet.mockReturnValue(query({ ...billingWallet(), lago_subscription_id: "subscription" }));
+  mocks.orgs.mockReturnValue(
+    query([
+      { id: ORG, display_name: "Merchant organization", your_role: "admin" },
+      {
+        id: MEMBER_ORG,
+        display_name: "Member organization",
+        your_role: "member",
+      },
+      {
+        id: "44444444-4444-4444-8444-444444444444",
+        display_name: "Viewer organization",
+        your_role: "viewer",
+      },
+    ]),
+  );
+  mocks.wallet.mockReturnValue(
+    query({ ...billingWallet(), lago_subscription_id: "subscription" }),
+  );
   mocks.usage.mockReturnValue(query(usage()));
   mocks.history.mockReturnValue(query({ topups: [], total: 0 }));
   mocks.grants.mockReturnValue(query({ grants: [] }));
@@ -209,21 +223,33 @@ beforeEach(() => {
   mocks.activity.mockReturnValue(query([]));
 });
 describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
-  beforeEach(() => { pageRoute = route; });
+  beforeEach(() => {
+    pageRoute = route;
+  });
   it("selects only administered owners and scopes every view with URL history", async () => {
     const { history } = await renderPage("/billing");
     await user.click(screen.getByRole("combobox", { name: "Billing owner" }));
-    expect(screen.queryByRole("option", { name: "Member organization" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Viewer organization" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("option", { name: "Merchant organization" }));
+    expect(
+      screen.queryByRole("option", { name: "Member organization" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Viewer organization" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole("option", { name: "Merchant organization" }),
+    );
     await waitFor(() => expect(mocks.wallet).toHaveBeenLastCalledWith(ORG));
     expect(mocks.usage).toHaveBeenLastCalledWith("30d", undefined, ORG);
     expect(mocks.history).toHaveBeenLastCalledWith(1, 10, "30d", ORG);
     expect(mocks.benefits).toHaveBeenLastCalledWith(1, ORG);
     const key = route === "/assistant" ? "panelOwnerId" : "ownerId";
-    expect(new URLSearchParams(history.location.search).get(key)).toContain(ORG);
+    expect(new URLSearchParams(history.location.search).get(key)).toContain(
+      ORG,
+    );
     await act(() => history.back());
-    await waitFor(() => expect(mocks.wallet).toHaveBeenLastCalledWith(undefined));
+    await waitFor(() =>
+      expect(mocks.wallet).toHaveBeenLastCalledWith(undefined),
+    );
     await act(() => history.forward());
     await waitFor(() => expect(mocks.wallet).toHaveBeenLastCalledWith(ORG));
   });
@@ -237,39 +263,78 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     mocks.wallet.mockReturnValue(query(null));
     await renderPage(`/billing?ownerId=${ORG}`);
     expect(mocks.provision).not.toHaveBeenCalled();
-    expect(screen.getByText("No wallet provisioned.")).toBeVisible();
+    expect(screen.getByText(/No wallet provisioned\./)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Provision Wallet" }));
-    await waitFor(() => expect(mocks.provision).toHaveBeenCalledWith({ owner_id: ORG }));
+    await waitFor(() =>
+      expect(mocks.provision).toHaveBeenCalledWith({ owner_id: ORG }),
+    );
   });
   it("repairs a missing subscription only by explicit setup", async () => {
-    mocks.wallet.mockReturnValue(query({ ...billingWallet(), lago_subscription_id: null }));
+    mocks.wallet.mockReturnValue(
+      query({ ...billingWallet(), lago_subscription_id: null }),
+    );
     await renderPage(`/billing?ownerId=${ORG}`);
-    expect(screen.queryByRole("button", { name: "Add credits" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add credits" }),
+    ).not.toBeInTheDocument();
     expect(mocks.provision).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Finish wallet setup" }));
-    await waitFor(() => expect(mocks.provision).toHaveBeenCalledWith({ owner_id: ORG }));
+    await user.click(
+      screen.getByRole("button", { name: "Finish wallet setup" }),
+    );
+    await waitFor(() =>
+      expect(mocks.provision).toHaveBeenCalledWith({ owner_id: ORG }),
+    );
   });
   it("sends the org to checkout and restores the selected owner in the original shell", async () => {
-    mocks.topup.mockResolvedValue({ checkout_url: "https://pay.example/checkout" });
+    mocks.topup.mockResolvedValue({
+      checkout_url: "https://pay.example/checkout",
+    });
     await renderPage(`/billing?ownerId=${ORG}`);
     await user.click(screen.getByRole("button", { name: "Add credits" }));
-    await user.click(screen.getByRole("button", { name: "Continue to payment" }));
-    await waitFor(() => expect(mocks.topup).toHaveBeenCalledWith(expect.objectContaining({ owner_id: ORG })));
-    expect(mocks.openExternal).toHaveBeenCalledWith("https://pay.example/checkout");
-    expect(consumeBillingCheckoutReturn(ACTOR, {})).toEqual(route === "/assistant"
-      ? { to: "/assistant", search: { panel: "billing", panelOwnerId: ORG } }
-      : { to: "/billing", search: { ownerId: ORG } });
+    await user.click(
+      screen.getByRole("button", { name: "Continue to payment" }),
+    );
+    await waitFor(() =>
+      expect(mocks.topup).toHaveBeenCalledWith(
+        expect.objectContaining({ owner_id: ORG }),
+      ),
+    );
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://pay.example/checkout",
+    );
+    expect(consumeBillingCheckoutReturn(ACTOR, {})).toEqual(
+      route === "/assistant"
+        ? { to: "/assistant", search: { panel: "billing", panelOwnerId: ORG } }
+        : { to: "/billing", search: { ownerId: ORG } },
+    );
   });
   it("resumes an org top-up with the same checkout return context", async () => {
-    mocks.history.mockReturnValue(query({ total: 1, topups: [{
-      id: "pending", status: "pending", amount_credits: 10,
-      created_at: "2026-11-05T00:00:00Z", checkout_url: "https://pay.example/resume",
-    }] }));
+    mocks.history.mockReturnValue(
+      query({
+        total: 1,
+        topups: [
+          {
+            id: "pending",
+            status: "pending",
+            amount_credits: 10,
+            created_at: "2026-11-05T00:00:00Z",
+            checkout_url: "https://pay.example/resume",
+          },
+        ],
+      }),
+    );
     await renderPage(`/billing?ownerId=${ORG}`);
-    await user.click(screen.getAllByRole("button", { name: "Resume payment" })[0]!);
-    expect(mocks.openExternal).toHaveBeenCalledWith("https://pay.example/resume");
-    expect(consumeBillingCheckoutReturn(ACTOR, {})?.search).toEqual(route === "/assistant"
-      ? { panel: "billing", panelOwnerId: ORG } : { ownerId: ORG });
+    await user.click(
+      screen.getAllByRole("button", { name: "Resume payment" })[0]!,
+    );
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://pay.example/resume",
+    );
+    expect(consumeBillingCheckoutReturn(ACTOR, {})?.search).toEqual(
+      route === "/assistant"
+        ? { panel: "billing", panelOwnerId: ORG }
+        : { ownerId: ORG },
+    );
     expect(mocks.topup).not.toHaveBeenCalled();
   });
   it("closing an org checkout by changing owner cannot spend from the old wallet", async () => {
@@ -278,9 +343,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await user.keyboard("{Escape}");
     await select("Billing owner", "Personal");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    mocks.topup.mockResolvedValue({ checkout_url: "https://pay.example/personal" });
+    mocks.topup.mockResolvedValue({
+      checkout_url: "https://pay.example/personal",
+    });
     await user.click(screen.getByRole("button", { name: "Add credits" }));
-    await user.click(screen.getByRole("button", { name: "Continue to payment" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continue to payment" }),
+    );
     await waitFor(() => expect(mocks.topup).toHaveBeenCalled());
     expect(mocks.topup.mock.calls[0]![0]).not.toHaveProperty("owner_id");
   });
@@ -300,9 +369,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       document.querySelector(".expandable-service > summary"),
     ).not.toBeVisible();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-    await user.click(
-      screen.getByText("Explore by service, model or agent"),
-    );
+    await user.click(screen.getByText("Explore by service, model or agent"));
     expect(
       document.querySelector(".expandable-service > summary"),
     ).toBeVisible();
@@ -313,15 +380,9 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       "data-state",
       "active",
     );
-    expect(
-      within(screen.getByRole("tabpanel", { name: "Billing" })).getByText(
-        "95 credits",
-      ),
-    ).toBeVisible();
+    expect(screen.getByTitle("95")).toBeVisible();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "View breakdown" }),
-    );
+    await user.click(screen.getByRole("button", { name: "View breakdown" }));
     expect(screen.getByText("100 credits")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Add credits" }));
     expect(screen.getByRole("dialog")).toBeVisible();
@@ -629,7 +690,11 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     const { history } = await renderPage("/billing?tab=billing&action=topup");
     // The user picks Usage while the wallet is still loading.
     await user.click(screen.getByRole("tab", { name: "Usage" }));
-    await waitFor(() => expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage"));
+    await waitFor(() =>
+      expect(history.location.search).toContain(
+        pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage",
+      ),
+    );
     expect(history.location.pathname).toBe(pageRoute);
     expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
     act(() => {
@@ -761,7 +826,10 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       screen.getByText("Acknowledged", { selector: ".usage-status" }),
     ).toBeVisible();
     expect(
-      screen.queryByText("Pending", { exact: true }),
+      within(screen.getByRole("tabpanel", { name: "Usage" })).queryByText(
+        "Pending",
+        { exact: true },
+      ),
     ).not.toBeInTheDocument();
   });
   it("switches the optional breakdown between services, models, and agents and searches its groups", async () => {
@@ -897,9 +965,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       ),
     );
     await renderPage("/billing");
-    await user.click(
-      screen.getByRole("button", { name: "Provision Wallet" }),
-    );
+    await user.click(screen.getByRole("button", { name: "Provision Wallet" }));
     expect(mocks.provision).toHaveBeenCalledWith({});
   });
 });

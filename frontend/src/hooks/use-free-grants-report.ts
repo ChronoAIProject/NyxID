@@ -4,13 +4,26 @@ import { api } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { freeGrantsReportSchema } from "@/schemas/free-grants-report";
 
-export function useFreeGrantsReport(params: URLSearchParams, page: number) {
+export function useFreeGrantsReport(
+  params: URLSearchParams,
+  page: number,
+  servicePage: number,
+) {
   const user = useAuthStore((s) => s.user?.id);
   return useQuery({
-    queryKey: ["admin", "free-grants", user, params.toString(), page],
+    queryKey: [
+      "admin",
+      "free-grants",
+      user,
+      params.toString(),
+      page,
+      servicePage,
+    ],
     queryFn: async () =>
       freeGrantsReportSchema.parse(
-        await api.get(`/admin/usage/free-grants?${params}&page=${page}`),
+        await api.get(
+          `/admin/usage/free-grants?${params}&page=${page}&service_page=${servicePage}`,
+        ),
       ),
     placeholderData: (previous, query) =>
       query?.queryKey[2] === user ? previous : undefined,

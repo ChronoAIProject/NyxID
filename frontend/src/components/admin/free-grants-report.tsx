@@ -1,13 +1,16 @@
-import { useState } from "react";
+import { useId, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
 import {
   freeGrantParams,
   useFreeGrantsReport,
 } from "@/hooks/use-free-grants-report";
 import type { AnalyticsFilters } from "@/schemas/usage-analytics";
-import { formatCreditAmount } from "@/lib/credits";
+import { formatCreditAmount, formatExactCredits } from "@/lib/credits";
+import { GrantCreditsTrend } from "./grant-credits-trend";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
@@ -22,8 +25,11 @@ export function FreeGrantsReport({
   return <Report key={`${params.toString()}:${refreshKey}`} params={params} />;
 }
 function Report({ params }: { params: URLSearchParams }) {
+  const id = useId();
   const [page, setPage] = useState(1);
+  const [servicePage, setServicePage] = useState(1);
   const [expanded, setExpanded] = useState(false);
+  const [mode, setMode] = useState("account");
   const [window, setWindow] = useState<{ from: string; to: string } | null>(
     null,
   );
@@ -33,145 +39,246 @@ function Report({ params }: { params: URLSearchParams }) {
     effective.set("from", window.from);
     effective.set("to", window.to);
   }
-  const query = useFreeGrantsReport(effective, page);
+  const query = useFreeGrantsReport(effective, page, servicePage);
   const denied =
     query.error instanceof ApiError && [403, 404].includes(query.error.status);
   const data = denied ? undefined : query.data;
+  const accountMode = mode === "account";
+  const total = data
+    ? accountMode
+      ? data.total_accounts
+      : data.total_services
+    : 0;
+  const currentPage = data ? (accountMode ? data.page : data.service_page) : 1;
+  function navigate(next: number) {
+    if (!data) return;
+    setWindow(data.window);
+    if (accountMode) setPage(next);
+    else setServicePage(next);
+  }
   return (
     <Card
-      aria-label="Free grants issued"
+      aria-label="Grant credits"
       className="my-5"
       aria-busy={query.isFetching}
     >
       <CardHeader>
-        {query.isFetching && data && (
-          <p role="status" className="type-secondary text-text-tertiary">
-            Updating issued grants…
-          </p>
-        )}
-        <CardTitle>Free grants issued</CardTitle>
+        <CardTitle>Grant credits</CardTitle>
         <p className="type-secondary text-muted-foreground">
-          Credits actually issued to billing accounts in the selected UTC
-          window. Uses the time and Users / organizations filters. Request-user
-          and service filters do not apply. Issuance is separate from consumed
-          or remaining credits.
+          Time and billing account filters · All services
         </p>
         {query.isError && (
           <ErrorBanner
             message={
               data
-                ? "Showing previously loaded issuance totals. Refresh failed."
-                : "Could not load free-grant issuance."
+                ? "Showing previously loaded grant totals. Refresh failed."
+                : "Could not load grant credits."
             }
             onRetry={() => void query.refetch()}
           />
         )}
+        {query.isFetching && data && (
+          <p role="status" className="type-secondary text-text-tertiary">
+            Updating grant credits…
+          </p>
+        )}
         {query.isPending ? (
-          <Skeleton className="h-12" />
+          <Skeleton className="h-16" />
         ) : (
           data && (
-            <div>
-              <p
-                className="font-display type-metric tabular-nums"
-                title={data.issued}
-              >
-                {formatCreditAmount(data.issued)}
-              </p>
-              <p className="mt-1 type-secondary text-text-tertiary">
-                {data.grants.toLocaleString()}{" "}
-                {data.grants === 1 ? "grant" : "grants"} across{" "}
-                {data.total_accounts.toLocaleString()} billing{" "}
-                {data.total_accounts === 1 ? "account" : "accounts"} · complete
-                filtered population
-              </p>
-            </div>
+            <dl
+              aria-label="Complete grant credit totals"
+              className="flex flex-wrap gap-x-10 gap-y-3 pt-2"
+            >
+              {(
+                [
+                  ["Granted", data.issued],
+                  ["Used", data.used],
+                ] as const
+              ).map(([label, value]) => (
+                <div key={label} className="min-w-0 flex-1 basis-48">
+                  <dt className="type-secondary text-muted-foreground">
+                    {label}
+                  </dt>
+                  <dd
+                    className="mt-1 break-words font-display type-metric tabular-nums"
+                    title={value}
+                  >
+                    {formatExactCredits(value)}{" "}
+                    <span className="type-secondary text-muted-foreground">
+                      {formatCreditAmount(value).endsWith(" credits")
+                        ? "credits"
+                        : "credit"}
+                    </span>
+                  </dd>
+                </div>
+              ))}
+            </dl>
           )
         )}
       </CardHeader>
       {data && (
-        <CardContent>
-          <p className="mb-3 type-secondary text-text-tertiary">
-            Issued from {utc(data.window.from)} to {utc(data.window.to)} (end
-            exclusive).
+        <CardContent className="space-y-3">
+          <GrantCreditsTrend data={data} />
+          <p className="type-secondary text-muted-foreground">
+            Usage can include older grants and exceed credits granted in this
+            window.
+          </p>
+          <p className="type-secondary text-text-tertiary">
+            {utc(data.window.from)} – {utc(data.window.to)} (end exclusive).
+            Updated {utc(data.generated_at)}.
             {window
               ? " Window held fixed while paging; Refresh starts a new report."
-              : ""}{" "}
-            Updated {utc(data.generated_at)}.
+              : ""}
           </p>
-          <details
-            open={expanded}
-            onToggle={(e) => setExpanded(e.currentTarget.open)}
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={id}
+            onClick={() => setExpanded(!expanded)}
+            className="flex min-h-6 items-center gap-1 type-row-title text-muted-foreground transition-colors hover:text-foreground"
           >
-            <summary className="w-fit cursor-pointer type-button">
-              Issued by account
-            </summary>
-            <ul className="mt-3 divide-y divide-border/50">
-              {data.accounts.map((a) => (
-                <li
-                  key={a.owner_id}
-                  className="flex flex-wrap items-start justify-between gap-3 py-3 type-secondary"
+            {expanded ? "Hide breakdown" : "View breakdown"}
+            <ChevronDown
+              aria-hidden="true"
+              className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
+            />
+          </button>
+          <div
+            id={id}
+            hidden={!expanded}
+            className="space-y-3 border-t border-border pt-3"
+          >
+            <p className="type-secondary text-muted-foreground">
+              Uses the time and Users / organizations filters. Request-user and
+              service filters do not apply.
+            </p>
+            <p className="type-secondary text-text-tertiary">
+              {data.grants.toLocaleString()}{" "}
+              {data.grants === 1 ? "grant" : "grants"} ·{" "}
+              {data.total_accounts.toLocaleString()} billing{" "}
+              {data.total_accounts === 1 ? "account" : "accounts"} with issuance
+              or usage · complete filtered population
+            </p>
+            <Tabs value={mode} onValueChange={setMode}>
+              <TabsList aria-label="Grant credits breakdown">
+                <TabsTrigger value="account">Account</TabsTrigger>
+                <TabsTrigger value="service">Service</TabsTrigger>
+              </TabsList>
+              <TabsContent value="account">
+                <ul
+                  className="divide-y divide-border/50"
+                  aria-label="Grant credits by billing account"
                 >
-                  <div className="min-w-0 flex-1">
-                    <p className="break-all type-row-title">{a.label}</p>
-                    <p className="type-secondary text-text-tertiary">
-                      {a.account_kind === "org"
-                        ? "Organization"
-                        : a.account_kind === "person"
-                          ? "Personal account"
-                          : "Historical account"}{" "}
-                      · {a.grants.toLocaleString()}{" "}
-                      {a.grants === 1 ? "grant" : "grants"}
-                    </p>
-                    <p className="break-all font-mono type-secondary text-text-tertiary">
-                      {a.owner_id}
-                    </p>
-                  </div>
-                  <strong className="tabular-nums" title={a.issued}>
-                    {formatCreditAmount(a.issued)} issued
-                  </strong>
-                </li>
-              ))}
-            </ul>
-            {!data.accounts.length && (
-              <p className="py-3 type-secondary text-muted-foreground">
-                No grants issued in this window.
-              </p>
-            )}
-            {data.total_accounts > data.per_page && (
-              <div className="mt-3 flex flex-wrap items-center gap-3">
+                  {data.accounts.map((a) => (
+                    <li
+                      key={a.owner_id}
+                      className="flex flex-wrap items-start justify-between gap-3 py-3 type-secondary"
+                    >
+                      <div className="min-w-0 flex-1 basis-40">
+                        <p className="break-words type-row-title">{a.label}</p>
+                        <p className="text-text-tertiary">
+                          {a.account_kind === "org"
+                            ? "Organization"
+                            : a.account_kind === "person"
+                              ? "Personal account"
+                              : "Historical account"}{" "}
+                          · {a.grants.toLocaleString()}{" "}
+                          {a.grants === 1 ? "grant" : "grants"}
+                        </p>
+                        <p className="break-all font-mono type-secondary text-text-tertiary">
+                          {a.owner_id}
+                        </p>
+                      </div>
+                      <dl className="flex max-w-full flex-wrap gap-x-5 gap-y-2">
+                        <div className="min-w-0">
+                          <dt className="text-muted-foreground">Granted</dt>
+                          <dd
+                            className="break-words tabular-nums"
+                            title={a.issued}
+                          >
+                            {formatCreditAmount(a.issued)}
+                          </dd>
+                        </div>
+                        <div className="min-w-0">
+                          <dt className="text-muted-foreground">Used</dt>
+                          <dd
+                            className="break-words tabular-nums"
+                            title={a.used}
+                          >
+                            {formatCreditAmount(a.used)}
+                          </dd>
+                        </div>
+                      </dl>
+                    </li>
+                  ))}
+                </ul>
+                {!data.accounts.length && (
+                  <p className="py-3 type-secondary text-muted-foreground">
+                    No grant issuance or usage in this window.
+                  </p>
+                )}
+              </TabsContent>
+              <TabsContent value="service">
+                <p className="mt-3 type-secondary text-muted-foreground">
+                  Grant-funded usage by service. Shared grants have no
+                  per-service granted amount.
+                </p>
+                <ul
+                  className="divide-y divide-border/50"
+                  aria-label="Grant-funded usage by service"
+                >
+                  {data.services.map((s) => (
+                    <li
+                      key={s.service_slug ?? ""}
+                      className="flex flex-wrap justify-between gap-3 py-3 type-secondary"
+                    >
+                      <span className="min-w-0 break-all type-row-title">
+                        {s.service_slug ??
+                          "Historical usage · service unavailable"}
+                      </span>
+                      <span className="break-words tabular-nums" title={s.used}>
+                        {formatCreditAmount(s.used)} used
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                {!data.services.length && (
+                  <p className="py-3 type-secondary text-muted-foreground">
+                    No grant-funded service usage on this page.
+                  </p>
+                )}
+              </TabsContent>
+            </Tabs>
+            {total > data.per_page && (
+              <div className="flex flex-wrap items-center gap-3">
                 <Button
                   variant="outline"
-                  disabled={page === 1 || query.isFetching}
-                  onClick={() => setPage(page - 1)}
+                  disabled={currentPage === 1 || query.isFetching}
+                  onClick={() => navigate(currentPage - 1)}
                 >
-                  Previous accounts
+                  Previous {accountMode ? "accounts" : "services"}
                 </Button>
                 <span className="type-secondary text-text-tertiary">
-                  Page {data.page} of{" "}
-                  {Math.ceil(data.total_accounts / data.per_page)}
+                  Page {currentPage} of {Math.ceil(total / data.per_page)}
                 </span>
                 <Button
                   variant="outline"
                   disabled={
-                    page * data.per_page >= data.total_accounts ||
-                    query.isFetching
+                    currentPage * data.per_page >= total || query.isFetching
                   }
-                  onClick={() => {
-                    setWindow(data.window);
-                    setPage(page + 1);
-                  }}
+                  onClick={() => navigate(currentPage + 1)}
                 >
-                  Next accounts
+                  Next {accountMode ? "accounts" : "services"}
                 </Button>
               </div>
             )}
-          </details>
+          </div>
         </CardContent>
       )}
     </Card>
   );
 }
-
 function utc(value: string) {
   return new Date(value).toLocaleString(undefined, {
     timeZone: "UTC",

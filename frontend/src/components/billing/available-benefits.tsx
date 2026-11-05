@@ -1,21 +1,23 @@
 import { BillingAllowanceBenefits } from "./billing-allowance-benefits";
-import { useState } from "react";
+import { useId, useState, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { BillingWalletBreakdown } from "./billing-wallet-card";
 import { useBillingBenefits } from "@/hooks/use-billing-benefits";
 import { useBillingWallet } from "@/hooks/use-billing";
 import { ApiError } from "@/lib/api-client";
 import {
   exactCredits,
+  formatExactCredits,
   formatCreditAmount,
   availableCreditTotal,
 } from "@/lib/credits";
-import { billingMetricLabel } from "@/lib/billing-units";
 import {
   serviceName,
   timestamp,
   type BillingCatalog,
 } from "@/lib/billing-display";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import type { CreditGrant } from "@/schemas/billing-credits";
@@ -32,17 +34,32 @@ function grantState(g: CreditGrant) {
 export function AvailableBenefits({
   catalog = [],
   ownerId,
+  actions,
 }: {
   catalog?: BillingCatalog;
   ownerId?: string;
+  actions?: ReactNode;
 }) {
+  const breakdownId = useId();
   const [expanded, setExpanded] = useState(false);
   const [page, setPage] = useState(1);
   const benefits = useBillingBenefits(page, ownerId);
   const wallet = useBillingWallet(ownerId);
   if (benefits.isLoading || wallet.isLoading)
     return (
-      <Skeleton aria-label="Loading available credits" className="mt-6 h-36" />
+      <Card
+        className="mt-6"
+        aria-label="Current available benefits"
+        aria-busy="true"
+      >
+        <CardContent className="flex flex-wrap items-start justify-between gap-3 p-4">
+          <Skeleton
+            aria-label="Loading available credits"
+            className="h-20 min-w-32 flex-1"
+          />
+          {actions}
+        </CardContent>
+      </Card>
     );
   const noWallet =
     wallet.data === null ||
@@ -69,61 +86,65 @@ export function AvailableBenefits({
     void benefits.refetch();
     void wallet.refetch();
   };
+  const total = complete
+    ? blocked
+      ? "0"
+      : availableCreditTotal(walletAvailable!, data!.summary.unreserved)
+    : null;
   return (
     <Card
-      className="mt-6"
+      className="benefits-container mt-6"
       aria-label="Current available benefits"
       aria-busy={benefits.isFetching || wallet.isFetching}
     >
-      <CardHeader>
+      <CardContent className="p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 className="type-secondary text-muted-foreground">
+              Available credits
+            </h2>
+            <p
+              className="mt-1 break-words font-display type-metric tabular-nums"
+              title={total ?? undefined}
+            >
+              {total === null ? (
+                "Unavailable"
+              ) : (
+                <>
+                  {formatExactCredits(total)}{" "}
+                  <span className="type-secondary text-muted-foreground">
+                    {money(total).endsWith(" credits") ? "credits" : "credit"}
+                  </span>
+                </>
+              )}
+            </p>
+            {data && (
+              <button
+                type="button"
+                aria-expanded={expanded}
+                aria-controls={breakdownId}
+                onClick={() => setExpanded(!expanded)}
+                className="mt-2 flex min-h-6 items-center gap-1 type-row-title text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {expanded ? "Hide breakdown" : "View breakdown"}
+                <ChevronDown
+                  aria-hidden="true"
+                  className={`h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
+                />
+              </button>
+            )}
+          </div>
+          {actions}
+        </div>
         {noWallet && (
-          <p role="status" className="type-secondary text-warning">
-            Provision a wallet to use your grants and allowances.
+          <p role="status" className="mt-2 type-secondary text-warning">
+            No wallet provisioned. Provision a wallet to use your credits and
+            free usage.
           </p>
         )}
         {suspended && (
-          <p role="alert" className="type-secondary-emphasis text-warning">
-            Usage is suspended. Wallet credits, grants, and allowances cannot
-            fund requests until billing is restored.
-          </p>
-        )}
-        <CardTitle>Available credits</CardTitle>
-        <p
-          className="font-display type-metric tabular-nums"
-          title={
-            complete
-              ? blocked
-                ? "0"
-                : availableCreditTotal(
-                    walletAvailable!,
-                    data!.summary.unreserved,
-                  )
-              : undefined
-          }
-        >
-          {complete
-            ? money(
-                blocked
-                  ? "0"
-                  : availableCreditTotal(
-                      walletAvailable!,
-                      data!.summary.unreserved,
-                    ),
-              )
-            : "Unavailable"}
-        </p>
-        <p className="type-secondary text-muted-foreground">
-          Wallet plus spendable grants. Grants apply to their eligible services;
-          free allowances are additional usage in their own units. Current
-          balances are independent of usage filters.
-        </p>
-        {complete && blocked && (
-          <p className="type-secondary text-muted-foreground">
-            Balance before billing restrictions:{" "}
-            {money(
-              availableCreditTotal(walletAvailable!, data!.summary.unreserved),
-            )}
-            .
+          <p role="alert" className="mt-2 type-secondary-emphasis text-warning">
+            Usage is suspended until billing is restored.
           </p>
         )}
         {stale && (
@@ -141,76 +162,59 @@ export function AvailableBenefits({
             Updating balances…
           </p>
         )}
-      </CardHeader>
-      {data && (
-        <CardContent className="space-y-4">
-          <div className="flex flex-wrap gap-x-6 gap-y-2 type-secondary">
-            <span>
-              Wallet:{" "}
-              <strong>
-                {walletAvailable === null
-                  ? "Unavailable"
-                  : money(walletAvailable)}
-              </strong>
-            </span>
-            <span>
-              Grants unreserved:{" "}
-              <strong>{money(data.summary.unreserved)}</strong>
-            </span>
-            <span>
-              Free usage:{" "}
-              <strong>
-                {data.allowances.length}{" "}
-                {data.allowances.length === 1 ? "allowance" : "allowances"}
-              </strong>
-            </span>
-          </div>
-          {data.allowances.length > 0 && (
-            <ul
-              aria-label="Available free usage"
-              className="flex flex-wrap gap-x-5 gap-y-1 type-secondary text-muted-foreground"
-            >
-              {data.allowances.slice(0, 3).map((a) => (
-                <li key={a.allowance.id}>
-                  {serviceName(catalog, a.allowance.service_slug)}:{" "}
-                  {a.remaining_quantity.toLocaleString()}{" "}
-                  {billingMetricLabel(a.allowance.metric)} left
-                </li>
-              ))}
-              {data.allowances.length > 3 && (
-                <li>+{data.allowances.length - 3} more in balance breakdown</li>
-              )}
-            </ul>
-          )}
-          <details
-            open={expanded}
-            onToggle={(e) => setExpanded(e.currentTarget.open)}
+
+        {data && (
+          <div
+            id={breakdownId}
+            hidden={!expanded}
+            className="mt-4 space-y-4 border-t border-border pt-4"
           >
-            <summary className="w-fit cursor-pointer type-button">
-              Balance breakdown
-            </summary>
-            <dl className="my-3 grid gap-2 type-secondary sm:grid-cols-2">
-              {(
-                [
-                  ["Held grants", data.summary.held],
-                  ["Pending activation", data.summary.pending_activation],
-                  ["Pending reclaim", data.summary.pending_reclaim],
+            <p className="type-secondary text-muted-foreground">
+              Wallet and eligible grants contribute to available credits. Free
+              allowances are additional usage in their own units. Current
+              balances are independent of usage filters.
+            </p>
+            {complete && blocked && (
+              <p className="type-secondary text-muted-foreground">
+                Balance before billing restrictions:{" "}
+                {money(
+                  availableCreditTotal(
+                    walletAvailable!,
+                    data.summary.unreserved,
+                  ),
+                )}
+                .
+              </p>
+            )}
+            {wallet.data && <BillingWalletBreakdown wallet={wallet.data} />}
+            <section aria-label="Grant balances">
+              <h3 className="type-secondary-strong">Grants</h3>
+              <p className="mt-1 type-secondary">
+                Available: {money(data.summary.unreserved)}
+              </p>
+              <dl className="my-3 grid gap-2 type-secondary sm:grid-cols-2">
+                {(
                   [
-                    "Expired, awaiting cleanup",
-                    data.summary.expired_awaiting_cleanup,
-                  ],
-                  [
-                    "Available with service restrictions",
-                    data.summary.restricted,
-                  ],
-                ] as const
-              ).map(([label, value]) => (
-                <div key={label}>
-                  <dt className="text-muted-foreground">{label}</dt>
-                  <dd className="tabular-nums">{money(value)}</dd>
-                </div>
-              ))}
-            </dl>
+                    ["Held grants", data.summary.held],
+                    ["Pending activation", data.summary.pending_activation],
+                    ["Pending reclaim", data.summary.pending_reclaim],
+                    [
+                      "Expired, awaiting cleanup",
+                      data.summary.expired_awaiting_cleanup,
+                    ],
+                    [
+                      "Available with service restrictions",
+                      data.summary.restricted,
+                    ],
+                  ] as const
+                ).map(([label, value]) => (
+                  <div key={label}>
+                    <dt className="text-muted-foreground">{label}</dt>
+                    <dd className="tabular-nums">{money(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
             <h3 className="type-secondary-strong">Individual grants</h3>
             <p className="my-1 type-secondary text-text-tertiary">
               {data.total_grants.toLocaleString()}{" "}
@@ -265,7 +269,10 @@ export function AvailableBenefits({
                       : "No expiry"}
                   </p>
                   {g.service_limits?.map((r) => (
-                    <p key={r.key} className="type-secondary text-muted-foreground">
+                    <p
+                      key={r.key}
+                      className="type-secondary text-muted-foreground"
+                    >
                       {r.label ||
                         r.service_slugs
                           .map((s) => serviceName(catalog, s))
@@ -312,9 +319,9 @@ export function AvailableBenefits({
               Benefits refreshed {timestamp(data.summary.generated_at)}.
               Allowances apply first, then eligible grants, then wallet credits.
             </p>
-          </details>
-        </CardContent>
-      )}
+          </div>
+        )}
+      </CardContent>
     </Card>
   );
 }

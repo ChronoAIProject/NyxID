@@ -130,7 +130,7 @@ pub async fn save_workspace(
     ))
 }
 
-/// Free credits actually issued, independently of their subsequent use.
+/// Grant credits issued and consumed in one bounded UTC window, by billing owner.
 #[utoipa::path(get, path = "/api/v1/admin/usage/free-grants", tag = "Admin", params(admin_usage_service::free_grants::Query), responses((status = 200, body = admin_usage_service::free_grants::Response)), security(("bearer_auth" = [])))]
 pub async fn get_free_grants(
     State(state): State<AppState>,

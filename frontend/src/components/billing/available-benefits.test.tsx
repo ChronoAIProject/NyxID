@@ -131,12 +131,24 @@ it("adds exact wallet and spendable grants, with native allowance units and full
   expect(availableCreditTotal("2.000000000001", "12.000000000001")).toBe(
     "14.000000000002",
   );
-  expect(screen.getByLabelText("Available free usage")).toHaveTextContent(
-    "requests left",
-  );
-  await userEvent.click(screen.getByText("Balance breakdown"));
+  const disclosure = screen.getByRole("button", { name: "View breakdown" });
+  expect(disclosure).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByText("Free allowances")).not.toBeVisible();
+  expect(screen.getByText("Pending activation")).not.toBeVisible();
+  expect(
+    screen.getByRole("heading", { name: "Available credits" }),
+  ).toBeVisible();
+  disclosure.focus();
+  await userEvent.keyboard("{Enter}");
+  expect(
+    screen.getByRole("button", { name: "Hide breakdown" }),
+  ).toHaveAttribute("aria-expanded", "true");
+  expect(
+    document.getElementById(disclosure.getAttribute("aria-controls")!),
+  ).toBeVisible();
+  expect(screen.getByText("Free allowances")).toBeVisible();
   expect(screen.getByText("Pending activation")).toBeVisible();
-  expect(screen.getByText(/Available: 12 credits/)).toBeVisible();
+  expect(screen.getByText(/Available: 12 credits · Held:/)).toBeVisible();
 });
 it("uses singular credit and grant labels in the headline and expanded history", async () => {
   const data = response();
@@ -154,7 +166,7 @@ it("uses singular credit and grant labels in the headline and expanded history",
   );
   mount();
   expect(await screen.findByTitle("1")).toHaveTextContent("1 credit");
-  await userEvent.click(screen.getByText("Balance breakdown"));
+  await userEvent.click(screen.getByText("View breakdown"));
   expect(screen.getByText(/1 grant · page 1\./)).toBeVisible();
   expect(screen.getByText(/Granted 1 credit ·/)).toBeVisible();
 });
@@ -170,8 +182,8 @@ it("preserves the expanded breakdown and authoritative headline while the next p
         ),
   );
   mount();
-  await screen.findByText("Balance breakdown");
-  await userEvent.click(screen.getByText("Balance breakdown"));
+  await screen.findByText("View breakdown");
+  await userEvent.click(screen.getByText("View breakdown"));
   await userEvent.click(screen.getByRole("button", { name: "Next grants" }));
   expect(screen.getByText("Individual grants")).toBeVisible();
   expect(screen.getByRole("button", { name: "Next grants" })).toBeDisabled();
@@ -193,9 +205,8 @@ it("does not present suspended benefits as spendable", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "Usage is suspended",
   );
-  expect(
-    screen.getByText("0 credits", { selector: "p.font-display" }),
-  ).toHaveAttribute("title", "0");
+  expect(screen.getByTitle("0")).toHaveTextContent("0 credits");
+  expect(screen.getByTitle("0")).toBeVisible();
 });
 it("shows a failed refresh as stale and does not silently discard it", async () => {
   const client = mount();
@@ -210,7 +221,7 @@ it("shows a failed refresh as stale and does not silently discard it", async () 
 });
 it("clears benefit details after authorization is lost", async () => {
   const client = mount();
-  await screen.findByText("Balance breakdown");
+  await screen.findByText("View breakdown");
   get.mockRejectedValue(
     new ApiError(403, {
       error: "forbidden",
@@ -220,7 +231,7 @@ it("clears benefit details after authorization is lost", async () => {
   );
   await act(() => client.invalidateQueries());
   expect(await screen.findByText("Unavailable")).toBeVisible();
-  expect(screen.queryByText("Balance breakdown")).not.toBeInTheDocument();
+  expect(screen.queryByText("View breakdown")).not.toBeInTheDocument();
 });
 
 it("keeps grants spendable when the wallet is negative and shows the signed wallet separately", async () => {
@@ -235,6 +246,8 @@ it("keeps grants spendable when the wallet is negative and shows the signed wall
   expect(await screen.findByTitle("12.000000000001")).toHaveTextContent(
     "12 credits",
   );
+  expect(screen.getByText("-8 credits")).not.toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "View breakdown" }));
   expect(screen.getByText("-8 credits")).toBeVisible();
   expect(availableCreditTotal("-8", "12.000000000001")).toBe("12.000000000001");
 });
@@ -278,4 +291,21 @@ it("refreshes wallet and benefits together every 30 seconds on the active page",
   } finally {
     vi.useRealTimers();
   }
+});
+
+it("keeps wallet actions available while benefits load without showing a partial total", async () => {
+  get.mockImplementation((path: string) =>
+    path === "/billing/wallet"
+      ? Promise.resolve(billingWallet())
+      : new Promise(() => {}),
+  );
+  const client = new QueryClient();
+  render(
+    <QueryClientProvider client={client}>
+      <AvailableBenefits actions={<button>Add credits</button>} />
+    </QueryClientProvider>,
+  );
+  expect(screen.getByRole("button", { name: "Add credits" })).toBeVisible();
+  expect(screen.getByLabelText("Loading available credits")).toBeVisible();
+  expect(screen.queryByTitle("95")).not.toBeInTheDocument();
 });

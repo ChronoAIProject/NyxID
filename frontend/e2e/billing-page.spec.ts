@@ -186,7 +186,9 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    await page.getByText("Balance breakdown", { exact: true }).click();
+    await page
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
     const allowance = page.locator(".benefit-disclosure").filter({
       has: page.locator(".compact-benefit-label > strong", {
         hasText: "Example LLM",
@@ -508,7 +510,9 @@ for (const width of [1440, 768, 390, 320]) {
       page.getByRole("heading", { name: "Billing & Usage", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText("95 credits", { exact: true }).first(),
+      page
+        .getByLabel("Current available benefits", { exact: true })
+        .locator('p[title="96.5"]'),
     ).toBeVisible();
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
@@ -516,15 +520,21 @@ for (const width of [1440, 768, 390, 320]) {
     const benefits = page.getByLabel("Current available benefits", {
       exact: true,
     });
-    await expect(benefits).toContainText("96.5 credits");
+    await expect(benefits.locator('p[title="96.5"]')).toBeVisible();
+    expect((await benefits.boundingBox())!.height).toBeLessThan(170);
     await expect(benefits.getByText("Individual grants")).not.toBeVisible();
     await expect(
-      benefits.getByLabel("Available free usage").locator("li"),
-    ).toHaveCount(4);
-    await benefits.getByText("Balance breakdown", { exact: true }).click();
+      benefits.getByText("Free allowances", { exact: true }),
+    ).not.toBeVisible();
+    await expect(
+      benefits.getByRole("button", { name: "Add credits", exact: true }),
+    ).toBeVisible();
+    await benefits
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
     await expect(benefits.getByText("Individual grants")).toBeVisible();
     await expect(
-      benefits.getByText("Available: 1.5 credits", { exact: false }),
+      benefits.getByText(/Available: 1.5 credits · Held:/),
     ).toBeVisible();
     // #1673 replaced the image with a focusable stacked meter. Keyboard
     // focus exposes the full allowance breakdown for every viewport.
@@ -817,7 +827,9 @@ for (const width of [1440, 390]) {
       exact: true,
     });
     await expect(benefits).toContainText("96.5 credits");
-    await benefits.getByText("Balance breakdown", { exact: true }).click();
+    await benefits
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
     await benefits.getByRole("button", { name: "Next grants" }).click();
     await expect(benefits).toContainText("51 grants · page 2");
     await expect(benefits.getByText("Individual grants")).toBeVisible();
@@ -855,7 +867,9 @@ test("singular benefit amounts and grant history read correctly on mobile", asyn
     exact: true,
   });
   await expect(benefits.locator('p[title="1"]')).toHaveText("1 credit");
-  await benefits.getByText("Balance breakdown", { exact: true }).click();
+  await benefits
+    .getByRole("button", { name: "View breakdown", exact: true })
+    .click();
   await expect(benefits).toContainText("1 grant · page 1.");
   await expect(benefits).toContainText("Granted 1 credit ·");
   await page.getByRole("tab", { name: "Usage", exact: true }).click();
@@ -878,3 +892,77 @@ test("suspended grants remain visible but cannot appear spendable on either tab"
   await page.getByRole("tab", { name: "Usage", exact: true }).click();
   await expect(benefits.locator('p[title="0"]')).toHaveText("0 credits");
 });
+
+for (const theme of ["light", "dark"] as const) {
+  test(`available breakdown preserves large balances and allowance layout at 320px enlarged ${theme}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 320, height: 1000 });
+    await billingApi(page);
+    await page.addInitScript(
+      (mode) =>
+        localStorage.setItem(
+          "nyxid.theme",
+          JSON.stringify({
+            state: { mode, textScale: 2, density: 1, motion: "reduce" },
+            version: 2,
+          }),
+        ),
+      theme,
+    );
+    await page.route("**/api/v1/billing/wallet", (route) =>
+      route.fulfill({
+        json: { ...billingWallet(), available: "123456789.123456789123" },
+      }),
+    );
+    await page.route("**/api/v1/billing/benefits?**", (route) =>
+      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+    );
+    await page.goto("/billing");
+    const benefits = page.getByLabel("Current available benefits", {
+      exact: true,
+    });
+    await expect(
+      benefits.locator('p[title="123456790.623456789123"]'),
+    ).toBeVisible();
+    const disclosure = benefits.getByRole("button", {
+      name: "View breakdown",
+      exact: true,
+    });
+    await disclosure.focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      benefits.getByRole("button", { name: "Hide breakdown", exact: true }),
+    ).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      benefits.getByText("123,456,789.123457 credits", { exact: true }),
+    ).toBeVisible();
+    const allowance = benefits
+      .locator(".benefit-disclosure")
+      .filter({
+        has: page.locator(".compact-benefit-label > strong", {
+          hasText: "Example LLM",
+        }),
+      });
+    await allowance.locator("summary").first().click();
+    await expect(
+      benefits.getByRole("region", { name: "Selected allowance balances" }),
+    ).toBeVisible();
+    for (const target of await benefits
+      .locator(
+        '.allowance-balance > header, .allowance-balance > dl, [aria-label="Wallet breakdown"]',
+      )
+      .all()) {
+      expect(
+        await target.evaluate(
+          (node) => node.scrollWidth <= node.clientWidth + 1,
+        ),
+      ).toBe(true);
+    }
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}

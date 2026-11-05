@@ -27,6 +27,12 @@ async function setup(page: Page, preview = true) {
         window: { from: "2026-10-10T00:00:00Z", to: "2026-10-17T00:00:00Z" },
         generated_at: "2026-10-16T12:00:00Z",
         issued: "0",
+        used: "0",
+        interval: "day",
+        trend: [],
+        total_services: 0,
+        service_page: 1,
+        services: [],
         grants: 0,
         total_accounts: 0,
         accounts: [],
@@ -514,9 +520,9 @@ for (const width of [1440, 390]) {
     await page.goto("/admin/usage?tab=nyxbot");
     const review = page.getByRole("heading", { name: "Recent feedback" });
     await expect(review).toBeVisible();
-    await expect(
-      page.getByLabel("Free grants issued", { exact: true }),
-    ).toHaveCount(0);
+    await expect(page.getByLabel("Grant credits", { exact: true })).toHaveCount(
+      0,
+    );
     const model = page.getByRole("heading", {
       name: "Cost and billing by model",
     });
@@ -558,12 +564,27 @@ for (const width of [1440, 390]) {
   });
 }
 
-for (const width of [1440, 390]) {
-  test(`free-grant issuance stays complete and account-separated at ${width}px`, async ({
+for (const [width, theme, textScale] of [
+  [1440, "dark", 1],
+  [390, "light", 1],
+  [320, "dark", 2],
+] as const) {
+  test(`grant credits stay complete by account and service at ${width}px ${theme} ${textScale}x`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 1000 });
     await setup(page);
+    await page.addInitScript(
+      ({ theme, textScale }) =>
+        localStorage.setItem(
+          "nyxid.theme",
+          JSON.stringify({
+            state: { mode: theme, textScale, density: 1, motion: "reduce" },
+            version: 2,
+          }),
+        ),
+      { theme, textScale },
+    );
     const requests: URLSearchParams[] = [];
     await page.route("**/api/v1/admin/usage/free-grants?**", (route) => {
       const params = new URL(route.request().url()).searchParams;
@@ -574,6 +595,25 @@ for (const width of [1440, 390]) {
           window: { from: "2026-10-10T00:00:00Z", to: "2026-10-16T12:00:00Z" },
           generated_at: "2026-10-16T12:00:00Z",
           issued: "73.000000000001",
+          used: "100.500000000001",
+          interval: "day",
+          trend: Array.from({ length: 7 }, (_, i) => ({
+            start: `2026-10-${10 + i}T00:00:00Z`,
+            end:
+              i === 6 ? "2026-10-16T12:00:00Z" : `2026-10-${11 + i}T00:00:00Z`,
+            issued: i === 0 ? "73.000000000001" : "0",
+            used: i === 5 ? "100.500000000001" : "0",
+          })),
+          total_services: 51,
+          service_page: Number(params.get("service_page")),
+          services: [
+            {
+              service_slug:
+                params.get("service_page") === "1" ? "nyxbot" : null,
+              used:
+                params.get("service_page") === "1" ? "5.000000000001" : "0.5",
+            },
+          ],
           grants: 68,
           total_accounts: 51,
           per_page: 50,
@@ -587,6 +627,7 @@ for (const width of [1440, 390]) {
                   : "Research organization",
               account_kind: currentPage === 1 ? "person" : "org",
               issued: "1.000000000001",
+              used: "5.000000000001",
               grants: 1,
             },
           ],
@@ -594,23 +635,53 @@ for (const width of [1440, 390]) {
       });
     });
     await page.goto("/admin/usage");
-    const report = page.getByLabel("Free grants issued", { exact: true });
-    await expect(report).toContainText("68 grants across 51 billing accounts");
-    await expect(report.getByTitle("73.000000000001")).toBeVisible();
-    await report.getByText("Issued by account", { exact: true }).click();
+    const report = page.getByLabel("Grant credits", { exact: true });
+    await expect(
+      report.getByText("Time and billing account filters · All services"),
+    ).toBeVisible();
+    await expect(
+      report.getByText("Personal account · 1 grant"),
+    ).not.toBeVisible();
+    await expect(
+      report.getByRole("img", { name: /Daily grant credits/ }),
+    ).toBeVisible();
+    await expect(report.getByTitle("100.500000000001").first()).toBeVisible();
+    await expect(report.locator('dd[title="73.000000000001"]')).toBeVisible();
+    await report
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
     await expect(report).toContainText("Personal account · 1 grant");
-    await expect(report.getByTitle("1.000000000001")).toHaveText(
-      "1 credit issued",
-    );
+    await expect(report.getByTitle("1.000000000001")).toHaveText("1 credit");
     await report.getByRole("button", { name: "Next accounts" }).click();
     await expect(report).toContainText("Research organization");
     await expect(report).toContainText("Page 2 of 2");
-    await expect(report.getByTitle("73.000000000001")).toBeVisible();
+    await expect(report.locator('dd[title="73.000000000001"]')).toBeVisible();
     expect(requests.at(-1)!.has("period")).toBe(false);
+    await report.getByRole("tab", { name: "Service", exact: true }).click();
+    await expect(report.getByText("nyxbot", { exact: true })).toBeVisible();
+    await expect(report).toContainText("Page 1 of 2");
+    await expect(report).toContainText(
+      "Shared grants have no per-service granted amount",
+    );
+    await report.getByRole("button", { name: "Next services" }).click();
+    await expect(
+      report.getByText("Historical usage · service unavailable"),
+    ).toBeVisible();
+    expect(requests.at(-1)!.get("page")).toBe("2");
+    await report.getByRole("tab", { name: "Account", exact: true }).click();
+    await expect(report.getByText("Research organization")).toBeVisible();
+    await report.getByText("View chart data", { exact: true }).click();
+    const table = report.getByRole("table", {
+      name: /Exact daily grant credits/,
+    });
+    await expect(table.getByText("73.000000000001")).toBeVisible();
+    await expect(table.getByText("100.500000000001")).toBeVisible();
     await page.getByRole("button", { name: "Refresh", exact: true }).click();
     await expect.poll(() => requests.at(-1)!.get("page")).toBe("1");
     expect(requests.at(-1)!.get("period")).toBe("7d");
-    await report.getByText("Issued by account", { exact: true }).click();
+    await report
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
     await expect(report).toContainText("Personal account");
     expect(
       await page.evaluate(
@@ -618,7 +689,7 @@ for (const width of [1440, 390]) {
       ),
     ).toBe(true);
     await report.screenshot({
-      path: `test-results/free-grants-${width}.png`,
+      path: `test-results/grant-credits-${width}-${theme}-${textScale}.png`,
       animations: "disabled",
     });
   });
