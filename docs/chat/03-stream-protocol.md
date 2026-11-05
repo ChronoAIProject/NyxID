@@ -149,3 +149,16 @@ snapshots, raw workflow observations, workflow waiting signals, or a Workflow
 create-recovery response. It does not allocate `workflow-pending-*`, alias a
 workflow identity, or replay workflow wire captures. Legacy `chatc-*` history
 may be displayed or deleted, but it never becomes a stream or control target.
+
+
+## Generated result metadata
+
+Enabled owner history and active-turn attachments add optional `filename`, `source`,
+`result_version`, `preview_kind` and RFC3339 `expires_at`, with string origin
+`generated_artifact`. Assistant messages may add `artifact_delivery` containing
+`state`, `count`, `recovery_available` and indexed `rejected` outcomes. Readers
+accept future strings/counts and fall back to download/neutral status. Responses
+expose no source path, operation ID or content digest. These fields are hidden
+while the flag is off. Live media events are unchanged and do not prove durable
+file delivery. The browser constructs the authenticated download and empty-body
+recovery endpoints from its existing conversation/message IDs.

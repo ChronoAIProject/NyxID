@@ -121,6 +121,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
     for index in 0..2 {
         let bytes = format!("pixels-{index}");
         let row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "tool".into(),
@@ -144,6 +145,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             .await
             .unwrap();
         attachments.push(TurnAttachment {
+            artifact: Default::default(),
             id: row.id,
             label: "private_tool_label".into(),
             content_type: row.content_type,

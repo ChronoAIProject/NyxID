@@ -87,6 +87,7 @@ async fn source(
 }
 async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> TurnAttachment {
     let attachment = AssistantAttachment {
+        artifact: Default::default(),
         secret_context_versions: Default::default(),
         id: Uuid::new_v4().to_string(),
         origin: "tool".into(),
@@ -105,6 +106,7 @@ async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> T
         .await
         .unwrap();
     let metadata = TurnAttachment {
+        artifact: Default::default(),
         id: attachment.id,
         content_type: attachment.content_type,
         size: 8,
