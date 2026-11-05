@@ -603,20 +603,19 @@ impl NyxAgentEgress for Egress {
 }
 
 impl Egress {
-    async fn fence_model_setup(
-        &self,
-        user_id: &str,
-        turn: &TurnRef,
-        credential: &RuntimeCredential,
-    ) -> AppResult<AssistantConversation> {
-        super::assistant_guest_model_setup::fence_dispatch(
+    fn fence_model_setup<'a>(
+        &'a self,
+        user_id: &'a str,
+        turn: &'a TurnRef,
+        credential: &'a RuntimeCredential,
+    ) -> futures::future::BoxFuture<'a, AppResult<AssistantConversation>> {
+        Box::pin(super::assistant_guest_model_setup::fence_dispatch(
             &self.state.db,
             user_id,
             &turn.conversation_id,
             &turn.turn_id,
             &credential.api_key_id,
-        )
-        .await
+        ))
     }
 
     async fn fence_channel(

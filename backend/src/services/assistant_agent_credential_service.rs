@@ -136,12 +136,12 @@ pub(crate) async fn authority_with_access(
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<KeyAuthority> {
     if !conversation.credential_api_key_id.is_empty() {
-        require_ordinary_key(
+        Box::pin(require_ordinary_key(
             db,
             &conversation.user_id,
             &conversation.credential_api_key_id,
             Some(&mut *session),
-        )
+        ))
         .await?;
     }
     let Some(agent_id) = conversation.agent_id.as_deref() else {
@@ -163,7 +163,12 @@ pub(crate) async fn authority_with_access(
         .await;
     }
     let resolved = if snapshot.is_none() {
-        super::org_agent_service::resolve_agent_access(db, &conversation.user_id, &agent).await?
+        Box::pin(super::org_agent_service::resolve_agent_access(
+            db,
+            &conversation.user_id,
+            &agent,
+        ))
+        .await?
     } else {
         None
     };
