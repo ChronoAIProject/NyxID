@@ -591,3 +591,49 @@ async fn accepted_node_admission_closes_and_unavailable_or_restarted_replica_nee
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn automation_receipts_are_erased_by_exact_owner_and_block_final_completion() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let receipts = db.collection::<Document>("assistant_direct_handoffs");
+    receipts
+        .insert_many([
+            doc! {"_id": "pending", "user_id": &owner, "state": "pending"},
+            doc! {"_id": "terminal", "user_id": &owner, "state": "delivered"},
+            doc! {"_id": "other-owner", "user_id": "another-person", "state": "pending"},
+        ])
+        .await
+        .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"user_id": &owner})
+        .await
+        .unwrap()
+        .unwrap();
+    until_source_removed(&state, &owner).await;
+    assert_eq!(
+        receipts
+            .count_documents(doc! {"user_id": &owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        receipts
+            .find_one(doc! {"_id": "other-owner"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // The final check uses the same exact-owner inventory even with no hint on
+    // the deleted person row. A leftover cannot be declared complete.
+    receipts
+        .insert_one(doc! {"_id": "leftover", "user_id": &owner, "state": "pending"})
+        .await
+        .unwrap();
+    assert!(!local::source(&db, &job).await.unwrap());
+    receipts.delete_one(doc! {"_id": "leftover"}).await.unwrap();
+    assert!(local::source(&db, &job).await.unwrap());
+}
