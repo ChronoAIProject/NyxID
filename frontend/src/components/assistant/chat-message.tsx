@@ -895,7 +895,7 @@ export function ChatMessageBubble({
             streaming reply has no settled instant yet. */}
         {streaming ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
-            <MessageCopyAction text={content} />
+            <MessageCopyAction text={content} format="markdown" />
             {showFeedback ? <ReplyFeedbackVotes feedback={feedback} /> : null}
             <MessageTime
               value={message.timestamp}
@@ -1139,6 +1139,9 @@ export function ChatMessageList({
     overscan: ROW_OVERSCAN,
     gap: rowGap,
     scrollMargin,
+    // Match unwindowed jumps and reach scrollTop=0 for the first row, so
+    // expanding the compact toolbar preserves the beginning of the thread.
+    scrollPaddingStart: 24,
     // Keep the rows on screen in place when older messages load above them.
     anchorTo: "end",
     // A transcript opens at its newest message.
@@ -1323,7 +1326,7 @@ export function ChatMessageList({
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1">
+    <div data-chat-transcript-viewport="" className="relative flex min-h-0 min-w-0 flex-1">
       <div
         ref={scrollRef}
         onScroll={handleScroll}

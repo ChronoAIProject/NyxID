@@ -105,6 +105,10 @@ The 1,702-test full-suite result belongs to GitHub CI, not a local full-suite ru
 
 At committed head `107f5d1d7`, Mobile passed1,702 tests, typecheck and native-sync. CI Pipeline, Release manifest and CodeQL also completed successfully; other jobs were skipped or neutral. That result predates the 12-file root-layout/copy/machine follow-up patch committed and pushed as `7315fb6dc`. The new revision requires its own CI result; the earlier result is not full CI verification of this follow-up patch.
 
+## Refresh against current team main
+
+During delivery, team main advanced to `10444489b`, including the same two production URL-accessor fixes. This temporarily made the PR conflict and prevented new pull-request Checks from starting. The merge retains the stronger dynamic-domain test mocks and assertions from this PR. All mobile source/test bytes are identical before and after this merge; only upstream non-mobile changes were newly integrated. The 14 approval-card/detail tests were rerun and passed after resolving the two test-only conflicts. The earlier focused iPad results remain associated with unchanged mobile source.
+
 ## Remaining acceptance work
 
 - Long-page scrolling and bottom reachability are unproven for legal documents, automation run lists/pagination, the lower key-creation form and memory fields. The final wide-table column is only partly visible; successful horizontal reachability is unproven. CUA scroll attempts did not establish viewport movement, so they are not counted as passes or attributed to a product defect without further evidence.

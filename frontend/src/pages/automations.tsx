@@ -265,9 +265,11 @@ function AutomationsContent() {
                 <span className="mt-1 block type-secondary text-text-tertiary">
                   {row.source === "webhook"
                     ? "Runs on webhook events"
-                    : row.next_run_at
-                      ? `Next: ${formatAutomationTime(row.next_run_at, zone)}`
-                      : row.status === "active" ? "No run scheduled" : "Schedule paused"} · {row.last_run?.outcome
+                    : row.status !== "active"
+                      ? "Schedule paused"
+                      : row.next_run_at
+                        ? `Next: ${formatAutomationTime(row.next_run_at, zone)}`
+                        : "No run scheduled"} · {row.last_run?.outcome
                     ? `Last run: ${row.last_run.outcome.replaceAll("_", " ")}`
                     : "Not run yet"}
                 </span>

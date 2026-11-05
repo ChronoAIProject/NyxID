@@ -1,3 +1,4 @@
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Label } from "@/components/ui/label";
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
 import { useEffect, useLayoutEffect, useState } from "react";
@@ -299,26 +300,19 @@ function OwnedBindings() {
   const revoke = useRevokeBinding();
   const [review, setReview] = useState<OwnedBinding>();
   return (
-    <DetailSection title="Telegram onboarding bindings">
-      <div className="space-y-3 p-4 text-14">
-        {bindings.isPending && <p role="status">Loading bindings…</p>}
-        {bindings.error && (
-          <ErrorBanner
-            message="Could not load your bindings."
-            onRetry={() => void bindings.refetch()}
-          />
-        )}
+    <GroupedList title="Telegram onboarding bindings" footer={<>
+      {bindings.error && <div role="alert" className="space-y-2">
+        <p className="text-destructive">Could not load your bindings.</p>
+        <Button variant="ghost" size="sm" isLoading={bindings.isFetching} onClick={() => void bindings.refetch()}>Retry</Button>
+      </div>}
+      {revoke.error && <p role="alert" className="text-destructive">{revoke.error.message}</p>}
+    </>}>
+        {bindings.isPending && <GroupedRow title="Loading bindings…" role="status" />}
         {bindings.data?.length === 0 && (
-          <p className="text-muted-foreground">
-            No active onboarding bindings. Use /help in the manager's private
-            chat to start onboarding.
-          </p>
+          <GroupedRow title="No active onboarding bindings. Use /help in the manager’s private chat to start onboarding." />
         )}
         {bindings.data?.map((binding) => (
-          <div
-            key={binding.id}
-            className="space-y-2 rounded-lg border border-border p-3"
-          >
+          <GroupedRow key={binding.id} className="block space-y-2 break-all">
             <p>
               Manager {binding.manager_bot_id} · Telegram sender{" "}
               {binding.telegram_sender_id}
@@ -366,11 +360,9 @@ function OwnedBindings() {
                 Review revocation
               </Button>
             )}
-          </div>
+          </GroupedRow>
         ))}
-        {revoke.error && <ErrorBanner message={revoke.error.message} />}
-      </div>
-    </DetailSection>
+    </GroupedList>
   );
 }
 

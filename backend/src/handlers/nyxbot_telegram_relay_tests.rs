@@ -82,14 +82,18 @@ async fn gateway_file_failure_or_disabled_sharing_keeps_the_owner_text_turn() {
         assert_eq!(captured.len(), 1);
         let input = captured[0].to_string();
         assert!(input.contains("Keep the forwarded text despite the file failure"));
-        assert!(
-            input.contains(if enabled {
-                "too large: 1"
-            } else {
-                "attachments are not shared"
-            }),
-            "{input}"
-        );
+        let expected_notes: &[&str] = if enabled {
+            &["too large: 1"]
+        } else {
+            &[
+                "1 attachment is not shared",
+                "not enabled for this owner",
+                "Ask a NyxID platform administrator to review the assistant:channel-media rollout for this owner.",
+            ]
+        };
+        for &expected_note in expected_notes {
+            assert!(input.contains(expected_note), "{input}");
+        }
         assert!(telegram.received_requests().await.unwrap().is_empty());
         drop(captured);
         model.abort();
