@@ -1169,6 +1169,10 @@ pub async fn transcript(db: &Database, access: &Access, since: i64) -> AppResult
         personal::messages(db, &access.group.user_id, &access.group.id, 60, None).await?;
     rows.retain(|r| r.seq > since);
     let newest = rows.last().map_or(since, |r| r.seq);
+    Ok((render_transcript(&rows), newest))
+}
+
+pub(crate) fn render_transcript(rows: &[crate::models::assistant_group::GroupMessage]) -> String {
     let text = rows
         .iter()
         .map(|r| {
@@ -1191,7 +1195,7 @@ pub async fn transcript(db: &Database, access: &Access, since: i64) -> AppResult
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Ok((super::assistant_nyxagent::excerpt(&text, 12000), newest))
+    super::assistant_nyxagent::excerpt(&text, 12000)
 }
 
 pub async fn note(db: &Database, access: &Access, agent: &AssistantAgent) -> AppResult<String> {

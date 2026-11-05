@@ -64,6 +64,7 @@ import {
   useForgetNyxBotMemory,
   useRememberNyxBotMemory,
   useNyxBotAgent,
+  useNyxBotChannels,
   useGuestReadiness,
   useNyxBotSettings,
   useSetNyxBotAgentGrants,
@@ -223,18 +224,26 @@ export function AgentDetailsSheet({
   readonly onOpenChange: (open: boolean) => void;
   readonly onDeleted: () => void;
 }) {
+  const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
   const detail = useNyxBotAgent(agentId, open);
   const returnFocus = useRef<HTMLElement | null>(null);
   const agent = detail.data?.agent;
+  const linkedChannels = useNyxBotChannels(open && agent?.owner_kind === "org");
+  const hasOrgChannel = linkedChannels.data?.some(
+    (row) => row.agent_id === agent?.id && row.org_specialist,
+  );
   const loadedAgentId = agent?.id;
   const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
   const noAccess = detail.error ? isNoAccess(detail.error) : false;
   useEffect(() => {
     if (!open || !tab || !loadedAgentId) return;
-    const target = document.getElementById(tab === "grants" ? GRANTS_SECTION_ID : SKILLS_SECTION_ID);
+    const target = document.getElementById(
+      tab === "grants" ? GRANTS_SECTION_ID : SKILLS_SECTION_ID,
+    );
     if (!target) return;
     // jsdom has no scrollIntoView.
-    if (typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "start" });
+    if (typeof target.scrollIntoView === "function")
+      target.scrollIntoView({ block: "start" });
     target.focus({ preventScroll: true });
   }, [open, tab, loadedAgentId]);
   return (
@@ -242,9 +251,10 @@ export function AgentDetailsSheet({
       <SheetContent
         className="w-full overflow-y-auto sm:max-w-lg"
         onOpenAutoFocus={() => {
-          returnFocus.current = document.activeElement instanceof HTMLElement
-            ? document.activeElement
-            : null;
+          returnFocus.current =
+            document.activeElement instanceof HTMLElement
+              ? document.activeElement
+              : null;
         }}
         onCloseAutoFocus={(event) => {
           if (returnFocus.current?.isConnected) {
@@ -273,10 +283,13 @@ export function AgentDetailsSheet({
                 aria-label="No access"
                 className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
               >
-                <p className="font-medium text-foreground">You cannot view this agent.</p>
+                <p className="font-medium text-foreground">
+                  You cannot view this agent.
+                </p>
                 <p>
-                  It belongs to an organization you are not a member of, or it no
-                  longer exists. Its grants and skills cannot be shown or changed here.
+                  It belongs to an organization you are not a member of, or it
+                  no longer exists. Its grants and skills cannot be shown or
+                  changed here.
                 </p>
               </section>
             ) : (
@@ -295,7 +308,9 @@ export function AgentDetailsSheet({
                 </span>
                 {agentHandle(agent) ? <span>{agentHandle(agent)}</span> : null}
                 <AgentKindBadge kind={agent.kind} />
-                <Badge variant={agent.status === "running" ? "success" : "secondary"}>
+                <Badge
+                  variant={agent.status === "running" ? "success" : "secondary"}
+                >
                   {AGENT_STATUS_LABEL[agent.status]}
                 </Badge>
                 <span>
@@ -312,58 +327,101 @@ export function AgentDetailsSheet({
                 description={
                   agent.owner_kind === "org"
                     ? `${agent.owner_name ?? agent.owner_id} · Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
-                    : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}. Your role: ${agent.share_role}. Your chats and notes stay private.` : "Personal agent"
+                    : agent.share_role
+                      ? `Shared by ${agent.owner_name ?? agent.owner_id}. Your role: ${agent.share_role}. Your chats and notes stay private.`
+                      : "Personal agent"
                 }
               />
               <ShareAgentDialog agent={agent} />
-              {agent.share_role ? <>
-                <SharedAgentProfile key={`${agent.id}:${agent.persona}:${agent.description}`} agent={agent} />
-                <SharedAgentMemory agent={agent} />
-                <SharedConsentCards agentId={agent.id} />
-              </> : <>
-              <ProfileForm
-                key={[
-                  agent.id, agent.name, agent.description, agent.display_name, agent.persona,
-                  agent.channel_checking_notice,
-                ].join(":")}
-                agent={agent}
-              />
-              {agent.kind === "specialist" ? (
+              {agent.share_role ? (
                 <>
-                  <Section title="Access authority" description={accessAuthorityCopy(agent, requestMode)} />
-                  <GrantsForm
-                    key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
+                  <SharedAgentProfile
+                    key={`${agent.id}:${agent.persona}:${agent.description}`}
                     agent={agent}
                   />
+                  <SharedAgentMemory agent={agent} />
+                  <SharedConsentCards agentId={agent.id} />
                 </>
               ) : (
-                <Section id={GRANTS_SECTION_ID} title="Access" description="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.">
-                  <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
-                </Section>
+                <>
+                  <ProfileForm
+                    key={[
+                      agent.id,
+                      agent.name,
+                      agent.description,
+                      agent.display_name,
+                      agent.persona,
+                      agent.channel_checking_notice,
+                    ].join(":")}
+                    agent={agent}
+                  />
+                  {agent.kind === "specialist" ? (
+                    <>
+                      <Section
+                        title="Access authority"
+                        description={accessAuthorityCopy(agent, requestMode)}
+                      />
+                      <GrantsForm
+                        key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
+                        agent={agent}
+                      />
+                    </>
+                  ) : (
+                    <Section
+                      id={GRANTS_SECTION_ID}
+                      title="Access"
+                      description="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first."
+                    >
+                      <MachineCapabilities
+                        agentId={agent.id}
+                        disabled={agent.status === "destroyed"}
+                      />
+                    </Section>
+                  )}
+                  <AgentConnections key={agent.id} agent={agent} />
+                  <AgentSkills
+                    id={SKILLS_SECTION_ID}
+                    agentId={agent.id}
+                    readOnly={
+                      agent.status === "destroyed" ||
+                      agent.can_maintain === false
+                    }
+                  />
+                  <AgentLearningReview
+                    key={`${agent.id}:${proposalId ?? ""}`}
+                    agentId={agent.id}
+                    proposalId={proposalId}
+                    readOnly={
+                      agent.status === "destroyed" ||
+                      agent.can_maintain === false
+                    }
+                  />
+                  {agent.can_use !== false ? (
+                    <AgentAutomations agentId={agent.id} />
+                  ) : null}
+                  {agent.can_maintain !== false ? (
+                    <MemoryList
+                      agent={agent}
+                      memory={detail.data?.memory ?? []}
+                    />
+                  ) : null}
+                  {agent.status === "destroyed" ||
+                  (agent.owner_kind === "org" &&
+                    !orgChannels &&
+                    !hasOrgChannel) ? null : (
+                    <Section
+                      title="Channel bots"
+                      description={`Chat with ${agentTitle(agent)} from these bots.`}
+                    >
+                      <ChannelBotsManager agents={agents} agent={agent} />
+                    </Section>
+                  )}
+                  {agent.kind === "specialist" &&
+                  agent.can_maintain !== false ? (
+                    <Lifecycle agent={agent} onDeleted={onDeleted} />
+                  ) : null}
+                </>
               )}
-              <AgentConnections key={agent.id} agent={agent} />
-              <AgentSkills id={SKILLS_SECTION_ID} agentId={agent.id} readOnly={agent.status === "destroyed" || agent.can_maintain === false
-                } />
-              <AgentLearningReview key={`${agent.id}:${proposalId ?? ""}`} agentId={agent.id} proposalId={proposalId} readOnly={agent.status === "destroyed" || agent.can_maintain === false} />
-              {agent.can_use !== false ? (
-                <AgentAutomations agentId={agent.id} />
-              ) : null}
-              {agent.can_maintain !== false ? (
-                <MemoryList agent={agent} memory={detail.data?.memory ?? []} />
-              ) : null}
-              {agent.status === "destroyed" ||
-              agent.owner_kind === "org" ? null : (
-                <Section
-                  title="Channel bots"
-                  description={`Chat with ${agentTitle(agent)} from these bots.`}
-                >
-                  <ChannelBotsManager agents={agents} agent={agent} />
-                </Section>
-              )}
-              {agent.kind === "specialist" && agent.can_maintain !== false ? (
-                <Lifecycle agent={agent} onDeleted={onDeleted} />
-              ) : null}
-              </>}
             </>
           ) : null}
         </div>
@@ -608,7 +666,15 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
 }
 
 function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
-  const readiness = useGuestReadiness(agent.id, agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
+  const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
+  const canManageGuests =
+    agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
+  const readiness = useGuestReadiness(
+    agent.id,
+    agent.owner_kind !== "org" &&
+      !agent.share_role &&
+      agent.can_maintain !== false,
+  );
   const grants = useSetNyxBotAgentGrants();
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
@@ -631,14 +697,20 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
     const changed = Object.fromEntries(
       values.services
         .map((slug) => [slug, values.guest_access[slug] ?? "use"] as const)
-        .filter(([slug, level]) => level !== (agent.guest_access[slug] ?? "use")),
+        .filter(
+          ([slug, level]) => level !== (agent.guest_access[slug] ?? "use"),
+        ),
     );
     try {
       await grants.mutateAsync({
         id: agent.id,
         services: values.services,
-        ...(form.getFieldState("machines").isDirty ? { machines: values.machines } : {}),
-        ...(form.getFieldState("logins").isDirty ? { logins: values.logins } : {}),
+        ...(form.getFieldState("machines").isDirty
+          ? { machines: values.machines }
+          : {}),
+        ...(form.getFieldState("logins").isDirty
+          ? { logins: values.logins }
+          : {}),
         account_read: values.account_read,
         ...(Object.keys(changed).length ? { guest_access: changed } : {}),
       });
@@ -655,7 +727,12 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot."
     >
       <Form {...form}>
-        <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
+        <form
+          aria-label="Grants"
+          noValidate
+          onSubmit={form.handleSubmit(save)}
+          className="space-y-3"
+        >
           <FormField
             control={form.control}
             name="services"
@@ -670,24 +747,33 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               </FormItem>
             )}
           />
-          {(["machines", ...(agent.owner_kind === "org" ? [] : ["logins"])] as (
+          {(
+            ["machines", ...(agent.owner_kind === "org" ? [] : ["logins"])] as (
               | "machines"
               | "logins"
             )[]
           ).map((kind) => (
-            <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
+            <FormField
+              key={kind}
+              control={form.control}
+              name={kind}
+              render={({ field }) => (
                 <FormItem>
                   <MachineGrantPicker
                     org={
                       agent.owner_kind === "org" ? agent.owner_id : undefined
                     }
-                    kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={readOnly} />
+                    kind={kind}
+                    value={field.value ?? []}
+                    onChange={field.onChange}
+                    disabled={readOnly}
+                  />
                 </FormItem>
               )}
             />
           ))}
           <GuestReadiness readiness={readiness.data} />
-          {services.length && agent.owner_kind !== "org" ? (
+          {services.length && canManageGuests ? (
             <FormField
               control={form.control}
               name="guest_access"
@@ -705,28 +791,28 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
           ) : null}
           {agent.owner_kind !== "org" ? (
             <FormField
-            control={form.control}
-            name="account_read"
-            render={({ field }) => (
-              <FormItem>
-                <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
-                  <div className="space-y-1">
-                    <FormLabel>Read my account</FormLabel>
-                    <FormDescription className="text-12">
+              control={form.control}
+              name="account_read"
+              render={({ field }) => (
+                <FormItem>
+                  <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+                    <div className="space-y-1">
+                      <FormLabel>Read my account</FormLabel>
+                      <FormDescription className="text-12">
                         Look up keys, services and nodes; never change them.
                       </FormDescription>
+                    </div>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        disabled={readOnly}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
                   </div>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      disabled={readOnly}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                </div>
-              </FormItem>
-            )}
-          />
+                </FormItem>
+              )}
+            />
           ) : null}
           {error ? (
             <p role="alert" className="text-12 text-destructive">
@@ -751,8 +837,16 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
       {agent.can_maintain !== false ? (
         <>
           <AgentOperationScopes agentId={agent.id} disabled={readOnly} />
-          {agent.owner_kind !== "org" && !agent.share_role ? <CollaborationGuestControls agentId={agent.id} /> : null}
-          {agent.owner_kind !== "org" ? <AgentOperationScopes agentId={agent.id} disabled={readOnly} guests /> : null}
+          {agent.owner_kind !== "org" && !agent.share_role ? (
+            <CollaborationGuestControls agentId={agent.id} />
+          ) : null}
+          {canManageGuests ? (
+            <AgentOperationScopes
+              agentId={agent.id}
+              disabled={readOnly}
+              guests
+            />
+          ) : null}
           <MachineCapabilities agentId={agent.id} disabled={readOnly} />
         </>
       ) : null}

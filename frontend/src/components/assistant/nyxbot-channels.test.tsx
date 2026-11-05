@@ -6,8 +6,14 @@ import { ChannelBotsManager } from "./nyxbot-channels";
 import { ApiError } from "@/lib/api-client";
 
 const data = vi.hoisted(() => ({
-  channels: [] as unknown[], bots: [] as unknown[],
-  connect: vi.fn(), link: vi.fn(), retryGateway: vi.fn(), pending: false,
+  channels: [] as unknown[],
+  bots: [] as unknown[],
+  orgs: [] as unknown[],
+  orgChannels: false,
+  connect: vi.fn(),
+  link: vi.fn(),
+  retryGateway: vi.fn(),
+  pending: false,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   nyxBotOf: (agents: AssistantAgent[]) => agents.find((agent) => agent.kind === "nyxbot"),
@@ -20,7 +26,13 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ data: data.bots, isPending: false }),
 }));
-vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: data.orgs }) }));
+vi.mock("@/hooks/use-feature-flag", () => ({
+  useFeature: () => data.orgChannels,
+}));
+vi.mock("./org-specialist-channel-settings", () => ({
+  OrgSpecialistChannelSettings: () => <div>Member verification</div>,
+}));
 vi.mock("./nyxbot-channel-chats", () => ({
   ChannelChats: ({ agents }: { agents: readonly AssistantAgent[] }) => (
     <div data-testid="channel-chat-agents">
@@ -29,10 +41,19 @@ vi.mock("./nyxbot-channel-chats", () => ({
   ),
 }));
 beforeEach(() => {
-  data.channels = []; data.bots = []; data.pending = false;
-  data.connect.mockResolvedValue({ channel_agent: { bot_label: "Receipts" }, link: {
-    code: "LINK123", instructions: "Send this code to your bot.", expires_at: "2026-10-22T00:00:00Z",
-  } });
+  data.channels = [];
+  data.bots = [];
+  data.orgs = [];
+  data.orgChannels = false;
+  data.pending = false;
+  data.connect.mockResolvedValue({
+    channel_agent: { bot_label: "Receipts" },
+    link: {
+      code: "LINK123",
+      instructions: "Send this code to your bot.",
+      expires_at: "2026-10-22T00:00:00Z",
+    },
+  });
   data.link.mockResolvedValue(undefined);
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -198,6 +219,68 @@ it.each([
   render(<ChannelBotsManager agents={[]} />);
   expect(screen.getByText(`Last error: ${explanation}`)).toBeVisible();
   expect(screen.getByText(code)).toHaveClass("text-text-tertiary");
+});
+
+it("offers an enabled organization specialist only to its admin and same-org bots", async () => {
+  data.orgChannels = true;
+  data.orgs = [{ id: "team", your_role: "admin" }];
+  data.bots = [
+    { id: "owned", user_id: "team", label: "Team bot", platform: "lark" },
+    {
+      id: "foreign",
+      user_id: "different",
+      label: "Other bot",
+      platform: "lark",
+    },
+  ];
+  const specialist = {
+    ...agent("org-specialist", "idle", "org"),
+    owner_id: "team",
+  };
+  render(<ChannelBotsManager agents={[agent("personal"), specialist]} />);
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("combobox", { name: "Agent for Team bot" }),
+  );
+  expect(screen.getByRole("option", { name: "org-specialist" })).toBeVisible();
+  await user.keyboard("{Escape}");
+  await user.click(
+    screen.getByRole("combobox", { name: "Agent for Other bot" }),
+  );
+  expect(
+    screen.queryByRole("option", { name: "org-specialist" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps member verification available on an existing binding without giving management or linking rights", () => {
+  data.orgs = [{ id: "team", your_role: "member" }];
+  data.channels = [
+    {
+      ...connection("active"),
+      org_specialist: {
+        org_id: "team",
+        guest_enabled: false,
+        delegated_service_ids: [],
+        daily_credits: null,
+      },
+    },
+  ];
+  render(
+    <ChannelBotsManager
+      agents={[{ ...agent("first", "idle", "org"), owner_id: "team" }]}
+    />,
+  );
+  expect(screen.getByText("Member verification")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Disconnect" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Link account|Link another account/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByTestId("channel-chat-agents")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("combobox", { name: "Agent for Receipts" }),
+  ).toBeDisabled();
 });
 
 

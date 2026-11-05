@@ -243,6 +243,8 @@ pub struct MachineUsageAttribution {
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_channel_guest: Option<crate::models::org_channel::GuestUsage>,
     #[serde(rename = "_id")]
     pub id: String,
     /// New rows enter the indexed live tail. Missing legacy markers are also

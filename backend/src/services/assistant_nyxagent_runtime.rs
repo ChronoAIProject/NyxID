@@ -885,7 +885,7 @@ pub(crate) async fn run_owner_turn(
                 let now = Utc::now();
                 engine::mark_queued(&state.db,&row,&turn_id,now,now+chrono::Duration::seconds(60)).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
-                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline)).await;
+                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline,super::org_channel_service::origin(&row))).await;
                 engine::mark_dequeued(&state.db,&row,&turn_id).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
                 if !ready.unwrap_or(false) {return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);}
@@ -916,7 +916,7 @@ pub(crate) async fn run_owner_turn(
                     .and_then(|r|r.get_str("claim").ok().map(str::to_owned));
                 // Another request may already have replaced the rejected generation.
                 let force = current==setup_generation;
-                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline)).await.unwrap_or(false) {
+                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline,super::org_channel_service::origin(&row))).await.unwrap_or(false) {
                     partial.clear();
                     instruction_context = None;
                     return execute_owner_turn(&state,egress.as_ref(),&authority,&row,&text,&mut credential,policy,&mut events,&block_id,&mut partial,&mut instruction_context).await;
