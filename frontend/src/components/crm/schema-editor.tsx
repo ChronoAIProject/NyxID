@@ -1,3 +1,4 @@
+import { NewCrmObject } from "./new-object";
 import { useEffect, useState } from "react";
 import { useAddCrmField, useUpdateCrmField } from "@/hooks/use-crm";
 import { Button } from "@/components/ui/button";
@@ -248,6 +249,7 @@ export function CrmSchemaEditor({
   const kind = form.watch("kind");
   return (
     <section aria-label="Object schema" className="space-y-3">
+      <NewCrmObject ownerId={ownerId} />
       <p className="text-12 text-text-secondary">
         Schema revision {object.schema_revision}. Keys and types are immutable.
         Up to 100 fields and 100 options per field, including archived

@@ -5,6 +5,14 @@ import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
 import { cmaOperationSchema } from "./cma-operation";
 
+export const turnCrmArtifactSchema = z.object({
+  kind: z.enum(["view", "record", "object"]),
+  id: z.string(), owner_id: z.string(), object_key: z.string().nullish(),
+  title: z.string().max(200), role: z.enum(["created", "presented"]),
+}).strict();
+export type TurnCrmArtifact = z.infer<typeof turnCrmArtifactSchema>;
+const crmArtifacts = z.array(turnCrmArtifactSchema).max(8).optional();
+
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
 export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).max(200) });
@@ -112,6 +120,7 @@ export const nyxAgentConversationSchema = z.object({
       activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
+      crm_artifacts: crmArtifacts,
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
     })
     .nullable(),
@@ -191,7 +200,8 @@ export const nyxAgentMessageSchema = z.object({
   }).nullable().optional(),
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
-  attachments: z.array(nyxAgentAttachmentSchema).default([]),
+  crm_artifacts: crmArtifacts,
+      attachments: z.array(nyxAgentAttachmentSchema).default([]),
   activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
@@ -334,6 +344,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
   base.extend({ event: z.literal("message.completed"), message_id: z.string() }),
   base.extend({
     event: z.literal("turn.completed"),
+    crm_artifacts: crmArtifacts,
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
     turn_metadata: turnMetadataSchema.nullish(),
@@ -844,7 +855,8 @@ export const assistantGroupMessageSchema = z.object({
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullable().optional(), updated_at: z.string().optional() }).nullable().optional(),
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
-  attachments: z.array(nyxAgentAttachmentSchema).optional(),
+  crm_artifacts: crmArtifacts,
+      attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),
   seq: z.number().int().positive(),
   /** `notice` is a NyxID-authored system line (members joined, renamed, ...). */

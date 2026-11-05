@@ -612,6 +612,7 @@ export class NyxAgentTransport {
       if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
+        crmArtifacts: message.crm_artifacts,
         recovery: message.recovery,
         id: message.id,
         feedback: message.feedback ?? undefined,
@@ -645,7 +646,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
+        ? { crmArtifacts: polledTurn.crm_artifacts, ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
@@ -675,6 +676,7 @@ export class NyxAgentTransport {
         const cached = streaming ? undefined : this.liveViews.get(message);
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
+          crmArtifacts: settled?.crm_artifacts ?? (streaming ? live.state.activeTurn?.crmArtifacts : undefined),
           recovery: settled?.recovery,
           id: message.id,
           role: settled?.role ?? message.role,

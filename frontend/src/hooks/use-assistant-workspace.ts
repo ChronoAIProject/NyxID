@@ -1,3 +1,9 @@
+import { useQuery } from "@tanstack/react-query";
+import { assistantJson } from "@/lib/assistant/assistant-http";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
+import { z } from "zod";
 import {
   useApprovalRequests,
   useNotificationSettings,
@@ -42,9 +48,21 @@ export function useAssistantApprovals() {
 
 export function useAssistantWorkspaceCounts() {
   const pendingQuery = usePendingApprovalRequests();
+  const enabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
+  const actor = useAuthStore((state) => state.user?.id);
+  const artifacts = useQuery({
+    queryKey: ["crm", actor, "artifact-count", "actor", actor],
+    queryFn: async () =>
+      z
+        .object({ count: z.number().int().nonnegative() })
+        .parse(await assistantJson("/assistant/crm/views/count")).count,
+    enabled: enabled && Boolean(actor),
+    retry: false,
+    refetchInterval: 30_000,
+  });
   return {
     data: {
-      artifacts: 0,
+      artifacts: enabled ? (artifacts.data ?? 0) : 0,
       pendingApprovals: pendingQuery.data?.total ?? 0,
     },
   };

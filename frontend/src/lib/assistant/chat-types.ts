@@ -19,6 +19,7 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly crmArtifacts?: readonly import("@/schemas/assistant-nyxagent").TurnCrmArtifact[];
   readonly cmaOperations?: readonly import("@/schemas/cma-operation").CmaOperation[];
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
   readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;

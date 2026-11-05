@@ -33,7 +33,7 @@ vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current:
 vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: (flag: FeatureFlag) => {
   const enabled = useAuthStore((state) => userHasFeature(state.user, flag));
-  return flag === FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW ? enabled : accountMocks.nyxagent;
+  return flag === FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW || flag === FEATURE_FLAG.CMS_POC_V1 ? enabled : accountMocks.nyxagent;
 } }));
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => accountMocks.navigate,
@@ -975,4 +975,11 @@ describe("restricted workspace previews", () => {
     expect(screen.getByText("Artifacts").closest('[aria-disabled="true"]')).toBeInTheDocument();
     expect(screen.getByText("Activity").closest('[aria-disabled="true"]')).toBeInTheDocument();
   });
+});
+
+it("opens live saved artifacts when CMS is enabled", () => {
+  useAuthStore.setState({ user: { ...USER, capabilities: { enabled_features: [FEATURE_FLAG.CMS_POC_V1] } } });
+  renderSidebar();
+  expect(screen.getByRole("link", { name: /Artifacts/ })).toHaveAttribute("data-to", "/assistant/crm");
+  expect(screen.getByRole("link", { name: /Artifacts/ })).toHaveAttribute("data-search", JSON.stringify({ surface: "views" }));
 });

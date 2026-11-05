@@ -9,6 +9,7 @@ import {
 } from "@tanstack/react-query";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
+  crmCreateObjectSchema,
   crmActivitiesResponseSchema,
   crmAggregateQuerySchema,
   crmAggregateResultSchema,
@@ -686,18 +687,16 @@ export function useCrmPeopleLabels(ids: readonly string[], ownerId?: string) {
       queryFn: async () => {
         const people: z.infer<typeof crmPersonSchema>[] = [];
         for (let index = 0; index < unique.length; index += 200) {
-          const result = z
-            .object({ people: z.array(crmPersonSchema) })
-            .parse(
-              await assistantJson(`${CRM_PATH}/people/lookup`, {
-                method: "POST",
-                body: ownerBody(
-                  { ids: unique.slice(index, index + 200) },
-                  owner,
-                  actor,
-                ),
-              }),
-            );
+          const result = z.object({ people: z.array(crmPersonSchema) }).parse(
+            await assistantJson(`${CRM_PATH}/people/lookup`, {
+              method: "POST",
+              body: ownerBody(
+                { ids: unique.slice(index, index + 200) },
+                owner,
+                actor,
+              ),
+            }),
+          );
           people.push(...result.people);
         }
         return people;
@@ -708,4 +707,29 @@ export function useCrmPeopleLabels(ids: readonly string[], ownerId?: string) {
     }),
     owner,
   );
+}
+
+export function useCreateCrmObject(ownerId?: string) {
+  const context = useCrmMutationContext(ownerId);
+  return useMutation({
+    mutationFn: async ({
+      input,
+      idempotencyKey,
+    }: {
+      input: z.input<typeof crmCreateObjectSchema>;
+      idempotencyKey?: string;
+    }) =>
+      crmObjectSchema.parse(
+        await assistantJson(`${CRM_PATH}/objects`, {
+          method: "POST",
+          headers: mutationHeaders(idempotencyKey),
+          body: ownerBody(
+            crmCreateObjectSchema.parse(input),
+            context.owner,
+            context.actor,
+          ),
+        }),
+      ),
+    onSuccess: () => context.invalidate(),
+  });
 }

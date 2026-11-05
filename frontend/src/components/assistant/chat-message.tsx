@@ -1,3 +1,4 @@
+import { CrmArtifactBlock } from "./blocks/crm-artifact-block";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
@@ -722,6 +723,7 @@ export function ChatMessageBubble({
         {capacityNote ? (
           <p role="note" className="text-12 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
+        <CrmArtifactBlock artifacts={message.crmArtifacts} />
         {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>

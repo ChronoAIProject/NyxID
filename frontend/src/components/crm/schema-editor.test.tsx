@@ -10,6 +10,7 @@ import { CrmSchemaEditor } from "./schema-editor";
 import type { CrmObject } from "@/schemas/crm";
 const { patch, add } = vi.hoisted(() => ({ patch: vi.fn(), add: vi.fn() }));
 vi.mock("@/hooks/use-crm", () => ({
+  useCreateCrmObject: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useUpdateCrmField: () => ({ mutateAsync: patch, isPending: false }),
   useAddCrmField: () => ({ mutateAsync: add, isPending: false }),
 }));

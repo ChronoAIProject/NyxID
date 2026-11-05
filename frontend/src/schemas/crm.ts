@@ -107,6 +107,16 @@ export const crmPipelineSchema = z.object({
   closed_stages: z.array(crmOptionValueSchema),
 });
 
+export const crmCreateObjectSchema = z
+  .object({
+    key: crmKeySchema,
+    label: z.string().trim().min(1).max(200),
+    plural_label: z.string().trim().min(1).max(200),
+    fields: z.array(crmFieldSchema).min(1).max(100),
+    pipeline: crmPipelineSchema.nullish(),
+  })
+  .strict();
+
 export const crmObjectMetadataSchema = z.object({
   id: crmIdSchema,
   owner_id: crmIdSchema,

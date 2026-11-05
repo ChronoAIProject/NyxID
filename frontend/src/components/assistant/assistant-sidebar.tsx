@@ -1018,7 +1018,11 @@ export function AssistantSidebar({
           />
           <span className="truncate">Plugins</span>
         </Link>
-        {workspacePreview ? (
+        {crmEnabled ? (
+          <Link to="/assistant/crm" search={{ surface: "views", owner: undefined, record: undefined, view: undefined, object: undefined }} className="flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground">
+            <FileText className="h-4 w-4 shrink-0 text-text-tertiary" /><span className="flex-1 truncate">Artifacts</span><span className="font-mono text-9 text-text-tertiary">{counts.data?.artifacts ?? 0}</span>
+          </Link>
+        ) : workspacePreview ? (
           <ComingSoonItem
             icon={FileText}
             label="Artifacts"

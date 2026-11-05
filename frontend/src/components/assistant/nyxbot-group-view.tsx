@@ -1,3 +1,4 @@
+import { CrmArtifactBlock } from "./blocks/crm-artifact-block";
 import { GroupAgentAccessRequest } from "./group-agent-access";
 import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
@@ -188,6 +189,7 @@ export function GroupMessageRow({
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
+          <CrmArtifactBlock artifacts={message.crm_artifacts} />
           <PeopleChips ids={message.mentioned_participant_ids ?? []} participants={participants} />
           <UserText text={projection.text} names={names} mentions={projection.mentions} />
           {message.attachments?.map((item) => (
