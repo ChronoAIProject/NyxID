@@ -2240,7 +2240,7 @@ async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
     let (_, ids) = work_groups::post(&state.db, &authority(&row), &group, "Investigate this")
         .await
         .unwrap();
-    assert_eq!(ids, [group.lead_agent_id.clone()]);
+    assert_eq!(ids.as_slice(), std::slice::from_ref(&group.lead_agent_id));
     crate::services::assistant_group_service::persist_last_recipients(
         &state.db,
         OWNER,
@@ -2417,7 +2417,7 @@ async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group
     )
     .await
     .unwrap();
-    assert_eq!(addressed, [shared.id.clone()]);
+    assert_eq!(addressed.as_slice(), std::slice::from_ref(&shared.id));
     let current = crate::services::assistant_group_service::get(&state.db, OWNER, &group.id)
         .await
         .unwrap();

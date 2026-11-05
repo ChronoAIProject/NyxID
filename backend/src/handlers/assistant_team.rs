@@ -499,11 +499,9 @@ pub(crate) async fn after_turn(
         .automation_work
         .as_ref()
         .is_some_and(|w| w.role == "direct")
+        && let Err(error) = crate::services::trigger_schedule::direct::settled(&state.db, row).await
     {
-        if let Err(error) = crate::services::trigger_schedule::direct::settled(&state.db, row).await
-        {
-            tracing::debug!(%error, "Automation handoff publication deferred");
-        }
+        tracing::debug!(%error, "Automation handoff publication deferred");
     }
     if row.is_subagent()
         && !turn
