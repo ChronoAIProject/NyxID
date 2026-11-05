@@ -135,7 +135,15 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
                 .find_one(doc! { "conversation_id": thread, "turn_id": turn, "role": "assistant" })
                 .await?;
             if let Some(reply) = reply {
-                settle_result(state, &row, &run, &reply.text, reply.error_code.as_deref()).await?;
+                settle_artifact_result(
+                    state,
+                    &row,
+                    &run,
+                    &reply.text,
+                    reply.error_code.as_deref(),
+                    &reply.crm_artifacts,
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -717,6 +725,22 @@ pub(super) async fn settle_result(
     text: &str,
     error: Option<&str>,
 ) -> AppResult<()> {
+    let artifacts = row
+        .active_turn
+        .as_ref()
+        .map(|turn| turn.crm_artifacts.as_slice())
+        .unwrap_or_default();
+    settle_artifact_result(state, row, run, text, error, artifacts).await
+}
+
+pub(super) async fn settle_artifact_result(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    run: &TriggerRun,
+    text: &str,
+    error: Option<&str>,
+    artifacts: &[crate::models::assistant_crm_artifact::TurnCrmArtifact],
+) -> AppResult<()> {
     use futures::TryStreamExt;
     if error.is_none() {
         let cards: Vec<crate::models::assistant_acknowledgement::AssistantAcknowledgement> = state
@@ -826,8 +850,23 @@ pub(super) async fn settle_result(
         }
     }
     schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
+    let failure_text = error.map(|code| {
+        if code == "capacity_exceeded" {
+            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
+        } else {
+            engine::TurnError::new(code).message
+        }
+    });
+    let text = crate::services::crm::artifacts::channel_text(
+        &state.db,
+        &row.user_id,
+        artifacts,
+        failure_text.as_deref().unwrap_or(text),
+        &state.config.frontend_url,
+    )
+    .await;
     if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
-        return settle_chat_result(state, row, run, text, error).await;
+        return settle_chat_result(state, row, run, &text, error).await;
     }
     // One settlement owns the outbound attempt. Recovery never duplicates an
     // ambiguous network send; the thread remains the durable final result.
@@ -858,14 +897,7 @@ pub(super) async fn settle_result(
     else {
         return Ok(());
     };
-    let failure_text = error.map(|code| {
-        if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
-        } else {
-            engine::TurnError::new(code).message
-        }
-    });
-    let final_text = failure_text.as_deref().unwrap_or(text);
+    let final_text = text.as_str();
     let outcome = match &run.deliver_to {
         DeliverTo::Thread => Ok(()),
         DeliverTo::Notification => {
@@ -941,14 +973,6 @@ async fn settle_chat_result(
             "Result delivery destination changed".into(),
         ));
     };
-    let failure = error.map(|code| {
-        if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
-        } else {
-            engine::TurnError::new(code).message
-        }
-    });
-    let text = failure.as_deref().unwrap_or(text);
     let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
     let seconds = (claim.expires_at - Utc::now()).num_seconds().max(0) as u64;
     let result = tokio::time::timeout(
@@ -1119,7 +1143,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
-crm_artifacts: Vec::new(),
+                crm_artifacts: Vec::new(),
                         delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
                         media_queue_notice_id: None,

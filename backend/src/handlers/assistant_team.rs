@@ -377,7 +377,7 @@ struct OwnerTurnSettled {
 impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for OwnerTurnSettled {
     async fn settled(
         &self,
-        row: AssistantConversation,
+        mut row: AssistantConversation,
         reply: crate::services::platform_manager_contract::ReplyRef,
     ) {
         if row.id != reply.turn.conversation_id
@@ -413,6 +413,9 @@ impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for Owner
                         error_code = error.error_code(),
                         "Saved personal reply delivery deferred or refused"
                     );
+                }
+                if let Some(turn) = row.active_turn.as_mut() {
+                    turn.crm_artifacts = message.crm_artifacts;
                 }
                 let error = message.error_code.as_deref().map(TurnError::new);
                 after_turn_boxed(self.state.clone(), row, message.text, error).await;
@@ -459,13 +462,15 @@ pub(crate) async fn after_turn(
             super::nyxbot::late_delivery::process(state, source).await;
         }
     }
+    let channel_text = channel_artifact_text(state, row, text).await;
     let owner = row.user_id.as_str();
     if let Some(run_id) = turn.trigger_run_id.as_deref()
         && !crate::services::async_service_operation::pending_run(&state.db, run_id)
             .await
             .unwrap_or(true)
     {
-        super::trigger_scheduler::settled(state, row, run_id, text, error.map(|e| e.code)).await;
+        super::trigger_scheduler::settled(state, row, run_id, &channel_text, error.map(|e| e.code))
+            .await;
     }
     // Every reply of a hidden group member thread belongs to the group,
     // including event turns (a finished link, a confirmed action).
@@ -542,7 +547,12 @@ pub(crate) async fn after_turn(
                 state,
                 row,
                 origin,
-                "I couldn't finish answering that question. Please ask again.",
+                &channel_artifact_text(
+                    state,
+                    row,
+                    "I couldn't finish answering that question. Please ask again.",
+                )
+                .await,
                 None,
             )
             .await;
@@ -563,10 +573,11 @@ pub(crate) async fn after_turn(
     match engine::answer_routing(row, turn).primary {
         engine::PrimaryDestination::ChatUpdate { origins } => {
             if origins.len() == 1 && origins[0].thread.is_none() {
-                super::nyxbot::deliver_update(state, row, text, Some(&plan)).await;
+                super::nyxbot::deliver_update(state, row, &channel_text, Some(&plan)).await;
             } else {
                 for origin in origins {
-                    super::nyxbot::deliver_to(state, row, &origin, text, Some(&plan)).await;
+                    super::nyxbot::deliver_to(state, row, &origin, &channel_text, Some(&plan))
+                        .await;
                 }
             }
         }
@@ -576,9 +587,32 @@ pub(crate) async fn after_turn(
         | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
+        super::nyxbot::deliver_to(state, row, origin, &channel_text, Some(&plan)).await;
     }
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+}
+
+/// Settled references are copied from the already loaded message by the owner hook.
+/// These links feed async chat updates, duplicate recipients and trigger deliveries.
+pub(crate) async fn channel_artifact_text(
+    state: &AppState,
+    row: &AssistantConversation,
+    text: &str,
+) -> String {
+    let artifacts = row
+        .active_turn
+        .as_ref()
+        .map(|turn| turn.crm_artifacts.as_slice())
+        .unwrap_or_default();
+    if row.guest_turn
+        || row.collaboration.is_some()
+        || !crate::services::crm::artifacts::enabled_for(&state.db, &row.user_id, artifacts)
+            .await
+            .unwrap_or(false)
+    {
+        return text.to_owned();
+    }
+    crate::services::crm::artifacts::append_links(text, artifacts, &state.config.frontend_url)
 }
 
 /// Falls back to the turn when no reply row exists (a lost turn swept

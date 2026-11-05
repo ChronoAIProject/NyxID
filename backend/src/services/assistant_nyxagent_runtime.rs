@@ -309,20 +309,24 @@ where
         SettledExecution::Saved { message_id, .. } => message_id.as_str(),
         _ => message_id,
     };
-    let metadata = db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+    let saved_message = db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
         .find_one(doc! {"_id": saved_message_id, "conversation_id": &row.id, "user_id": &row.user_id, "turn_id": turn_id})
-        .await.ok().flatten().and_then(|message| message.turn_metadata);
+        .await.ok().flatten();
+    let metadata = saved_message
+        .as_ref()
+        .and_then(|message| message.turn_metadata.clone());
+    let artifacts = saved_message
+        .map(|message| message.crm_artifacts)
+        .unwrap_or_default();
     let mut terminal =
         json!({"turn_id": turn_id, "status": status, "error": error, "turn_metadata": metadata});
     if !row.guest_turn
         && row.collaboration.is_none()
-        && super::crm::enabled(db, &row.user_id).await.unwrap_or(false)
+        && super::crm::artifacts::enabled_for(db, &row.user_id, &artifacts)
+            .await
+            .unwrap_or(false)
     {
-        terminal["crm_artifacts"] = json!(
-            super::crm::artifacts::settled(db, &row.user_id, &row.id, turn_id)
-                .await
-                .unwrap_or_default()
-        );
+        terminal["crm_artifacts"] = json!(artifacts);
     }
     events.emit("turn.completed", terminal);
     drop(permit);

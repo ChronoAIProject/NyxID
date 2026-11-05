@@ -1616,7 +1616,28 @@ async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
         .insert_one(&run)
         .await
         .unwrap();
-    settle_result(&state, &thread, &run, "GitHub summary delivered", None)
+    crate::services::feature_flag_service::set_platform_override(
+        &state.db,
+        crate::services::crm::FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let artifacts = vec![
+        crate::models::assistant_crm_artifact::TurnCrmArtifact::View {
+            id: "saved-view".into(),
+            owner_id: OWNER.into(),
+            title: "Private view".into(),
+            role: crate::models::assistant_crm_artifact::CrmArtifactRole::Created,
+        },
+    ];
+    let artifact_text = format!(
+        "GitHub summary delivered\n\n{}/assistant/crm?owner={OWNER}&view=saved-view",
+        state.config.frontend_url.trim_end_matches('/')
+    );
+    settle_artifact_result(&state, &thread, &run, &artifact_text, None, &artifacts)
         .await
         .unwrap();
     let saved = state
@@ -1628,10 +1649,7 @@ async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
         .unwrap();
     assert_eq!(saved.outcome, RunOutcome::Completed);
     assert_eq!(requests.lock().await[0].1["chat_id"], "42");
-    assert_eq!(
-        requests.lock().await[0].1["text"],
-        "GitHub summary delivered"
-    );
+    assert_eq!(requests.lock().await[0].1["text"], artifact_text);
     state
         .db
         .collection::<Document>(crate::models::nyxbot_channel::THREADS_COLLECTION_NAME)

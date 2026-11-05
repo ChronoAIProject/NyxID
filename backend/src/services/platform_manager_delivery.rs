@@ -505,7 +505,9 @@ pub(crate) async fn render_personal(
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
     let mut message = message.clone();
-    if !super::crm::enabled(&state.db, &message.user_id).await? {
+    if !super::crm::artifacts::enabled_for(&state.db, &message.user_id, &message.crm_artifacts)
+        .await?
+    {
         message.crm_artifacts.clear();
     }
     append_card_notices(

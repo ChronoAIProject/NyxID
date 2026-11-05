@@ -406,7 +406,7 @@ pub(crate) async fn publish_result(
                 let text: String = source.text.chars().take(12_000).collect();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
-crm_artifacts: Vec::new(),
+                crm_artifacts: source.crm_artifacts.clone(),
                         delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
                         media_queue_notice_id: None,

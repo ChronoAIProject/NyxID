@@ -472,7 +472,13 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     )
     .await;
     let text = super::images::append_failure(&text, &report);
-    let text = if crate::services::crm::enabled(&state.db, &message.user_id).await? {
+    let text = if crate::services::crm::artifacts::enabled_for(
+        &state.db,
+        &message.user_id,
+        &message.crm_artifacts,
+    )
+    .await?
+    {
         crate::services::crm::artifacts::append_links(
             &text,
             &message.crm_artifacts,
@@ -573,7 +579,7 @@ pub(super) async fn stream_images(
         }).await? else { return Ok(bounded_reply(text)); };
         let report = event_images(state, &event, delivery, &channel, &thread, &conversation, &message, Some(deadline)).await;
         let text = super::images::append_failure(&bounded_reply(text), &report);
-        Ok(if crate::services::crm::enabled(&state.db, &message.user_id).await? {
+        Ok(if crate::services::crm::artifacts::enabled_for(&state.db, &message.user_id, &message.crm_artifacts).await? {
             crate::services::crm::artifacts::append_links(&text, &message.crm_artifacts, &state.config.frontend_url)
         } else {
             text

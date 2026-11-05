@@ -91,6 +91,20 @@ pub async fn enabled_for(
     super::enabled(db, owner).await
 }
 
+pub async fn channel_text(
+    db: &Database,
+    owner: &str,
+    artifacts: &[TurnCrmArtifact],
+    text: &str,
+    frontend: &str,
+) -> String {
+    if enabled_for(db, owner, artifacts).await.unwrap_or(false) {
+        append_links(text, artifacts, frontend)
+    } else {
+        text.to_owned()
+    }
+}
+
 pub async fn settled(
     db: &Database,
     owner: &str,

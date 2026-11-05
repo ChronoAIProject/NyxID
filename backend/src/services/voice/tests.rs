@@ -1276,7 +1276,8 @@ async fn cross_thread_voice_settlement_publishes_once_under_racing_publishers() 
             &engine::TurnResult { text: "Connected services: Calendar and Drive.".into(), session_id: None, response_id: None, error: None })).await.unwrap();
         let request = voice::get(db, &call.user_id, &visible.id, &request.id).await.unwrap();
         assert_eq!(request.state, crate::models::assistant_voice::RequestState::Completed);
-        let source = voice::result_message(db, &request).await.unwrap().unwrap();
+        let mut source = voice::result_message(db, &request).await.unwrap().unwrap();
+        source.crm_artifacts = vec![crate::models::assistant_crm_artifact::TurnCrmArtifact::View {id:"voice-view".into(),owner_id:call.user_id.clone(),title:"Voice result".into(),role:crate::models::assistant_crm_artifact::CrmArtifactRole::Created}];
         let (a, b) = tokio::join!(voice::publish_result(db, &request, &source), voice::publish_result(db, &request, &source));
         let id = a.unwrap().unwrap();
         assert_eq!(b.unwrap().as_deref(), Some(id.as_str()));
@@ -1285,6 +1286,7 @@ async fn cross_thread_voice_settlement_publishes_once_under_racing_publishers() 
             .count_documents(doc!{"conversation_id":&visible.id,"turn_id":&request.turn_id,"role":"assistant"}).await.unwrap(), 1);
         let result = db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME).find_one(doc!{"_id":&id}).await.unwrap().unwrap();
         assert_eq!(result.get_str("text").unwrap(), "Connected services: Calendar and Drive.");
+        assert_eq!(result.get_array("crm_artifacts").unwrap()[0].as_document().unwrap().get_str("id").unwrap(), "voice-view");
         db.drop().await.unwrap();
     }).await;
 }
