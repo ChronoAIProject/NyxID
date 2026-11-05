@@ -3,6 +3,30 @@ import { describe, expect, it } from "vitest";
 import { TextBlock } from "./text-block";
 
 describe("TextBlock", () => {
+  it("renders the Chinese reply's punctuation-adjacent bold text", () => {
+    const { container } = render(<TextBlock text={'**这块先去掉，别急着吃。**照片无法确认整颗是否安全；\n\n从照片看，**更像木瓜自身长出的异常肉质组织，俗称“胎木瓜”或“瓜中瓜”**。'} />);
+    expect(container.querySelectorAll("strong")).toHaveLength(2);
+    expect(screen.getByText("这块先去掉，别急着吃。").tagName).toBe("STRONG");
+    expect(container.textContent).not.toContain("**");
+  });
+
+  it("keeps escaped CJK markers, code and malformed emphasis literal", () => {
+    const literal = "**这块先去掉，别急着吃。**照片";
+    const { container } = render(<TextBlock text={[
+      "\\*\\*这块先去掉，别急着吃。\\*\\*照片",
+      `\`${literal}\``,
+      `\`\`\`text\n${literal}\n\`\`\``,
+      "**未闭合。照片",
+      "**plain.**word",
+    ].join("\n\n")} />);
+    expect(container.querySelector("strong")).toBeNull();
+    expect(container.querySelectorAll("code")).toHaveLength(2);
+    for (const code of container.querySelectorAll("code")) expect(code.textContent).toContain(literal);
+    expect(container.textContent).toContain("**未闭合。照片");
+    expect(container.textContent).toContain("**plain.**word");
+    expect(container.querySelector("p")?.textContent).toBe(literal);
+  });
+
   it("renders the supported markdown subset", () => {
     render(
       <TextBlock text={"**Scoped** and *brokered* with `charges:read`."} />,

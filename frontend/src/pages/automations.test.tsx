@@ -1,3 +1,4 @@
+import { formatAutomationTime } from "@/lib/automation-time";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   act,
@@ -121,6 +122,28 @@ function chooseOption(label: string, name: string) {
   fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowDown" });
   fireEvent.keyDown(screen.getByRole("option", { name }), { key: "Enter" });
 }
+
+it.each([
+  { status: "disabled", schedule: { kind: "at", at: "2026-10-22T08:40:00Z" }, next: "2026-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "disabled", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "active", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: null },
+] as const)("shows the effective next run on desktop and mobile: $status / $schedule.kind / $next", ({ status, schedule, next }) => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [{ ...trigger, status, schedule, next_run_at: next }] } });
+  render(<AutomationsPage />);
+  const expected = status !== "active"
+    ? "Schedule paused"
+    : next === null ? "No run scheduled" : `Next: ${formatAutomationTime(next, "Asia/Singapore")}`;
+  const row = screen.getByRole("button", { name: trigger.label });
+  expect(row).toHaveTextContent(expected);
+  if (status !== "active") {
+    expect(row).not.toHaveTextContent(formatAutomationTime(next, "Asia/Singapore"));
+  }
+  expect(mocks.update).not.toHaveBeenCalled();
+});
 
 it("preserves schedule drafts across segments and guards dismissal until discarded", async () => {
   const user = userEvent.setup();

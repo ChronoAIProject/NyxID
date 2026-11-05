@@ -257,7 +257,7 @@ export function GroupMessageRow({
           ))}
           <TextBlock text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} />
           <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
-            <MessageCopyAction text={sanitizeAssistantMessageContent(projection.copyText)} />
+            <MessageCopyAction text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} format="markdown" />
             <ReplyFeedbackVotes feedback={feedback} />
           </div>
           <ReplyFeedbackFollowUp feedback={feedback} />
