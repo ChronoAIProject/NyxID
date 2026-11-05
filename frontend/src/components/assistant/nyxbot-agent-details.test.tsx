@@ -381,6 +381,26 @@ it("lets the owner choose what others in the agent's chats may do with each serv
   );
 });
 
+it("hides CRM grant controls and omits stored grants from a flag-off save", async () => {
+  agent = agentRow({
+    crm: [{ owner_id: "owner", object: "company", capabilities: ["read"] }],
+  });
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const grants = await within(sheet).findByRole("form", { name: "Grants" });
+  expect(
+    within(grants).queryByRole("group", { name: "CRM access" }),
+  ).not.toBeInTheDocument();
+  await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  await user.click(within(grants).getByRole("button", { name: "Save grants" }));
+  await waitFor(() =>
+    expect(grantRequestBodies).toEqual([
+      '{"services":["github","slack"],"account_read":false}',
+    ]),
+  );
+  expect(client.getQueryCache().findAll({ queryKey: ["crm"] })).toHaveLength(0);
+});
+
 it("preserves CRM grants when a flag-on save changes only other grants", async () => {
   enableCrm();
   agent = agentRow({
@@ -892,12 +912,10 @@ it("clears an agent's own access mode back to the workspace setting", async () =
 
 it("hides the agent model selector without the internal model-controls flag", async () => {
   const owner = useAuthStore.getState().user!;
-  useAuthStore
-    .getState()
-    .setUser({
-      ...owner,
-      capabilities: { billing_available: false, enabled_features: [] },
-    });
+  useAuthStore.getState().setUser({
+    ...owner,
+    capabilities: { billing_available: false, enabled_features: [] },
+  });
   renderSheet();
   const profile = await screen.findByRole("form", { name: "Profile" });
   expect(

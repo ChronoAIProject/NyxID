@@ -1553,6 +1553,66 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
 }
 
 #[tokio::test]
+async fn crm_live_stream_rechecks_flag_before_delivering_queued_events() {
+    use crate::services::assistant_live::LiveEvent;
+    use crate::services::feature_flag_service::{self, FlagTarget};
+    use http_body_util::BodyExt;
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("crm_live_flag").await;
+    f.state.assistant_live.set_open_for_tests(true);
+    let mut body = live(State(f.state.clone()), test_auth_user(&f.owner))
+        .await
+        .unwrap()
+        .into_body();
+    let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(
+        std::str::from_utf8(&ready)
+            .unwrap()
+            .contains("event: ready")
+    );
+    for enabled in [false, true, false] {
+        f.state.assistant_live.publish(LiveEvent::Crm {
+            owner_id: f.owner.clone(),
+            user_id: f.owner.clone(),
+        });
+        f.state.assistant_live.publish(LiveEvent::ChannelBot {
+            id: "channel".into(),
+            user_id: f.owner.clone(),
+            active: true,
+        });
+        feature_flag_service::set_platform_override(
+            &f.state.db,
+            crate::services::crm::FLAG_KEY,
+            &FlagTarget::User(f.owner.clone()),
+            enabled,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let frame = std::str::from_utf8(&frame).unwrap();
+        if enabled {
+            assert!(frame.contains("event: crm"), "{frame}");
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert!(
+                std::str::from_utf8(&frame)
+                    .unwrap()
+                    .contains("event: channels")
+            );
+        } else {
+            assert!(frame.contains("event: channels"), "{frame}");
+            assert!(!frame.contains("event: crm"));
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn crm_history_masks_active_and_settled_artifacts_when_flag_is_off() {
     use crate::models::assistant_crm_artifact::{
         CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
