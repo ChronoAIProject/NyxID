@@ -3,7 +3,7 @@ import { FEATURE_FLAG, userHasFeature } from "./feature-flags";
 
 describe("userHasFeature", () => {
   it("pins the CRM feature key to the backend catalog", () => {
-    expect(FEATURE_FLAG.CRM).toBe("assistant:crm");
+    expect(FEATURE_FLAG.CMS_POC_V1).toBe("cms:poc-v1");
   });
 
   it.each([null, undefined])(

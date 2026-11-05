@@ -1,5 +1,5 @@
 import { accessAuthorityCopy } from "@/lib/assistant/access-authority-copy";
-import { CrmGrantPicker } from "@/components/crm/grant-picker";
+
 import { CollaborationGuestControls } from "./collaboration-guest-controls";
 import { GuestReadiness } from "./guest-readiness";
 import {
@@ -15,7 +15,19 @@ import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+const CrmGrantPicker = lazy(() =>
+  import("@/components/crm/grant-picker").then((module) => ({
+    default: module.CrmGrantPicker,
+  })),
+);
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Trash2 } from "lucide-react";
@@ -682,7 +694,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
 }
 
 function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
-  const crmEnabled = useFeature(FEATURE_FLAG.CRM);
+  const crmEnabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
   const readiness = useGuestReadiness(
     agent.id,
     agent.owner_kind !== "org" &&
@@ -790,20 +802,24 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               )}
             />
           ))}
-          <FormField
-            control={form.control}
-            name="crm"
-            render={({ field }) => (
-              <FormItem>
-                <CrmGrantPicker
-                  ownerId={agent.owner_id}
-                  value={field.value ?? []}
-                  onChange={field.onChange}
-                  disabled={readOnly || grants.isPending}
-                />
-              </FormItem>
-            )}
-          />
+          {crmEnabled && (
+            <Suspense fallback={null}>
+              <FormField
+                control={form.control}
+                name="crm"
+                render={({ field }) => (
+                  <FormItem>
+                    <CrmGrantPicker
+                      ownerId={agent.owner_id}
+                      value={field.value ?? []}
+                      onChange={field.onChange}
+                      disabled={readOnly || grants.isPending}
+                    />
+                  </FormItem>
+                )}
+              />
+            </Suspense>
+          )}
           <GuestReadiness readiness={readiness.data} />
           {services.length && agent.owner_kind !== "org" ? (
             <FormField

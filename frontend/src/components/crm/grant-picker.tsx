@@ -18,7 +18,7 @@ export function CrmGrantPicker({
 }) {
   const actor = useAuthStore((state) => state.user?.id);
   const owner = ownerId ?? actor;
-  const enabled = useFeature(FEATURE_FLAG.CRM);
+  const enabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
   const objects = useCrmObjects(owner, enabled && Boolean(owner));
   if (!owner || (!enabled && !value.length)) return null;
   return (

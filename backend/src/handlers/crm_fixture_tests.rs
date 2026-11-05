@@ -178,7 +178,7 @@ async fn crm_http_contract_fixtures_match_real_routes() {
         .unwrap();
     feature_flag_service::set_platform_override(
         &db,
-        feature_flag_service::ASSISTANT_CRM_FLAG_KEY,
+        feature_flag_service::CMS_POC_V1_FLAG_KEY,
         &FlagTarget::User(owner.to_string()),
         true,
         &owner.to_string(),

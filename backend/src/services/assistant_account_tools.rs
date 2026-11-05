@@ -329,6 +329,16 @@ pub async fn virtual_service_for(
         .unwrap_or(false)
     {
         service.endpoints.extend(super::crm::tools::endpoints());
+    } else {
+        for endpoint in &mut service.endpoints {
+            if let Some(schema) = &mut endpoint.request_body_schema {
+                if let Some(properties) =
+                    schema.get_mut("properties").and_then(Value::as_object_mut)
+                {
+                    properties.remove("crm");
+                }
+            }
+        }
     }
     service
 }

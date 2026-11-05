@@ -1215,7 +1215,17 @@ pub(crate) async fn execute_tool(
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
         );
     }
-    execute_authorized_tool(state, chat, tool_name, args).await
+    let crm_enabled = crate::services::crm::enabled(&state.db, &chat.user_id)
+        .await
+        .unwrap_or(false);
+    if !crm_enabled && args.get("crm").is_some() {
+        return refusal("not_found", "CRM resource not found");
+    }
+    let (mut result, error) = execute_authorized_tool(state, chat, tool_name, args).await;
+    if !crm_enabled {
+        crate::services::crm::hide_fields(&mut result);
+    }
+    (result, error)
 }
 
 fn execute_authorized_tool<'a>(
@@ -3143,6 +3153,9 @@ pub async fn create_agent(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if !body.crm.is_empty() {
+        crate::services::crm::require_enabled(&state.db, &owner).await?;
+    }
     let resource_owner = match body.org.as_deref() {
         Some(org) => {
             crate::services::org_agent_service::resolve_org(&state.db, &owner, org).await?
@@ -3384,6 +3397,9 @@ pub async fn set_agent_grants(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if body.crm.is_some() {
+        crate::services::crm::require_enabled(&state.db, &owner).await?;
+    }
     let current = team::maintained_agent(&state.db, &owner, &id).await?;
     let targets = Box::pin(team::resolve_targets(
         &state.db,
@@ -3421,8 +3437,12 @@ pub async fn set_agent_grants(
     ))
     .await?;
     let agent = Box::pin(team::set_grants(&state.db, &owner, &id, change)).await?;
-    Ok(Json(json!({"id": agent.id, "services": targets.slugs,
-        "account_read": agent.grants.account_read, "crm": agent.grants.crm})))
+    let mut result = json!({"id": agent.id, "services": targets.slugs,
+        "account_read": agent.grants.account_read, "crm": agent.grants.crm});
+    if !crate::services::crm::enabled(&state.db, &owner).await? {
+        crate::services::crm::hide_fields(&mut result);
+    }
+    Ok(Json(result))
 }
 
 pub async fn destroy_agent_route(

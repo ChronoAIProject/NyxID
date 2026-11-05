@@ -1,6 +1,6 @@
 # CRM records and saved views
 
-CRM is behind the default-off `assistant:crm` feature flag. The design source is the [CRM and dynamic artifacts proposal](https://gist.github.com/ctkm-aelf/f0928ec823b8cb408df38bb24c4bcd34).
+CRM is behind the default-off `cms:poc-v1` feature flag. The design source is the [CRM and dynamic artifacts proposal](https://gist.github.com/ctkm-aelf/f0928ec823b8cb408df38bb24c4bcd34).
 
 The CRM has three separate contracts. Object metadata defines meaning and valid writes. Queries define authorized retrieval and aggregation. Saved views define presentation. A stage move changes a record. A dashboard edit changes a view. Neither regenerates the other.
 
@@ -14,7 +14,7 @@ Every document carries `owner_id`, the polymorphic owner (a person or an org use
 
 An inaccessible owner is not-found-shaped. Routes that address a document by id take the owner from the document; a mismatching `?owner_id=` is 404.
 
-All routes are under `/api/v1/assistant/crm`, inside the existing human-only router, and every handler calls `require_first_party_human` and the `assistant:crm` flag check (resolved for the acting person). The flag off returns 404. Native assistant access uses the separate conversation-key boundary described below.
+All routes are under `/api/v1/assistant/crm`, inside the existing human-only router, and every handler calls `require_first_party_human` and the `cms:poc-v1` flag check (resolved for the acting person). The flag off returns 404. Organization workspaces resolve this flag for the acting person through personal flag resolution, including current organization-membership overrides; the resource owner does not choose the flag. Native assistant access uses the separate conversation-key boundary described below.
 
 ## Object metadata
 

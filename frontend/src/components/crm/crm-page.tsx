@@ -343,7 +343,7 @@ function EnabledCrmPage() {
 }
 export function CrmPage() {
   const loading = useAuthStore((state) => state.isLoading);
-  const enabled = useFeature(FEATURE_FLAG.CRM);
+  const enabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
   if (loading) return null;
   if (!enabled)
     return (

@@ -12,7 +12,38 @@ pub mod views;
 
 use crate::errors::{AppError, AppResult, CrmValidationIssue};
 
-pub const FLAG_KEY: &str = "assistant:crm";
+pub const FLAG_KEY: &str = "cms:poc-v1";
+
+pub async fn enabled(db: &mongodb::Database, actor: &str) -> AppResult<bool> {
+    crate::services::feature_flag_service::personal_flag_enabled(db, actor, FLAG_KEY).await
+}
+
+pub async fn require_enabled(db: &mongodb::Database, actor: &str) -> AppResult<()> {
+    if enabled(db, actor).await? {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("CRM resource not found".into()))
+    }
+}
+
+/// Remove additive CRM fields at non-CRM response boundaries for flag-off callers.
+pub fn hide_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("crm");
+            map.remove("crm_artifacts");
+            for child in map.values_mut() {
+                hide_fields(child);
+            }
+        }
+        serde_json::Value::Array(rows) => {
+            for row in rows {
+                hide_fields(row);
+            }
+        }
+        _ => {}
+    }
+}
 
 pub(crate) async fn fence_owner(
     db: &mongodb::Database,

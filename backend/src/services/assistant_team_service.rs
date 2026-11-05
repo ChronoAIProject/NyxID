@@ -2518,6 +2518,7 @@ pub struct AgentSummary {
     pub status: &'static str,
     pub services: Vec<String>,
     pub account_read: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub crm: Vec<crate::models::assistant_agent::CrmGrant>,
     /// What guests may do with each granted service, by the name in
     /// `services`: `read`, `use` or `all`.
@@ -2730,8 +2731,12 @@ pub async fn summaries(
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
     let running = running_agents(db, owner).await?;
+    let crm_enabled = super::crm::enabled(db, owner).await?;
     let mut out = Vec::with_capacity(rows.len());
     for mut agent in rows {
+        if !crm_enabled {
+            agent.grants.crm.clear();
+        }
         let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
         let org_owned = owner != agent.user_id;
         if org_owned {

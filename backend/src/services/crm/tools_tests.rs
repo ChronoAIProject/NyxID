@@ -575,3 +575,42 @@ async fn crm_native_deleted_view_replays_after_one_approval_with_live_authority(
     ));
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn crm_flag_off_hides_native_inventory_and_team_schema_and_refuses_dispatch() {
+    let f = fixture().await;
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        super::super::FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(!available(&f.state.db, &f.chat).await.unwrap());
+    let service =
+        crate::services::assistant_account_tools::virtual_service_for(&f.state.db, &f.chat).await;
+    for endpoint in &service.endpoints {
+        assert!(!endpoint.name.starts_with("crm_"));
+        assert!(
+            endpoint
+                .request_body_schema
+                .as_ref()
+                .and_then(|s| s.get("properties"))
+                .and_then(|p| p.get("crm"))
+                .is_none()
+        );
+    }
+    for name in NAMES {
+        assert!(call(&f, name, json!({}), 1).await.is_err(), "{name}");
+    }
+    let summaries =
+        crate::services::assistant_team_service::summaries(&f.state.db, &f.owner, true, false, 0)
+            .await
+            .unwrap();
+    for summary in summaries {
+        assert!(serde_json::to_value(summary).unwrap().get("crm").is_none());
+    }
+    f.state.db.drop().await.unwrap();
+}

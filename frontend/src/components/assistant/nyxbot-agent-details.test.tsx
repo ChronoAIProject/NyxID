@@ -90,7 +90,7 @@ function enableCrm() {
       ...current.capabilities,
       enabled_features: [
         ...(current.capabilities?.enabled_features ?? []),
-        "assistant:crm",
+        "cms:poc-v1",
       ],
     },
   });
