@@ -48,6 +48,10 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Server-verified channel provenance, bound individually to accepted sources.
+    /// Reply-recipient joins do not contribute provenance to an existing turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_contexts: Vec<ChannelTurnContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,6 +96,27 @@ pub struct AgentEvent {
     pub report_to: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelTurnContext {
+    /// Exact server-validated organization source, retained independently of
+    /// mutable reply preferences and revalidated before rendering model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_origin: Option<Box<ChannelOrigin>>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub conversation_label: Option<String>,
+    #[serde(default)]
+    pub followed: bool,
+    pub source_event_id: String,
+    pub channel_id: String,
+    pub channel_bot_id: String,
+    pub conversation_kind: String,
+    pub sender_kind: super::channel_thread::ThreadSenderKind,
+    pub guest: bool,
+    pub original_message: bool,
 }
 
 impl AgentEvent {
@@ -253,6 +278,9 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     /// Whether this tool image may accompany a reply sent to a channel chat.
     #[serde(default)]
     pub chat_delivery: Option<bool>,
@@ -333,7 +361,12 @@ pub struct StreamReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_watch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    /// Authenticated source of this turn only; never inherited from reply routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_context: Option<ChannelTurnContext>,
     #[serde(default)]
     pub business_system_success: bool,
     #[serde(default)]
@@ -513,6 +546,8 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_head: Option<super::generated_artifact::DeliveryHead>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     /// Server-created, tool-free visitor model initialization. Never client input.

@@ -406,6 +406,14 @@ none` and a 16-token output bound before admission/billing/egress. Model, target
 headers and the runtime's prompt are unchanged. Once that genuine owner model
 call is admitted and accepted upstream, setup can stop through normal turn
 cancellation; the text of the hidden answer is not needed to establish a route.
+Before publishing acceptance, the direct model relay gives setup response
+handling an independent task lifetime. Closing the model callback's own client
+connection still cancels response IO; settlement then records observed usage
+(or the existing bounded usage estimate), outside that cancellation. Non-SSE
+setup bodies are capped at 512 KiB and use `PROXY_STREAM_IDLE_TIMEOUT_SECS` as
+a total body-read deadline. These bounds apply to response IO, leaving
+settlement able to persist its durable intent after a timeout. Ordinary model
+callbacks keep their existing request lifetime.
 The setup key has no service, account or machine grants; setup MCP and non-model
 callbacks are refused. Only a genuine admitted owner model callback can record
 the exact route. Guest text, service selectors, models and credentials never

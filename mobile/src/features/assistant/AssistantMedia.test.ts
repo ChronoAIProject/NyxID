@@ -232,6 +232,7 @@ function imageHarness(captionColor?: string) {
   const requests: any[] = [];
   let background: (s: string) => void = () => {};
   const pending = deferred<Uint8Array>();
+  const reload = deferred<Uint8Array>();
   class Dir {
     exists = true;
     create() {}
@@ -280,7 +281,7 @@ function imageHarness(captionColor?: string) {
         },
       },
       "@react-navigation/native": { useIsFocused: () => focused },
-      "react-native-safe-area-context": { SafeAreaView: "Safe" },
+      "./AssistantImagePreview": { AssistantImagePreview: "ImagePreview" },
       "expo-file-system": { Directory: Dir, File, Paths: { cache: "cache" } },
       "expo-sharing": {},
       "lucide-react-native": {
@@ -297,9 +298,7 @@ function imageHarness(captionColor?: string) {
       "../../lib/api/http": {
         requestAuthenticatedBytes: (path: string, signal: AbortSignal) => {
           requests.push({ path, signal });
-          return requests.length === 1
-            ? pending.promise
-            : new Promise<Uint8Array>(() => {});
+          return requests.length === 1 ? pending.promise : reload.promise;
         },
       },
     },
@@ -307,6 +306,7 @@ function imageHarness(captionColor?: string) {
   return {
     ...x,
     pending,
+    reload,
     requests,
     deleted: () => deleted,
     writes: () => writes,
@@ -320,6 +320,10 @@ function imageHarness(captionColor?: string) {
     },
     background: () => {
       background("background");
+      x.h.flush();
+    },
+    foreground: () => {
+      background("active");
       x.h.flush();
     },
   };
@@ -342,10 +346,24 @@ test("visible tool images use authenticated bytes inline, preserve the viewer, a
       ),
   );
   assert.match(x.text(), /agent couldn't view this image/);
-  assert.equal(x.nodes().find((n) => n.type === "Modal")?.props.visible, false);
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
   x.press("Image from Browser screen");
-  assert.equal(x.nodes().find((n) => n.type === "Modal")?.props.visible, true);
-  x.press("Close attachment preview");
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    "file:///private/image.png",
+  );
+  x.nodes()
+    .find((n) => n.type === "ImagePreview")!
+    .props.onClose();
+  x.h.flush();
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
+  assert.equal(x.requests.length, 1);
   assert.equal(x.deleted(), 0);
   x.background();
   assert.equal(x.deleted(), 1);
@@ -365,9 +383,44 @@ test("late inline image reads cannot write files after blur or account switch", 
 
 test("attachment captions on a user bubble retain the chosen foreground", () => {
   const x = imageHarness("#FFFFFF");
-  const caption = x.nodes().find((node) => node.type === "Label" && words(node).includes("agent couldn't view"));
+  const caption = x
+    .nodes()
+    .find(
+      (node) =>
+        node.type === "Label" && words(node).includes("agent couldn't view"),
+    );
   assert.ok(caption);
-  assert.equal(Object.assign({}, ...[caption.props.style].flat()).color, "#FFFFFF");
+  assert.equal(
+    Object.assign({}, ...[caption.props.style].flat()).color,
+    "#FFFFFF",
+  );
+  x.h.unmount();
+});
+
+test("backgrounding closes the image overlay and a foreground reload cannot reopen it", async () => {
+  const x = imageHarness();
+  x.pending.resolve(new Uint8Array([1, 2, 3]));
+  await x.h.settle();
+  x.press("Image from Browser screen");
+  assert.ok(x.nodes().find((n) => n.type === "ImagePreview")?.props.uri);
+  x.background();
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
+  x.foreground();
+  x.reload.resolve(new Uint8Array([1, 2, 3]));
+  await x.h.settle();
+  assert.equal(x.requests.length, 2);
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
+  assert.ok(
+    x
+      .nodes()
+      .some((n) => n.props.accessibilityLabel === "Image from Browser screen"),
+  );
   x.h.unmount();
 });
 

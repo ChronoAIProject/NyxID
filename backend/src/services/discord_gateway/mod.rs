@@ -9,6 +9,18 @@ pub(crate) mod roles;
 mod tests;
 pub(crate) mod transport;
 
+#[cfg(test)]
+pub(crate) fn normalized_test_message(
+    bot: &crate::models::channel_bot::ChannelBot,
+    event: &serde_json::Value,
+    channel: &serde_json::Value,
+) -> (
+    crate::services::channel_platform::InboundMessage,
+    crate::models::channel_thread::ChannelThreadFacts,
+) {
+    facts::normalize(bot, event, channel).unwrap().unwrap()
+}
+
 use bson::{Document, doc};
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
