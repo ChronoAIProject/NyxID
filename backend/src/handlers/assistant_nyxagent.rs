@@ -1537,23 +1537,24 @@ pub async fn stop(
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
     match engine::request_stop_target(&state.db, &user_id, &id).await? {
-        engine::StopTarget::Scoped(Some(snapshot)) => {
-            if let Some(turn) = snapshot.active_turn.as_ref() {
-                super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
-                    .await?;
+        engine::StopTarget::Scoped(snapshot) => {
+            super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
+                .await?;
+            crate::services::machine_service::cancel_unrelated(
+                &state,
+                &user_id,
+                &id,
+                snapshot.as_deref(),
+            )
+            .await?;
+            if let Some(snapshot) = snapshot {
                 let descendants = crate::services::trigger_schedule::continuation::stopped_targets(
                     &state.db, &snapshot,
                 )
                 .await?;
-                if descendants.is_empty() {
-                    crate::services::machine_service::cancel_turn(&state, &user_id, &id, turn)
-                        .await?;
-                } else {
-                    super::trigger_scheduler::cancel_transports(&state, &descendants).await?;
-                }
+                super::trigger_scheduler::cancel_transports(&state, &descendants).await?;
             }
         }
-        engine::StopTarget::Scoped(None) => {}
         engine::StopTarget::Legacy => {
             super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id)
                 .await?;
@@ -2289,6 +2290,8 @@ pub(crate) async fn start_turn_with_voice(
         ))
         .await?
     };
+    #[cfg(test)]
+    crate::test_utils::pause_committed_admission(&state.db).await;
     if let Some(watch) = crate::services::async_service_operation::bound(&state.db, &row).await? {
         crate::services::async_service_operation::apply_delivery(&mut row, &watch);
     }

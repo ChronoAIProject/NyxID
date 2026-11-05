@@ -6,6 +6,9 @@ pub const COLLECTION_NAME: &str = "machine_jobs";
 /// Server-issued execution authority. No command, output, or gateway token.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct MachineJob {
+    /// Lifecycle attribution only; never execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_run_id: Option<String>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

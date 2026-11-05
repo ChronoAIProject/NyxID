@@ -144,25 +144,37 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// Reserve before submission, under an owner-wide write fence, so parallel
-/// submissions cannot exceed bounds or leave an unwatchable upstream job.
-pub async fn cancel_turn(db: &Database, owner: &str, thread: &str, turn: &str) -> AppResult<()> {
+/// Preserve conversation-wide Stop cleanup except for another live run.
+pub async fn cancel_unrelated(
+    db: &Database,
+    owner: &str,
+    thread: &str,
+    target: Option<&str>,
+) -> AppResult<()> {
     let ctx = (
         db.clone(),
         owner.to_owned(),
         thread.to_owned(),
-        turn.to_owned(),
+        target.map(str::to_owned),
     );
-    super::transaction_service::run_db_only(db, &ctx, |session, (db, owner, thread, turn)| Box::pin(async move {
-        let mut cursor = db.collection::<AsyncServiceOperation>(WATCHES).find(doc! {"user_id": owner, "conversation_id": thread, "turn_id": turn, "state": {"$in": ACTIVE}}).session(&mut *session).await?;
-        let watches: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
-        let ids: Vec<_> = watches.iter().map(|w| w.id.clone()).collect();
-        db.collection::<bson::Document>(WATCHES).update_many(doc! {"_id": {"$in": &ids}}, doc! {"$unset": {"secret_context_versions.result_encrypted": ""}, "$set": {"state": "cancelling", "result_encrypted": null, "lease_id": null, "lease_until": null, "poll_at": bson::DateTime::now()}}).session(&mut *session).await?;
-        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner}, doc! {"$pull": {"pending_events": {"kind": EVENT_KIND, "id": {"$in": ids}}}}).session(session).await?;
+    super::transaction_service::run_db_only(db, &ctx, |session, (db, owner, thread, target)| Box::pin(async move {
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner}, doc! {"$inc": {"automation_handoff_version": 1_i64}}).session(&mut *session).await?;
+        let protected = super::trigger_schedule::continuation::stop_protected_runs_in_session(db, owner, target.as_deref(), session).await?;
+        db.collection::<bson::Document>(WATCHES).update_many(doc! {
+            "user_id": owner, "conversation_id": thread, "state": {"$in": ["submitting", "waiting", "ready", "queued"]},
+            "delivery.automation_work.run_id": {"$nin": &protected},
+        }, doc! {"$unset": {"secret_context_versions.result_encrypted": ""}, "$set": {
+            "state": "cancelling", "result_encrypted": null, "lease_id": null, "lease_until": null, "poll_at": bson::DateTime::now()
+        }}).session(&mut *session).await?;
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner},
+            doc! {"$pull": {"pending_events": {"kind": EVENT_KIND, "automation_work.run_id": {"$nin": &protected}}}}
+        ).session(session).await?;
         Ok(())
     })).await
 }
 
+/// Reserve before submission, under an owner-wide write fence, so parallel
+/// submissions cannot exceed bounds or leave an unwatchable upstream job.
 #[cfg(test)]
 pub async fn reserve(
     db: &Database,
@@ -590,7 +602,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;return Ok(false);
             };
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
-            if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, work, session).await?;}
+            if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, &w.conversation_id, work, session).await?;}
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             let event = AgentEvent {

@@ -3255,7 +3255,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .as_ref()
         .and_then(|t| t.automation_work.as_ref())
     {
-        super::trigger_schedule::continuation::fence_work(db, user_id, work, session).await?;
+        super::trigger_schedule::continuation::fence_work(db, user_id, &id, work, session).await?;
     }
     if row
         .active_turn
@@ -3741,19 +3741,25 @@ pub async fn append_events_in_session(
             continue;
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
+            let protected_automation = row
+                .pending_events
+                .iter()
+                .any(|e| e.automation_work.is_some());
             if event.invocation_id.is_some()
                 || event.automation_work.is_some()
-                || row
-                    .pending_events
-                    .iter()
-                    .any(|e| e.invocation_id.is_some() || e.automation_work.is_some())
+                || (!protected_automation
+                    && row.pending_events.iter().any(|e| e.invocation_id.is_some()))
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
             }
             let index = row
                 .pending_events
                 .iter()
-                .position(|e| e.source_event_ids.is_empty())
+                .position(|e| {
+                    e.source_event_ids.is_empty()
+                        && e.automation_work.is_none()
+                        && e.invocation_id.is_none()
+                })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
@@ -3893,6 +3899,7 @@ pub(crate) async fn request_stop_row_target(
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let Some(existing_turn) = existing.active_turn.as_ref() else {
         if existing.automation_v2 {
+            super::async_service_operation::cancel_unrelated(db, user_id, id, None).await?;
             return Ok(None);
         }
         super::async_service_operation::cancel(db, user_id, id).await?;
@@ -3903,6 +3910,7 @@ pub(crate) async fn request_stop_row_target(
     super::execution_permission_dispatch::tasks::stop(db, existing).await?;
     if existing_turn.heartbeat_at.is_none() && live_turn(existing, now).is_none() {
         if existing.automation_v2 {
+            super::async_service_operation::cancel_unrelated(db, user_id, id, None).await?;
             return Ok(None);
         }
         super::async_service_operation::cancel(db, user_id, id).await?;
@@ -3928,13 +3936,22 @@ pub(crate) async fn request_stop_row_target(
     }
     let Some(row) = row else {
         // A concurrent settlement, delete, or new turn won the exact fence.
+        if existing.automation_v2 {
+            super::async_service_operation::cancel_unrelated(db, user_id, id, None).await?;
+        }
         return Ok(None);
     };
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
     };
     if existing.automation_v2 {
-        super::async_service_operation::cancel_turn(db, user_id, id, &turn.turn_id).await?;
+        super::async_service_operation::cancel_unrelated(
+            db,
+            user_id,
+            id,
+            turn.automation_work.as_ref().map(|w| w.run_id.as_str()),
+        )
+        .await?;
         if let Some(work) = turn
             .automation_work
             .as_ref()
