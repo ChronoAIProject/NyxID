@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { FEATURE_FLAG, userHasFeature } from "./feature-flags";
+import { FEATURE_FLAG, isGlobalOnlyFlag, userHasFeature } from "./feature-flags";
+
+it("restricts shared CMA rate synchronization to global overrides", () => {
+  expect(isGlobalOnlyFlag(FEATURE_FLAG.CMA_SANDBOX_RATE_SYNC)).toBe(true);
+  expect(isGlobalOnlyFlag(FEATURE_FLAG.CMA_SANDBOX_BILLING)).toBe(false);
+});
 
 describe("userHasFeature", () => {
   it.each([null, undefined])(

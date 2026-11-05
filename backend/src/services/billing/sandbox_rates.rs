@@ -283,6 +283,9 @@ impl BillingService {
         let Some(lago) = self.lago.as_deref().filter(|_| self.config.billing_enabled) else {
             return Ok(0);
         };
+        if !crate::services::feature_flag_service::cma_sandbox_rate_sync_enabled(&self.db).await? {
+            return Ok(0);
+        }
         let now = Utc::now();
         let claim = Uuid::new_v4().to_string();
         let lock = self.db.collection::<Document>(COLLECTION_NAME).find_one_and_update(
@@ -307,6 +310,12 @@ impl BillingService {
                     doc! {"$unset":{"sync_claim":"","sync_claim_until":""}},
                 )
                 .await?;
+        } else {
+            tracing::warn!(
+                plan_code = %self.config.lago_plan_code,
+                timeout_secs = 60,
+                "CMA rate synchronization timed out; retaining lease and pending versions for retry"
+            );
         }
         // An ambiguous timeout keeps the lease through its original expiry.
         result.map_err(|_| unavailable("CMA rate synchronization timed out"))?
@@ -366,6 +375,15 @@ impl BillingService {
                 Ok(())
             }
             .await;
+            if let Err(error) = &result {
+                tracing::warn!(
+                    rate_card_id = %card.id,
+                    version = card.version,
+                    plan_code = %card.plan_code,
+                    error_code = error.error_code(),
+                    "CMA rate card synchronization failed; recording for retry"
+                );
+            }
             self.db
                 .collection::<Document>(COLLECTION_NAME)
                 .update_one(

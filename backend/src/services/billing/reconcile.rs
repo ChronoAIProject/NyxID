@@ -140,7 +140,17 @@ impl BillingReconciler {
         .await?;
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
-        stats.service_price_syncs += runtime_billing.retry_sandbox_rate_cards().await?;
+        // CMA configuration work must not prevent ordinary usage emission or
+        // tax/balance refresh. Pending/failed cards remain durable retry work;
+        // an ambiguous timeout retains the sync lease until its expiry.
+        match runtime_billing.retry_sandbox_rate_cards().await {
+            Ok(synced) => stats.service_price_syncs += synced,
+            Err(error) => tracing::warn!(
+                plan_code = %self.config.lago_plan_code,
+                error_code = error.error_code(),
+                "CMA rate synchronization failed; retaining retry work and continuing billing reconciliation"
+            ),
+        }
         stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
         // Price synchronization invalidates affected profiles. Refresh those
         // within this pass; admissions also refresh individually on demand.
@@ -662,6 +672,10 @@ fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[path = "reconcile_cma_tests.rs"]
+mod cma_tests;
+
+#[cfg(test)]
 mod tests {
     use async_trait::async_trait;
     use chrono::{Duration, Utc};
@@ -684,7 +698,7 @@ mod tests {
     /// `if !self.config.billing_enabled { return }` gate in `run_once`).
     /// Tests that exercise the Lago push/ack/retry/dead-letter path must run
     /// with billing enabled so the reconciler reaches `push_unacked`.
-    fn billing_enabled_config() -> crate::config::AppConfig {
+    pub(super) fn billing_enabled_config() -> crate::config::AppConfig {
         crate::config::AppConfig {
             billing_enabled: true,
             billing_allocations_enabled: false,
@@ -749,7 +763,7 @@ mod tests {
         }
     }
 
-    fn finalized_row(transaction_id: &str) -> UsageMeterRow {
+    pub(super) fn finalized_row(transaction_id: &str) -> UsageMeterRow {
         let now = Utc::now() - Duration::seconds(120);
         UsageMeterRow {
             org_channel_guest: None,

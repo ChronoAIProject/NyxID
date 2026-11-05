@@ -254,6 +254,24 @@ excluded from generic abandonment/release; absent evidence retains holds.
 
 ## Enablement and runtime rate configuration
 
+`experimental:cma-sandbox-rate-sync` independently controls CMA rate-card writes
+to Lago. It defaults to **true** and accepts **global overrides only**, because
+the provider plan is shared across owners. Admins can change it at runtime on
+the existing Feature Flags page or with
+`PUT /api/v1/admin/feature-flags/experimental:cma-sandbox-rate-sync` and
+`{"target_kind":"global","enabled":false}`. Set `enabled` to true to resume.
+The reconciler reads the live flag before each sync batch; no redeploy or new
+environment variable is required. Disabling prevents new sync batches, leaves
+already-synced cards and provider charges untouched, and retains pending/failed
+versions for a later retry. A sync batch already in flight may finish.
+
+CMA sync errors and the bounded batch timeout are logged with metadata only.
+Pending/failed cards remain retryable; an ambiguous timeout retains the existing
+lease until expiry. Ordinary tax refresh, usage emission and wallet/rate refresh
+continue in the same reconciliation pass. The sync flag does not enable or
+disable admission: the existing admission gates below and synchronized-price
+proof still apply.
+
 The existing admin Feature Flags page and
 `PUT /api/v1/admin/feature-flags/experimental:cma-sandbox-billing` control the
 runtime rollout. No separate editor or end-user self-activation API is added.
@@ -312,6 +330,13 @@ contain client-supplied rates. The seed is deployment configuration only;
 charge paths always read the persisted effective version.
 
 ## Rollout and remaining launch work
+
+Finance's rollout condition ([PR #2204](https://github.com/ChronoAIProject/NyxID/pull/2204#issuecomment-6651534655))
+allows merging/deploying and an internal-team pilot with the current card.
+Before enabling any external user, publish a revised rate card aligned with the
+final pricing policy, confirm its Lago synchronization and effective date, and
+align the website and policy with that card. Seeding or deploying does not satisfy
+this external-rollout prerequisite; Finance supplies the pricing detail privately.
 
 Keep `CMA_BILLING_ENABLED=false` until every API reader and billing worker knows
 the three new enum units. Disabling admission after writing these units does not
