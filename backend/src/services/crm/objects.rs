@@ -117,6 +117,179 @@ pub async fn get(db: &Database, owner_id: &str, key: &str) -> AppResult<CrmObjec
         .ok_or_else(|| AppError::NotFound("CRM object not found".into()))
 }
 
+pub const MAX_OWNER_OBJECTS: u64 = 50;
+pub const RESERVED_OBJECT_KEYS: &[&str] = &["company", "contact", "opportunity", "task"];
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateObjectInput {
+    pub key: String,
+    pub label: String,
+    pub plural_label: String,
+    pub fields: Vec<CrmField>,
+    #[serde(default)]
+    pub pipeline: Option<CrmPipeline>,
+}
+
+fn validate_create(input: &CreateObjectInput) -> AppResult<()> {
+    if !fields::valid_key(&input.key) || RESERVED_OBJECT_KEYS.contains(&input.key.as_str()) {
+        return Err(super::validation_error(
+            "key",
+            "must be an unreserved immutable object key",
+        ));
+    }
+    for (path, label) in [
+        ("label", &input.label),
+        ("plural_label", &input.plural_label),
+    ] {
+        if label.trim().is_empty()
+            || label.chars().count() > 200
+            || label.chars().any(char::is_control)
+        {
+            return Err(super::validation_error(
+                path,
+                "must contain 1 to 200 printable characters",
+            ));
+        }
+    }
+    if input.fields.is_empty() || input.fields.len() > 100 {
+        return Err(super::validation_error(
+            "fields",
+            "must contain 1 to 100 fields",
+        ));
+    }
+    let mut keys = HashSet::new();
+    for (index, field) in input.fields.iter().enumerate() {
+        validation_result(fields::validate_definition(
+            field,
+            &format!("fields.{index}"),
+        ))?;
+        if !keys.insert(&field.key) || field.archived {
+            return Err(super::validation_error(
+                format!("fields.{index}"),
+                "initial fields must have unique keys and be active",
+            ));
+        }
+    }
+    if let Some(pipeline) = &input.pipeline {
+        let stage = input
+            .fields
+            .iter()
+            .find(|f| f.key == pipeline.stage_field)
+            .filter(|f| f.required)
+            .ok_or_else(|| {
+                super::validation_error("pipeline.stage_field", "must name a required select field")
+            })?;
+        let CrmFieldKind::Select { options } = &stage.kind else {
+            return Err(super::validation_error(
+                "pipeline.stage_field",
+                "must name a required select field",
+            ));
+        };
+        let mut closed = HashSet::new();
+        if options.len() > 50
+            || pipeline.closed_stages.iter().any(|key| {
+                !closed.insert(key) || !options.iter().any(|o| &o.value == key && !o.archived)
+            })
+        {
+            return Err(super::validation_error(
+                "pipeline.closed_stages",
+                "must name unique live stages from at most 50 options",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub async fn create(
+    db: &Database,
+    owner_id: &str,
+    input: CreateObjectInput,
+    receipt: Option<super::records::ReceiptContext>,
+) -> AppResult<CrmObject> {
+    if let Some(response) = super::records::lookup_receipt(db, receipt.as_ref()).await? {
+        return Ok(response);
+    }
+    validate_create(&input)?;
+    ensure_seeded(db, owner_id).await?;
+    let context = (db.clone(), owner_id.to_owned(), input, receipt.clone());
+    let result = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |tx, (db, owner, input, receipt)| {
+            Box::pin(async move {
+                super::fence_owner(db, owner, tx).await?;
+                if let Some(value) =
+                    super::records::receipt_in_session(db, receipt.as_ref(), tx).await?
+                {
+                    return serde_json::from_value(value).map_err(|_| {
+                        AppError::Internal("Stored CRM object response is invalid".into())
+                    });
+                }
+                let collection = db.collection::<CrmObject>(COLLECTION_NAME);
+                if collection
+                    .count_documents(doc! {"owner_id":owner})
+                    .session(&mut *tx)
+                    .await?
+                    >= MAX_OWNER_OBJECTS
+                {
+                    return Err(super::validation_error(
+                        "key",
+                        "an owner may contain at most 50 objects, including seeded objects",
+                    ));
+                }
+                if collection
+                    .find_one(doc! {"owner_id":owner,"key":&input.key})
+                    .session(&mut *tx)
+                    .await?
+                    .is_some()
+                {
+                    return Err(super::validation_error(
+                        "key",
+                        "already exists on this owner",
+                    ));
+                }
+                for (index, field) in input.fields.iter().enumerate() {
+                    if let CrmFieldKind::Record { target, .. } = &field.kind {
+                        if target != &input.key
+                            && collection
+                                .find_one(doc! {"owner_id":owner,"key":target})
+                                .session(&mut *tx)
+                                .await?
+                                .is_none()
+                        {
+                            return Err(super::validation_error(
+                                format!("fields.{index}.target"),
+                                "must name an object owned by the same CRM owner",
+                            ));
+                        }
+                    }
+                }
+                let now = Utc::now();
+                let object = CrmObject {
+                    id: Uuid::new_v4().to_string(),
+                    owner_id: owner.clone(),
+                    key: input.key.clone(),
+                    label: input.label.trim().into(),
+                    plural_label: input.plural_label.trim().into(),
+                    schema_revision: 1,
+                    fields: input.fields.clone(),
+                    pipeline: input.pipeline.clone(),
+                    default_columns: input.fields.iter().take(6).map(|f| f.key.clone()).collect(),
+                    seeded: false,
+                    created_at: now,
+                    updated_at: now,
+                };
+                collection.insert_one(&object).session(&mut *tx).await?;
+                super::records::insert_receipt(db, tx, receipt.as_ref(), &object, now).await?;
+                Ok(object)
+            })
+        },
+    )
+    .await;
+    super::records::recover_duplicate(db, receipt.as_ref(), result).await
+}
+
 pub async fn add_field(
     db: &Database,
     owner_id: &str,

@@ -201,6 +201,39 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     let (_, private) = crate::routes::build_router_with_state(state.clone());
     let app = private.with_state(state.clone());
     let mut fixtures = FixtureWriter::new();
+    feature_flag_service::set_platform_override(
+        &state.db,
+        feature_flag_service::CMS_POC_V1_FLAG_KEY,
+        &FlagTarget::User(owner.to_string()),
+        false,
+        &owner.to_string(),
+    )
+    .await
+    .unwrap();
+    for (method, path, body) in [
+        ("GET", "/objects", None),
+        ("GET", "/views/count", None),
+        ("GET", "/people", None),
+        (
+            "POST",
+            "/objects",
+            Some(json!({"key":"asset","label":"Asset","plural_label":"Assets","fields":[]})),
+        ),
+        ("POST", "/query", Some(json!({"object":"company"}))),
+        ("POST", "/views/validate", Some(json!({"envelope":{}}))),
+    ] {
+        let (status, _) = request(&app, &token, method, &format!("{BASE}{path}"), body, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    feature_flag_service::set_platform_override(
+        &state.db,
+        feature_flag_service::CMS_POC_V1_FLAG_KEY,
+        &FlagTarget::User(owner.to_string()),
+        true,
+        &owner.to_string(),
+    )
+    .await
+    .unwrap();
 
     let objects = ok(&app, &token, "GET", &format!("{BASE}/objects"), None, None).await;
     fixtures.assert("objects", objects);
@@ -696,4 +729,7 @@ async fn crm_http_contract_fixtures_match_real_routes() {
     assert_eq!(foreign_status, missing_status);
     assert_eq!(mismatched_hint, missing_record);
     assert_eq!(foreign_record, missing_record);
+    let custom = ok(&app,&token,"POST",&format!("{BASE}/objects"),Some(json!({"key":"asset","label":"Asset","plural_label":"Assets","fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]})),Some("create-object")).await;
+    assert_eq!(custom["key"], "asset");
+    assert_eq!(custom["seeded"], false);
 }

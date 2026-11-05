@@ -135,6 +135,16 @@ async fn crm_native_annotations_follow_declared_action_class() {
         crate::services::assistant_account_tools::virtual_service_for(&f.state.db, &f.chat).await;
     for (tool, class, hints) in [
         (
+            "nyxid__crm_present",
+            acks::OwnerActionClass::Read,
+            (true, false, false),
+        ),
+        (
+            "nyxid__crm_create_object",
+            acks::OwnerActionClass::Sensitive,
+            (false, false, false),
+        ),
+        (
             "nyxid__crm_query",
             acks::OwnerActionClass::Read,
             (true, false, false),
@@ -612,5 +622,287 @@ async fn crm_flag_off_hides_native_inventory_and_team_schema_and_refuses_dispatc
     for summary in summaries {
         assert!(serde_json::to_value(summary).unwrap().get("crm").is_none());
     }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn crm_artifact_tools_create_present_replay_and_live_grants() {
+    let f = fixture().await;
+    let input = json!({"key":"asset","label":"Asset","plural_label":"Assets","fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]});
+    let args = json!({"mutation_key":"create-assets","input":input});
+    assert!(
+        call(&f, "crm_create_object", args.clone(), 1)
+            .await
+            .is_err()
+    );
+    set_grants(
+        &f,
+        vec![(
+            "asset",
+            vec![
+                CrmCapability::Read,
+                CrmCapability::Write,
+                CrmCapability::Schema,
+            ],
+        )],
+    )
+    .await;
+    let created = call(&f, "crm_create_object", args.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        created,
+        call(&f, "crm_create_object", args, 3).await.unwrap()
+    );
+    let upsert = json!({"mutation_key":"asset-row","input":{"object":"asset","match_field":"name","values":{"name":"First"}}});
+    let record = call(&f, "crm_upsert_record", upsert.clone(), 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        record,
+        call(&f, "crm_upsert_record", upsert, 5).await.unwrap()
+    );
+    let id = record["result"]["id"].as_str().unwrap();
+    let presented = call(&f, "crm_present", json!({"kind":"record","id":id}), 6)
+        .await
+        .unwrap();
+    assert!(presented["result"].get("values").is_none());
+    let row = f
+        .state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":&f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let artifacts = &row.active_turn.unwrap().crm_artifacts;
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(
+        artifacts[0].kind,
+        crate::models::assistant_crm_artifact::CrmArtifactKind::Object
+    );
+    assert_eq!(
+        artifacts[1].role,
+        crate::models::assistant_crm_artifact::CrmArtifactRole::Presented
+    );
+    let serialized = serde_json::to_value(artifacts).unwrap().to_string();
+    assert!(!serialized.contains("values"));
+    set_grants(&f, vec![("company", vec![CrmCapability::Read])]).await;
+    assert!(
+        call(&f, "crm_present", json!({"kind":"record","id":id}), 7)
+            .await
+            .is_err()
+    );
+    feature_flag_service::set_platform_override(
+        &f.state.db,
+        super::super::FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(
+        call(&f, "crm_present", json!({"kind":"record","id":id}), 8)
+            .await
+            .is_err()
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn crm_saved_views_are_created_then_presented_artifacts() {
+    let f = fixture().await;
+    let envelope = json!({"formatVersion":1,"renderer":"json-render","rendererSpecVersion":"nyxid-crm-v1","queries":{"companies":{"kind":"table","query":{"object":"company"}}},"spec":{"root":"table","elements":{"table":{"type":"ObjectTable","props":{"queryId":"companies"},"children":[]}}}});
+    let saved = call(
+        &f,
+        "crm_save_view",
+        json!({"mutation_key":"view-1","input":{"title":"Companies","envelope":envelope}}),
+        1,
+    )
+    .await
+    .unwrap();
+    let id = saved["result"]["id"].as_str().unwrap();
+    call(&f, "crm_present", json!({"kind":"view","id":id}), 2)
+        .await
+        .unwrap();
+    let live = f
+        .state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":&f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let artifacts = live.active_turn.unwrap().crm_artifacts;
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(
+        artifacts[0].role,
+        crate::models::assistant_crm_artifact::CrmArtifactRole::Presented
+    );
+    crate::services::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        &f.row,
+        &f.chat.api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &crate::services::assistant_nyxagent::TurnResult {
+            text: "Saved".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        super::super::artifacts::settled(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            f.chat.turn_id.as_deref().unwrap()
+        )
+        .await
+        .unwrap(),
+        artifacts
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn crm_artifacts_atomic_deduplication_bound_and_link_delivery() {
+    use crate::models::assistant_crm_artifact::*;
+    let f = fixture().await;
+    let make = |id: usize, role| TurnCrmArtifact {
+        kind: CrmArtifactKind::View,
+        id: format!("view-{id}"),
+        owner_id: f.owner.clone(),
+        object_key: None,
+        title: "Clean\n\u{202e}title".into(),
+        role,
+    };
+    let entries: Vec<_> = (0..20)
+        .map(|i| make(i % 10, CrmArtifactRole::Created))
+        .collect();
+    futures::future::try_join_all(
+        entries
+            .into_iter()
+            .map(|a| super::super::artifacts::record(&f.state.db, &f.chat, a)),
+    )
+    .await
+    .unwrap();
+    super::super::artifacts::record(&f.state.db, &f.chat, make(9, CrmArtifactRole::Presented))
+        .await
+        .unwrap();
+    let row = f
+        .state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":&f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let artifacts = row.active_turn.unwrap().crm_artifacts;
+    assert_eq!(artifacts.len(), MAX_TURN_CRM_ARTIFACTS);
+    let ids: std::collections::HashSet<_> = artifacts.iter().map(|a| (&a.kind, &a.id)).collect();
+    assert_eq!(ids.len(), artifacts.len());
+    assert!(artifacts.iter().all(|a| a.title == "Cleantitle"));
+    assert_eq!(
+        artifacts.iter().find(|a| a.id == "view-9").unwrap().role,
+        CrmArtifactRole::Presented
+    );
+    let once = super::super::artifacts::append_links("Reply", &artifacts, "https://nyxid.test");
+    assert_eq!(
+        once,
+        super::super::artifacts::append_links(&once, &artifacts, "https://nyxid.test")
+    );
+    assert!(!once.contains("Cleantitle"));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn crm_custom_object_validation_and_owner_cap_are_transactional() {
+    let f = fixture().await;
+    let input = json!({"key":"asset","label":"Asset","plural_label":"Assets","fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]});
+    for bad in [
+        {
+            let mut v = input.clone();
+            v["key"] = json!("company");
+            v
+        },
+        {
+            let mut v = input.clone();
+            v["key"] = json!("Bad-Key");
+            v
+        },
+        {
+            let mut v = input.clone();
+            v["fields"] = json!([]);
+            v
+        },
+        {
+            let mut v = input.clone();
+            v["pipeline"] = json!({"stage_field":"name","closed_stages":[]});
+            v
+        },
+        {
+            let mut v = input.clone();
+            v["fields"][0]["type"] = json!("record");
+            v["fields"][0]["target"] = json!("unknown");
+            v["fields"][0]["cardinality"] = json!("one");
+            v["fields"][0].as_object_mut().unwrap().remove("max_length");
+            v
+        },
+    ] {
+        assert!(
+            objects::create(
+                &f.state.db,
+                &f.owner,
+                serde_json::from_value(bad).unwrap(),
+                None
+            )
+            .await
+            .is_err()
+        );
+    }
+    let seed = objects::get(&f.state.db, &f.owner, "company")
+        .await
+        .unwrap();
+    let rows: Vec<_> = (0..45)
+        .map(|n| crate::models::crm_object::CrmObject {
+            id: uuid::Uuid::new_v4().to_string(),
+            key: format!("custom_{n}"),
+            seeded: false,
+            ..seed.clone()
+        })
+        .collect();
+    f.state
+        .db
+        .collection::<crate::models::crm_object::CrmObject>(
+            crate::models::crm_object::COLLECTION_NAME,
+        )
+        .insert_many(rows)
+        .await
+        .unwrap();
+    let mut other = input.clone();
+    other["key"] = json!("other_asset");
+    let (a, b) = tokio::join!(
+        objects::create(
+            &f.state.db,
+            &f.owner,
+            serde_json::from_value(input).unwrap(),
+            None
+        ),
+        objects::create(
+            &f.state.db,
+            &f.owner,
+            serde_json::from_value(other).unwrap(),
+            None
+        )
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    assert_eq!(
+        objects::list(&f.state.db, &f.owner).await.unwrap().len(),
+        50
+    );
     f.state.db.drop().await.unwrap();
 }

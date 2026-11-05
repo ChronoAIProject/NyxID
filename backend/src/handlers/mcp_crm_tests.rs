@@ -165,3 +165,97 @@ async fn crm_direct_and_universal_wrappers_preserve_validation_conflicts_and_sco
     );
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn crm_artifacts_use_real_direct_and_universal_dispatch() {
+    let f = crm::tools::tests::fixture().await;
+    let mut auth = McpAuthContext::user(f.owner.clone(), AuthMethod::ApiKey);
+    auth.chat = Some(f.chat.clone());
+    auth.api_key_id = Some(f.chat.api_key_id.clone());
+    f.state.db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME).update_one(doc! {"_id":&f.chat.agent_id},doc! {"$push":{"grants.crm":{"owner_id":&f.owner,"object":"asset","capabilities":["read","write","schema"]}}}).await.unwrap();
+    let mut object_id = None;
+    for universal in [false, true] {
+        let args = json!({"mutation_key":"dataset","input":{"key":"asset","label":"Asset","plural_label":"Assets","fields":[{"key":"name","label":"Name","type":"text","max_length":200,"required":true,"archived":false}]}});
+        let response = if universal {
+            Box::pin(handle_meta_call_tool(
+                &f.state,
+                &auth,
+                None,
+                &json!({"tool_name":"nyxid__crm_create_object","arguments":args}),
+                Some(json!(50)),
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            ))
+            .await
+        } else {
+            handle_account_tool(
+                &f.state,
+                &auth,
+                "nyxid__crm_create_object",
+                &args,
+                Some(json!(49)),
+            )
+            .await
+        };
+        let result = decoded(response).await;
+        assert!(result.get("error").is_none(), "{result}");
+        let id = result["result"]["id"].as_str().unwrap().to_owned();
+        if let Some(previous) = &object_id {
+            assert_eq!(previous, &id);
+        } else {
+            object_id = Some(id);
+        }
+    }
+    let record = records::create(
+        &f.state.db,
+        &f.owner,
+        CrmActor::human(&f.owner),
+        records::CreateRecordInput {
+            object: "asset".into(),
+            values: serde_json::from_value(json!({"name":"Live asset"})).unwrap(),
+            protect: vec![],
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    for universal in [false, true] {
+        let args = json!({"kind":"record","id":record.id});
+        let response = if universal {
+            Box::pin(handle_meta_call_tool(
+                &f.state,
+                &auth,
+                None,
+                &json!({"tool_name":"nyxid__crm_present","arguments":args}),
+                Some(json!(52)),
+                false,
+                crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            ))
+            .await
+        } else {
+            handle_account_tool(
+                &f.state,
+                &auth,
+                "nyxid__crm_present",
+                &args,
+                Some(json!(51)),
+            )
+            .await
+        };
+        let result = decoded(response).await;
+        assert_eq!(result["result"]["id"], record.id, "{result}");
+        assert!(result["result"].get("values").is_none());
+    }
+    let live = f
+        .state
+        .db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&f.row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.active_turn.unwrap().crm_artifacts.len(), 2);
+    f.state.db.drop().await.unwrap();
+}

@@ -96,6 +96,8 @@ pub(crate) async fn fence_admission(
 }
 
 pub const NAMES: &[&str] = &[
+    "crm_present",
+    "crm_create_object",
     "crm_schema",
     "crm_query",
     "crm_aggregate",
@@ -119,11 +121,11 @@ pub fn action_class(name: &str) -> Option<acks::OwnerActionClass> {
     use acks::OwnerActionClass::*;
     Some(match name {
         "crm_schema" | "crm_query" | "crm_aggregate" | "crm_record" | "crm_activities"
-        | "crm_views" | "crm_view" => Read,
+        | "crm_views" | "crm_view" | "crm_present" => Read,
         "crm_upsert_record" | "crm_patch_record" | "crm_restore_record" | "crm_add_note"
         | "crm_save_view" | "crm_update_view" => Change,
         "crm_archive_record" | "crm_delete_view" => Destructive,
-        "crm_add_field" | "crm_update_field" => Sensitive,
+        "crm_add_field" | "crm_update_field" | "crm_create_object" => Sensitive,
         _ => return None,
     })
 }
@@ -164,11 +166,13 @@ pub fn endpoints() -> Vec<McpToolEndpoint> {
     NAMES.iter().map(|name| McpToolEndpoint {
         endpoint_id: format!("nyxid__{name}"), name: (*name).into(), method: "POST".into(),
         description: Some(match *name {
+            "crm_present" => "Show an existing saved view or record as a live artifact in the app and a link in chat apps. Pass kind and id; authority is checked live. No snapshot is stored in chat.",
+            "crm_create_object" => "Create a custom CRM dataset and reusable live artifact. Requires Schema authority on the proposed immutable key. Initial typed fields and optional pipeline use the same validators as field editing. Artifacts render live in the app and as links in chat apps.",
             "crm_schema" => "List typed CRM objects, fields, required values, relationships and pipeline metadata. Use immutable field keys.",
             "crm_upsert_record" => "Match/create/update a CRM record by an explicit active text identity (trimmed, case-insensitive exact match). Ambiguous or archived matches fail. Input: object, match_field, values, optional expected_revision. Never guess relationships. Human overrides and fresher run results are preserved; inspect skipped fields. Reuse identity across scheduled runs.",
             "crm_query" => "Bounded CRM table query with filters, projection and cursor. Input uses the shared table query contract; follow next_cursor for more records.",
             "crm_aggregate" => "Current-record count/sum/avg/min/max. Group by category or date with date_bucket:{unit:day|week|month,timezone:IANA}. Calendar dates require UTC. No historical snapshots or inferred trends.",
-            "crm_save_view" | "crm_update_view" => "Save a validated nyxid-crm-v1 json-render envelope. Use shared table/aggregate queries and closed CRM components. Saving does not invoke a model. Invalid bindings return actionable paths.",
+            "crm_save_view" | "crm_update_view" => "Save a validated nyxid-crm-v1 json-render envelope. Use shared table/aggregate queries and closed CRM components. Save a view to give the person a reusable live artifact in the app and links in chat apps. Use crm_present to show an existing view or record. Saving does not invoke a model. Invalid bindings return actionable paths.",
             _ => "Read or mutate owner-scoped CRM data through the shared typed services. Writes require expected revisions where applicable. Use crm_schema for definitions; all authority and source identity are server derived.",
         }.into()),
         request_content_type: Some("application/json".into()), request_body_required: true,
@@ -366,7 +370,7 @@ async fn execute_inner(
     }
     objects::ensure_seeded(&state.db, owner).await?;
     let capability = match name {
-        "crm_add_field" | "crm_update_field" => CrmCapability::Schema,
+        "crm_add_field" | "crm_update_field" | "crm_create_object" => CrmCapability::Schema,
         _ if class == acks::OwnerActionClass::Read => CrmCapability::Read,
         _ => CrmCapability::Write,
     };
@@ -381,6 +385,14 @@ async fn execute_inner(
     ) {
         let id = id(args, "record_id")?;
         Some(records::get(&state.db, owner, id).await?.object_key)
+    } else if name == "crm_present" && args["kind"] == "record" {
+        Some(
+            records::get(&state.db, owner, id(args, "id")?)
+                .await?
+                .object_key,
+        )
+    } else if name == "crm_create_object" {
+        args["input"]["key"].as_str().map(str::to_owned)
     } else {
         args["input"]["object"]
             .as_str()
@@ -546,6 +558,22 @@ async fn execute_inner(
     };
     let operation = async {
         match name {
+            "crm_present" => {
+                if args["kind"] == "view" {
+                    let view = views::get(&state.db, owner, id(args, "id")?).await?;
+                    Ok(
+                        json!({"id":view.id,"title":super::artifacts::title(&view.title),"kind":"view"}),
+                    )
+                } else {
+                    let record = records::get(&state.db, owner, id(args, "id")?).await?;
+                    Ok(
+                        json!({"id":record.id,"object_key":record.object_key,"kind":"record","revision":record.revision}),
+                    )
+                }
+            }
+            "crm_create_object" => encoded(objects::ObjectApi::from(
+                objects::create(&state.db, owner, input(args)?, receipt).await?,
+            )),
             "crm_schema" => encoded(
                 objects::list(&state.db, owner)
                     .await?
@@ -671,7 +699,10 @@ async fn execute_inner(
         }
     };
     let operation: AppResult<Value> = if let Some(response) = committed {
-        if matches!(name, "crm_add_field" | "crm_update_field") {
+        if matches!(
+            name,
+            "crm_add_field" | "crm_update_field" | "crm_create_object"
+        ) {
             // Schema services persist their model response; native tools expose
             // the same API DTO on first execution and receipt recovery.
             let object = serde_json::from_value::<crate::models::crm_object::CrmObject>(response)
@@ -698,6 +729,59 @@ async fn execute_inner(
     };
 
     redact_links(&chat, &agent, owner, &mut result);
+    use crate::models::assistant_crm_artifact::{
+        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
+    };
+    let artifact = match name {
+        "crm_save_view" | "crm_update_view" => {
+            Some((CrmArtifactKind::View, CrmArtifactRole::Created))
+        }
+        "crm_create_object" => Some((CrmArtifactKind::Object, CrmArtifactRole::Created)),
+        "crm_upsert_record"
+            if result["revision"] == 1 && args["input"]["expected_revision"].is_null() =>
+        {
+            Some((CrmArtifactKind::Record, CrmArtifactRole::Created))
+        }
+        "crm_present" => Some((
+            if args["kind"] == "view" {
+                CrmArtifactKind::View
+            } else {
+                CrmArtifactKind::Record
+            },
+            CrmArtifactRole::Presented,
+        )),
+        _ => None,
+    };
+    if let Some((kind, role)) = artifact {
+        let title = result["title"]
+            .as_str()
+            .or_else(|| result["label"].as_str())
+            .unwrap_or_else(|| match kind {
+                CrmArtifactKind::View => "Saved view",
+                CrmArtifactKind::Record => "Record",
+                CrmArtifactKind::Object => "Dataset",
+            });
+        super::artifacts::record(
+            &state.db,
+            &chat,
+            TurnCrmArtifact {
+                kind,
+                role,
+                id: result["id"]
+                    .as_str()
+                    .ok_or_else(|| AppError::Internal("CRM artifact identity missing".into()))?
+                    .into(),
+                owner_id: owner.into(),
+                object_key: result["object_key"]
+                    .as_str()
+                    .or_else(|| result["key"].as_str())
+                    .map(str::to_owned),
+                title: title.into(),
+            },
+        )
+        .await?;
+    }
+
     if class != acks::OwnerActionClass::Read {
         let _ = crate::services::audit_service::log_actor_event(state.db.clone(), &crate::services::audit_service::AuditActor { user_id: chat.user_id.clone(), api_key_id: Some(chat.api_key_id.clone()), api_key_name: None, ip_address: None, user_agent: None }, "crm_tool_mutation", Some(json!({"owner_id":owner,"tool":name,"conversation_id":chat.conversation_id,"turn_id":turn.turn_id}))).await;
     }
@@ -746,7 +830,19 @@ pub async fn validate_grants(
                 "write/schema grants must also include read",
             ));
         }
-        objects::get(db, owner, &grant.object).await?;
+        if !super::fields::valid_key(&grant.object) {
+            return Err(super::validation_error(
+                "crm.object",
+                "must be an immutable object key",
+            ));
+        }
+        match objects::get(db, owner, &grant.object).await {
+            Ok(_) => {}
+            Err(AppError::NotFound(_))
+                if grant.capabilities.contains(&CrmCapability::Schema)
+                    && !objects::RESERVED_OBJECT_KEYS.contains(&grant.object.as_str()) => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
 }
@@ -783,8 +879,20 @@ async fn authorize_operation(
 ) -> AppResult<()> {
     if let Some(key) = object_key {
         require_object(chat, agent, owner, key, capability)?;
-        let object = objects::get(db, owner, key).await?;
-        authorize_references(chat, agent, owner, &object, &args["input"])?;
+        if name != "crm_create_object" {
+            let object = objects::get(db, owner, key).await?;
+            authorize_references(chat, agent, owner, &object, &args["input"])?;
+        }
+    }
+    if name == "crm_create_object" {
+        let body: objects::CreateObjectInput = input(args)?;
+        for field in body.fields {
+            if let crate::models::crm_object::CrmFieldKind::Record { target, .. } = field.kind {
+                if Some(target.as_str()) != object_key {
+                    require_object(chat, agent, owner, &target, CrmCapability::Read)?;
+                }
+            }
+        }
     }
     if matches!(name, "crm_add_field") {
         if args["input"]["field"]["type"] == "record" {
@@ -798,6 +906,18 @@ async fn authorize_operation(
                 CrmCapability::Read,
             )?;
         }
+    }
+    if name == "crm_present" && args["kind"] == "view" {
+        let view = views::get(db, owner, id(args, "id")?).await?;
+        let metadata = objects::list(db, owner).await?;
+        authorize_envelope(
+            chat,
+            agent,
+            owner,
+            &view.envelope,
+            CrmCapability::Read,
+            &metadata,
+        )?;
     }
     if args["input"].get("envelope").is_some() || args.get("view_id").is_some() {
         let metadata = objects::list(db, owner).await?;
@@ -928,6 +1048,13 @@ fn key_schema() -> Value {
     json!({"type":"string","pattern":"^[a-z][a-z0-9_]{0,47}$","maxLength":48})
 }
 pub fn schema(name: &str) -> Value {
+    if name == "crm_present" {
+        return object_schema(
+            json!({"kind":{"enum":["view","record"]},"id":{"type":"string","format":"uuid"},"owner_id":{"type":"string","format":"uuid"}}),
+            &["kind", "id"],
+        );
+    }
+
     let key = key_schema();
     let filters = json!({"type":"array","maxItems":20,"items":object_schema(json!({"field":key,"op":{"type":"string","enum":["eq","neq","in","nin","contains","gt","gte","lt","lte","is_set","is_unset"]},"value":{}}), &["field","op"])});
     let values = json!({"type":"object","maxProperties":100,"description":"Stable field keys to typed values. Currency is integer hundredths; percent is a fraction; relation values are UUID/string arrays; null clears optional values."});
@@ -1057,6 +1184,10 @@ pub fn schema(name: &str) -> Value {
         ],
     );
     let input = match name {
+        "crm_create_object" => object_schema(
+            json!({"key":key,"label":{"type":"string","minLength":1,"maxLength":200},"plural_label":{"type":"string","minLength":1,"maxLength":200},"fields":{"type":"array","maxItems":100,"items":{"oneOf":field_variants}},"pipeline":object_schema(json!({"stage_field":key,"closed_stages":{"type":"array","maxItems":50,"items":{"type":"string","pattern":"^[a-z0-9_]{1,48}$","maxLength":48}}}), &["stage_field","closed_stages"])}),
+            &["key", "label", "plural_label", "fields"],
+        ),
         "crm_query" => table,
         "crm_aggregate" => aggregate,
         "crm_upsert_record" => object_schema(
