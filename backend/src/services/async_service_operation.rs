@@ -224,6 +224,7 @@ pub async fn reserve_with_artifacts(
                 return Err(AppError::Conflict("Async operation watch limit reached".into()));
             }
             let turn=row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?;
+            if let Some(task)=&chat.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
@@ -246,6 +247,7 @@ pub async fn reserve_with_artifacts(
             }
             let now=Utc::now();
             let watch=AsyncServiceOperation {
+            execution_task: super::execution_permission_dispatch::tasks::child(&chat),
             artifact_catalog_service_id: artifact_catalog.clone().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()),
             artifact_mode: artifact_catalog.as_ref().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()).map(|_|super::generated_artifacts::sandbox::MODE.to_owned()),
             artifact_result: None,
@@ -598,8 +600,9 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
+            if let Some(task) = &w.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let event = AgentEvent {
-                execution_task: None,
+                execution_task: w.execution_task.clone(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,

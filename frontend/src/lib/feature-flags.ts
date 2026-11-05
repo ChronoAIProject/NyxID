@@ -96,6 +96,13 @@ export function isGlobalOnlyFlag(key: string): boolean {
   return GLOBAL_ONLY_FLAGS.includes(key);
 }
 
+/** Enabled per person only; the backend refuses global and organization enables. */
+const USER_ONLY_FLAGS: readonly string[] = [FEATURE_FLAG.EXECUTION_PERMISSIONS];
+
+export function isUserOnlyFlag(key: string): boolean {
+  return USER_ONLY_FLAGS.includes(key);
+}
+
 /** All flag keys as an array (iteration, validation, tests). */
 export const FEATURE_FLAG_KEYS = Object.values(FEATURE_FLAG) as FeatureFlag[];
 

@@ -1,4 +1,4 @@
-# Explicit execution permissions (#2193 / #2194 Phase A / #2195 Part A)
+# Explicit execution permissions (#2193 / #2194 Phases A–B / #2195 Part A)
 
 **Status: default-off contract, dispatch, and assistant permission authoring.**
 The #2195 Part A flow below adds human permission updates and exact-effect resume
@@ -149,8 +149,9 @@ old record; no widening by inference.
 
 1. Deploy all readers and dispatchers first, with `permissions:execution-v1`
    default off. Activation requires reader, dispatch and authoring capabilities in the
-   all-replica roster and drained-writer gate, and supports per-person overrides
-   only. Reads and disabling remain available.
+   all-replica roster and drained-writer gate. Person/org/global overrides are supported;
+   broad activation additionally requires enrollment readiness. Reads and disabling
+   remain available.
 2. Authoring requires `permissions:execution-authoring-v1` in addition to reader
    and dispatch readiness. Native references and mandatory org markers remain
    unwritable. Reader or dispatch readiness alone never enables new proposals.
@@ -163,8 +164,8 @@ old record; no widening by inference.
    rollback's unchanged TTL.
 
 #2194 Phase A does not include authoring; #2195 Part A below adds assistant
-permission cards and web UI. This release still excludes native-policy-key execution, Machine service HTTP, async/background watches,
-voice-task service calls, mandatory-org authoring or legacy migration. Tests cover
+permission cards and web UI. Phase B adds the bounded adapters below, while
+mandatory-org authoring and legacy migration remain excluded. Tests cover
 the pure contract, serialization/legacy management, real proxy/MCP/LLM admission,
 provider attempt counts, task fences, concurrent claims and the unmarked database
 command budget. The adapter matrix below defines the exact boundary.
@@ -178,21 +179,23 @@ execution permission, and creates no proposal fields or inert cards.
 
 ### Activation and read budget
 
-`permissions:execution-v1` can be enabled **only for an active person via a user
-override**. Global and organization enables are rejected with a validation error;
-reads, disabling and clearing remain available. Activation requires
+`permissions:execution-v1` supports active-person, organization and global cohorts.
+Global/org activation and clears that enable inherited access additionally require
+`permissions:execution-enrollment-v1`. Explicit disabling remains available.
+Activation requires
 `permissions:execution-v1` (reader), `permissions:execution-dispatch-v1`
 (enforcement) and `permissions:execution-authoring-v1` (human authoring) in the existing all-replica readiness/drained-writer gate.
 
-The override and `User.execution_permission_enrollment = 1` are written in the
-same transaction; disabling/clearing removes the marker. Authentication copies
-this non-authorizing hint from the person it already loads. First-party turn
+A personal override and its `User.execution_permission_enrollment` hint are
+written in the same transaction; disabling/clearing recomputes scoped inheritance. Authentication
+combines this hint with the bounded snapshot using the person it already loads. First-party turn
 admission may persist a server task root; general personal API keys and assistant
 thread keys construct a request-local context. Delegated, OAuth-client and
-service-account principals never participate. No enrollment scan, new environment
-variable, background reconciler, or cross-request authorization cache is added.
+service-account principals never participate. Organization-only reconciliation
+and a process snapshot supply hints, never authorization. No population scan or
+new environment variable is added; see broad enrollment below.
 
-An unmarked request performs no execution-permission database command. Only
+A non-candidate request performs no execution-permission database command. Only
 marked supported calls load a bounded batch of candidate grants for the exact
 actor/principal/connection and one request-local policy decision. Candidates keep
 their individual claim state; complete reusable coverage is preferred and partial
@@ -202,13 +205,16 @@ the legacy gates. Disabling cannot downgrade already admitted coverage to Full.
 
 ### Adapter boundary
 
-| Adapter | Phase A behavior |
+| Adapter | Dispatch behavior |
 | --- | --- |
 | Ordinary bounded HTTP proxy, catalog UUID / connection slug / selected pool member | Participates after concrete resolution and existing ceilings/input checks. Coverage binds one exact connection; it cannot authorize a pool fallback account. |
 | Assistant owner, org-member and shared HTTP connection admission | One decision may satisfy the eligible risk/personal-service/shared-actor floors. Existing selection, live key/share/grants, org instruction and model-lane rules remain. |
 | MCP endpoint, generic and prepared bounded HTTP | The prepared method/path/query/body/declared headers and exact connection feed the same coordinator; the receipt is carried to final HTTP or node egress. |
 | LLM provider and translated gateways | Participates on the final translated request. Stateless model recognition, billing and provider-hosted tool restrictions are unchanged. |
-| Native permission-bound keys, Machine service HTTP, async/background watches, voice service tasks | Phase B. Explicitly excluded from new coverage and retain their existing gates. |
+| Native personal Google/Drive permission-bound REST/MCP keys | Existing policy/adapter verification precedes the coordinator. Verification reads cannot consume the primary claim. Admission refusal precedes the primary-send marker; the 90-day credential cap remains. |
+| Assistant Machine service HTTP | The signed job/runtime/service ceilings remain; coverage evaluates the actual bounded HTTP effect. External job principals cannot inherit the creator's consent. |
+| Async/background watches | Persist original actor/key/turn/TaskRef. Each leased status, result or cancel operation evaluates its own exact effect; submission is not lifecycle permission. Uncertain submissions cannot create another submission. |
+| Voice-task service HTTP/MCP | Retain the authenticated source and original request's task root through continuation/recovery. Live voice/WS/media remain excluded. |
 | Guests, platform/channel/automation turns, WS/CONNECT, streaming request bodies, SSH/native commands | No execution-permission coverage; existing authority and confirmation rules apply. |
 | Managed/composite service adapters, catalog-only calls without an exact connection, resource-policy grants needing a native adapter | No new coverage; no fabricated HTTP/resource evidence. Supported ordinary HTTP still uses its normal ceilings. |
 
@@ -286,7 +292,7 @@ through ordinary HTTP proxy or MCP endpoint/generic/prepared HTTP. Guest,
 platform/channel/automation, old in-flight turns without recorded lineage,
 ordinary API-key/external and standalone LLM-gateway callers retain their existing
 gap behavior. Unsupported managed/composite transformations also retain legacy
-prompts. This does not extend Phase B adapters.
+prompts. Phase B adapters always retain the legacy gap chain; they never create Part A proposals.
 
 The existing `ApprovalRequest` carries one versioned `execution_proposal`.
 Ceilings and prohibitions run before its creation. It consolidates only missing
@@ -380,9 +386,147 @@ bearer authority. The original caller's normal billing lane remains unchanged.
 ### Authoring rollout
 
 Deploy readers, dispatchers and authoring support to every replica and drain old
-writers before per-person activation. There is no org/global enable, new env var,
-TTL migration or backfill. Old replicas ignore proposal payloads and retain legacy
+writers before activation. Global/org enrollment additionally requires the
+broad-enrollment capability below. No new env var, TTL migration or backfill is required. Old replicas ignore proposal payloads and retain legacy
 behavior; they must not serve activated cohorts. Disable enrollment and drain
 pending resumes/claims on upgraded replicas before binary rollback. The unchanged
 `expires_at` TTL preserves persistent rows. #2195 Part B adds non-assistant callers;
 #2196 handles explicitly reviewed legacy mapping.
+
+
+## Dispatch integration: #2194 Phase B
+
+Phase B uses the same effective person/org/global enrollment, reader/dispatch readiness and live
+egress fences. Non-candidate keys and unmarked old jobs/watches/voice requests do
+not load execution permissions or prepare their descriptors for this feature. Marked
+background work cannot fall back to an unmarked context after disabling enrollment.
+
+Native keys keep the personal, server-held Google/Drive pilot. The engine alone
+mints a verified primary plan after its adapter checks. Verification reads retain
+their existing gates, are accounted separately and never select/consume the
+primary operation permission. The provider send marks dispatch; an admission gap
+or denial before that marker is not `OutcomeUncertain`. Failure after a mutating
+send remains uncertain. Policy pause, account/epoch and live key checks still
+apply. This does not enable policy-reference issuance or extend credential life.
+
+Machine jobs and async watches persist server-owned task lineage alongside their
+existing actor, key, conversation, source turn and concrete child identity. Each
+provider attempt fences that child plus its root. A job's command approval does
+not become permission for arbitrary HTTP bodies. Status, result and cancellation
+are independent watch effects and retain the operation contract/lease ceilings.
+Recovery of an uncertain submission is observation only, never resubmission.
+Background children keep a message root alive; cancellation and hard deadlines
+fence future calls. External Machine principals retain their own authority path.
+
+Voice tasks copy the server enrollment hint before runtime startup and retain the
+original request's visible-message TaskRef through confirmation continuations and
+recovery. Cancellation fences the same root. This applies only to bounded HTTP/MCP
+calls from the isolated task thread, not the live session, WS or media stream.
+
+A Phase B gap keeps today's native/proxy/MCP/watch confirmation behavior (including
+existing background refusal when no live decision can be requested). Covered
+suppresses only the three eligible floors; independent Machine, org, webhook,
+exact-use and resource ceilings remain. No Phase B gap creates an execution
+proposal or retained resume payload; that source expansion belongs to #2195 Part B.
+
+## Global and organization enrollment
+
+Global/org enrollment uses `permissions:execution-v1` as a rollout control, not
+as the authority for an effect. The saved execution permission, its exact
+bindings, revocation and claims remain authoritative. No enrollment epoch or
+linearizable flag-change fence is introduced. A send racing a flag disable may
+finish; off → on can let still-pending marked work continue under a still-valid
+permission. It does not reopen consumed/uncertain claims or revive revoked
+permissions.
+
+`execution_permission_enrollment` now materializes **personal/org** candidacy.
+A global change never scans or rewrites the person population. A bounded local
+snapshot of this single flag's overrides supplies global candidacy: refresh by
+change stream and five-second polling, at most 10,000 rows. Cold, overflowed,
+failed or older-than-15-second snapshots provide no new candidates. The existing
+person marker remains an independent candidate hint. Org enables cannot be
+inferred from a snapshot without membership information. Known memberships may
+narrow global candidates; a candidate is never authority.
+
+The shared resolver preserves the existing personal flag precedence, including
+Viewer memberships, legacy role/org-user rows and deny-wins org ties. A personal
+false overrides global true; clearing an override restores inheritance. Active
+membership means `revoked_at: null`, as in the existing flag model. Enrollment
+never gives a Viewer resource proxy rights and does not expand supported lanes.
+Live resolution is bounded to 256 memberships and 2,048 applicable override rows,
+with two-second query deadlines. An incomplete live read is an operational error,
+never an allow. A bounded hint computation may instead omit the hint so that
+membership departure and account disable remain possible.
+
+Org override changes enqueue one coalesced, leased job for that org, in the
+flag/audit transaction. Scans use batches of 100 and a member-ID keyset cursor;
+they include soft-revoked members for cleanup. A 30-second claim and generation
+check prevent an expired/superseded worker from advancing progress or publishing
+stale hints. Completed jobs repair only their org every five minutes to cover
+membership/enable races; there is no population job. Signup retains its original
+plain insert: a new person has no scoped enrollment to materialize, and global
+candidacy comes from the snapshot.
+
+Lifecycle hint reads use standalone queries with a whole-read deadline, applying
+the pending membership/account change in memory. They never run a deadline-bound
+hint query in the action's Mongo transaction, because a server query timeout can
+abort that transaction even if its error is caught. Successful hints commit with
+the action. Overflow, deadlines or other hint-read failures leave the hint and
+queue the affected org's repair job. Only genuine transaction/write errors can
+fail the action because of this bookkeeping. Disable simply clears the hint
+without a lookup.
+
+A coalesced, generation-fenced person repair receipt retains the affected actor
+when an account-state read could not identify its orgs, or org deletion removes
+the membership rows. The worker visits only explicitly deferred people in batches
+of 25, resolves current flags, repairs the hint and schedules their org jobs.
+Unresolved receipts retry after five minutes. Org deletion queues these receipts
+without doing per-person hint reads inside its 100-member transaction; successful
+repair removes the receipt and completed deleted-org jobs are retired. Receipt
+generations protect repair writes only, never permission authority.
+
+Admin feature-flag list responses add bounded `execution_enrollment` progress (up to
+100 recent org jobs plus `has_more`), including cleared overrides' cleanup jobs.
+
+Auth (API keys, first-party bearer/cookie sessions and MCP) computes candidacy
+from the already-loaded person, without new queries. Collaboration admission also
+uses its already-loaded membership scope; org-group admission reuses its existing
+person read. DB-only services share the AppState-owned process snapshot through
+weak database-scoped handles. A missing handle is cold, never an implicit enable.
+
+The bounded live resolver runs before creating a new task root or group request,
+before queueing a fresh voice task, and at fresh HTTP/MCP/native admission before
+permission preparation or proposals. A stale-positive hint resolving off selects
+legacy with no durable marked work; a stale-negative stays legacy. A voice session's
+boolean is only a candidate hint; the task request is live-checked before marking.
+Device-key voice remains excluded. Existing tasks, proposals, resumes, watches,
+Machine children and voice continuations recheck the live effective flag at their
+existing barriers and refuse/drain when off. They never downgrade to legacy.
+Membership revocation therefore removes org-only participation at the next live
+barrier even while an old marker remains. A global or user enable can still make
+the person eligible under the normal precedence; resource ACLs remain independent.
+
+Production heartbeats advertise `permissions:execution-enrollment-v1` with the
+reader/dispatch/authoring capabilities. Global/org enables and clear-that-enables
+require all four. An org-disable clear is conservatively gated when any
+global/org-scoped positive could apply, without scanning members to prove overlap;
+a personal-disable clear uses live effective resolution. Explicit disables remain
+available when readiness is red.
+
+Rollout:
+
+1. Deploy every serving API replica and worker, drain old writers, and confirm the
+   configured readiness roster reports reader, dispatch, authoring and enrollment.
+2. Pilot an org or selected users. Watch the admin flag response's
+   `execution_enrollment` job progress; new members get scoped hints at membership
+   admission, and new people enter a global cohort without a signup hook.
+3. Enable the global override when ready. Snapshot refresh normally converges
+   within five seconds; cold/overflowed/failed snapshots add no new candidates.
+4. To roll back, disable **all effective cohorts** (global=false does not override
+   explicit org/user=true), then drain marked work on upgraded binaries before
+   downgrading. Do not restart old writers against an activated cohort.
+
+The flag is rollout control. A send racing disable may complete, and off→on can
+allow pending marked work under still-valid permission. Exact permission revocation
+and claim fences are unchanged. Cache invalidation is neither authority revocation
+nor a rollback procedure.

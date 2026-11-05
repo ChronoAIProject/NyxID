@@ -5004,6 +5004,9 @@ async fn forward_request_with_egress_guard_inner(
                 .await
                 .map_err(ForwardRequestError::PreDispatchRejected)?;
         }
+        if let Some(context) = &target.execution_request {
+            context.native_dispatched();
+        }
         let result = no_redirect_http_client().execute(request).await;
         if let Some(permit) = &target.execution_permission {
             permit
@@ -5021,9 +5024,16 @@ async fn forward_request_with_egress_guard_inner(
                 .before_send(target)
                 .await
                 .map_err(ForwardRequestError::PreDispatchRejected)?;
+            if let Some(context) = &target.execution_request {
+                context.native_dispatched();
+            }
             no_redirect_http_client().execute(request).await
         } else {
-            request.send().await
+            let request = request.build()?;
+            if let Some(context) = &target.execution_request {
+                context.native_dispatched();
+            }
+            client.execute(request).await
         };
         if let Some(permit) = &target.execution_permission {
             permit

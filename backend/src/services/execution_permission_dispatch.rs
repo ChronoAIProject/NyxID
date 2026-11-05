@@ -21,6 +21,8 @@ use crate::{
 };
 
 mod authority;
+pub(crate) mod descendants;
+mod native;
 pub(crate) mod proposals;
 pub(crate) mod tasks;
 
@@ -33,12 +35,16 @@ pub(crate) struct RequestContext {
     pub(crate) actor: String,
     pub(crate) principal: Principal,
     pub(crate) operation_id: String,
+    voice_task: bool,
+    native: Option<Arc<native::Native>>,
+    descendant: Option<Arc<descendants::Descendant>>,
     authoring: std::sync::atomic::AtomicBool,
     generated_correlation: OnceLock<String>,
     resume: Option<Arc<proposals::Resume>>,
     drain: OnceLock<Drain>,
     authenticated_key: OnceLock<String>,
     source_credential: OnceLock<String>,
+    admission: OnceCell<bool>,
     snapshot: OnceCell<Vec<ApprovalGrant>>,
     authority: OnceCell<Arc<authority::Snapshot>>,
     policies: tokio::sync::Mutex<Vec<(String, PolicyDecision)>>,
@@ -68,6 +74,9 @@ impl RequestContext {
         let _ = self.generated_correlation.set(value.to_owned());
     }
     pub(crate) fn enable_authoring(&self) {
+        if self.native.is_some() || self.descendant.is_some() || self.voice_task {
+            return;
+        }
         self.authoring
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -104,6 +113,30 @@ impl RequestContext {
         Ok(())
     }
 
+    /// The hint only opts into this bounded live read. A fresh false result is
+    /// legacy; persisted task/proposal/child work must drain instead.
+    async fn admit_candidate(
+        &self,
+        db: &Database,
+        chat: Option<&acks::ChatAuthority>,
+    ) -> AppResult<bool> {
+        let enabled = *self
+            .admission
+            .get_or_try_init(|| async {
+                super::execution_permission_enrollment::live_enabled(db, &self.actor, None).await
+            })
+            .await?;
+        if !enabled
+            && (self.resume.is_some()
+                || self.descendant.is_some()
+                || self.participating()
+                || chat.is_some_and(|c| c.execution_task.is_some()))
+        {
+            return Err(refused());
+        }
+        Ok(enabled)
+    }
+
     pub(crate) fn participating(&self) -> bool {
         self.drain.get().is_some()
     }
@@ -118,6 +151,9 @@ impl RequestContext {
             let Some(drain) = self.drain.get() else {
                 return Ok(());
             };
+            if let Some(native) = &self.native {
+                native.check(&drain.db, None).await?;
+            }
             require_enrolled(&drain.db, &self.actor, None).await?;
             super::security_readiness_service::require(&drain.db, READINESS).await?;
             super::security_readiness_service::require(
@@ -125,9 +161,14 @@ impl RequestContext {
                 super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
             )
             .await?;
+            if let Some(source) = &self.descendant {
+                source.check(&drain.db, None).await?;
+            }
             if let Some(chat) = &drain.chat {
-                chat.ensure_live_turn(&drain.db, None, None, "execution_permission.drain")
-                    .await?;
+                if self.descendant.is_none() {
+                    chat.ensure_live_turn(&drain.db, None, None, "execution_permission.drain")
+                        .await?;
+                }
                 if let Some(task) = &chat.execution_task {
                     tasks::check(&drain.db, task).await?;
                 }
@@ -144,6 +185,7 @@ impl RequestContext {
         if marker != Some(VERSION)
             || chat.is_some_and(|c| {
                 c.execution_unsupported
+                    || (c.execution_voice_task && c.execution_task.is_none())
                     || c.guest
                     || c.platform_thread
                     || c.channel_adapter_origin.is_some()
@@ -159,12 +201,16 @@ impl RequestContext {
                 |c| Principal::Agent(c.agent_id.clone()),
             ),
             operation_id: Uuid::new_v4().to_string(),
+            voice_task: chat.is_some_and(|c| c.execution_voice_task),
+            native: None,
+            descendant: None,
             authoring: std::sync::atomic::AtomicBool::new(false),
             generated_correlation: OnceLock::new(),
             resume: None,
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
+            admission: OnceCell::new(),
             snapshot: OnceCell::new(),
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
@@ -293,24 +339,26 @@ async fn require_enrolled(
     actor: &str,
     session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
-    let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","execution_permission_enrollment":1_i32};
-    // A write serializes disabling enrollment against a provider dispatch barrier.
-    let matched = if let Some(session) = session {
-        db.collection::<Document>("users")
+    let mut session = session;
+    if !super::execution_permission_enrollment::live_enabled(db, actor, session.as_deref_mut())
+        .await?
+    {
+        return Err(refused());
+    }
+    // Keep the existing account-disable fence, not a flag-change fence. The
+    // rollout flag can race dispatch; exact permission/claim fences cannot.
+    if let Some(session) = session {
+        let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
+        if db
+            .collection::<Document>("users")
             .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
             .session(session)
             .await?
             .matched_count
-            == 1
-    } else {
-        db.collection::<Document>("users")
-            .find_one(filter)
-            .projection(doc! {"_id":1})
-            .await?
-            .is_some()
-    };
-    if !matched {
-        return Err(refused());
+            != 1
+        {
+            return Err(refused());
+        }
     }
     Ok(())
 }
@@ -360,6 +408,8 @@ pub(crate) struct Permit {
     authority: Arc<authority::Snapshot>,
     resume: Option<Arc<proposals::Resume>>,
     generated_correlation: Option<String>,
+    native: Option<Arc<native::Native>>,
+    descendant: Option<Arc<descendants::Descendant>>,
 }
 
 impl Permit {
@@ -504,6 +554,12 @@ pub(crate) fn prepare<'a>(
         let Some(context) = context else {
             return Ok(None);
         };
+        if !context.admit_candidate(db, chat).await? {
+            return Ok(None);
+        }
+        if let Some(native) = &context.native {
+            native.require_effect(&effect)?;
+        }
         if let Some(result) = context.decision.get() {
             return match result {
                 Resolution::Gap => Ok(None),
@@ -682,7 +738,10 @@ pub(crate) fn prepare<'a>(
                         admitted_descendant: true,
                     }
                 }),
-                resource: None,
+                resource: context
+                    .native
+                    .as_ref()
+                    .map(|n| n.evidence(&digest, &binding)),
                 floors: effect.floors,
                 authority: contract::LiveAuthority::Allowed,
                 eligible_decider: true,
@@ -723,6 +782,8 @@ pub(crate) fn prepare<'a>(
                         authority,
                         resume: context.resume.clone(),
                         generated_correlation: context.generated_correlation.get().cloned(),
+                        native: context.native.clone(),
+                        descendant: context.descendant.clone(),
                     });
                     context
                         .decision
@@ -794,6 +855,9 @@ impl Permit {
             if target_digest(target) != self.target_digest {
                 return Err(refused());
             }
+            if let Some(native) = &self.native {
+                native.check(&self.db, None).await?;
+            }
             require_enrolled(&self.db, &self.subject.actor_user_id, None).await?;
             super::security_readiness_service::require(&self.db, READINESS).await?;
             super::security_readiness_service::require(
@@ -801,9 +865,14 @@ impl Permit {
                 super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
             )
             .await?;
+            if let Some(source) = &self.descendant {
+                source.check(&self.db, None).await?;
+            }
             if let Some(chat) = &self.chat {
-                chat.ensure_live_turn(&self.db, None, None, "execution_permission.egress")
-                    .await?;
+                if self.descendant.is_none() {
+                    chat.ensure_live_turn(&self.db, None, None, "execution_permission.egress")
+                        .await?;
+                }
                 if let Some(task) = &chat.execution_task {
                     tasks::check(&self.db, task).await?;
                 }
@@ -823,12 +892,16 @@ impl Permit {
                 actor: self.subject.actor_user_id.clone(),
                 principal: self.subject.principal.clone(),
                 operation_id: self.operation_id.clone(),
+                voice_task: self.chat.as_ref().is_some_and(|c| c.execution_voice_task),
+                native: None,
+                descendant: None,
                 authoring: std::sync::atomic::AtomicBool::new(false),
                 generated_correlation: OnceLock::new(),
                 resume: None,
                 drain: OnceLock::new(),
                 authenticated_key: OnceLock::new(),
                 source_credential: OnceLock::new(),
+                admission: OnceCell::new(),
                 snapshot: OnceCell::new(),
                 authority: OnceCell::new(),
                 policies: tokio::sync::Mutex::new(Vec::new()),
@@ -956,7 +1029,10 @@ impl Permit {
                     active: !t.cancelled,
                     admitted_descendant: true,
                 }),
-            resource: None,
+            resource: self
+                .native
+                .as_ref()
+                .map(|n| n.evidence(&self.digest, &self.binding)),
             floors: &self.floors,
             authority: contract::LiveAuthority::Allowed,
             eligible_decider: false,
@@ -1121,6 +1197,9 @@ impl Permit {
         dispatch: bool,
     ) -> futures::future::BoxFuture<'a, AppResult<()>> {
         Box::pin(async move {
+            if let Some(native) = &self.native {
+                native.check(&self.db, Some(session)).await?;
+            }
             require_enrolled(&self.db, &self.subject.actor_user_id, Some(session)).await?;
             if audience(
                 &self.db,
@@ -1136,7 +1215,11 @@ impl Permit {
             self.authority.fence(&self.db, session).await?;
             if let Some(chat) = &self.chat {
                 let (row, _, _) = Box::pin(acks::fence(&self.db, chat, session)).await?;
-                super::assistant_access_policy::require_same_live_turn(chat, &row)?;
+                if let Some(source) = &self.descendant {
+                    source.check(&self.db, Some(session)).await?;
+                } else {
+                    super::assistant_access_policy::require_same_live_turn(chat, &row)?;
+                }
                 super::assistant_group_service::fence_member_thread(&self.db, &row, session)
                     .await?;
                 if let Some(shared) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
@@ -1302,7 +1385,8 @@ pub(crate) fn admit_http<'a>(
         };
         if method == "CONNECT"
             || headers.contains_key(axum::http::header::UPGRADE)
-            || auth.api_key_purpose != crate::models::api_key::ApiKeyPurpose::General
+            || (auth.api_key_purpose != crate::models::api_key::ApiKeyPurpose::General
+                && context.native.is_none())
             || !matches!(auth.auth_method, crate::mw::auth::AuthMethod::ApiKey)
             || auth.assistant_chat.as_ref().is_some_and(|c| {
                 c.execution_unsupported
@@ -1319,6 +1403,12 @@ pub(crate) fn admit_http<'a>(
             nyxid_service_adapters::ifttt::AUTH_METHOD
                 | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
         ) || super::telnyx_platform_service::contract(&target.service).is_some()
+        {
+            return Ok(());
+        }
+        if !context
+            .admit_candidate(&state.db, auth.assistant_chat.as_deref())
+            .await?
         {
             return Ok(());
         }
@@ -1341,6 +1431,9 @@ pub(crate) fn admit_http<'a>(
                 return Err(refused());
             }
             tasks::check(&state.db, task).await?;
+        }
+        if let Some(source) = &context.descendant {
+            source.check(&state.db, None).await?;
         }
         // Capture policy/credential selectors before evaluating any cached policy.
         // prepare compares them again, and the send transaction fences this same
@@ -1386,10 +1479,11 @@ pub(crate) fn admit_http<'a>(
                 }
                 _ => acks::OwnerActionClass::Change,
             });
-            if acks::confirmation_needed(&state.db, chat, facts, false)
-                .await?
-                .ask()
-                .is_some_and(|n| n.mode.is_some())
+            if context.descendant.is_none()
+                && acks::confirmation_needed(&state.db, chat, facts, false)
+                    .await?
+                    .ask()
+                    .is_some_and(|n| n.mode.is_some())
             {
                 floors.push(ExecutionFloor::AccessModeRisk);
             }
@@ -1475,6 +1569,9 @@ pub(crate) fn admit_http<'a>(
                     floors.push(*floor);
                 }
             }
+        }
+        if let Some(native) = &context.native {
+            native.check(&state.db, None).await?;
         }
         if floors.is_empty()
             && !(context.authoring.load(std::sync::atomic::Ordering::Relaxed)
@@ -1644,3 +1741,6 @@ pub(crate) fn exclude(auth: &mut crate::mw::auth::AuthUser) {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+pub(crate) mod phase_b_tests;

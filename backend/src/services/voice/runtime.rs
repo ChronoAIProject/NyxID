@@ -34,6 +34,7 @@ pub async fn start_for_client_key(
     client_request_id: &str,
     mut preferences: VoicePreferences,
     sdp: &str,
+    execution_enrolled: bool,
     client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<Started> {
     super::super::assistant_voice::require_enabled(&state.db, user)
@@ -60,6 +61,7 @@ pub async fn start_for_client_key(
             client_request_id,
             preferences,
             resolved.identity,
+            execution_enrolled,
             client_key,
         )
         .await
@@ -87,6 +89,7 @@ pub async fn start_for_client_key(
     Box::pin(start_with_provider(
         state,
         StartInput {
+            execution_enrolled,
             responses_billing: Some(resolved.token_billing),
             user,
             conversation,
@@ -104,6 +107,7 @@ pub async fn start_for_client_key(
 }
 
 pub(super) struct StartInput<'a> {
+    pub execution_enrolled: bool,
     pub responses_billing: Option<crate::services::billing::BillingRouteContext>,
     pub user: &'a str,
     pub conversation: &'a str,
@@ -122,6 +126,7 @@ pub(super) async fn start_with_provider(
     concurrency: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Started> {
     let StartInput {
+        execution_enrolled,
         responses_billing,
         user,
         conversation,
@@ -146,6 +151,11 @@ pub(super) async fn start_with_provider(
     let mut created_session_id = None;
     let mut provider_attempted = false;
     let startup = async {
+        if execution_enrolled && call.client_key.is_none() {
+            call = session::write(&state.db, &call, doc! {"execution_enrolled":true})
+                .await
+                .map_err(|e| Stage::Thread.error(e))?;
+        }
         Box::pin(super::client_key::revalidate(&state.db, &call)).await?;
         if let Some(model) = &provider.delegation_model {
             call = session::write(&state.db, &call, doc! {"responses_model":model}).await?;

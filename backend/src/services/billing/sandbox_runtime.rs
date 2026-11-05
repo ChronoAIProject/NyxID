@@ -46,7 +46,7 @@ fn unavailable(message: &str) -> AppError {
     AppError::BillingProviderUnavailable(message.into())
 }
 
-fn uuid(value: &str) -> AppResult<()> {
+pub(super) fn uuid(value: &str) -> AppResult<()> {
     let parsed =
         Uuid::parse_str(value).map_err(|_| invalid("Sandbox billing identity must be UUID v4"))?;
     if parsed.get_version_num() != 4 || parsed.to_string() != value {
@@ -97,24 +97,23 @@ pub struct ProducerAuthority {
     id: String,
     token_jti: String,
     credential_generation: i64,
+    service_id: String,
+    settings_revision: i64,
 }
 
 pub async fn authorize_producer(
     db: &Database,
-    configured_id: Option<&str>,
     actor_id: &str,
     scopes: &str,
     token_jti: &str,
 ) -> AppResult<ProducerAuthority> {
     use crate::models::service_account::{COLLECTION_NAME, ServiceAccount, ServiceAccountPurpose};
-    if configured_id != Some(actor_id)
-        || !scopes.split_whitespace().any(|s| s == WRITE_SCOPE)
-        || token_jti.is_empty()
-    {
+    if !scopes.split_whitespace().any(|s| s == WRITE_SCOPE) || token_jti.is_empty() {
         return Err(AppError::Forbidden(
-            "Sandbox billing requires the configured producer".into(),
+            "Sandbox billing requires an authorized producer".into(),
         ));
     }
+    let settings = super::sandbox_settings::for_producer(db, actor_id).await?;
     let account = db
         .collection::<ServiceAccount>(COLLECTION_NAME)
         .find_one(doc! {"_id":actor_id,"is_active":true})
@@ -134,6 +133,8 @@ pub async fn authorize_producer(
         id: actor_id.into(),
         token_jti: token_jti.into(),
         credential_generation: account.credential_generation,
+        service_id: settings.service_id,
+        settings_revision: settings.revision,
     })
 }
 
@@ -143,6 +144,15 @@ async fn fence_producer(
     producer: &ProducerAuthority,
 ) -> AppResult<()> {
     use crate::models::service_account::{COLLECTION_NAME, ServiceAccount, ServiceAccountPurpose};
+    let changed = db.collection::<Document>(crate::models::sandbox_billing_settings::COLLECTION_NAME).update_one(
+        doc! {"_id": &producer.service_id, "authorized_producer_service_account_id": &producer.id, "revision": producer.settings_revision},
+        doc! {"$inc": {"admission_revision": 1_i64}},
+    ).session(&mut *session).await?;
+    if changed.matched_count != 1 {
+        return Err(AppError::Forbidden(
+            "Sandbox producer authorization changed".into(),
+        ));
+    }
     let account = db
         .collection::<ServiceAccount>(COLLECTION_NAME)
         .find_one(doc! {"_id":&producer.id,"is_active":true,})
@@ -217,6 +227,13 @@ async fn fence_owner(db: &Database, session: &mut ClientSession, owner: &str) ->
 
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     use mongodb::{IndexModel, options::IndexOptions};
+    db.collection::<Document>(crate::models::sandbox_billing_settings::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"authorized_producer_service_account_id": 1})
+                .build(),
+        )
+        .await?;
     for (collection, keys) in [
         (WINDOW_COLLECTION, doc! {"producer_id":1,"request_id":1}),
         (CURSOR_COLLECTION, doc! {"producer_id":1,"sandbox_id":1}),

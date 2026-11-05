@@ -9528,6 +9528,18 @@ price/amount fields and other unknown fields are rejected. A reused request ID
 with different input, changed final evidence, or changed retained ledger
 revision is a conflict. Evidence acceptance is distinct from provider emission.
 
+CMA service-owned producer settings: `GET` (admin/operator) and `PUT` (platform
+admin only) at `/api/v1/admin/billing/services/{id}/sandbox`. `{id}` must be the
+unique active catalog service with slug `cma`. GET returns `service_id`,
+`authorized_producer_service_account_id` (null when unset), and `revision` (0
+before configuration). PUT requires both `expected_revision` and
+`authorized_producer_service_account_id` (a canonical UUID v4 or explicit null).
+Stale revisions and changes with unreported funded windows return 409. Only an
+active General-purpose account with `billing:sandbox:write` can be selected;
+saving protects its credential management and atomically appends a chained audit.
+No setting means no authorized producer. These settings do not enable admission
+or alter prices; `experimental:cma-sandbox-billing` controls admission rollout.
+
 CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
 (admin/operator) and `POST /api/v1/admin/billing/cma-rate-cards` (admin-only)
 list and publish immutable effective-dated resource prices. See

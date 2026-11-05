@@ -33,7 +33,10 @@ separate hardware identity. The human owner retains ordinary call control.
 Every service operation checks current Key/service scope, the fixed Bot binding,
 operation policy and explicit Deny rules. Voice access creates no service-operation
 approval. Bot tools keep their existing grants and owner action confirmations;
-a board service Key cannot decide an owner action card from speech.
+a board service Key cannot decide an owner action card from speech. Device-key
+voice is an external source: even if its owner is enrolled in execution
+permissions, its sessions and delegated tasks retain legacy confirmations and
+cannot inherit that enrollment or an execution-permission task root.
 
 ## Service URL and operations
 

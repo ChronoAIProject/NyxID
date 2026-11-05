@@ -1178,6 +1178,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
             artifact_mode: None,
             artifact_result: None,
             artifact_event_turn_id: None,
+            execution_task: None,
             instruction_receipt_version: 0,
             shared_execution: None,
             secret_context_versions: Default::default(),

@@ -224,6 +224,8 @@ pub struct AppState {
     /// resumes chats waiting on connect links and new bots at once, and
     /// pushes thread changes to open browsers.
     pub assistant_live: Arc<services::assistant_live::AssistantLive>,
+    /// Local rollout hint only; live admission integration follows Phase B.
+    pub execution_enrollment: services::execution_permission_enrollment::snapshot::Cache,
 }
 
 impl AppState {
@@ -959,6 +961,8 @@ async fn server_main() {
         .await
         .expect("Telemetry erasure destination registration failed");
 
+    let execution_enrollment =
+        crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     let state = AppState {
         #[cfg(test)]
         local_machine_platform: None,
@@ -1135,6 +1139,7 @@ async fn server_main() {
         telemetry: telemetry::TelemetryClient::from_config(&config, Some(db.clone())),
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
+        execution_enrollment,
     };
 
     services::personal_erasure_service::ensure_indexes(&state.db)
@@ -1219,6 +1224,15 @@ async fn server_main() {
         let live = state.assistant_live.clone();
         let db = state.db.clone();
         tokio::spawn(async move { live.run(db).await });
+    }
+
+    {
+        let cache = state.execution_enrollment.clone();
+        let db = state.db.clone();
+        tokio::spawn(async move { cache.run(db).await });
+        tokio::spawn(services::execution_permission_enrollment::jobs::run(
+            state.db.clone(),
+        ));
     }
 
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.

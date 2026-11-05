@@ -401,18 +401,18 @@ describe("group message body copy integration", () => {
       activities: [], attachments: [], recipient_agent_ids: [] } as unknown as AssistantGroupMessage;
     return <GroupMessageRow groupId={group.id} message={message} names={[]} members={group.members} onOpenAgent={() => undefined} />;
   }
-  it("copies the sanitized assistant body with Markdown code intact", async () => {
+  it("copies the readable assistant body with code content intact", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const markdown = "**Answer**\n\n```ts\n  run()\n```";
     render(row("agent", `${markdown}\n<function_calls>hidden-tool-input</function_calls>`));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
-    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("Answer\n\n  run()\n");
   });
   it("copies original user text without rendered recipients or timestamps", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const original = "@NyxBot  <function_calls>literal example</function_calls>  ";
+    const original = "@NyxBot  **literal** <function_calls>literal example</function_calls>  ";
     render(row("user", original));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
     expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
@@ -420,6 +420,20 @@ describe("group message body copy integration", () => {
   it("has no copy button for output without a visible body", () => {
     render(row("agent", "<function_calls>hidden</function_calls>"));
     expect(screen.queryByRole("button", { name: "Copy message" })).not.toBeInTheDocument();
+  });
+  it.each(["**Alice**", "[Alice](https://example.test)"])("copies a group's displayed mention name literally: %s", async (label) => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const member = { id: RESEARCHER, name: "researcher", display_name: label, kind: "specialist" as const, destroyed: false, working: false, mention_handle: "agent-0123456789abcdef" };
+    const message: AssistantGroupMessage = { id: "copy-mention", seq: 1, role: "agent", agent: member, text: `Hello @${RESEARCHER} and **team**.`, created_at: "2026-11-03T00:00:00Z" };
+    const view = render(<GroupMessageRow groupId={group.id} message={message} names={[]} members={[member]} onOpenAgent={() => undefined} />);
+    expect(screen.getByText(`@${label}`)).toHaveAttribute("data-group-mention");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(`Hello @${label} and team.`);
+    writeText.mockClear();
+    view.rerender(<GroupMessageRow groupId={group.id} message={{ ...message, role: "user" }} names={[]} members={[member]} onOpenAgent={() => undefined} />);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(`Hello @${label} and **team**.`);
   });
 });
 

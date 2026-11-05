@@ -165,6 +165,10 @@ async fn actual_signed_external_gateway_preserves_personal_and_org_streaming_and
         requests.recv().await.unwrap();
         let job = job(&f, issued["job_id"].as_str().unwrap()).await;
         let auth = gateway_auth(&f.state.db, &job).await.unwrap();
+        assert!(
+            auth.execution_permission.is_none(),
+            "external principals never inherit the job creator permission"
+        );
         assert!(auth.assistant_chat.is_none());
         assert!(job.conversation_id.is_empty());
         assert_eq!(

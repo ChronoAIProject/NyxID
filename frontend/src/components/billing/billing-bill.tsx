@@ -40,17 +40,17 @@ const paymentStatus = (status: string) => PAYMENT_STATUS[status] ?? "Unknown";
 const note =
   "Only wallet-funded usage appears on this bill. Usage covered by grants or allowances is excluded and is not taxed.";
 
-export function BillingBill({ enabled }: { enabled: boolean }) {
+export function BillingBill({ enabled, ownerId }: { enabled: boolean; ownerId?: string }) {
   const [page, setPage] = useState(1);
-  const bill = useCurrentBill(enabled);
+  const bill = useCurrentBill(enabled, ownerId);
   const currentBill = bill.data;
-  const history = useBillingInvoices(page, enabled);
+  const history = useBillingInvoices(page, enabled, ownerId);
   const [downloading, setDownloading] = useState<string | null>(null);
   if (!enabled) return null;
   async function receipt(invoice: UsageInvoice) {
     setDownloading(invoice.id);
     try {
-      await openInvoiceReceipt(invoice.id);
+      await openInvoiceReceipt(invoice.id, ownerId);
     } catch (error) {
       toast.error(
         error instanceof Error

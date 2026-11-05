@@ -1817,15 +1817,11 @@ async fn execution_permission_covers_shared_actor_connection_without_consent_or_
         .mount(&server)
         .await;
     let f = TransportFixture::new("execution_shared_covered", &server.uri()).await;
-    f.f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.f.outsider},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    crate::services::execution_permission_dispatch::phase_b_tests::enroll(
+        &f.f.state.db,
+        &f.f.outsider,
+    )
+    .await;
     crate::services::assistant_settings_service::update(
         &f.f.state.db,
         &f.f.outsider,

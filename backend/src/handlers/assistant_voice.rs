@@ -158,6 +158,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 conversation_id:Some(request.task_conversation_id.clone().ok_or_else(|| AppError::Conflict("Voice task thread unavailable".into()))?),text:message.text,
                 model:None,agent_id:None,attachment_ids:Vec::new(),access_mode:None,
             });
+            start.execution_enrollment = request.execution_enrolled;
             if let Some(task_id) = request.task_conversation_id.as_deref()
                 && state.db.collection::<crate::models::assistant_conversation::AssistantConversation>(
                     crate::models::assistant_conversation::COLLECTION_NAME,

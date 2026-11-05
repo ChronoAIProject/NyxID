@@ -181,3 +181,14 @@ Upgrade all backend replicas before issuing this new key purpose: older
 binaries cannot deserialize `permission_bound`. The Docker build includes the
 shared permissions crate, and permissions changes trigger backend CI. Owner
 deletion removes persisted policies; normal revocation retains policy metadata.
+
+
+### Optional execution permissions
+
+For per-person `permissions:execution-v1` enrollment, the verified native REST/MCP
+primary plan enters the shared execution coordinator before provider dispatch.
+The existing folder/resource policy is still a ceiling. Verification reads keep
+their own checks and never consume the primary one-operation claim. A permission
+gap retains the legacy approval path; refusal before sending is not an uncertain
+write. The pilot remains personal Google/Drive only with the same 90-day credential
+cap. See [execution permissions](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-b).

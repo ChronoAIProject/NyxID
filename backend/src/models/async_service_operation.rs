@@ -82,6 +82,9 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    /// Server-admitted original task, never caller-supplied authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]

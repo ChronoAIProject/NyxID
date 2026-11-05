@@ -3400,15 +3400,8 @@ async fn execution_permission_group_roots_bind_requester_audience_and_cancel_at_
         .await
         .unwrap();
     share(&f, &agent, &[&f.member]).await;
-    f.state
-        .db
-        .collection::<bson::Document>(USERS)
-        .update_many(
-            doc! {"_id":{"$in":[&f.admin,&f.member]}},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    svc::execution_permission_dispatch::phase_b_tests::enroll(&f.state.db, &f.admin).await;
+    svc::execution_permission_dispatch::phase_b_tests::enroll(&f.state.db, &f.member).await;
     let owner_turn = runtime_start(&f, &f.admin, &group, &agent).await;
     let recipient_turn = runtime_start(&f, &f.member, &group, &agent).await;
     let root = recipient_turn
@@ -3702,15 +3695,7 @@ async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_p
             .await
             .unwrap();
         share(&f, &agent, &[&f.member]).await;
-        f.state
-            .db
-            .collection::<bson::Document>(USERS)
-            .update_one(
-                doc! {"_id":&f.member},
-                doc! {"$set":{"execution_permission_enrollment":1}},
-            )
-            .await
-            .unwrap();
+        svc::execution_permission_dispatch::phase_b_tests::enroll(&f.state.db, &f.member).await;
         let row = if collaboration {
             runtime_start(&f, &f.member, &group, &agent)
                 .await
@@ -3937,4 +3922,60 @@ async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_p
         );
         f.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn collaboration_broad_enrollment_marks_only_live_admissions() {
+    let (f, agent, group) = setup("collab_broad_enrollment").await;
+    svc::execution_permission_dispatch::phase_b_tests::enroll_global(&f.state.db, &f.admin).await;
+    let access = identity::load(&f.state.db, &f.admin, &group.id, None)
+        .await
+        .unwrap();
+    assert!(access.execution_enrolled);
+    let request = requests::enqueue_with_uploads_ready(
+        &f.state.db,
+        &f.admin,
+        &group.id,
+        "Research",
+        Some(std::slice::from_ref(&agent.id)),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(request.execution_task.is_some());
+    // Keep the positive snapshot. The live user deny must win before any root is marked.
+    svc::feature_flag_admin_service::mutate(
+        &f.state.db,
+        svc::execution_permission_enrollment::FLAG,
+        svc::feature_flag_admin_service::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::User,
+            target_id: Some(f.admin.clone()),
+            enabled: Some(false),
+        },
+        &svc::audit_service::AuditActor {
+            user_id: f.admin.clone(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    let access = identity::load(&f.state.db, &f.admin, &group.id, None)
+        .await
+        .unwrap();
+    assert!(access.execution_enrolled);
+    let request = requests::enqueue_with_uploads_ready(
+        &f.state.db,
+        &f.admin,
+        &group.id,
+        "Fresh legacy request",
+        Some(std::slice::from_ref(&agent.id)),
+        &[],
+    )
+    .await
+    .unwrap();
+    assert!(request.execution_task.is_none());
+    f.state.db.drop().await.unwrap();
 }

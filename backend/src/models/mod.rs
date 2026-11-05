@@ -51,6 +51,8 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod execution_enrollment_job;
+pub mod execution_enrollment_repair;
 pub mod execution_permission;
 pub mod execution_proposal;
 pub mod feature_flag_definition;
@@ -208,6 +210,7 @@ pub mod catalog_icon;
 
 pub mod machine_runtime_billing;
 pub mod sandbox_billing;
+pub mod sandbox_billing_settings;
 pub mod sandbox_rate_card;
 
 pub mod machine_oauth_consent_request;

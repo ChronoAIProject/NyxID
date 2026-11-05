@@ -78,35 +78,26 @@ async fn mounted_quote_exclusion_matches_cma_contract_before_paid_dependencies()
             .unwrap();
     }
     let quote = json!({"owner_id": f.owner, "sandbox_id": format!("sbx_{}", Uuid::new_v4().simple()), "allocation": allocation()});
-    for (fleet, message) in [
-        (
-            true,
-            "Billing provider unavailable: Sandbox owner is outside the billing rollout",
-        ),
-        (
-            false,
-            "Billing provider unavailable: CMA paid admission is disabled",
-        ),
-    ] {
-        let mut state = state.clone();
-        let config = &mut state.config;
-        config.cma_billing_enabled = fleet;
-        config.billing_enabled = false;
-        config.billing_fail_closed = true;
-        config.cma_billing_service_id = None;
-        state.billing = Arc::new(BillingService::new(
-            f.db.clone(),
-            Arc::new(state.config.clone()),
-        ));
-        let (_, mounted) = crate::routes::build_router();
-        let router = mounted.with_state(state);
-        let (status, body) = call(&router, Some(&token), "POST", "/quotes", quote.clone()).await;
-        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
-        assert_eq!(
-            body,
-            json!({"error": "billing_provider_unavailable", "error_code": 11302, "message": message})
-        );
-    }
+    let mut state = state;
+    let config = &mut state.config;
+    config.billing_enabled = false;
+    config.billing_fail_closed = true;
+    state.billing = Arc::new(BillingService::new(
+        f.db.clone(),
+        Arc::new(state.config.clone()),
+    ));
+    let (_, mounted) = crate::routes::build_router();
+    let router = mounted.with_state(state);
+    let (status, body) = call(&router, Some(&token), "POST", "/quotes", quote).await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(
+        body,
+        json!({
+            "error": "billing_provider_unavailable",
+            "error_code": 11302,
+            "message": "Billing provider unavailable: Sandbox owner is outside the billing rollout",
+        })
+    );
     for collection in [QUOTE_COLLECTION, WINDOW_COLLECTION, USAGE] {
         assert_eq!(
             f.db.collection::<Document>(collection)
@@ -203,6 +194,28 @@ async fn mounted_producer_contract_authenticates_and_recovers_receipts_and_curso
     assert_eq!(status, StatusCode::OK, "{admitted}");
     assert_eq!(admitted["evidence_accepted"], false);
     assert_eq!(admitted["components"].as_array().unwrap().len(), 3);
+    crate::services::feature_flag_service::set_platform_override(
+        &f.db,
+        crate::services::feature_flag_service::CMA_SANDBOX_BILLING_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let (status, excluded) = call(
+        &router,
+        Some(&token),
+        "POST",
+        "/quotes",
+        json!({"owner_id": f.owner, "sandbox_id": sandbox, "allocation": allocation()}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    assert_eq!(
+        excluded["message"],
+        "Billing provider unavailable: Sandbox owner is outside the billing rollout"
+    );
     let receipt_path = format!("/receipts/{}", input["request_id"].as_str().unwrap());
     assert_eq!(
         call(&router, Some(&token), "GET", &receipt_path, Value::Null)

@@ -857,6 +857,7 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
         use serde_json::{Value, json};
         use tower::ServiceExt;
         let (f, voice, service, raw) = setup("voice_no_operation_approval").await;
+        crate::services::execution_permission_dispatch::phase_b_tests::enroll(&f.state.db, &f.owner).await;
         f.state.db.collection::<bson::Document>("notification_channels").update_one(
             doc! {"user_id":&f.owner}, doc! {"$set":{"approval_required":true}},
         ).await.unwrap();
@@ -922,12 +923,13 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, provider_app).await.unwrap() });
-        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { responses_billing: None,
+        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { execution_enrolled: true, responses_billing: None,
             client_key:binding, user:&f.owner, conversation:&f.row.id,
             client_request_id:&Uuid::new_v4().to_string(), preferences:platform(&voice),
             sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
         }, resolved.identity, resolved.billing, super::openai::OpenAi::fixture(resolved.key,address), None)
             .await.unwrap();
+        assert!(!started.session.execution_enrolled, "Device OpenAI voice cannot inherit owner permissions");
         let notice_id = Uuid::new_v4().to_string();
         for (path, data) in [
             (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id),
@@ -1408,3 +1410,123 @@ mod deep_audit_tests;
 
 #[path = "service_ingress_tests.rs"]
 mod service_ingress_tests;
+
+#[tokio::test]
+async fn device_voice_cannot_inherit_enrolled_owner_permissions_or_task_root() {
+    for global in [false, true] {
+        use crate::services::{
+            assistant_nyxagent as engine, assistant_voice as voice,
+            execution_permission_dispatch::phase_b_tests,
+        };
+        Box::pin(async {
+            for login_child in [false, true] {
+                let (f, provider, _, raw) = setup("voice_device_execution_excluded").await;
+                phase_b_tests::enroll_cohort(&f.state.db, &f.owner, global).await;
+                let parent = auth(&f, &raw).await.api_key_id.unwrap();
+                let secret = if login_child {
+                    child(&f, &parent).await.1
+                } else {
+                    raw
+                };
+                let a = auth(&f, &secret).await;
+                assert!(a.execution_enrolled, "The owner's enrollment is live");
+                let caller = keys::caller(&f.state.db, &a).await.unwrap();
+                assert!(!caller.auth.execution_enrolled);
+                assert!(caller.auth.execution_permission.is_none());
+                let binding = keys::authorize(&f.state.db, &a, &f.row.id).await.unwrap();
+                assert!(binding.is_some());
+                // Even an incorrectly propagated hint cannot enroll device audio.
+                // Grok preparation creates the durable session without provider I/O.
+                let mut call = super::grok_runtime::prepare(
+                    &f.state,
+                    &f.owner,
+                    &f.row.id,
+                    &Uuid::new_v4().to_string(),
+                    platform(&provider),
+                    "fixture".into(),
+                    true,
+                    binding,
+                )
+                .await
+                .unwrap()
+                .session;
+                assert!(!call.execution_enrolled);
+                let stored = session::get(&f.state.db, &f.owner, &f.row.id, &call.id)
+                    .await
+                    .unwrap();
+                assert!(!stored.execution_enrolled);
+                assert!(stored.client_key == call.client_key);
+                // Task admission separately refuses to transfer enrollment, even
+                // if the in-memory session hint is stale or incorrectly set.
+                call.execution_enrolled = true;
+                let segment = super::transcript::Segment {
+                    fragments: Vec::new(),
+                    id: Uuid::new_v4().to_string(),
+                    speaker: super::transcript::Speaker::User,
+                    text: "Check the calendar".into(),
+                    start_ms: 0,
+                    end_ms: 1000,
+                    sealed: true,
+                    complete: true,
+                };
+                super::transcript::persist(&f.state.db, &call, &segment)
+                    .await
+                    .unwrap();
+                let request =
+                    super::transcript::delegate(&f.state.db, &call, "device-request", &segment)
+                        .await
+                        .unwrap();
+                assert!(!request.execution_enrolled);
+                let request = voice::ensure_task_conversation(
+                    &f.state.db,
+                    &f.state.encryption_keys,
+                    &request,
+                )
+                .await
+                .unwrap();
+                let mut start = engine::TurnStart::from(&engine::TurnRequest {
+                    conversation_id: request.task_conversation_id.clone(),
+                    text: segment.text,
+                    model: None,
+                    agent_id: None,
+                    attachment_ids: Vec::new(),
+                    access_mode: None,
+                    acknowledgement_id: None,
+                    retry_of: None,
+                });
+                start.execution_enrollment = request.execution_enrolled;
+                let hidden = Box::pin(engine::begin_turn_with_voice(
+                    &f.state.db,
+                    &f.owner,
+                    start,
+                    &f.state.encryption_keys,
+                    Some(&request.id),
+                ))
+                .await
+                .unwrap();
+                assert!(
+                    hidden
+                        .active_turn
+                        .as_ref()
+                        .unwrap()
+                        .execution_task
+                        .is_none()
+                );
+                let key =
+                    key_service::get_api_key(&f.state.db, &f.owner, &hidden.credential_api_key_id)
+                        .await
+                        .unwrap();
+                let task_auth =
+                    crate::mw::auth::api_key_auth_user(&f.state.db, &key, None, None, None)
+                        .await
+                        .unwrap();
+                assert!(task_auth.execution_permission.is_none());
+                voice::cancel(&f.state.db, &f.owner, &f.row.id, &request.id)
+                    .await
+                    .unwrap();
+                f.state.db.drop().await.unwrap();
+            }
+        })
+        .await;
+    }
+}

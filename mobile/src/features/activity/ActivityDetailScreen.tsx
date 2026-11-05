@@ -1,5 +1,5 @@
 import { ServiceIcon } from "../../components/ServiceIcon";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { capture } from "../../lib/telemetry";
@@ -418,7 +418,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
               label="Review in the web app"
               accessibilityRole="link"
               onPress={() =>
-                void Linking.openURL(`${NYXID_FRONTEND_URL}/assistant/approvals`)
+                void Linking.openURL(`${getFrontendUrl()}/assistant/approvals`)
               }
             />
           </SettingsGroup>

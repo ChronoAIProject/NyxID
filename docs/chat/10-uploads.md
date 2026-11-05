@@ -494,7 +494,8 @@ The default-off `assistant:generated-artifacts` flag uses the normal personal,
 organization and global resolution. It admits files only for the owner's private
 Web NyxAgent chat, from the compiled Sandbox catalog and its exact submit/status/
 result contract. Shared, guest, group, channel, voice and invocation lanes retain
-the ordinary watch path. Async watches remain outside execution-permission Phase A.
+the ordinary watch path. Async watches preserve main’s execution-permission Phase B task lineage and live
+permission checks; legacy unmarked watches keep their existing authority.
 
 The result adapter reads status, result and status again through the existing
 async execution authority. Operation identity, catalog/target/contract, lifecycle

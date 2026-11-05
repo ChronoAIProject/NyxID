@@ -4,7 +4,7 @@ use super::*;
 use crate::models::async_service_operation::AsyncServiceOperation;
 use crate::services::async_service_operation as watches;
 
-async fn call(
+pub(super) async fn call(
     state: &AppState,
     watch: &AsyncServiceOperation,
     name: &str,
@@ -30,7 +30,7 @@ async fn call(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = if watch.shared_execution.is_some() {
+    let mut auth = if watch.shared_execution.is_some() || watch.execution_task.is_some() {
         let key =
             crate::services::key_service::get_api_key(&state.db, &watch.user_id, &watch.api_key_id)
                 .await?;
@@ -41,6 +41,13 @@ async fn call(
             .await
             .map_err(|_| denied())?
     };
+    // Old watches never borrow a newer foreground turn's enrollment or task.
+    if watch.execution_task.is_none() {
+        auth.execution_permission = None;
+        if let Some(chat) = auth.chat.as_mut() {
+            chat.execution_permission = None;
+        }
+    }
     // This watch was admitted only for an owner turn. A later guest message
     // on the same thread neither owns nor changes this background request.
     if let Some(chat) = auth.chat.as_mut() {
@@ -123,6 +130,12 @@ async fn call(
             )?,
         );
     prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
+    if auth.execution_permission.is_some() {
+        let user = super::permission_dispatch_auth(&auth)?;
+        prepared
+            .admit_execution_permission(state, &user, service, endpoint)
+            .await?;
+    }
     authorize_mcp_tool_operation(
         state,
         &auth,

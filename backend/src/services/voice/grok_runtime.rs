@@ -12,6 +12,7 @@ use crate::{
 use mongodb::bson::{self, doc};
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare(
     state: &AppState,
     user: &str,
@@ -19,6 +20,7 @@ pub async fn prepare(
     request: &str,
     preferences: VoicePreferences,
     identity: String,
+    execution_enrolled: bool,
     client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<runtime::Started> {
     let row = session::admit_for_client_key(
@@ -32,7 +34,12 @@ pub async fn prepare(
         client_key,
     )
     .await?;
-    let row = session::write(&state.db, &row, doc! {"protocol":"xai_realtime"}).await?;
+    let row = session::write(
+        &state.db,
+        &row,
+        doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled && row.client_key.is_none()},
+    )
+    .await?;
     Ok(runtime::Started {
         session: row,
         sdp: String::new(),

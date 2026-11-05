@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   preview: vi.fn(),
   navigate: vi.fn(),
+  actor: "person" as string | undefined,
+  token: "hosted-token",
   available: true,
   intentLocked: false,
   choice: undefined as boolean | undefined,
@@ -28,14 +30,14 @@ const mocks = vi.hoisted(() => ({
   fields: null as { name: string; label: string; secret: boolean }[] | null,
 }));
 vi.mock("@tanstack/react-router", () => ({
-  useParams: () => ({ token: "hosted-token" }),
+  useParams: () => ({ token: mocks.token }),
   useNavigate: () => mocks.navigate,
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: () => ({
-    isAuthenticated: true,
+    isAuthenticated: !!mocks.actor,
     isLoading: false,
-    user: { email: "person@example.test" },
+    user: mocks.actor ? { id: mocks.actor, email: "person@example.test" } : null,
   }),
 }));
 vi.mock("@/hooks/use-keys", () => ({
@@ -89,6 +91,8 @@ vi.mock("@/hooks/use-connect-links", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.available = true;
+  mocks.actor = "person";
+  mocks.token = "hosted-token";
   mocks.intentLocked = false;
   mocks.choice = undefined;
   mocks.scopes = [];
@@ -107,6 +111,54 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+it.each(["another-person", undefined])(
+  "clears entered credentials and refreshes the preview when the account becomes %s",
+  async (actor) => {
+    mocks.available = false;
+    const view = render(<ConnectLinkPage />);
+    const credential = await screen.findByPlaceholderText(
+      "Paste API key or token for xAI",
+    );
+    await userEvent.type(credential, "private-entered-credential");
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(1));
+    mocks.actor = actor;
+    view.rerender(<ConnectLinkPage />);
+    expect(credential).not.toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue("private-entered-credential"),
+    ).not.toBeInTheDocument();
+    if (actor) {
+      await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
+      expect(
+        screen.getByPlaceholderText("Paste API key or token for xAI"),
+      ).toHaveValue("");
+    } else {
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        to: "/login",
+        search: { return_to: `${window.location.origin}/connect/hosted-token` },
+      });
+    }
+    expect(mocks.complete).not.toHaveBeenCalled();
+  },
+);
+it("clears entered credentials when opening a different connection request", async () => {
+  mocks.available = false;
+  const view = render(<ConnectLinkPage />);
+  const credential = await screen.findByPlaceholderText(
+    "Paste API key or token for xAI",
+  );
+  await userEvent.type(credential, "private-entered-credential");
+  mocks.token = "another-hosted-token";
+  view.rerender(<ConnectLinkPage />);
+  expect(credential).not.toBeInTheDocument();
+  expect(
+    screen.getByPlaceholderText("Paste API key or token for xAI"),
+  ).toHaveValue("");
+  await waitFor(() =>
+    expect(mocks.preview).toHaveBeenLastCalledWith("another-hosted-token"),
+  );
+  expect(mocks.complete).not.toHaveBeenCalled();
 });
 it("defaults to platform and completes without any secret", async () => {
   render(<ConnectLinkPage />);

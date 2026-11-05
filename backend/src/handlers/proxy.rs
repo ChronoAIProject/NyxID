@@ -4641,13 +4641,14 @@ async fn execute_resolved_proxy_inner<'a>(
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
-        && machine_ingress.is_none()
-        && permission_ingress.is_none()
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
     {
-        if !all_headers.contains_key(crate::services::assistant_service_execution::ACK_HEADER) {
+        if machine_ingress.is_none()
+            && permission_ingress.is_none()
+            && !all_headers.contains_key(crate::services::assistant_service_execution::ACK_HEADER)
+        {
             execution_permission.enable_authoring();
         }
         let mut permission_body = force_stream_usage_for_service(

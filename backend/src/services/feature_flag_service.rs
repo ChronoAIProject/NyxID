@@ -76,9 +76,9 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
 
 /// Per-person rollout for CMA's prepaid Sandbox allocation billing. This is
 /// deliberately separate from the general billing flag so operators can
-/// enable CMA for a pilot owner independently of other metered traffic. The
-/// operational `CMA_BILLING_ENABLED` setting remains a fleet-wide admission
-/// gate; both gates must allow new Sandbox coverage.
+/// enable CMA for a pilot owner independently of other metered traffic.
+/// This is the sole CMA rollout gate for new Sandbox coverage; it resolves
+/// global, matching organization, then personal overrides.
 pub const CMA_SANDBOX_BILLING_FLAG_KEY: &str = "experimental:cma-sandbox-billing";
 
 const CMA_SANDBOX_BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {
@@ -299,7 +299,7 @@ pub const ORG_INSTRUCTION_FLAG_KEY: &str = "assistant:org-instruction-v1";
 pub const EXECUTION_PERMISSIONS_FLAG_KEY: &str = "permissions:execution-v1";
 const EXECUTION_PERMISSIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: EXECUTION_PERMISSIONS_FLAG_KEY,
-    description: "Stage explicit execution permissions after fleet readiness; contract readers only, no execution or authoring enabled yet",
+    description: "Explicit execution permissions for assistant chats: one approval card can save a permission (one operation, task, window or until revoked) and resume the request; covered requests skip repeated prompts. Per-person enables only; requires the reader, dispatch and authoring readiness capabilities",
     default_enabled: false,
 };
 const ORG_INSTRUCTION_FLAG: FeatureFlagDef = FeatureFlagDef {

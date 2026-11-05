@@ -738,6 +738,7 @@ impl McpAuthContext {
     /// retains the live-turn requirement for shared keys.
     fn from_watch_auth(auth: crate::mw::auth::AuthUser) -> Self {
         let mut context = Self::user(auth.user_id.to_string(), AuthMethod::ApiKey);
+        context.execution_permission = auth.execution_permission.clone();
         context.chat = auth.assistant_chat.as_deref().cloned();
         context.scope = auth.scope;
         context.is_api_key = true;
@@ -1405,10 +1406,7 @@ async fn verify_user_active_with_enrollment(
     match user {
         Some(u) if u.is_active => Ok((
             user_id,
-            u.user_type
-                .is_person()
-                .then_some(u.execution_permission_enrollment)
-                .flatten(),
+            state.execution_enrollment.candidate(&u, &[]).then_some(1),
         )),
         _ => Err(Box::new(mcp_401(&state.config.base_url))),
     }
@@ -11086,6 +11084,7 @@ mod skill_authoring_discovery_tests {
         auth.chat = Some(ChatAuthority {
             execution_group_id: None,
             execution_unsupported: false,
+            execution_voice_task: false,
             execution_task: None,
             execution_permission: None,
             business_system_success: false,
@@ -11832,5 +11831,74 @@ mod schedule_retry_identity_tests {
         let other =
             json!({"name":"service__write", "arguments":{"acknowledgement_id":"provider-field"}});
         assert_eq!(chat_retry_digest(&other), chat_activity_digest(&other));
+    }
+}
+
+#[cfg(test)]
+mod broad_enrollment_tests {
+    use super::*;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn global_mcp_auth_uses_loaded_person_and_adds_no_reads() {
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let observed = reads.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && let Ok(collection) = event.command.get_str("find")
+            {
+                observed.lock().unwrap().push(collection.to_owned());
+            }
+        });
+        let db = crate::test_utils::connect_test_database_with_command_handler(
+            "broad_mcp_auth",
+            handler,
+        )
+        .await
+        .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "mcp",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let state = crate::test_utils::test_app_state(db);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", key.full_key.parse().unwrap());
+        reads.lock().unwrap().clear();
+        let legacy = authenticate_mcp(&state, &headers, false).await.unwrap();
+        assert!(legacy.execution_permission.is_none());
+        let baseline = reads.lock().unwrap().clone();
+        crate::services::execution_permission_dispatch::phase_b_tests::enroll_global(
+            &state.db, &owner,
+        )
+        .await;
+        reads.lock().unwrap().clear();
+        let broad = authenticate_mcp(&state, &headers, false).await.unwrap();
+        assert!(broad.execution_permission.is_some());
+        assert_eq!(*reads.lock().unwrap(), baseline);
+        state.db.drop().await.unwrap();
     }
 }
