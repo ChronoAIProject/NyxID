@@ -21,13 +21,31 @@ window admission. Zero-price trials stay outside paid admission.
 
 ## Authority and account eligibility
 
-Configure a catalog identity for Sandbox entitlements and funding in
-`CMA_BILLING_SERVICE_ID` and one
-General-purpose service account UUID in `CMA_BILLING_SERVICE_ACCOUNT_ID`. Its
-issued JWT and live account both need `billing:sandbox:write`. AuthUser verifies
-the JWT/token row; each money/evidence transaction also fences account activity,
-purpose, scope, credential generation, token expiry and revocation. Human,
-delegated, relay and API-key authentication is rejected.
+The unique active catalog service with slug `cma` owns Sandbox entitlements,
+funding and producer settings. No CMA-specific environment configuration is
+required. On the CMA service edit page, a platform admin selects **Sandbox
+billing → Authorized producer service account**. The account must be active,
+General-purpose and have `billing:sandbox:write` scope. The selector saves through
+`PUT /api/v1/admin/billing/services/{service_id}/sandbox`; reads allow
+admin/operator, and writes require platform admin. Unset or ambiguous producer
+settings, or a missing/ambiguous active CMA service, refuse new paid admission.
+
+The service-owned `sandbox_billing_settings` row stores the selected account and
+revision. Its update and chained audit commit together. Saving also marks the
+account platform-protected, so organization admins cannot manage its credentials.
+The issued JWT and live account both need `billing:sandbox:write`. AuthUser
+verifies the JWT/token row; each money/evidence transaction rechecks the settings
+revision and fences account activity, purpose, scope, credential generation,
+token expiry and revocation. Human, delegated, relay and API-key authentication
+is rejected. Producer authentication reads authority settings independently of
+catalog prices, preserving early flag exclusion and historical recovery.
+
+Changing or clearing the producer is refused while its funded windows still need
+evidence. Rotate credentials on the same account for continuity. Account
+protection remains after removal; only a platform admin can manage that account.
+Catalog changes never retarget accepted quotes or historical usage. These settings
+select authority only: immutable prices and their existing rate-card editor stay
+on **Admin → Billing → Settings**; service credential-lane prices do not replace them.
 
 Only this trusted producer can assert an owner and lifecycle operation. CMA must
 establish owner authorization and price consent before requesting a window;
@@ -214,19 +232,18 @@ the sole exception that also pins `message` for compatibility with the CMA clien
 ### Explicit exclusion on the money-free quote endpoint
 
 After authenticating the producer and validating owner identity, NyxID evaluates
-`CMA_BILLING_ENABLED` first, then `experimental:cma-sandbox-billing` using the
-existing global → matching organization → personal override resolution. These
-checks precede accounting readiness, ordinary billing configuration, catalog,
-rate-card/cache, wallet, subscription and Lago dependencies. A flag-resolution
-failure remains an error; it is never inferred to mean exclusion.
+`experimental:cma-sandbox-billing` using the existing global → matching
+organization → personal override resolution. This check precedes accounting
+readiness, ordinary billing configuration, catalog, rate-card/cache, wallet,
+subscription and Lago dependencies. A flag-resolution failure remains an error;
+it is never inferred to mean exclusion.
 
 For `POST /quotes`, CMA may proceed unbilled **only** on HTTP **402** with
 `error: "billing_provider_unavailable"`, numeric `error_code: 11302`, and exactly
-one of these `message` strings:
+this `message` string:
 
 | Exclusion | Exact message |
 | --- | --- |
-| Fleet gate is off | `Billing provider unavailable: CMA paid admission is disabled` |
 | Owner's CMA cohort flag is off | `Billing provider unavailable: Sandbox owner is outside the billing rollout` |
 
 This pins the client contract in CMA PR #1322 at `2d31bf36b`. Excluded quotes
@@ -236,11 +253,11 @@ eligibility, missing prices/wallets and provider failures use distinct messages
 and remain fail-closed. Any different status, key, numeric code, message or
 malformed response is **not** permission to run unbilled.
 
-New window admissions check the same gates before paid-billing dependencies,
+New window admissions check the same flag before paid-billing dependencies,
 after the existing idempotent-receipt recovery path. A window refusal is never
 proof that an earlier ambiguous request created no hold. `GET /receipts`, exact
 committed-request replay, evidence ingestion and settlement of already-funded
-windows remain available when fleet or cohort admission is disabled.
+windows remain available when the admission flag is disabled.
 
 Never extend a provider deadline without an accepted matching receipt. Retry
 receipts/evidence even when admission is disabled. On evidence timeout, GET the
@@ -309,19 +326,21 @@ The existing admin Feature Flags page and
 runtime rollout. No separate editor or end-user self-activation API is added.
 Use `{"target_kind":"user","target_key":"<person UUID>","enabled":true}` for one
 person, or `{"target_kind":"global","enabled":true}` for the global baseline.
-The default is false. The Billing Settings environment table shows the independent
-fleet gate and configured producer/catalog identities. Existing resolution applies global, matching organization
+The default is false. Producer authority is stored on the CMA service's Sandbox
+billing settings. Existing resolution applies global, matching organization
 cohorts, then a personal override; an organization cohort targets its members'
 personal wallets and does **not** authorize an organization payer. Set the same
-override to false to disable it. `CMA_BILLING_ENABLED=false` is the independent
-fleet-wide admission kill switch, even if a per-user flag is true.
+override to false to disable it. A global false override changes the baseline;
+organization and personal overrides still take precedence. To disable admission
+for every owner, clear or disable any enabled organization/personal overrides as
+well as disabling the global flag. No environment switch overrides this resolution.
 
 With the flag off, no new quote/window or charged coverage is admitted. Previously
 funded windows retain their contractual liability: receipts, evidence ingestion,
 and settlement remain recoverable after disablement. Disabling does not refund
-unproven usage, discard evidence, or backcharge unfunded intervals. Both rollout
-flags, `BILLING_ENABLED`, configured producer/service, approved synchronized prices,
-and account/provider eligibility must permit admission.
+unproven usage, discard evidence, or backcharge unfunded intervals. The general
+billing and CMA admission flags, `BILLING_ENABLED`, authorized producer/CMA service,
+approved synchronized prices, and account/provider eligibility must permit admission.
 
 `GET /api/v1/admin/billing/cma-rate-cards` lists the latest 100 versions for
 admin/operator inspection. `POST` on the same path is admin-only and accepts:
@@ -370,9 +389,9 @@ final pricing policy, confirm its Lago synchronization and effective date, and
 align the website and policy with that card. Seeding or deploying does not satisfy
 this external-rollout prerequisite; Finance supplies the pricing detail privately.
 
-Keep `CMA_BILLING_ENABLED=false` until every API reader and billing worker knows
-the three new enum units. Disabling admission after writing these units does not
-make rollback to old readers safe. No historical usage is backcharged.
+Keep `experimental:cma-sandbox-billing` disabled for every owner until all API
+readers and billing workers know the three new enum units. Disabling admission
+after writing these units does not make rollback to old readers safe. No historical usage is backcharged.
 
 The CMA lifecycle adapter is a separate required change: persist generation and
 owner intent, consume these receipts, fence provider `shutdownTime` to coverage,

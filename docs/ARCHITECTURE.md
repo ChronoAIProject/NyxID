@@ -2290,6 +2290,14 @@ and the required reader-before-writer rollout.
 
 ### CMA prepaid allocation billing
 
+The unique active `cma` catalog service owns a `sandbox_billing_settings` row
+keyed by its UUID, containing the admin-selected producer account and revision.
+The dedicated authority row lets authentication and cohort exclusion run without
+reading paid catalog/price data. Settings changes and chained audit commit
+atomically; every money/evidence transaction touches the same revision to fence
+revocation. Selected accounts are platform-protected. No CMA environment pin is
+used. The existing immutable rate-card price source is unchanged.
+
 The trusted CMA producer obtains quotes and finite resource reservations, then
 pushes retained allocation evidence to the billing service. `sandbox_rate_cards`
 stores immutable, audited effective-dated prices; a deploy-time seed installs the

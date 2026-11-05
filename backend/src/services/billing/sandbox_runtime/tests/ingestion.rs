@@ -22,7 +22,7 @@ async fn set_flag(f: &Fixture, target: FlagTarget, value: Option<bool>) {
 
 #[tokio::test]
 async fn cma_flag_defaults_off_and_global_user_overrides_control_new_coverage() {
-    let mut f = fixture("sandbox_flags").await;
+    let f = fixture("sandbox_flags").await;
     let input = request(&f, 2).await;
     let user = FlagTarget::User(f.owner.clone());
     set_flag(&f, user.clone(), None).await;
@@ -96,8 +96,7 @@ async fn cma_flag_defaults_off_and_global_user_overrides_control_new_coverage() 
             .await
             .is_err()
     );
-    set_flag(&f, user, Some(true)).await;
-    Arc::make_mut(&mut f.billing.config).cma_billing_enabled = false;
+    set_flag(&f, user, Some(false)).await;
     assert_eq!(
         f.billing
             .sandbox_window_receipt(&f.producer, &input.request_id)
@@ -106,7 +105,7 @@ async fn cma_flag_defaults_off_and_global_user_overrides_control_new_coverage() 
             .unwrap()
             .id,
         admitted.id,
-        "fleet disable must preserve receipt recovery"
+        "flag disable must preserve receipt recovery"
     );
     assert!(
         f.billing
@@ -133,7 +132,7 @@ async fn cma_flag_defaults_off_and_global_user_overrides_control_new_coverage() 
                 .unwrap();
         assert!(
             row.funding.unwrap().settled,
-            "fleet disable must preserve exact settlement"
+            "flag disable must preserve exact settlement"
         );
     }
 }
