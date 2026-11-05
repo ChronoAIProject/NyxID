@@ -102,7 +102,7 @@ it("shows the actual safe summary and keeps absent pagination explicitly unknown
     }),
   ).not.toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),
@@ -249,16 +249,18 @@ it("displays the exact reviewed authority and expiry inside the decision dialog"
   await openReview();
   const dialog = within(screen.getByRole("dialog"));
   expect(
-    dialog.getByText("Grant / assignment revision").nextElementSibling,
+    dialog
+      .getByText("Grant / assignment revision")
+      .closest("[data-grouped-row]"),
   ).toHaveTextContent("7 / 3");
   expect(
-    dialog.getByText("Runtime generation").nextElementSibling,
+    dialog.getByText("Runtime generation").closest("[data-grouped-row]"),
   ).toHaveTextContent("2");
   expect(
-    dialog.getByText("Parameter digest").nextElementSibling,
+    dialog.getByText("Parameter digest").closest("[data-grouped-row]"),
   ).toHaveTextContent("parameter-digest");
   expect(
-    dialog.getByText("Waiting approval expires").nextElementSibling,
+    dialog.getByText("Waiting approval expires").closest("[data-grouped-row]"),
   ).toHaveTextContent(new Date(payload().expires_at).toLocaleString());
   expect(
     dialog.getByText(/Full request content is unavailable/),
@@ -283,7 +285,7 @@ it("reports approval as waiting for the original caller even before the next rea
   // accepted approval, never infer that the caller's operation executed.
   http.get.mockImplementation(() => new Promise(() => {}));
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I reviewed this identity/ }),
+    screen.getByRole("switch", { name: /I reviewed this identity/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Approve one retry" }),

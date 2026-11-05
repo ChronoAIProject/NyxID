@@ -216,7 +216,7 @@ export function TelegramClaimForm() {
                 setNotice(null);
               }}
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Use the code from your private Telegram setup chat. Only enter
               codes for bots you created.
             </p>
@@ -245,7 +245,7 @@ export function TelegramClaimForm() {
               {...form.register("label")}
             />
             {form.formState.errors.label && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 {form.formState.errors.label.message}
               </p>
             )}
@@ -260,11 +260,11 @@ export function TelegramClaimForm() {
                 form.setValue("target_org_id", next ?? undefined)
               }
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Your personal account or an organization you manage.
             </p>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Once connected, choose an AI agent in the bot’s settings to handle
             replies.
           </p>
@@ -280,7 +280,7 @@ export function TelegramClaimForm() {
       )}
       {conflict && pending && (
         <div className="space-y-3 rounded-xl border border-border bg-card p-4">
-          <p className="text-sm">Existing setup: {pending.label}</p>
+          <p className="text-14">Existing setup: {pending.label}</p>
           <Button
             variant="outline"
             onClick={() =>

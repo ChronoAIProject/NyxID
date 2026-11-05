@@ -86,7 +86,7 @@ pub async fn context(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(&b.user_id, &r.resource_owner, r.class)
+        .resolve_for_ordinary_execution(&b.user_id, &r.resource_owner, r.class)
         .await?;
     let pricing = r.service.billing.as_ref().filter(|p| {
         if r.class == CredentialClass::NyxidManagedMaster {

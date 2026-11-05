@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { RefreshCw, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -168,14 +169,14 @@ export function AssistantProviderDisconnectDialog({
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Provider</span>
               <Badge variant="secondary" className="max-w-[70%] truncate font-mono">
                 {params.providerId}
               </Badge>
             </div>
-            <label className="flex items-start gap-2">
+            <Label className="flex items-start gap-2">
               <Checkbox
                 checked={confirmed}
                 onCheckedChange={(value) => setConfirmed(value === true)}
@@ -184,11 +185,11 @@ export function AssistantProviderDisconnectDialog({
                 <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
                 this revokes and clears the legacy provider token.
               </span>
-            </label>
+            </Label>
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
-        {verified ? <p className="text-11 text-success">Disconnect evidence verified.</p> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
+        {verified ? <p className="text-13 text-success">Disconnect evidence verified.</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>

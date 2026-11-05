@@ -1,4 +1,4 @@
-import { fireEvent, render, renderHook, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useApplyTheme } from "@/hooks/use-theme";
@@ -13,6 +13,16 @@ beforeEach(() => {
 });
 
 describe("DisplaySettings", () => {
+  it("labels the new default as 1× and formats a precisely migrated preference for the slider", async () => {
+    render(<DisplaySettings />);
+    expect(screen.getByRole("slider", { name: "Text size" })).toHaveAttribute("aria-valuetext", "1×");
+    expect(screen.getAllByText("Default: 1×")).toHaveLength(2);
+    localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: 1.17 }, version: 1 }));
+    await act(async () => useThemeStore.persist.rehydrate());
+    expect(screen.getByRole("slider", { name: "Text size" })).toHaveAttribute("aria-valuetext", "1.38×");
+    expect(useThemeStore.getState().textScale).toBe(1.17 / 0.85);
+  });
+
   it("supports keyboard selection and focus within display radio groups", async () => {
     const user = userEvent.setup();
     render(<DisplaySettings />);
@@ -83,14 +93,14 @@ describe("DisplaySettings", () => {
       expect(slider).toHaveAttribute("aria-valuetext", `${value}×`);
       expect(useThemeStore.getState()[field]).toBe(1);
       expect(localStorage.getItem("nyxid.theme")).toBe(persisted);
-      expect(root.style.fontSize).toBe("");
+      expect(root.style.fontSize).toBe("85%");
       expect(root.style.getPropertyValue("--spacing")).toBe("");
     }
 
     fireEvent.pointerUp(slider, { pointerId: 1, pointerType });
     expect(useThemeStore.getState()[field]).toBe(1.83);
     expect(JSON.parse(localStorage.getItem("nyxid.theme")!).state[field]).toBe(1.83);
-    expect(root.style.fontSize).toBe(field === "textScale" ? "183%" : "");
+    expect(parseFloat(root.style.fontSize)).toBeCloseTo(field === "textScale" ? 155.55 : 85);
     expect(root.style.getPropertyValue("--spacing")).toBe(field === "density" ? "7.32px" : "");
   });
 

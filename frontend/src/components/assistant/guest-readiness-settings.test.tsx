@@ -40,11 +40,11 @@ it("loads channel readiness only when opened and shares it across ordinary chat 
   const user=mount();
   expect(reads).toEqual([]);
   await user.click(screen.getByRole("button",{name:"Chats and who can talk"}));
-  await screen.findByText("Visitor 7");
+  await screen.findByRole("heading", { name: /^Visitor 7 ·/ });
   expect(screen.getAllByText("Model ready for visitors")).toHaveLength(9);
   expect(reads.filter((r)=>r.includes("guest-readiness"))).toEqual([base]);
   await user.click(screen.getByRole("button",{name:"Show 12 more"}));
-  await screen.findByText("Visitor 19");
+  await screen.findByRole("heading", { name: /^Visitor 19 ·/ });
   expect(reads.filter((r)=>r.includes("guest-readiness"))).toEqual([base]);
 });
 it("checks a chat separately only when the server reports its own profile or route", async () => {

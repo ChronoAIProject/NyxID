@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -511,7 +512,7 @@ export function NotificationSettingsPage() {
                     <>
                       <Badge variant="success">Connected</Badge>
                       {settings.telegram_username && (
-                        <span className="text-12 text-muted-foreground">
+                        <span className="text-14 text-muted-foreground">
                           {settings.telegram_username}
                         </span>
                       )}
@@ -565,7 +566,7 @@ export function NotificationSettingsPage() {
                 </div>
               ) : !pushDevices?.devices.length ? (
                 <div className="space-y-3">
-                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+                  <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
                     No devices registered. Install the NyxID mobile app and sign
                     in to register a device.
                   </div>
@@ -596,10 +597,10 @@ export function NotificationSettingsPage() {
                           {device.platform === "apns" ? "iOS" : "Android"}
                         </Badge>
                         <div className="space-y-0.5">
-                          <p className="text-12 font-medium">
+                          <p className="type-row-title">
                             {device.device_name ?? "Unknown device"}
                           </p>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Registered{" "}
                             {new Date(
                               device.registered_at,
@@ -652,7 +653,7 @@ export function NotificationSettingsPage() {
                   {form.formState.errors.root && (
                     <div
                       role="alert"
-                      className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
+                      className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive"
                     >
                       {form.formState.errors.root.message}
                     </div>
@@ -855,7 +856,7 @@ export function NotificationSettingsPage() {
               ) : serviceConfigsError ? (
                 <ErrorBanner message="Failed to load per-service overrides. Try refreshing the page." onRetry={refetchServiceConfigs} />
               ) : serviceConfigs?.configs.length === 0 ? (
-                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+                <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
                   No per-service overrides configured. All services use the
                   global default.
                 </div>
@@ -881,10 +882,10 @@ export function NotificationSettingsPage() {
                     >
                       <div className="flex items-center justify-between">
                         <div className="space-y-0.5">
-                          <p className="text-12 font-medium">
+                          <p className="type-row-title">
                             {config.service_name}
                           </p>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {config.user_service_slug
                               ? `${config.user_service_slug} — `
                               : ""}
@@ -922,9 +923,7 @@ export function NotificationSettingsPage() {
                           <TabsContent value="simple" className="mt-3">
                             <div className="flex flex-col gap-3">
                               <div className="flex flex-wrap items-center gap-2">
-                                <span className="text-xs text-muted-foreground">
-                                  Mode:
-                                </span>
+                                <Label htmlFor={`approval-mode-${mutationKey}`}>Mode</Label>
                                 <Select
                                   value={config.approval_mode}
                                   onValueChange={(value) =>
@@ -935,7 +934,7 @@ export function NotificationSettingsPage() {
                                     )
                                   }
                                 >
-                                  <SelectTrigger className="h-7 w-[180px] text-xs">
+                                  <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
@@ -947,7 +946,7 @@ export function NotificationSettingsPage() {
                                     </SelectItem>
                                   </SelectContent>
                                 </Select>
-                                <span className="text-xs text-muted-foreground">
+                                <span className="text-13 text-muted-foreground">
                                   {config.approval_mode === "grant"
                                     ? "Approval creates a reusable grant"
                                     : "Every request needs fresh approval"}
@@ -955,9 +954,9 @@ export function NotificationSettingsPage() {
                               </div>
                               <div className="flex flex-wrap gap-3">
                                 {approvalVerbs.map((verb) => (
-                                  <label
+                                  <Label
                                     key={verb}
-                                    className="flex items-center gap-2 text-xs text-muted-foreground"
+                                    className="flex items-center gap-2 text-muted-foreground"
                                   >
                                     <Switch
                                       checked={enabledVerbs.includes(verb)}
@@ -971,7 +970,7 @@ export function NotificationSettingsPage() {
                                       }
                                     />
                                     {approvalVerbLabels[verb]}
-                                  </label>
+                                  </Label>
                                 ))}
                               </div>
                             </div>
@@ -1018,14 +1017,14 @@ export function NotificationSettingsPage() {
           {linkData && (
             <div className="space-y-4">
               <div className="rounded-lg bg-muted p-4 text-center">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Send this to @{linkData.bot_username}
                 </p>
-                <code className="mt-2 block text-lg font-semibold">
+                <code className="mt-2 block type-body">
                   /start {linkData.link_code}
                 </code>
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 This code expires in{" "}
                 {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
               </p>
@@ -1116,9 +1115,9 @@ export function NotificationSettingsPage() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label className="text-12 font-medium" htmlFor="service-select">
+              <Label htmlFor="service-select">
                 Service
-              </label>
+              </Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
@@ -1134,15 +1133,15 @@ export function NotificationSettingsPage() {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Shows your configured AI services. To add a new one, go to
                 the Keys page.
               </p>
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-12 font-medium">Require Approval</p>
-                <p className="text-xs text-muted-foreground">
+                <p className="type-row-title">Require Approval</p>
+                <p className="text-13 text-muted-foreground">
                   Whether this service requires approval for programmatic
                   access.
                 </p>
@@ -1158,12 +1157,12 @@ export function NotificationSettingsPage() {
             {selectedApprovalRequired && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label
-                    className="text-12 font-medium"
+                  <Label
+
                     htmlFor="approval-mode-select"
                   >
                     Approval Mode
-                  </label>
+                  </Label>
                   <Select
                     value={selectedApprovalMode}
                     onValueChange={(v) =>
@@ -1178,21 +1177,21 @@ export function NotificationSettingsPage() {
                       <SelectItem value="grant">Time-based grant</SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {selectedApprovalMode === "grant"
                       ? "Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires."
                       : "Every API request requires a fresh approval. No grant is created."}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-12 font-medium">
+                  <p className="type-row-title">
                     Require Approval For
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3">
                     {approvalVerbs.map((verb) => (
-                      <label
+                      <Label
                         key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-xs text-muted-foreground"
+                        className="flex items-center justify-between rounded-lg border border-border p-3 text-muted-foreground"
                       >
                         <span>{approvalVerbLabels[verb]}</span>
                         <Switch
@@ -1213,7 +1212,7 @@ export function NotificationSettingsPage() {
                             });
                           }}
                         />
-                      </label>
+                      </Label>
                     ))}
                   </div>
                 </div>

@@ -16,7 +16,7 @@ export function LoginPage() {
   const inviteCode = params.get("code") ?? undefined;
 
   if (import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1") {
-    return <div className="space-y-4"><h1 className="text-2xl font-semibold">View your real connections</h1><p className="text-sm text-muted-foreground">Sign in on NyxID, then return here to explore the local routing proposal with your production account data.</p><Button asChild><a href="/__routing-preview/login">Continue to NyxID</a></Button></div>;
+    return <div className="space-y-4"><h1 className="type-metric">View your real connections</h1><p className="text-14 text-muted-foreground">Sign in on NyxID, then return here to explore the local routing proposal with your production account data.</p><Button asChild><a href="/__routing-preview/login">Continue to NyxID</a></Button></div>;
   }
 
   // Keep QR mounted while profile restoration clears the pending MFA state,
@@ -27,7 +27,7 @@ export function LoginPage() {
         {!appLoginOpen && (
           <>
             <MfaVerifyForm returnTo={returnTo} cookieChallenge={cookieMfaRequired} />
-            <p className="border-t border-border pt-6 text-center text-12 text-muted-foreground">
+            <p className="border-t border-border pt-6 text-center text-14 text-muted-foreground">
               You can also sign in by approving from your NyxID app.
             </p>
           </>
@@ -44,7 +44,7 @@ export function LoginPage() {
   return (
     <>
       {params.get("mfa") === "expired" && (
-        <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+        <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
           Your verification expired. Please sign in again.
         </p>
       )}

@@ -172,7 +172,7 @@ const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
     field: "created_by",
     label: "Created By",
     defaultWidth: 200,
-    cellClassName: "font-mono text-11 text-muted-foreground",
+    cellClassName: "font-mono text-13 text-muted-foreground",
   },
   {
     field: "broker",
@@ -193,7 +193,7 @@ const OAUTH_CLIENT_COLUMNS: readonly DataTableColumn<OAuthClientSortField>[] = [
     field: "created_at",
     label: "Created",
     defaultWidth: 190,
-    cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
+    cellClassName: "whitespace-nowrap text-14 text-muted-foreground",
   },
 ];
 
@@ -640,13 +640,13 @@ export function AdminOAuthClientsPage() {
         return (
           <div className="min-w-0 space-y-1">
             <p
-              className="line-clamp-2 break-words text-sm font-medium text-foreground"
+              className="line-clamp-2 break-words type-row-title text-foreground"
               title={client.client_name}
             >
               {client.client_name}
             </p>
             <p
-              className="line-clamp-2 break-all font-mono text-11 text-muted-foreground"
+              className="line-clamp-2 break-all font-mono text-13 text-muted-foreground"
               title={client.id}
             >
               {client.id}
@@ -683,7 +683,7 @@ export function AdminOAuthClientsPage() {
                 stageBrokerCapability(client, checked)
               }
             />
-            <span className="whitespace-nowrap text-11 font-medium text-foreground">
+            <span className="whitespace-nowrap type-secondary-emphasis text-foreground">
               {client.broker_capability_effective
                 ? "Broker enabled"
                 : "No broker"}
@@ -713,7 +713,7 @@ export function AdminOAuthClientsPage() {
               }
               onCheckedChange={(checked) => stageActive(client, checked)}
             />
-            <span className="whitespace-nowrap text-11 font-medium text-foreground">
+            <span className="whitespace-nowrap type-secondary-emphasis text-foreground">
               {client.is_active ? "Active" : "Inactive"}
             </span>
           </div>
@@ -792,7 +792,7 @@ export function AdminOAuthClientsPage() {
               <div
                 role="status"
                 aria-live="polite"
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                className="flex items-center gap-1.5 text-13 text-muted-foreground"
               >
                 <Loader2
                   className="h-3.5 w-3.5 animate-spin"
@@ -824,7 +824,7 @@ export function AdminOAuthClientsPage() {
         {error && data && (
           <div
             role="alert"
-            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-sm sm:flex-row sm:items-center sm:justify-between"
+            className="flex flex-col gap-3 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-14 sm:flex-row sm:items-center sm:justify-between"
           >
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -869,7 +869,7 @@ export function AdminOAuthClientsPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="text-sm font-medium text-destructive">
+            <p className="type-row-title text-destructive">
               Failed to load OAuth clients
             </p>
             <Button
@@ -885,12 +885,12 @@ export function AdminOAuthClientsPage() {
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
             <KeyRound className="h-10 w-10 text-muted-foreground" />
             <div>
-              <p className="text-sm font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 {hasActiveFilters
                   ? "No clients match these filters"
                   : "No OAuth clients"}
               </p>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {hasActiveFilters
                   ? "Adjust or clear the current filters."
                   : "Registered clients will appear here."}
@@ -982,7 +982,7 @@ export function AdminOAuthClientsPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-11 text-text-tertiary">
+              <p className="text-13 text-text-tertiary">
                 Showing {String((displayedPage - 1) * displayedPerPage + 1)}-
                 {String(Math.min(displayedPage * displayedPerPage, total))} of{" "}
                 {String(total)} clients
@@ -1043,7 +1043,7 @@ export function AdminOAuthClientsPage() {
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-11 text-text-tertiary">
+                <span className="min-w-[84px] text-center text-13 text-text-tertiary">
                   Page {String(displayedPage)} of {String(displayedTotalPages)}
                 </span>
                 <Button
@@ -1080,10 +1080,10 @@ export function AdminOAuthClientsPage() {
           </DialogHeader>
           {pendingClientAction && (
             <div className="rounded-lg bg-muted/50 p-3">
-              <p className="text-sm font-medium">
+              <p className="type-row-title">
                 {pendingClientAction.client.client_name}
               </p>
-              <p className="mt-1 font-mono text-11 text-muted-foreground">
+              <p className="mt-1 font-mono text-13 text-muted-foreground">
                 {pendingClientAction.client.id}
               </p>
             </div>
@@ -1171,7 +1171,7 @@ function BrokerSettingsSection({
             <Skeleton className="h-14 w-full" />
           </div>
         ) : error ? (
-          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-14 text-destructive">
             <AlertTriangle className="h-4 w-4" />
             Failed to load broker settings
           </div>
@@ -1220,13 +1220,13 @@ function BrokerPolicyRow({
     <div className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <p className="text-sm font-medium text-foreground">{label}</p>
+          <p className="type-row-title text-foreground">{label}</p>
           <Badge variant={overridden ? "default" : "secondary"}>
             {overridden ? "Overridden" : "Env default"}
           </Badge>
           <BoolBadge value={setting.effective} />
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Env default: {setting.env_default ? "enabled" : "disabled"}
           {overridden
             ? ` · Override: ${setting.override ? "enabled" : "disabled"}`
@@ -1297,7 +1297,7 @@ function BoolBadge({ value }: { readonly value: boolean }) {
 function ScopeList({ scopes }: { readonly scopes: string }) {
   const items = scopes.split(/\s+/).filter(Boolean);
   if (items.length === 0) {
-    return <span className="text-sm text-muted-foreground">None</span>;
+    return <span className="text-14 text-muted-foreground">None</span>;
   }
   const visibleItems = items.slice(0, 3);
   const hiddenItems = items.slice(3);
@@ -1314,20 +1314,20 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
           {visibleItems.map((scope) => (
             <span
               key={scope}
-              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono text-10 font-medium text-muted-foreground"
+              className="inline-flex max-w-[112px] truncate rounded-md bg-muted px-2 py-0.5 font-mono type-group-label text-muted-foreground"
             >
               {scope}
             </span>
           ))}
           {hiddenItems.length > 0 && (
-            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 text-10 font-medium text-muted-foreground">
+            <span className="inline-flex h-6 shrink-0 items-center rounded-md border border-border/80 bg-muted px-2 type-group-label text-muted-foreground">
               +{String(hiddenItems.length)} more
             </span>
           )}
         </button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 rounded-lg p-3">
-        <p className="mb-2 text-xs font-semibold text-foreground">
+        <p className="mb-2 type-secondary-strong text-foreground">
           Allowed scopes
         </p>
         <div className="flex max-h-56 flex-wrap gap-1.5 overflow-y-auto">
@@ -1335,7 +1335,7 @@ function ScopeList({ scopes }: { readonly scopes: string }) {
             <Badge
               key={scope}
               variant="secondary"
-              className="max-w-full break-all font-mono text-10"
+              className="max-w-full break-all font-mono text-12"
             >
               {scope}
             </Badge>

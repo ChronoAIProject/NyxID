@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { pendingSetupRequest } from "@/lib/platform-onboarding";
 import { useEffect, useLayoutEffect, useState } from "react";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -61,7 +62,7 @@ export function PlatformOnboardingPage() {
         description="Choose a starter, review the answers and limits, then connect a bot you own."
       />
       {templates.isPending && (
-        <p role="status" className="text-12 text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           Loading starters…
         </p>
       )}
@@ -77,11 +78,11 @@ export function PlatformOnboardingPage() {
             key={template.id}
             className="space-y-4 rounded-xl border border-border bg-card p-4"
           >
-            <h2 className="text-15 font-semibold">{template.name}</h2>
-            <p className="text-12 text-muted-foreground">
+            <h2 className="type-card-title">{template.name}</h2>
+            <p className="text-14 text-muted-foreground">
               {template.description}
             </p>
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               You review all public content. No connector access is included.
             </p>
             <Button
@@ -158,13 +159,13 @@ function BindingReview({ code }: { code: string }) {
         <ErrorBanner message="This link is unavailable or expired. Return to the manager's private chat and use /help to start a new onboarding request." />
       )}
       {preview.isPending && code && (
-        <p role="status" className="text-12 text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           Checking your request…
         </p>
       )}
       {preview.data && !expired && (
         <DetailSection title="What you are linking">
-          <div className="space-y-3 p-4 text-12">
+          <div className="space-y-3 p-4 text-14">
             <p>
               Manager:{" "}
               <span className="font-mono">
@@ -234,7 +235,7 @@ function BindingReview({ code }: { code: string }) {
                   Linking to <strong>{user.email}</strong>. To use another
                   account, sign out before continuing.
                 </p>
-                <label className="flex items-start gap-2">
+                <Label className="flex items-start gap-2">
                   <Checkbox
                     checked={replace}
                     onCheckedChange={(value) => setReplace(value === true)}
@@ -243,7 +244,7 @@ function BindingReview({ code }: { code: string }) {
                     Replace this chat's existing account binding, if it has one.
                     The previous account's setups remain theirs.
                   </span>
-                </label>
+                </Label>
                 <div className="flex flex-wrap justify-end gap-2">
                   <Button
                     disabled={decision.isPending}
@@ -281,7 +282,7 @@ function BindingReview({ code }: { code: string }) {
         </DetailSection>
       )}
       {decision.error && <ErrorBanner message={decision.error.message} />}
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Linking shares onboarding progress only. It does not deliver
         credentials, grant tools, create resources or activate a bot.
       </p>
@@ -299,7 +300,7 @@ function OwnedBindings() {
   const [review, setReview] = useState<OwnedBinding>();
   return (
     <DetailSection title="Telegram onboarding bindings">
-      <div className="space-y-3 p-4 text-12">
+      <div className="space-y-3 p-4 text-14">
         {bindings.isPending && <p role="status">Loading bindings…</p>}
         {bindings.error && (
           <ErrorBanner
@@ -405,7 +406,7 @@ export function CreateSetupForm({
             ),
           )}
         >
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Start with a name and timezone. Add the remaining details in your
             saved draft before review. Organization setup is unavailable for
             this starter.
@@ -452,7 +453,7 @@ function ArchivedSetups() {
   const archives = useArchivedSetups(cursor);
   return (
     <DetailSection title="Cancelled and expired setups">
-      <div className="space-y-3 p-4 text-12">
+      <div className="space-y-3 p-4 text-14">
         {archives.error && (
           <ErrorBanner message="Could not load archived setups." />
         )}
@@ -541,7 +542,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               </div>
             ))}
           </dl>
-          <label className="flex gap-2">
+          <Label className="flex gap-2">
             <Checkbox
               checked={
                 review?.id === draft.id && review.revision === draft.revision
@@ -554,7 +555,7 @@ export function AnonymousDraftReview({ binding }: { binding: OwnedBinding }) {
               I recognize these facts from my private Telegram chat and want
               this draft in my account.
             </span>
-          </label>
+          </Label>
           <Button
             disabled={
               review?.id !== draft.id ||
@@ -583,13 +584,13 @@ function AnonymousDrafts() {
   const selected = bindings.data?.find((binding) => binding.id === selectedId);
   return (
     <DetailSection title="Bring a Telegram draft into your account">
-      <div className="space-y-3 p-4 text-12">
+      <div className="space-y-3 p-4 text-14">
         <p>
           Link your private manager chat first. Then choose that exact chat and
           review its unowned drafts. Adoption saves a draft; it does not
           provision or activate a bot.
         </p>
-        <label className="block space-y-2">
+        <Label className="block space-y-2">
           Linked chat
           <select
             value={selectedId}
@@ -604,7 +605,7 @@ function AnonymousDrafts() {
               </option>
             ))}
           </select>
-        </label>
+        </Label>
         {selected && (
           <AnonymousDraftReview
             key={`${selected.id}:${selected.generation}`}
@@ -640,7 +641,7 @@ export function PlatformSetupsPage() {
         />
       )}
       {setups.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading saved setups…
         </p>
       )}
@@ -657,14 +658,14 @@ export function PlatformSetupsPage() {
             className="space-y-3 rounded-xl border border-border bg-card p-4"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-13 font-semibold">{setup.facts.name}</h2>
+              <h2 className="type-card-title">{setup.facts.name}</h2>
               <Badge
                 variant={setup.state === "active" ? "success" : "secondary"}
               >
                 {setupStatus[setup.state]}
               </Badge>
             </div>
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Revision {setup.revision} ·{" "}
               {setup.template === "restaurant-starter"
                 ? "Restaurant starter"
@@ -682,7 +683,7 @@ export function PlatformSetupsPage() {
         ))}
       </div>
       {setups.data?.length === 0 && !template && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
           Your saved setups will appear here. Choose a starter to begin.
         </p>
       )}

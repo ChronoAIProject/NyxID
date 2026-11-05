@@ -1,6 +1,7 @@
 import { AgentAvatarStack } from "../../components/AgentAvatar";
+import { SkeletonCards } from "../../components/Skeleton";
 import { useEffect } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight } from "lucide-react-native";
 import {
@@ -54,10 +55,7 @@ export function GroupsList({
         <Notice message="You're offline. Reconnect to refresh your crews." />
       )}
       {query.isPending && (
-        <ActivityIndicator
-          accessibilityLabel="Loading crews"
-          color={colors.primary}
-        />
+        <SkeletonCards count={2} accessibilityLabel="Loading crews" />
       )}
       {query.isError && (
         <>

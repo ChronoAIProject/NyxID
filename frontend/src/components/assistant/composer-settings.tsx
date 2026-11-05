@@ -99,7 +99,7 @@ export function ComposerSettings({
           type="button"
           disabled={disabled}
           aria-label={`${menuLabel}: ${triggerLabel}${advancedControls && mode ? `, ${accessLabel}` : ""}`}
-          className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-12 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+          className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-14 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
         >
           <span className="flex min-w-0 items-center text-foreground">
             <span className="truncate">
@@ -178,7 +178,7 @@ export function ComposerSettings({
                 >
                   <span className="min-w-0 flex-1 break-words">
                     {modelDisplayName(row)}
-                    {modelCannotViewImages(row) && <span className="ml-2 text-11 text-muted-foreground">Can’t view images</span>}
+                    {modelCannotViewImages(row) && <span className="ml-2 text-13 text-muted-foreground">Can’t view images</span>}
                     {!row.available && !models.isPending
                       ? " (unavailable)"
                       : ""}
@@ -277,7 +277,7 @@ function SettingsSection({
     </>
   );
   const triggerClass =
-    "min-h-8 gap-2 rounded-md px-2 text-12 focus:bg-overlay-strong data-[state=open]:bg-overlay-strong";
+    "min-h-8 gap-2 rounded-md px-2 text-14 focus:bg-overlay-strong data-[state=open]:bg-overlay-strong";
 
   if (narrow) {
     return (

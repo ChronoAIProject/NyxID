@@ -1,3 +1,4 @@
+import { describeChanges } from "@/lib/grouped-form-changes";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -18,21 +19,23 @@ import { DetailSection } from "@/components/shared/detail-section";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-  useAppForm,
-} from "@/components/ui/form";
+  GroupedInput as Input,
+  GroupedSelectTrigger as SelectTrigger,
+  GroupedList,
+  GroupedRow,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField as FormItem,
+  GroupedLabel as FormLabel,
+  GroupedMessage as FormMessage,
+} from "@/components/ui/grouped-fields";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { Form, FormControl, FormField, useAppForm } from "@/components/ui/form";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import {
@@ -132,91 +135,97 @@ export function RemoteMachineJobs({
     });
     setCursors([]);
     setSelectedId(null);
+    form.reset(value);
   });
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Find jobs by status and creation time without a known job ID. Metadata
         remains for 30 days after termination. Commands, input, environment
         values and full output are not stored in this history.
       </p>
       <Form {...form}>
-        <form onSubmit={apply} className="grid gap-3 sm:grid-cols-2">
-          <FormField
-            control={form.control}
-            name="status"
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>Status</FormLabel>
-                <Select value={field.value} onValueChange={field.onChange}>
-                  <FormControl>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                  </FormControl>
-                  <SelectContent>
-                    {[
-                      "all",
-                      "running",
-                      "finished",
-                      "cancelled",
-                      "interrupted",
-                      "revoked",
-                      "expired",
-                    ].map((status) => (
-                      <SelectItem key={status} value={status}>
-                        {status === "all"
-                          ? "All statuses"
-                          : status.replaceAll("_", " ")}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
-          {(["from", "to"] as const).map((name) => (
+        <form onSubmit={apply} className="space-y-6">
+          <GroupedList
+            title="Filter jobs"
+            footer="Date filters use your local timezone and are sent as absolute timestamps. Finished includes all recorded exit results, including nonzero exit codes. A cancelled record alone does not confirm a physical stop."
+          >
             <FormField
-              key={name}
               control={form.control}
-              name={name}
+              name="status"
               render={({ field }) => (
-                <FormItem>
-                  <FormLabel>
-                    {name === "from" ? "Created from" : "Created to"}
-                  </FormLabel>
-                  <FormControl>
-                    <Input type="datetime-local" {...field} />
-                  </FormControl>
+                <FormItem inline>
+                  <FormLabel>Status</FormLabel>
+                  <Select value={field.value} onValueChange={field.onChange}>
+                    <FormControl>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {[
+                        "all",
+                        "running",
+                        "finished",
+                        "cancelled",
+                        "interrupted",
+                        "revoked",
+                        "expired",
+                      ].map((status) => (
+                        <SelectItem key={status} value={status}>
+                          {status === "all"
+                            ? "All statuses"
+                            : status.replaceAll("_", " ")}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <FormMessage />
                 </FormItem>
               )}
             />
-          ))}
-          <div className="flex items-end gap-2">
-            <Button type="submit" disabled={!form.formState.isDirty}>
-              Apply filters
-            </Button>
-            <Button type="button" onClick={() => void query.refetch()}>
-              Refresh
-            </Button>
-          </div>
+            {(["from", "to"] as const).map((name) => (
+              <FormField
+                key={name}
+                control={form.control}
+                name={name}
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>
+                      {name === "from" ? "Created from" : "Created to"}
+                    </FormLabel>
+                    <FormControl>
+                      <Input type="datetime-local" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            ))}
+            <GroupedRow asChild interactive>
+              <button type="button" onClick={() => void query.refetch()}>
+                Refresh
+              </button>
+            </GroupedRow>
+          </GroupedList>
+          <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "status", label: "Status", format: (value) => String(value).replace(/^./, (letter) => letter.toUpperCase()) }, { key: "from", label: "From" }, { key: "to", label: "To" }])}
+            label="job filters"
+            dirty={form.formState.isDirty}
+            pending={query.isFetching}
+            save={apply}
+            discard={() => form.reset()}
+            saveLabel="Apply filters"
+          />
         </form>
       </Form>
-      <p className="text-12 text-muted-foreground">
-        Date filters use your local timezone and are sent as absolute
-        timestamps. Finished includes all recorded exit results, including
-        nonzero exit codes. A cancelled record alone does not confirm a physical
-        stop.
-      </p>
       {cancelNotice && (
-        <p role="status" className="text-12 text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           {cancelNotice}
         </p>
       )}
       {query.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading jobs…
         </p>
       )}
@@ -224,7 +233,7 @@ export function RemoteMachineJobs({
         (missing ? (
           <p
             role="status"
-            className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground"
+            className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground"
           >
             Job history is unavailable on this server. This does not mean the
             machine has no jobs. The owner job-list API must be connected before
@@ -237,12 +246,12 @@ export function RemoteMachineJobs({
           />
         ))}
       {!query.isPending && !query.error && !jobs.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
           No jobs match these filters.
         </p>
       )}
       {!query.isPending && !query.error && (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Loaded {jobs.length} {jobs.length === 1 ? "job" : "jobs"} on this
           page.
         </p>
@@ -253,7 +262,7 @@ export function RemoteMachineJobs({
             key={job.id}
             className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
           >
-            <p className="break-all font-mono text-13 font-semibold">
+            <p className="break-all font-mono type-card-title">
               {job.id}
             </p>
             <div className="flex flex-wrap gap-2">
@@ -264,15 +273,15 @@ export function RemoteMachineJobs({
                 Output {job.output_availability}
               </Badge>
             </div>
-            <p className="break-all text-11 text-muted-foreground">
+            <p className="break-all text-13 text-muted-foreground">
               {subjectText(job.subject)}
             </p>
-            <p className="text-11 text-text-tertiary">
+            <p className="text-13 text-text-tertiary">
               {when(job.started_at ?? job.created_at)} · Generation{" "}
               {job.runtime_generation ?? "Not reported"}
             </p>
             {job.status === "finished" && (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {job.exit_code === null
                   ? "Exit result not reported"
                   : `Exit code ${job.exit_code}`}
@@ -298,14 +307,14 @@ export function RemoteMachineJobs({
               {jobs.map((job) => (
                 <TableRow key={job.id}>
                   <TableCell>
-                    <p className="break-all font-mono text-11">{job.id}</p>
-                    <p className="break-all text-11 text-muted-foreground">
+                    <p className="break-all font-mono text-13">{job.id}</p>
+                    <p className="break-all text-13 text-muted-foreground">
                       {subjectText(job.subject)}
                     </p>
                   </TableCell>
                   <TableCell>
                     {job.status}
-                    <p className="text-11 text-text-tertiary">
+                    <p className="text-13 text-text-tertiary">
                       Generation {job.runtime_generation ?? "Not reported"}
                       {job.exit_code !== null ? ` · Exit ${job.exit_code}` : ""}
                     </p>
@@ -444,7 +453,7 @@ export function RemoteMachineJobs({
               value={when(selected.output_expires_at)}
             />
             {selected.output_reason && (
-              <p className="px-4 py-3 text-12 text-muted-foreground">
+              <p className="px-4 py-3 text-14 text-muted-foreground">
                 {selected.output_reason}
               </p>
             )}
@@ -455,7 +464,7 @@ export function RemoteMachineJobs({
             job={selected}
           />
           {active(selected) && selected.cancellation_available !== true && (
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Owner cancellation is not exposed by this server. No cancellation
               request can be sent here.
             </p>
@@ -621,7 +630,7 @@ export function MachineOutput({
   }
   return (
     <DetailSection title="Live job output">
-      <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
+      <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
         <p>
           Output is fetched on demand from the live authorized node and held
           only in this open view. It is never copied into Query caches, browser
@@ -683,7 +692,7 @@ export function MachineOutput({
         )}
         {output && output.output_available !== false && (
           <>
-            <p className="text-11">
+            <p className="text-13">
               Status {output.status} · Duration{" "}
               {output.duration_ms === undefined
                 ? "not reported"
@@ -695,13 +704,13 @@ export function MachineOutput({
                 : ""}
             </p>
             <h4 className="font-medium text-foreground">Standard output</h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-11">
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-14">
               {output.stdout === undefined
                 ? "(not reported)"
                 : output.stdout || "(empty)"}
             </pre>
             <h4 className="font-medium text-foreground">Standard error</h4>
-            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-11">
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-14">
               {output.stderr === undefined
                 ? "(not reported)"
                 : output.stderr || "(empty)"}

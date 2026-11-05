@@ -460,6 +460,7 @@ fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -618,6 +619,7 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -656,6 +658,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -705,6 +708,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -785,6 +789,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -853,6 +858,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -921,6 +927,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -1265,6 +1272,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            execution_task: None,
             business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),
@@ -3525,6 +3533,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4346,6 +4355,7 @@ fn memory_remembered_in_one_thread_keeps_another_threads_binding() {
 fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "bot".into(),
         platform: "telegram".into(),
@@ -4606,6 +4616,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4668,6 +4679,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -5064,6 +5076,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
     use crate::models::channel_thread_follow::ThreadTurnBinding;
     fn origin(partition: &str, bound: bool) -> ChannelOrigin {
         ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             nyxbot_channel_id: "channel".into(),
             platform: "telegram-new".into(),
@@ -5207,6 +5220,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
 fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "channel".into(),
         platform: "lark".into(),
@@ -5235,6 +5249,7 @@ fn reply_length_guidance_follows_all_channel_destinations_but_never_app_only() {
     use crate::models::assistant_conversation::PlatformReplyRouting;
     let mut row = stale_test_row(Utc::now());
     let telegram = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "telegram-channel".into(),
         platform: "telegram".into(),
@@ -5403,6 +5418,7 @@ async fn tool_image_chat_resolves_x_public_dm_and_trigger_destinations() {
         "transport":"direct", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
     }).await.unwrap();
     let origin = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "channel".into(),
         platform: "x".into(),
@@ -5718,6 +5734,7 @@ async fn in_progress_excludes_other_people_channel_and_guest_threads() {
     channel.id = format!("channel-{}", Uuid::new_v4().simple());
     channel.agent_id = Some("agent".into());
     channel.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
@@ -7346,6 +7363,7 @@ async fn checking_notice_requires_external_work_and_five_seconds_and_claims_once
     turn.started_at = now;
     turn.origin = TurnOrigin::Channel;
     turn.asked_from = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
@@ -7438,6 +7456,7 @@ async fn checking_notice_is_fenced_by_stop_replacement_settlement_and_capacity_n
         turn.external_check_started = true;
         turn.origin = TurnOrigin::Channel;
         turn.asked_from = Some(ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             thread: None,
             nyxbot_channel_id: "channel".into(),

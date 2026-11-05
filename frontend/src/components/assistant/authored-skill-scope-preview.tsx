@@ -19,12 +19,12 @@ export function AuthoredSkillScopePreview({ agentId, proposalId }: {
     throwOnError: false,
   });
   if (preview.isError || preview.data?.scope_unavailable) {
-    return <p className="text-11 text-muted-foreground">Scope unavailable.</p>;
+    return <p className="text-13 text-muted-foreground">Scope unavailable.</p>;
   }
   const scope = preview.data?.scope;
   if (!scope?.omissions.length) return null;
   return (
-    <div className="space-y-1 text-11 text-muted-foreground">
+    <div className="space-y-1 text-13 text-muted-foreground">
       <p>Declared omissions</p>
       <ul aria-label="Declared omissions" className="list-disc pl-5">
         {scope.omissions.map((omission, index) => <li key={index}>{omission}</li>)}

@@ -4,7 +4,10 @@ import { useIsFocused } from "@react-navigation/native";
 import { useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { z } from "zod";
 import { ActionButton, Label, Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { SettingsGroup, SettingsPage, SettingsRow } from "../../components/settings/SettingsList";
 import { SegmentControl } from "../../components/SegmentControl";
+import { SkeletonRows } from "../../components/Skeleton";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { billingApi } from "../../lib/api/billingApi";
@@ -74,6 +77,8 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
     if (!canRefresh.current || getAuthEpoch() !== epoch) return;
     await Promise.allSettled([wallet.refetch(), grants.refetch(), allowances.refetch(), ...(historyOpen.current && hasWallet && !issue ? [usage.refetch()] : [])]);
   }
+  // `fetching` still gates Retry; only a pull shows the spinner.
+  const pull = usePullRefresh(refresh);
   function toggleHistory() {
     if (expanded) void client.cancelQueries({ queryKey: [...root, "usage"] });
     historyOpen.current = !expanded;
@@ -83,30 +88,29 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
   const loaded = wallet.data?.kind === "ready" && wallet.data.data && grants.data?.kind === "ready" && allowances.data?.kind === "ready"
     ? { wallet: wallet.data.data, grants: grants.data.data.grants, allowances: allowances.data.data.allowances } : undefined;
   const historyIssue = expanded ? unavailable([usage]) : undefined;
-  return <WorkspacePage title="Usage & credits" showHeading={false} refreshing={fetching} onRefresh={() => void refresh()}>
+  return <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
     {issue ? <>
       <Notice tone="error" message={issue} />
       <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
     </> : absent ? <Label muted>No billing account yet.</Label> : !loaded ? <>
-      <Label muted>{isConnected ? "Loading…" : "Offline. Connect to load your balance."}</Label>
+      {isConnected ? <SkeletonRows rows={3} icon={false} detail={false} title accessibilityLabel="Loading balance" /> : <Label muted>Offline. Connect to load your balance.</Label>}
       {!isConnected && <ActionButton label="Retry" variant="secondary" onPress={() => void refresh()} />}
     </> : <>
       {!isConnected && <Notice message="Offline. Showing your saved balance." />}
       <BillingWalletCard {...loaded} now={Date.now()} />
-      <Label muted style={{ fontSize: 12, lineHeight: 16 }}>To add credits, use NyxID on the web.</Label>
       <BillingHistoryRow expanded={expanded} onPress={toggleHistory} />
       {expanded && <>
         <SegmentControl segments={[{ label: "24 hours" }, { label: "7 days" }, { label: "30 days" }]} activeIndex={periods.indexOf(period)} onPress={(index) => setPeriod(periods[index] ?? "30d")} />
         {historyIssue ? <>
           <Notice tone="error" message={historyIssue} />
           <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
-        </> : usage.data?.kind === "ready" ? <>
-          {usage.data.data.billing.rates_are_approximate && <Label muted>Usage costs are estimates.</Label>}
-          {services.length === 0 && <Label muted>No usage recorded for this period.</Label>}
+        </> : usage.data?.kind === "ready" ? <SettingsGroup title="Usage by service" inset={false}
+          footer={usage.data.data.billing.rates_are_approximate ? "Usage costs are estimates." : undefined}>
+          {services.length === 0 && <SettingsRow label="No usage recorded for this period" />}
           {services.slice(0, serviceLimit).map((service) => <BillingServiceCard key={`${period}:${service.key}`} service={service} />)}
-          {services.length > serviceLimit && <ActionButton label="Show more services" variant="secondary" onPress={() => setServiceLimit((limit) => limit + 10)} />}
-        </> : <Label muted>{isConnected ? "Loading usage…" : "Offline. Connect to load usage."}</Label>}
+          {services.length > serviceLimit && <SettingsRow tone="action" label="Show More Services" onPress={() => setServiceLimit((limit) => limit + 10)} />}
+        </SettingsGroup> : isConnected ? <SkeletonRows rows={3} icon={false} title accessibilityLabel="Loading usage" /> : <Label muted>Offline. Connect to load usage.</Label>}
       </>}
     </>}
-  </WorkspacePage>;
+  </SettingsPage>;
 }

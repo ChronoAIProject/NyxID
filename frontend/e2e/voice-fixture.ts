@@ -1,12 +1,25 @@
 import type { Page } from "@playwright/test";
-import { voiceOption } from "../src/test/voice-fixture";
+import { voiceOption, voicePreferences } from "../src/test/voice-fixture";
 
 /** Explicit local media + NyxID wire fixture. Never connects to a provider. */
 export async function installVoiceFixture(
   page: Page,
-  permission: "granted" | "pending" | "denied" = "granted",
+  permission: "granted" | "pending" | "denied" | "native" = "granted",
 ) {
   const calls = { starts: 0, ends: 0, dictations: 0, stops: 0, pcm: 0 };
+  await page.route("**/api/v1/assistant/nyxagent/machines?*", route => route.fulfill({ json: [] }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?*", route => route.fulfill({ json: { sessions: [] } }));
+  // Settings use the in-memory NyxAgent transport in mock mode, before HTTP
+  // routing. Seed its saved voice choice so these tests exercise activation,
+  // rather than the first-use settings dialog.
+  await page.route("**/src/lib/assistant/nyxagent-http-fixtures.ts*", async (route) => {
+    const response = await route.fetch({ headers: { ...route.request().headers(), "if-none-match": "", "if-modified-since": "" } });
+    const source = await response.text();
+    const signature = /settingsResponse\(\)\s*\{\s*return\s*\{/;
+    if (!signature.test(source)) throw new Error("NyxAgent settings fixture changed");
+    await route.fulfill({ response, body: source.replace(signature,
+      `settingsResponse() { return { voice: ${JSON.stringify({ ...voicePreferences, input_mode: "automatic" })},`) });
+  });
   await page.addInitScript(
     ({ permission }) => {
       const f = {
@@ -44,7 +57,7 @@ export async function installVoiceFixture(
             .forEach((track) => track.dispatchEvent(new Event("ended")));
         return audio;
       }
-      Object.defineProperty(navigator, "mediaDevices", {
+      if (permission !== "native") Object.defineProperty(navigator, "mediaDevices", {
         configurable: true,
         value: {
           enumerateDevices: async () => [
@@ -158,13 +171,14 @@ export async function installVoiceFixture(
         },
       }),
   );
-  await page.route("**/api/v1/assistant/nyxagent/voice/options?*", (route) =>
+  await page.route(/\/api\/v1\/assistant\/nyxagent\/voice\/options(?:\?.*)?$/, (route) =>
     route.fulfill({
       json: { options: [{ ...priced, model_label: "Fixture Live" }] },
     }),
   );
   let settings = {
     access_mode: "nyxmode",
+    voice: { ...voicePreferences, input_mode: "automatic" },
     skip_destructive_confirmation: false,
     max_live_subagents: 4,
     max_concurrent_subagent_turns: 2,

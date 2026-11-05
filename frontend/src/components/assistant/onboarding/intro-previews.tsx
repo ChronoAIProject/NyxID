@@ -15,7 +15,7 @@ export function AccessModesPreview() {
   const [mode, setMode] = useState<NyxAgentAccessMode>("nyxmode");
   return (
     <div className="space-y-1.5">
-      <div role="radiogroup" aria-label="Access modes" className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted p-1">
+      <div role="radiogroup" aria-label="Access modes" className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1">
         {MODES.map((value) => (
           <button
             key={value}
@@ -24,7 +24,7 @@ export function AccessModesPreview() {
             aria-checked={mode === value}
             onClick={() => setMode(value)}
             className={cn(
-              "rounded-md px-2 py-1 text-11 font-medium transition-colors motion-reduce:transition-none",
+              "min-w-0 break-words rounded-md px-2 py-1 type-row-title transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus motion-reduce:transition-none",
               mode === value
                 ? "bg-card text-foreground shadow-sm"
                 : "text-text-tertiary hover:text-foreground",
@@ -34,7 +34,7 @@ export function AccessModesPreview() {
           </button>
         ))}
       </div>
-      <p className="min-h-[2lh] text-11 leading-snug text-muted-foreground">
+      <p className="min-h-[2lh] text-13 text-muted-foreground">
         {ACCESS_MODE_DESCRIPTION[mode]}
         {mode === "nyxmode" ? " This is the default." : ""}
       </p>

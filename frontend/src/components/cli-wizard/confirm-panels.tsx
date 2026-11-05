@@ -233,7 +233,7 @@ export function ApiKeyCreateConfirm({
                   side="right"
                   align="start"
                   sideOffset={8}
-                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13"
                 >
                   <div className="flex flex-col gap-4">
                     <p>
@@ -285,7 +285,7 @@ export function ApiKeyCreateConfirm({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Tags the key for audit attribution + per-agent rate limits.
           </p>
         </div>
@@ -306,7 +306,7 @@ export function ApiKeyCreateConfirm({
                   allowAllNodes: false,
                 }));
               }}
-              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
+              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-15 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
             >
               <option value="">Personal (your account)</option>
               {orgs.data
@@ -317,7 +317,7 @@ export function ApiKeyCreateConfirm({
                   </option>
                 ))}
             </select>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               Org-owned keys authenticate as the org; every admin of
               the selected org can rotate or delete them.
             </p>
@@ -326,7 +326,7 @@ export function ApiKeyCreateConfirm({
         <Field label="Key expiry" htmlFor="pair-api-key-expiry">
           <select id="pair-api-key-expiry" value={lifetime}
             onChange={(event) => setLifetime(event.target.value)}
-            className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground">
+            className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-15 text-foreground">
             <option value="default">90 days (default)</option>
             {["7", "30", "90", "365"].map((days) => <option key={days} value={days}>{days} days</option>)}
             {prefill.expires_in_days != null && prefill.expires_in_days > 0 &&
@@ -335,7 +335,7 @@ export function ApiKeyCreateConfirm({
             <option value="never">No expiry</option>
             {lifetime === "conflict" ? <option value="conflict">Conflicting prefill; select a lifetime</option> : null}
           </select>
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Key expiry: {lifetime === "never" ? "No expiry (explicitly selected)"
               : lifetime === "default" ? "90 days (default)"
               : lifetime === "conflict" ? "Choose either an expiry date or no expiry"
@@ -726,7 +726,7 @@ export function ServiceAccountCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-15 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">Personal (your admin account)</option>
               {orgs.data?.map((org) => (
@@ -1012,7 +1012,7 @@ export function DeveloperAppCreateConfirm({
             }}
             placeholder="openid profile email"
           />
-          <p className="text-xs text-muted-foreground">Space-separated.</p>
+          <p className="text-13 text-muted-foreground">Space-separated.</p>
         </Field>
         <Field label="Delegation scopes (optional)" htmlFor="pair-app-delegation">
           <Input
@@ -1027,7 +1027,7 @@ export function DeveloperAppCreateConfirm({
         <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
           <div className="flex flex-col gap-0.5">
             <Label htmlFor="pair-app-broker">Broker capability</Label>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Allow this app to broker downstream credentials.
             </p>
           </div>
@@ -1047,7 +1047,7 @@ export function DeveloperAppCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-15 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">Personal</option>
               {orgs.data?.map((org) => (
@@ -1274,7 +1274,7 @@ export function MfaSetupConfirm({
           />
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Couldn't render the QR code. Use the otpauth URL below instead.
         </p>
       )}
@@ -1282,7 +1282,7 @@ export function MfaSetupConfirm({
       <div className="flex flex-col gap-1.5">
         <Label>Or enter the secret manually</Label>
         <div className="flex items-center gap-2">
-          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm">
+          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-14">
             {secretRevealed ? secret : "•".repeat(Math.max(secret?.length ?? 12, 12))}
           </code>
           <Button
@@ -1297,7 +1297,7 @@ export function MfaSetupConfirm({
           </Button>
         </div>
         {qrUrl ? (
-          <p className="break-all text-11 text-muted-foreground">
+          <p className="break-all text-13 text-muted-foreground">
             otpauth URL: <code className="font-mono">{qrUrl}</code>
           </p>
         ) : null}
@@ -1350,7 +1350,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
       {message}
     </p>
   );

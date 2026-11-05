@@ -86,18 +86,18 @@ export function useChangeReview<T>(
           {pending?.changes.map((change) => (
             <div
               key={change.field}
-              className="space-y-2 rounded-md border border-border p-3 text-sm"
+              className="space-y-2 rounded-md border border-border p-3 text-14"
             >
               <p className="font-medium">{change.field}</p>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs text-muted-foreground">Current</p>
+                  <p className="text-13 text-muted-foreground">Current</p>
                   <pre className="whitespace-pre-wrap break-all font-sans">
                     {change.before}
                   </pre>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">New</p>
+                  <p className="text-13 text-muted-foreground">New</p>
                   <pre className="whitespace-pre-wrap break-all font-sans">
                     {change.after}
                   </pre>

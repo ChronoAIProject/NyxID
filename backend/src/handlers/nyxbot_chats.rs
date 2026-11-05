@@ -57,6 +57,15 @@ pub(super) async fn adopt_relay_chat(
         return Ok(());
     }
     let relay_partition = direct_partition(chat_id, sender_id, thread_id);
+    if row.org_specialist.is_some() {
+        return crate::services::org_channel_service::transcript::adopt_private_partition(
+            &state.db,
+            row,
+            &relay_partition,
+            partition,
+        )
+        .await;
+    }
     let threads = state.db.collection::<NyxbotThread>(THREADS);
     let Some(legacy) = threads
         .find_one(doc! {"channel_id": &row.id, "$or": [
@@ -174,8 +183,23 @@ pub(super) async fn note_owner_presence(
     sender_id: &str,
 ) -> AppResult<NyxbotThread> {
     let mut chat = chat.clone();
-    if is_group(&chat) && !chat.owner_seen && row.owner_sender_ids.iter().any(|id| id == sender_id)
-    {
+    let owner = if row.org_specialist.is_some() {
+        crate::services::org_channel_service::sender(
+            &state.db,
+            row,
+            sender_id,
+            true,
+            chat.agent_id
+                .as_deref()
+                .or(row.agent_id.as_deref())
+                .unwrap_or_default(),
+        )
+        .await?
+        .1
+    } else {
+        row.owner_sender_ids.iter().any(|id| id == sender_id)
+    };
+    if is_group(&chat) && !chat.owner_seen && owner {
         state
             .db
             .collection::<NyxbotThread>(THREADS)
@@ -1215,30 +1239,74 @@ pub(crate) async fn list_chats(
     {
         return Err(AppError::NotFound(format!("Channel {id} not found")));
     }
+    let mut managed = Vec::new();
+    for row in channels {
+        if let Some(binding) = &row.org_specialist {
+            match crate::services::org_channel_service::require_admin(
+                &state.db,
+                owner,
+                &binding.org_id,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AppError::Forbidden(_)) if channel_id.is_none() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        managed.push(row);
+    }
+    let channels = managed;
     let ids: Vec<&str> = channels.iter().map(|row| row.id.as_str()).collect();
     let chats: Vec<NyxbotThread> = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .find(doc! {"user_id": owner, "channel_id": {"$in": ids}, "record_scope":{"$ne":"platform_thread"},
-        "$or": [{"kind": {"$ne": bson::Bson::Null}},
-            {"conversation_id": {"$ne": bson::Bson::Null}}]})
+        .find(
+            doc! {"channel_id": {"$in": ids}, "record_scope":{"$ne":"platform_thread"},
+            "$or": [{"kind": {"$ne": bson::Bson::Null}},
+                {"conversation_id": {"$ne": bson::Bson::Null}}]},
+        )
         .sort(doc! {"last_message_at": -1, "updated_at": -1})
         .limit(LIST_LIMIT)
         .await?
         .try_collect()
         .await?;
-    let on = super::thread_follow::enabled(state, owner).await?;
-    let counts = crate::services::channel_thread_follow_service::counts(
-        &state.db,
-        owner,
-        &chats.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
-    )
-    .await?;
     let mut responses = Vec::new();
+    let mut counts = std::collections::HashMap::new();
+    let mut owner_chats = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    for row in &channels {
+        owner_chats.entry(&row.user_id).or_default().extend(
+            chats
+                .iter()
+                .filter(|c| c.channel_id == row.id)
+                .map(|c| c.id.clone()),
+        );
+    }
+    // Ordinary personal lists retain one batch; org management may include
+    // several linking admins, each with their own follow authority.
+    let mut follow_enabled = std::collections::HashMap::new();
+    for (transport_owner, chat_ids) in owner_chats {
+        counts.extend(
+            crate::services::channel_thread_follow_service::counts(
+                &state.db,
+                transport_owner,
+                &chat_ids,
+            )
+            .await?,
+        );
+        follow_enabled.insert(
+            transport_owner,
+            super::thread_follow::enabled(state, transport_owner).await?,
+        );
+    }
     for chat in &chats {
         let Some(row) = channels.iter().find(|r| r.id == chat.channel_id) else {
             continue;
         };
+        let on = follow_enabled
+            .get(row.user_id.as_str())
+            .copied()
+            .unwrap_or(false);
         let dto = follow_response(state, row, chat, on, *counts.get(&chat.id).unwrap_or(&0));
         responses.push(dto);
     }
@@ -1253,7 +1321,7 @@ async fn load_chat(
     let chat = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .find_one(doc! {"_id": chat_id, "user_id": owner,"record_scope":{"$ne":"platform_thread"}})
+        .find_one(doc! {"_id": chat_id,"record_scope":{"$ne":"platform_thread"}})
         .await?
         .ok_or_else(|| AppError::NotFound("Chat not found".into()))?;
     let row = load_channel(state, owner, &chat.channel_id).await?;
@@ -1358,7 +1426,19 @@ pub(crate) async fn update_chat(
             }
         } else {
             let agent = team::agent(&state.db, owner, agent).await?;
-            if agent.user_id != owner {
+            if let Some(binding) = &row.org_specialist {
+                crate::services::org_channel_service::require_admin(
+                    &state.db,
+                    owner,
+                    &binding.org_id,
+                )
+                .await?;
+                if agent.user_id != binding.org_id || agent.is_nyxbot() {
+                    return Err(AppError::ValidationError(
+                        "Choose a specialist owned by this organization".into(),
+                    ));
+                }
+            } else if agent.user_id != owner {
                 return Err(AppError::organization_agent_channel_unsupported());
             }
             if agent.destroyed_at.is_some() {
@@ -1382,8 +1462,9 @@ pub(crate) async fn update_chat(
     if agent_changed.is_some() {
         update.insert("$inc", doc! {"binding_generation":1});
     }
-    let updated = crate::services::channel_thread_follow_service::update_settings(
+    let updated = crate::services::channel_thread_follow_service::update_settings_as(
         &state.db,
+        &row.user_id,
         owner,
         &row.id,
         &chat.id,
@@ -1414,8 +1495,9 @@ pub(crate) async fn update_chat(
     )
     .await?;
     let mut result = json!({"chat": follow_response(state,&row,&updated,on,*counts.get(&updated.id).unwrap_or(&0))});
-    if (group && members_may_talk(&updated))
-        || (!group && row.private_chats.as_deref() == Some("everyone"))
+    if row.org_specialist.is_none()
+        && ((group && members_may_talk(&updated))
+            || (!group && row.private_chats.as_deref() == Some("everyone")))
     {
         super::prepare_guest_model(
             state,
@@ -1425,16 +1507,18 @@ pub(crate) async fn update_chat(
         )
         .await?;
     }
-    result["chat"]["guest_readiness"] = json!(
-        crate::services::assistant_service_execution::guest_readiness(
-            &state.db,
-            &state.encryption_keys,
-            owner,
-            updated.agent_id.as_deref().or(row.agent_id.as_deref()),
-            updated.conversation_id.as_deref()
-        )
-        .await?
-    );
+    if row.org_specialist.is_none() {
+        result["chat"]["guest_readiness"] = json!(
+            crate::services::assistant_service_execution::guest_readiness(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+                updated.agent_id.as_deref().or(row.agent_id.as_deref()),
+                updated.conversation_id.as_deref()
+            )
+            .await?
+        );
+    }
     if let Some(code) = gateway_error {
         result["warning"] = json!(format!(
             "Saved, but the gateway did not accept the change ({code}); the bot keeps \
@@ -1502,7 +1586,8 @@ pub(crate) async fn update_access(
         .await?;
     }
     let applied =
-        crate::services::nyxbot_chat_settings_service::update(&state.db, &row, settings).await?;
+        crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
+            .await?;
     audit(
         state,
         owner,
@@ -1515,7 +1600,11 @@ pub(crate) async fn update_access(
     let mut result = json!({"channel_agent_id":row.id,
         "private_chats":settings.private_chats.as_deref().or(row.private_chats.as_deref()).unwrap_or("owner"),
         "private_chat_posts":settings.private_chat_posts.or(row.private_chat_posts).unwrap_or(false),"applied_count":applied});
-    if let Some(access) = settings.private_chats.as_deref() {
+    if let Some(access) = settings
+        .private_chats
+        .as_deref()
+        .filter(|_| row.org_specialist.is_none())
+    {
         if access == "everyone" {
             super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None).await?;
         }
@@ -1661,9 +1750,27 @@ pub(crate) async fn post_current_turn(
     if !post_turn_is_live(state, chat).await? {
         return Err(AppError::AssistantTurnRequired);
     }
+    let transport_owner = if let Some(access) =
+        chat.org_agent_access.as_ref().and_then(|a| a.channel())
+    {
+        let target = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"_id":chat_id,
+            "channel_id":&access.channel().id,"partition":&access.origin().partition})
+            .await?
+            .ok_or_else(crate::services::org_channel_service::denied)?;
+        if target.kind.as_deref() == Some("private") && access.execution().actor_id != chat.user_id
+        {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        access.channel().user_id.as_str()
+    } else {
+        chat.user_id.as_str()
+    };
     let target = prepare_post(
         state,
-        &chat.user_id,
+        transport_owner,
         chat_id,
         (!chat.is_orchestrator()
             && !crate::services::assistant_service_execution::is_shared_chat(chat))
@@ -2224,6 +2331,24 @@ async fn revalidate_post_target(
         // destination, never authority donated by the shared agent's owner.
         super::route_key_auth(state, &channel).await?;
     }
+    if let Some(access) = fence
+        .and_then(|c| c.org_agent_access.as_ref())
+        .and_then(|a| a.channel())
+    {
+        if access.execution().guest
+            || channel.id != access.channel().id
+            || thread.partition != access.origin().partition
+        {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        crate::services::org_channel_service::validate(
+            &state.db,
+            access.origin(),
+            &access.execution().actor_id,
+            &access.execution().agent_id,
+        )
+        .await?;
+    }
     if let Some(chat) = fence
         && !post_turn_is_live(state, chat).await?
     {
@@ -2245,7 +2370,13 @@ async fn send_post_one_impl(
         &mut outbound.metadata,
     );
     let effect_guard: Option<crate::services::channel_platform::PostEffectGuard> = fence
-        .filter(|chat| crate::services::assistant_service_execution::is_shared_chat(chat))
+        .filter(|chat| {
+            crate::services::assistant_service_execution::is_shared_chat(chat)
+                || chat
+                    .org_agent_access
+                    .as_ref()
+                    .is_some_and(|a| a.channel().is_some())
+        })
         .map(|chat| {
             let state = state.clone();
             let target = target.clone();

@@ -1871,6 +1871,7 @@ mod tests {
             created_at: now,
         };
         let redeemer = User {
+            execution_permission_enrollment: None,
             id: "user-2".to_string(),
             email: "redeemer@test.com".to_string(),
             password_hash: None,
@@ -1934,6 +1935,7 @@ mod tests {
             created_at: now,
         };
         let redeemer = User {
+            execution_permission_enrollment: None,
             id: "user-3".to_string(),
             email: "no-name@test.com".to_string(),
             password_hash: None,
@@ -1975,6 +1977,7 @@ mod tests {
 
         let now = Utc::now();
         let org = User {
+            execution_permission_enrollment: None,
             id: "org-1".to_string(),
             email: "org@nyxid.local".to_string(),
             password_hash: None,
@@ -2011,6 +2014,7 @@ mod tests {
 
         let now = Utc::now();
         let org = User {
+            execution_permission_enrollment: None,
             id: "org-2".to_string(),
             email: "org@nyxid.local".to_string(),
             password_hash: None,
@@ -2047,6 +2051,7 @@ mod tests {
 
         let now = Utc::now();
         let org = User {
+            execution_permission_enrollment: None,
             id: "org-3".to_string(),
             email: "org@nyxid.local".to_string(),
             password_hash: None,

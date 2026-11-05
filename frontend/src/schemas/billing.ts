@@ -111,6 +111,9 @@ export const billingMachineUsageSchema = z.object({
 
 export const billingUsageRowSchema = z.object({
   ...fundingBreakdownShape,
+  org_channel_guest: z
+    .object({ channel_id: z.string(), sender_hash: z.string() })
+    .optional(),
   machine_usage: billingMachineUsageSchema.optional(),
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),

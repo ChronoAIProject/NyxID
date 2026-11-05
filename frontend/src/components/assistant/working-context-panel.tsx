@@ -44,7 +44,7 @@ export function WorkingContextPanel({
         <SheetHeader>
           <SheetTitle>Working context</SheetTitle>
         </SheetHeader>
-        <div className="mt-4 space-y-2 text-11 text-text-tertiary">
+        <div className="mt-4 space-y-2 text-13 text-text-tertiary">
           {query.isPending ? <p>Loading working context…</p> : null}
           {query.isError ? (
             <p role="alert" className="text-destructive">

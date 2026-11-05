@@ -110,14 +110,14 @@ export function NodeScopeCard({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-nodes" className="text-12">
+              <Label htmlFor="allow-all-nodes">
                 Allow all nodes
               </Label>
             </div>
 
             {!allowAll && (
               <div className="space-y-2 rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Select allowed nodes:
                 </p>
                 {scopedNodes.length > 0 ? (
@@ -128,13 +128,13 @@ export function NodeScopeCard({
                         checked={selectedIds.includes(n.id)}
                         onCheckedChange={() => toggleNode(n.id)}
                       />
-                      <Label htmlFor={`node-${n.id}`} className="text-xs">
+                      <Label htmlFor={`node-${n.id}`}>
                         {n.name}
                         <Badge
                           variant={
                             n.status === "online" ? "default" : "secondary"
                           }
-                          className="ml-1 text-10"
+                          className="ml-1 text-12"
                         >
                           {n.status}
                         </Badge>
@@ -142,7 +142,7 @@ export function NodeScopeCard({
                     </div>
                   ))
                 ) : (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     No nodes available for this key.
                   </p>
                 )}
@@ -170,7 +170,7 @@ export function NodeScopeCard({
               ) : allowedNodes.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {allowedNodes.map((n) => (
-                    <Badge key={n.id} variant="secondary" className="text-xs">
+                    <Badge key={n.id} variant="secondary" className="text-12">
                       {n.name}
                     </Badge>
                   ))}

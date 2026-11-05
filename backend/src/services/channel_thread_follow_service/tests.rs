@@ -46,6 +46,7 @@ fn child(selection: Selection) -> (NyxbotThread, ThreadTurnBinding) {
 }
 fn origin(child: &NyxbotThread, b: ThreadTurnBinding) -> ChannelOrigin {
     ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "link".into(),
         partition: child.partition.clone(),
@@ -80,7 +81,10 @@ async fn concurrent_activation_reuses_child_and_stop_fences_unclaimed_turn() {
     let stopped = stop(&db, "owner", "link", "parent", &c.id).await.unwrap();
     assert_eq!(stopped.conversation_id, c.conversation_id);
     assert!(activate_claim(&db, &c, b.clone()).await.is_err());
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     let (again, next) = child(choose(&db, &t, &a, true).await);
     assert_eq!(again.id, c.id);
     assert_eq!(again.conversation_id, c.conversation_id);
@@ -96,7 +100,10 @@ async fn concurrent_activation_reuses_child_and_stop_fences_unclaimed_turn() {
 #[tokio::test]
 async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
     let (db, t, a) = setup().await;
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     let (c, b) = child(choose(&db, &t, &a, true).await);
     activate_claim(&db, &c, b).await.unwrap();
     let (_, owner) = child(choose(&db, &t, &a, false).await);
@@ -114,7 +121,7 @@ async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
         )
         .await
         .unwrap(),
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
     update_settings(
         &db,
@@ -133,7 +140,7 @@ async fn unmentioned_follow_checks_sender_each_time_and_guests_cannot_stop() {
         )
         .await
         .unwrap(),
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
     db.drop().await.unwrap();
 }
@@ -152,7 +159,7 @@ async fn followed_thread_quiets_mentions_for_other_users_but_keeps_bot_requests(
             false
         )
         .await,
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
     assert_eq!(
         db.collection::<NyxbotThread>(THREADS)
@@ -170,7 +177,7 @@ async fn followed_thread_quiets_mentions_for_other_users_but_keeps_bot_requests(
     let other = ThreadReplyTarget::fixture("telegram", other);
     assert!(matches!(
         choose(&db, &other, &a, false).await,
-        Selection::Quiet
+        Selection::Quiet(_)
     ));
 
     let mut bot_mention = other.facts().clone();
@@ -220,7 +227,10 @@ async fn idle_expiry_reacquires_capacity_and_all_keeps_same_child_stopped() {
     let (c, b) = child(choose(&db, &t, &a, true).await);
     activate_claim(&db, &c, b).await.unwrap();
     db.collection::<NyxbotThread>(THREADS).update_one(doc! {"_id":&c.id},doc! {"$set":{"follow_expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     sweep(&db).await.unwrap();
     let (same, b) = child(choose(&db, &t, &a, true).await);
     assert_eq!(same.id, c.id);
@@ -277,7 +287,9 @@ async fn admitted_binding_survives_stop_but_not_relink_or_sender_revocation() {
         )
         .await
         .unwrap();
-    relink(&db, "owner", "link", "replacement").await.unwrap();
+    relink(&db, "owner", "owner", "link", "replacement")
+        .await
+        .unwrap();
     assert!(
         validate_delivery(&db, "owner", &o, conversation)
             .await
@@ -349,7 +361,10 @@ async fn rollback_rejects_new_follows_and_preserves_known_addressed_routing() {
         .update_one(doc! {"_id":"flag"}, doc! {"$set":{"enabled":false}})
         .await
         .unwrap();
-    assert!(matches!(choose(&db, &t, &a, false).await, Selection::Quiet));
+    assert!(matches!(
+        choose(&db, &t, &a, false).await,
+        Selection::Quiet(_)
+    ));
     let (same, b) = child(choose(&db, &t, &a, true).await);
     assert_eq!(same.id, c.id);
     activate_claim(&db, &same, b).await.unwrap();
@@ -412,7 +427,7 @@ async fn owner_queue_is_bounded_keeps_event_anchors_and_rechecks_authority_after
                 "sender_id":"human","guest":false,"addressed":true,"transport":"direct",
                 "stream_deadline":bson::DateTime::now(),"checked_at":bson::DateTime::now()}}).await.unwrap();
         assert_eq!(
-            super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event)
+            super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
                 .await
                 .unwrap(),
             i < 20
@@ -592,7 +607,10 @@ async fn unknown_child_contract_never_reactivates_or_delivers() {
             .update_one(doc! {"_id":&c.id}, doc! {"$set":fields})
             .await
             .unwrap();
-        assert!(matches!(choose(&db, &t, &a, true).await, Selection::Quiet));
+        assert!(matches!(
+            choose(&db, &t, &a, true).await,
+            Selection::Quiet(_)
+        ));
         assert!(
             validate_delivery(
                 &db,
@@ -646,9 +664,15 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
         .await
         .unwrap();
     assert!(
-        !super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event.clone())
-            .await
-            .unwrap()
+        !super::super::channel_turn_delivery::enqueue(
+            &db,
+            "owner",
+            conversation,
+            event.clone(),
+            None
+        )
+        .await
+        .unwrap()
     );
     let refused_child = db
         .collection::<NyxbotThread>(THREADS)
@@ -704,6 +728,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
             "owner",
             conversation,
             &event,
+            None,
             &mut session
         )
         .await
@@ -751,6 +776,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
             "owner",
             conversation,
             &event,
+            None,
             &mut session
         )
         .await
@@ -775,7 +801,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
         .await
         .unwrap();
     assert!(
-        super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event)
+        super::super::channel_turn_delivery::enqueue(&db, "owner", conversation, event, None)
             .await
             .unwrap()
     );

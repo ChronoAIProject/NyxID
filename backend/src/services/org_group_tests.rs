@@ -42,6 +42,7 @@ async fn enqueue(
 ) -> String {
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        execution_task: None,
         collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
@@ -355,7 +356,7 @@ async fn org_group_threads_keys_billing_uploads_and_single_auth_resolution() {
             assert!(uploads::for_chat(&f.state.db, &chat, other).await.is_err());
         }
         let payer = super::billing::owner_resolver::BillingOwnerResolver::new(f.state.db.clone())
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 actor,
                 &f.org,
                 crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
@@ -2087,6 +2088,7 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
     let first = TransactionCollisionHook::new(barrier.clone());
     let second = TransactionCollisionHook::new(barrier);
     let request = |id: &str| GroupRequest {
+        execution_task: None,
         collaboration: None,
         id: id.into(),
         group_id: access.group.id.clone(),

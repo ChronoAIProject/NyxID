@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import userEvent from "@testing-library/user-event";
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -70,6 +71,7 @@ describe("Agent Key operation scopes", () => {
     await user.click(screen.getByRole("option", { name: "Selected operations" }));
     await user.click(screen.getByRole("button", { name: "Select all reads" }));
     await user.click(screen.getByRole("button", { name: "Save operations" }));
+    await confirmChanges();
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith({
         serviceId: "svc",
@@ -100,6 +102,7 @@ describe("Agent Key operation scopes", () => {
     expect(screen.getAllByText("Value limits")).toHaveLength(2);
     await user.click(screen.getByRole("checkbox", { name: "DELETE /events/{id}" }));
     await user.click(screen.getByRole("button", { name: "Save operations" }));
+    await confirmChanges();
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith({
         serviceId: "svc",

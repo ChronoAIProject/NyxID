@@ -2451,6 +2451,8 @@ pub(crate) async fn test_app_state_no_db() -> AppState {
 /// Build a session-shaped `AuthUser` without a validated derivation policy.
 pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
     AuthUser {
+        execution_enrolled: false,
+        execution_permission: None,
         mfa_assured: false,
         mfa_enabled: None,
         org_agent_access: None,
@@ -2633,6 +2635,7 @@ pub(crate) fn assert_rci_audit_row(
 pub(crate) fn test_user(user_id: &str, user_type: UserType) -> User {
     let now = chrono::Utc::now();
     User {
+        execution_permission_enrollment: None,
         id: user_id.to_string(),
         email: format!("{user_id}@example.com"),
         password_hash: None,

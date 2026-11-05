@@ -93,7 +93,9 @@ it.each([
       throw new Error(`Unexpected fixture route ${path}`);
     });
     mount(<PlatformPersonalBindings />);
-    expect(await screen.findByText(/Discord account/)).toHaveTextContent(label);
+    expect(
+      (await screen.findByText(/Discord account/)).closest("section"),
+    ).toHaveTextContent(label);
     if (label !== "Linked") {
       expect(
         screen.queryByText(/This creates its saved thread/),

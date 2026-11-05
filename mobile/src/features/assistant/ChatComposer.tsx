@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
+  Animated,
   Pressable,
   StyleSheet,
   View,
@@ -9,19 +10,47 @@ import {
 } from "react-native";
 import { ArrowUp, AudioLines, Plus, Square } from "lucide-react-native";
 import { useTheme } from "../../theme/ThemeContext";
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 
-/** One filled, borderless pill shared by personal, contextual and group chats. */
+/**
+ * One filled pill shared by personal, contextual and group chats. Touching it gives a small ChatGPT-like bounce: a
+ * quick dip, then a springy settle. Reduce Motion keeps it still, and the
+ * voice composer opts out so holding to talk does not bounce.
+ */
 export function ChatComposerFrame({
   children,
   style,
+  bounce = true,
 }: {
   children: ReactNode;
   style?: StyleProp<ViewStyle>;
+  bounce?: boolean;
 }) {
   const { colors, mode } = useTheme();
+  const reducedMotion = useReducedMotion();
+  const [scale] = useState(() => new Animated.Value(1));
+  const press = () => {
+    if (!bounce || reducedMotion) return;
+    scale.stopAnimation();
+    Animated.sequence([
+      Animated.timing(scale, {
+        toValue: 0.985,
+        duration: 70,
+        useNativeDriver: true,
+      }),
+      Animated.spring(scale, {
+        toValue: 1,
+        speed: 22,
+        bounciness: 12,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  };
   return (
-    <View
+    <Animated.View
+      onTouchStart={press}
       style={[
+        { transform: [{ scale }] },
         styles.frame,
         mode === "light" && styles.lightLift,
         {
@@ -33,7 +62,7 @@ export function ChatComposerFrame({
       ]}
     >
       {children}
-    </View>
+    </Animated.View>
   );
 }
 

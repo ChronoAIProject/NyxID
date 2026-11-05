@@ -9,7 +9,7 @@ import type { ChallengeDetail } from "../lib/api/types";
 type Element = { type: string; props: Record<string, any> };
 
 // Exercise the real card source; replace only native rendering and theme.
-function loadCard(name: "HistoryCard" | "ChallengeCard") {
+function loadCard(name: "HistoryCard" | "ChallengeCard", openedUrls: string[] = []) {
   const filename = fileURLToPath(new URL(`./${name}.tsx`, import.meta.url));
   const output = ts.transpileModule(readFileSync(filename, "utf8"), {
     compilerOptions: {
@@ -26,23 +26,32 @@ function loadCard(name: "HistoryCard" | "ChallengeCard") {
       jsxs: (type: string, props: unknown) => ({ type, props }),
     },
     "./ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    "./GroupedCell": { GroupedCell: "GroupedCell" },
+    "./settings/SettingsList": { SettingsRow: "SettingsRow" },
+    "../lib/env": { NYXID_FRONTEND_URL: "https://app.example.test" },
+    "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
+      Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
       Pressable: "Pressable",
       Text: "Text",
       View: "View",
       StyleSheet: { create: (styles: unknown) => styles },
     },
-    "expo-blur": { BlurView: "BlurView" },
     "../theme/designTokens": {
       TOUCH_TARGET: 44,
-      radius: {},
       spacing: {},
       typeScale: {},
     },
     "../theme/ThemeContext": {
-      useTheme: () => ({ colors: {}, mode: "light" }),
+      useTheme: () => ({
+        colors: {
+          riskHigh: { text: "high" },
+          riskMedium: { text: "medium" },
+          riskLow: { text: "low" },
+        },
+        mode: "light",
+      }),
     },
-    "./StatusBadge": { StatusBadge: "StatusBadge" },
   };
   const exports: Record<string, (props: any) => Element> = {};
   runInNewContext(
@@ -61,7 +70,11 @@ function loadCard(name: "HistoryCard" | "ChallengeCard") {
   return exports[name];
 }
 
+/** Walk the tree, rendering local components such as the decision pair. */
 function elements(root: Element): Element[] {
+  const node = root as unknown as { type: unknown; props: any };
+  if (typeof node.type === "function")
+    return [root, ...elements((node.type as (p: any) => Element)(node.props))];
   return [
     root,
     ...[root.props.children]
@@ -74,6 +87,9 @@ function elements(root: Element): Element[] {
   ];
 }
 function textContent(root: Element): string {
+  const node = root as unknown as { type: unknown; props: any };
+  if (typeof node.type === "function")
+    return textContent((node.type as (p: any) => Element)(node.props));
   return [root.props.children]
     .flat(Infinity)
     .map((child) =>
@@ -85,10 +101,13 @@ function textContent(root: Element): string {
     )
     .join("");
 }
-function badgeLabels(root: Element): string[] {
-  return elements(root)
-    .filter((e) => e.type === "StatusBadge")
-    .map((e) => e.props.label);
+/** The row that opens the request detail (the cell's first pressable). */
+function opener(root: Element): Element {
+  const found = elements(root).find(
+    (e) => e.type === "Pressable" && "accessibilityHint" in e.props,
+  );
+  assert.ok(found);
+  return found;
 }
 function displayTime(value: string): string {
   return new Date(value).toLocaleString("en-US", {
@@ -117,6 +136,33 @@ const request: ChallengeDetail = {
 const HistoryCard = loadCard("HistoryCard");
 const ChallengeCard = loadCard("ChallengeCard");
 
+test("execution proposals keep the grouped card and only offer web review", () => {
+  const openedUrls: string[] = [];
+  const Card = loadCard("ChallengeCard", openedUrls);
+  const tree = Card({
+    challenge: {
+      ...request,
+      execution_proposal: {
+        version: 1, supported: true, can_decide: true,
+        state: "pending", review_path: "/assistant/approvals",
+      },
+    },
+    onApprove: () => assert.fail("Execution proposal approved from mobile"),
+    onDeny: () => assert.fail("Execution proposal denied from mobile"),
+  });
+  assert.equal(tree.type, "GroupedCell");
+  assert.match(textContent(tree), /Review the exact scope and duration in the web app/);
+  assert.doesNotMatch(textContent(tree), /Approval applies only|Approving allows/);
+  assert.ok(elements(tree).every((e) =>
+    (e.type as unknown as { name?: string }).name !== "ApprovalDecisionPair"));
+  const link = elements(tree).find((e) => e.type === "SettingsRow" && e.props.label === "Review in the web app");
+  assert.ok(link);
+  assert.equal(link.props.tone, "action");
+  assert.equal(link.props.accessibilityRole, "link");
+  link.props.onPress();
+  assert.deepEqual(openedUrls, ["https://app.example.test/assistant/approvals"]);
+});
+
 test("pending card shows the complete operation, requester and service, and opens its detail", () => {
   let opened = 0;
   const tree = ChallengeCard({
@@ -131,10 +177,12 @@ test("pending card shows the complete operation, requester and service, and open
   assert.ok(textContent(tree).indexOf("Cloudflare") < textContent(tree).indexOf(request.summary));
   assert.match(textContent(tree), /Cloudflare/);
   assert.match(textContent(tree), /Requested by AuricBot · nyx_key_abcd/);
-  assert.deepEqual(badgeLabels(tree), ["Org · Chrono", "Per-request"]);
-  assert.equal(tree.props.accessibilityRole, "button");
-  assert.match(tree.props.accessibilityHint, /details/);
-  tree.props.onPress();
+  assert.match(textContent(tree), /Org · Chrono · Per-request/);
+  assert.doesNotMatch(textContent(tree), /risk/);
+  assert.equal(tree.type, "GroupedCell");
+  assert.equal(opener(tree).props.accessibilityRole, "button");
+  assert.match(opener(tree).props.accessibilityHint, /details/);
+  opener(tree).props.onPress();
   assert.equal(opened, 1);
 });
 
@@ -147,7 +195,7 @@ test("pending card retains decision callbacks and known risk/grant evidence", ()
     onApprove: () => approved++,
     onDeny: () => denied++,
   });
-  assert.deepEqual(badgeLabels(tree), ["High risk", "Grant mode"]);
+  assert.match(textContent(tree), /High risk · Grant mode/);
   assert.match(
     textContent(tree),
     /Approving allows matching requests for 7 days/,
@@ -200,7 +248,8 @@ test("history shows actual decision channel and decision time without attributin
     assert.ok(text.includes("Requested by AuricBot · nyx_key_abcd"));
     assert.ok(!text.includes("You approved"));
     assert.ok(!text.includes(displayTime(request.created_at)));
-    assert.deepEqual(badgeLabels(tree), ["Approved"]);
+    assert.match(textContent(tree), /Approved/);
+    assert.doesNotMatch(textContent(tree), /risk/);
     assert.equal(
       elements(tree).find(
         (e) => e.type === "Text" && textContent(e) === request.summary,
@@ -218,7 +267,7 @@ test("history falls back to request time without inventing a decision timestamp 
     assert.match(textContent(tree), /Requested/);
     assert.ok(textContent(tree).includes(displayTime(request.created_at)));
     assert.doesNotMatch(textContent(tree), /Decided|via |You denied/);
-    assert.deepEqual(badgeLabels(tree), ["Denied"]);
+    assert.match(textContent(tree), /Denied/);
   }
 });
 
@@ -228,9 +277,10 @@ test("history preserves detail navigation and known risk without truncating the 
     item: { ...request, status: "EXPIRED", risk_level: "medium" },
     onPress: () => opened++,
   });
-  tree.props.onPress();
+  opener(tree).props.onPress();
   assert.equal(opened, 1);
-  assert.deepEqual(badgeLabels(tree), ["Expired", "Medium risk"]);
+  assert.match(textContent(tree), /Medium risk/);
+  assert.match(opener(tree).props.accessibilityLabel, /^Expired: /);
   assert.ok(textContent(tree).includes(request.summary));
 });
 
@@ -249,11 +299,30 @@ test("offline decisions are disabled while cached request details remain readabl
     decisionsDisabled: true,
     onPress: () => {},
   });
-  assert.equal(tree.props.disabled, false);
+  assert.equal(opener(tree).props.disabled, false);
   const decisions = elements(tree).filter(
     (e) =>
       e.type === "Pressable" && ["Approve", "Deny"].includes(textContent(e)),
   );
   assert.equal(decisions.length, 2);
   assert.ok(decisions.every((button) => button.props.disabled));
+});
+
+test("pending rows place Approve and Deny in one borderless split row below the request", () => {
+  const tree = ChallengeCard({ challenge: request, onPress: () => {} });
+  const all = elements(tree);
+  const pair = all.find(
+    (e) => (e.type as unknown as { name?: string }).name === "ApprovalDecisionPair",
+  );
+  assert.ok(pair);
+  assert.equal(pair.props.divider, undefined);
+  const decisions = all.filter(
+    (e) =>
+      e.type === "Pressable" && ["Approve", "Deny"].includes(textContent(e)),
+  );
+  assert.deepEqual(
+    decisions.map((e) => textContent(e)),
+    ["Approve", "Deny"],
+  );
+  assert.ok(all.every((e) => e.type !== "StatusBadge"));
 });

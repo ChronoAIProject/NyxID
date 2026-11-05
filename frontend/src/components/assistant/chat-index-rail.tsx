@@ -1,64 +1,116 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useScrollFades } from "@/hooks/use-scroll-fades";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import { cn } from "@/lib/utils";
 
-export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: {
+interface ChatIndexRailProps {
   readonly messages: readonly ChatMessage[];
   readonly scrollRef: RefObject<HTMLDivElement | null>;
   readonly bottomInset: number;
   readonly onNavigate: (messageIndex: number) => void;
-}) {
-  const entries = useMemo(() => messages.flatMap((message, messageIndex) => {
+}
+interface IndexEntry {
+  id: string;
+  messageIndex: number;
+  title: string;
+  role: "user" | "assistant";
+  author: string;
+}
+interface RailDrag {
+  pointer: number;
+  last: number;
+  top: number;
+  height: number;
+  offset: number;
+  pitch: number;
+  y: number;
+  time: number;
+}
+
+export function ChatIndexRail({ messages, ...props }: ChatIndexRailProps) {
+  const entries = useMemo(() => messages.flatMap<IndexEntry>((message, messageIndex) => {
     if (message.role !== "user" && message.role !== "assistant") return [];
     const firstLine = sanitizeAssistantMessageContent(message.content)
       .split(/\r?\n/).find((line) => line.trim())?.trim();
     const title = firstLine?.replace(/^#{1,6}\s+/, "").slice(0, 200)
       || message.images?.[0]?.label || message.error
       || (message.status === "streaming" ? "Working…" : "Message");
-    return [{ id: message.id, messageIndex, title, role: message.role,
+    return [{ id: message.id, messageIndex, title, role: message.role === "user" ? "user" : "assistant",
       author: message.authorName || (message.role === "user" ? "You" : "Assistant") }];
   }), [messages]);
+  return entries.length < 2 ? null : <IndexRail entries={entries} {...props} />;
+}
+
+function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatIndexRailProps, "messages"> & { readonly entries: readonly IndexEntry[] }) {
   const container = useRef<HTMLDivElement>(null);
   const pitchMeasure = useRef<HTMLSpanElement>(null);
   const rail = useRef<HTMLElement>(null);
-  const ticks = useRef<HTMLDivElement>(null);
-  const [layout, setLayout] = useState({ capacity: 60, pitch: 8 });
+  const [layout, setLayout] = useState({ height: 480, pitch: 7 });
+  const [viewportScroll, setViewportScroll] = useState(0);
   const [activeId, setActiveId] = useState<string>();
-  const [browseStart, setBrowseStart] = useState<number | null>(null);
   const [keyboardIndex, setKeyboardIndex] = useState<number | null>(null);
   const [hover, setHover] = useState<{ id: string; y: number } | null>(null);
-  const dragging = useRef<{ pointer: number; first: number; last: number; top: number; pitch: number; count: number } | null>(null);
+  const dragging = useRef<RailDrag | null>(null);
+  const dragFrame = useRef(0);
   const active = Math.max(0, entries.findIndex((entry) => entry.id === activeId));
-  const count = Math.min(layout.capacity, entries.length);
-  const maxFirst = Math.max(0, entries.length - count);
-  const followFirst = Math.max(0, Math.min(maxFirst, active - Math.floor(count / 2)));
-  const first = Math.max(0, Math.min(maxFirst, browseStart ?? followFirst));
-  const focusIndex = Math.max(first, Math.min(first + count - 1, keyboardIndex ?? active));
+  const totalHeight = entries.length * layout.pitch;
+  const centerOffset = Math.max(0, (layout.height - totalHeight) / 2);
+  const firstVisible = Math.max(0, Math.min(entries.length - 1, Math.floor(viewportScroll / layout.pitch)));
+  const lastVisible = Math.min(entries.length - 1, Math.ceil((viewportScroll + layout.height) / layout.pitch) - 1);
+  const first = Math.max(0, firstVisible - 8);
+  const end = Math.min(entries.length, lastVisible + 9);
+  const focusIndex = Math.max(firstVisible, Math.min(lastVisible, keyboardIndex ?? active));
   const hoveredEntry = hover ? entries.find((entry) => entry.id === hover.id) : undefined;
+  useScrollFades(container);
 
   useLayoutEffect(() => {
     const element = container.current;
     const measureElement = pitchMeasure.current;
     if (!element || !measureElement || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
     const measure = () => {
-      const regularPitch = measureElement.getBoundingClientRect().height || 8;
-      // Round down to browser layout precision so fitting ticks never overflow.
-      const fittedPitch = Math.floor(element.clientHeight / entries.length * 64) / 64;
-      const pitch = Math.min(regularPitch, Math.max(regularPitch * 5 / 8, fittedPitch));
-      const capacity = Math.max(2, Math.floor(element.clientHeight / pitch));
-      setLayout((current) => current.capacity === capacity && current.pitch === pitch ? current : { capacity, pitch });
+      frame = 0;
+      // Keep the floating rail below the toolbar, including wrapped headers.
+      const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
+      const parent = element.parentElement;
+      element.style.top = `${controls && parent ? Math.max(0, controls.getBoundingClientRect().bottom - parent.getBoundingClientRect().top + 8) : 0}px`;
+      const pitch = measureElement.getBoundingClientRect().height || 7;
+      const height = element.clientHeight;
+      setLayout((current) => current.height === height && current.pitch === pitch ? current : { height, pitch });
     };
-    const observer = new ResizeObserver(measure);
+    // Updating top also resizes this observed viewport. Write in the next
+    // frame, outside ResizeObserver delivery, including during header motion.
+    const observer = new ResizeObserver(() => {
+      if (!frame) frame = requestAnimationFrame(measure);
+    });
     observer.observe(element);
     observer.observe(measureElement);
+    const controls = scrollRef.current?.closest("[data-chat-content-layout]")?.querySelector("[data-chat-header-controls]");
+    if (controls) observer.observe(controls);
     measure();
-    return () => observer.disconnect();
-  }, [entries.length]);
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
+  }, [scrollRef]);
+
+  const reveal = useCallback((index: number) => {
+    const element = rail.current;
+    if (!element) return;
+    const inset = Math.min(layout.pitch * 4, layout.height / 4);
+    const top = index * layout.pitch;
+    const bottom = top + layout.pitch;
+    const maximum = Math.max(0, entries.length * layout.pitch - layout.height);
+    if (top < element.scrollTop + inset) element.scrollTop = Math.max(0, top - inset);
+    else if (bottom > element.scrollTop + layout.height - inset) element.scrollTop = Math.min(maximum, bottom - layout.height + inset);
+    setViewportScroll(element.scrollTop);
+  }, [entries.length, layout]);
+
+  useLayoutEffect(() => {
+    if (!dragging.current) reveal(active);
+  }, [active, reveal]);
 
   useEffect(() => {
     const element = scrollRef.current;
-    if (!element || entries.length < 2) return;
+    if (!element) return;
     let frame = 0;
     const update = () => {
       const top = element.getBoundingClientRect().top + 32;
@@ -81,42 +133,24 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(update);
     };
-    const scroll = () => {
-      if (!dragging.current) setBrowseStart(null);
-      schedule();
-    };
-    element.addEventListener("scroll", scroll, { passive: true });
+    element.addEventListener("scroll", schedule, { passive: true });
     const observer = new ResizeObserver(schedule);
     observer.observe(element);
     if (element.firstElementChild) observer.observe(element.firstElementChild);
     schedule();
     return () => {
       cancelAnimationFrame(frame);
-      element.removeEventListener("scroll", scroll);
+      element.removeEventListener("scroll", schedule);
       observer.disconnect();
     };
   }, [entries, scrollRef, bottomInset]);
 
-  useEffect(() => {
-    const element = rail.current;
-    if (!element || !maxFirst) return;
-    const wheel = (event: WheelEvent) => {
-      if (!event.deltaY) return;
-      event.preventDefault();
-      const step = Math.sign(event.deltaY) * Math.min(12, Math.max(1, Math.ceil(Math.abs(event.deltaY) / 16)));
-      setBrowseStart((current) => Math.max(0, Math.min(maxFirst, (current ?? followFirst) + step)));
-      setHover(null);
-    };
-    element.addEventListener("wheel", wheel, { passive: false });
-    return () => element.removeEventListener("wheel", wheel);
-  }, [maxFirst, followFirst]);
+  useEffect(() => () => cancelAnimationFrame(dragFrame.current), []);
 
   useLayoutEffect(() => {
     if (keyboardIndex === null) return;
     rail.current?.querySelector<HTMLButtonElement>(`[data-chat-index-target="${keyboardIndex}"]`)?.focus({ preventScroll: true });
-  }, [keyboardIndex, first]);
-
-  if (entries.length < 2) return null;
+  }, [keyboardIndex, first, end]);
 
   function preview(index: number, element: HTMLElement) {
     const bounds = container.current?.getBoundingClientRect();
@@ -128,15 +162,33 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
     const entry = entries[index];
     if (entry) onNavigate(entry.messageIndex);
   }
+  function selectAtPointer(drag: RailDrag) {
+    const element = rail.current;
+    if (!element) return;
+    const index = Math.max(0, Math.min(entries.length - 1, Math.floor((element.scrollTop + drag.y - drag.top - drag.offset) / drag.pitch)));
+    if (index === drag.last) return;
+    drag.last = index;
+    const tick = element.querySelector<HTMLElement>(`[data-chat-index-target="${index}"]`);
+    if (tick) preview(index, tick);
+    navigate(index);
+  }
+  function finishDrag() {
+    const drag = dragging.current;
+    dragging.current = null;
+    cancelAnimationFrame(dragFrame.current);
+    if (drag) reveal(drag.last);
+    setHover(null);
+  }
   return (
-    <div ref={container} className="pointer-events-none absolute top-0 right-[var(--assistant-scrollbar-width,0px)] z-30 hidden w-7 items-center justify-end md:flex" style={{ bottom: `var(--assistant-composer-inset, ${bottomInset}px)` }}>
-      <span ref={pitchMeasure} aria-hidden="true" className="pointer-events-none absolute h-2 w-0" />
+    <div ref={container} data-chat-index-container="" className="pointer-events-none absolute top-0 right-[var(--assistant-scrollbar-width,0px)] z-30 hidden w-[var(--chat-index-track-width)] items-center justify-end md:flex" style={{ bottom: `var(--assistant-composer-inset, ${bottomInset}px)` }}>
+      <span ref={pitchMeasure} aria-hidden="true" data-chat-index-pitch="" className="pointer-events-none absolute w-0" style={{ height: "var(--chat-index-pitch)" }} />
       <nav
         ref={rail}
         data-chat-index-rail=""
-        data-scroll-edges={[first > 0 && "top", first < maxFirst && "bottom"].filter(Boolean).join(" ")}
+        data-scroll-fade=""
         aria-label="Conversation index"
-        className="pointer-events-auto flex h-full w-full touch-none select-none flex-col items-end justify-center overflow-hidden"
+        className="pointer-events-auto scrollbar-none h-full w-full touch-none select-none overflow-x-hidden overflow-y-auto overscroll-contain scroll-auto"
+        onScroll={(event) => { setViewportScroll(event.currentTarget.scrollTop); setHover(null); }}
         onPointerLeave={() => { if (!dragging.current) setHover(null); }}
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -147,11 +199,12 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
         onKeyDown={(event) => {
           const index = Number((event.target as HTMLElement).closest<HTMLElement>("[data-chat-index-target]")?.dataset.chatIndexTarget);
           if (!Number.isFinite(index)) return;
-          const next = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: entries.length - 1, PageUp: index - count, PageDown: index + count }[event.key];
+          const page = Math.max(1, Math.floor(layout.height / layout.pitch) - 1);
+          const next = { ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: entries.length - 1, PageUp: index - page, PageDown: index + page }[event.key];
           if (next === undefined) return;
           event.preventDefault();
           const bounded = Math.max(0, Math.min(entries.length - 1, next));
-          setBrowseStart(Math.max(0, Math.min(maxFirst, bounded - Math.floor(count / 2))));
+          reveal(bounded);
           setKeyboardIndex(bounded);
           navigate(bounded);
         }}
@@ -160,32 +213,43 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
           if (event.button !== 0 || !target) return;
           event.preventDefault();
           const index = Number(target.dataset.chatIndexTarget);
-          const bounds = ticks.current!.getBoundingClientRect();
+          const bounds = event.currentTarget.getBoundingClientRect();
           event.currentTarget.setPointerCapture(event.pointerId);
-          // The header can collapse mid-drag. Keep the original tick positions
-          // so the same pointer movement still selects the same message.
-          dragging.current = { pointer: event.pointerId, first, last: index, top: bounds.top, pitch: bounds.height / count, count };
+          // Snapshot the viewport so collapsing the toolbar cannot move drag targets.
+          dragging.current = { pointer: event.pointerId, last: index, top: bounds.top, height: bounds.height, offset: centerOffset, pitch: layout.pitch, y: event.clientY, time: event.timeStamp };
           setKeyboardIndex(null);
-          setBrowseStart(first);
           preview(index, target);
           navigate(index);
+          const advance = (time: number) => {
+            const drag = dragging.current;
+            const element = rail.current;
+            if (!drag || !element) return;
+            const zone = Math.min(drag.pitch * 4, drag.height / 4);
+            const y = drag.y - drag.top;
+            const speed = y < zone ? Math.max(-2, (y - zone) / zone) : y > drag.height - zone ? Math.min(2, (y - drag.height + zone) / zone) : 0;
+            const elapsed = Math.min(64, time - drag.time);
+            drag.time = time;
+            if (speed) {
+              element.scrollTop += speed * drag.pitch * elapsed / 50;
+              setViewportScroll(element.scrollTop);
+              selectAtPointer(drag);
+            }
+            dragFrame.current = requestAnimationFrame(advance);
+          };
+          dragFrame.current = requestAnimationFrame(advance);
         }}
         onPointerMove={(event) => {
           const drag = dragging.current;
           if (!drag || drag.pointer !== event.pointerId) return;
-          const index = Math.max(drag.first, Math.min(drag.first + drag.count - 1, drag.first + Math.floor((event.clientY - drag.top) / drag.pitch)));
-          if (index === drag.last) return;
-          drag.last = index;
-          const tick = ticks.current?.querySelector<HTMLElement>(`[data-chat-index-target="${index}"]`);
-          if (tick) preview(index, tick);
-          navigate(index);
+          drag.y = event.clientY;
+          selectAtPointer(drag);
         }}
-        onPointerUp={() => { dragging.current = null; setBrowseStart(null); setHover(null); }}
-        onPointerCancel={() => { dragging.current = null; setBrowseStart(null); setHover(null); }}
-        onLostPointerCapture={() => { dragging.current = null; setBrowseStart(null); }}
+        onPointerUp={finishDrag}
+        onPointerCancel={finishDrag}
+        onLostPointerCapture={finishDrag}
       >
-        <div ref={ticks} className="w-full shrink-0">
-          {entries.slice(first, first + count).map((entry, offset) => {
+        <div className="relative min-h-full w-full" style={{ height: totalHeight }}>
+          {entries.slice(first, end).map((entry, offset) => {
             const index = first + offset;
             const selected = entry.id === activeId;
             return (
@@ -198,16 +262,16 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
                 aria-label={`Jump to message ${index + 1}: ${entry.author} — ${entry.title}`}
                 aria-current={selected ? "location" : undefined}
                 tabIndex={index === focusIndex ? 0 : -1}
-                className="group flex w-full cursor-pointer items-center justify-end pr-1 outline-none"
-                style={{ height: layout.pitch }}
-                // Previews follow focus and a held pointer, never a passing one.
-                onFocus={(event) => preview(index, event.currentTarget)}
+                className="group absolute left-0 flex w-full cursor-pointer items-center justify-end pr-[calc(var(--chat-index-tick-width)/4)] outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-muted-foreground"
+                style={{ height: layout.pitch, top: centerOffset + index * layout.pitch }}
+                onPointerEnter={(event) => { if (event.pointerType !== "touch" && !dragging.current) preview(index, event.currentTarget); }}
+                onFocus={(event) => { reveal(index); preview(index, event.currentTarget); }}
                 onClick={(event) => { if (event.detail === 0) navigate(index); }}
               >
                 <span aria-hidden="true" className={cn(
-                  "h-0.5 origin-right rounded-full transition-[transform,background-color] duration-150 group-focus-visible:scale-x-150 group-active:scale-x-150 motion-reduce:transition-none",
-                  entry.role === "user" ? "w-2" : "w-4",
-                  selected ? "bg-primary" : "bg-text-tertiary/80 group-focus-visible:bg-foreground group-active:bg-foreground",
+                  "h-[var(--chat-index-tick-thickness)] shrink-0 rounded-full bg-current transition-[color,opacity] duration-150 motion-reduce:transition-none",
+                  selected || entry.role === "assistant" ? "w-[var(--chat-index-tick-width)]" : "w-[calc(var(--chat-index-tick-width)/2)]",
+                  selected ? "text-nyx-secondary-400 opacity-100" : "text-text-tertiary opacity-50 group-hover:text-muted-foreground group-hover:opacity-100 group-focus-visible:text-muted-foreground group-focus-visible:opacity-100 group-active:text-muted-foreground group-active:opacity-100",
                 )} />
               </button>
             );
@@ -215,7 +279,7 @@ export function ChatIndexRail({ messages, scrollRef, bottomInset, onNavigate }: 
         </div>
       </nav>
       {hover && hoveredEntry ? (
-        <div role="tooltip" className="absolute right-full mr-2 w-max max-w-72 -translate-y-1/2 rounded-lg border border-hairline bg-popover px-3 py-2 text-11 text-foreground shadow-sm" style={{ top: hover.y }}>
+        <div role="tooltip" className="absolute right-full mr-2 w-max max-w-72 -translate-y-1/2 rounded-lg border border-hairline bg-popover px-3 py-2 text-13 text-foreground shadow-sm" style={{ top: hover.y }}>
           <p className="mb-1 font-medium text-text-tertiary">{hoveredEntry.author}</p>
           <p className="line-clamp-3 whitespace-pre-wrap break-words">{hoveredEntry.title}</p>
         </div>

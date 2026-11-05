@@ -25,8 +25,16 @@ use crate::{
 /// access; specialist threads carry exactly their agent's grants.
 #[derive(Clone, Debug)]
 pub enum KeyAuthority {
+    OrgChannelGuest(
+        AgentGrants,
+        crate::models::agent_operation_scope::OperationScopes,
+        String,
+    ),
     ModelSetup(String),
     Orchestrator,
+    /// Server-only wrapper: group restrictions are part of final authority,
+    /// never a second widen-then-narrow mutation on every continuation.
+    Collaboration(Box<KeyAuthority>, String),
     Shared(
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
@@ -40,6 +48,14 @@ pub enum KeyAuthority {
 }
 
 impl KeyAuthority {
+    pub fn is_shared(&self) -> bool {
+        match self {
+            Self::Shared(..) => true,
+            Self::Collaboration(inner, _) => inner.is_shared(),
+            _ => false,
+        }
+    }
+
     pub fn for_agent(agent: &AssistantAgent) -> Self {
         match agent.kind {
             AgentKind::Nyxbot => Self::Orchestrator,
@@ -55,20 +71,30 @@ impl KeyAuthority {
     /// rotated or hand-edited key converges back to its conversation's authority.
     pub fn key_fields(&self) -> bson::Document {
         match self {
+            Self::Collaboration(inner, group) => {
+                let mut fields = inner.key_fields();
+                fields.insert("assistant_group_id", group);
+                fields.insert("allow_all_nodes", false);
+                fields.insert("allowed_node_ids", bson::Array::new());
+                fields.insert("scopes", ASSISTANT_SCOPES);
+                fields
+            }
             Self::ModelSetup(owner) => doc! {
                 "assistant_agent_owner_id":owner,"assistant_operation_scopes":bson::Document::new(),
                 "allow_all_services":false,"allow_all_nodes":false,"allow_auto_connected_services":false,
                 "allowed_service_ids":[],"allowed_platform_service_ids":[],"allowed_node_ids":[],"scopes":ASSISTANT_SCOPES,
             },
-            Self::Shared(grants, scopes, owner) => doc! {
-                "assistant_agent_owner_id": owner,
-                "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
-                "allow_all_services": false, "allow_all_nodes": false,
-                "allowed_node_ids": [], "allow_auto_connected_services": false,
-                "allowed_service_ids": &grants.service_ids,
-                "allowed_platform_service_ids": &grants.platform_service_ids,
-                "scopes": ASSISTANT_SCOPES,
-            },
+            Self::Shared(grants, scopes, owner) | Self::OrgChannelGuest(grants, scopes, owner) => {
+                doc! {
+                    "assistant_agent_owner_id": owner,
+                    "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
+                    "allow_all_services": false, "allow_all_nodes": false,
+                    "allowed_node_ids": [], "allow_auto_connected_services": false,
+                    "allowed_service_ids": &grants.service_ids,
+                    "allowed_platform_service_ids": &grants.platform_service_ids,
+                    "scopes": ASSISTANT_SCOPES,
+                }
+            }
             Self::Orchestrator => doc! {
                 "assistant_agent_owner_id": bson::Bson::Null,
                 "assistant_operation_scopes": bson::Document::new(),
@@ -163,12 +189,30 @@ pub(crate) async fn authority_with_access(
         ))
         .await;
     }
+    let channel = if let Some(origin) = super::org_channel_service::origin(conversation) {
+        let access = Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            origin,
+            &conversation.user_id,
+            &agent.id,
+            true,
+        ))
+        .await?;
+        Some(super::org_agent_service::RequestAccess::from_channel(db, access).await?)
+    } else {
+        None
+    };
+    let snapshot = channel.as_ref().or(snapshot);
     let resolved = if snapshot.is_none() {
         super::org_agent_service::resolve_agent_access(db, &conversation.user_id, &agent).await?
     } else {
         None
     };
     let snapshot = snapshot.or(resolved.as_ref());
+    if let Some(access) = snapshot.filter(|s| s.channel().is_some()) {
+        access.check_conversation(conversation)?;
+    }
     if let Some(shared) = snapshot.and_then(|a| a.shared()) {
         snapshot
             .expect("shared snapshot")
@@ -218,6 +262,7 @@ pub(crate) async fn authority_with_access(
     }
     if agent.user_id != conversation.user_id
         && (conversation.guest_turn || conversation.channel.is_some())
+        && !snapshot.is_some_and(|s| s.channel().is_some())
     {
         return Err(AppError::Forbidden(
             "Organization agents require a private member thread".into(),
@@ -271,6 +316,21 @@ pub(crate) async fn authority_with_access(
         return Ok(KeyAuthority::Shared(
             grants,
             shared.operation_scopes(),
+            agent.user_id.clone(),
+        ));
+    }
+    if let Some(channel) = snapshot
+        .and_then(|s| s.channel())
+        .filter(|c| c.execution().guest)
+    {
+        let mut grants = agent.grants.clone();
+        grants.account_read = false;
+        grants.platform_service_ids.clear();
+        let policy = channel.delegated_services();
+        grants.service_ids.retain(|id| policy.contains(id));
+        return Ok(KeyAuthority::OrgChannelGuest(
+            grants,
+            agent.operation_scopes.clone(),
             agent.user_id.clone(),
         ));
     }
@@ -591,14 +651,23 @@ pub async fn load_or_provision_in_session(
     if let Some(old) = old {
         require_ordinary_key(db, user_id, &old.api_key_id, Some(&mut *session)).await?;
         let raw = decrypt(keys, &old).await?;
-        let valid = db
+        let current = db
             .collection::<ApiKey>(KEYS)
             .find_one(valid_key_filter(user_id, &old.api_key_id, &raw))
             .session(&mut *session)
-            .await?
-            .is_some();
-        if valid {
-            let mut fields = authority.key_fields();
+            .await?;
+        if let Some(current) = current {
+            // A continuation must not invalidate a reviewed effect merely by
+            // reapplying identical authority. Compare the already-loaded key;
+            // actual changes still go through the security mutation helper.
+            // The last-used write below still fences concurrent revocation in
+            // this transaction, even when the authority itself is unchanged.
+            let current = bson::to_document(&current).map_err(|_| unavailable())?;
+            let mut fields: bson::Document = authority
+                .key_fields()
+                .into_iter()
+                .filter(|(field, value)| current.get(field).unwrap_or(&bson::Bson::Null) != value)
+                .collect();
             fields.insert("last_used_at", bson::DateTime::now());
             mutations::update_one(
                 db,
@@ -1414,6 +1483,55 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn unchanged_turn_authority_preserves_security_fence_but_changes_invalidate() {
+        let (state, owner, row) = fixture("nyxa_authority_noop").await;
+        let db = &state.db;
+        let original = key_service::get_api_key(db, &owner, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        let fence = |id: String| async move {
+            db.collection::<bson::Document>(KEYS)
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_i64("machine_external_fence")
+                .unwrap_or(0)
+        };
+        let original_fence = fence(row.credential_api_key_id.clone()).await;
+        load_or_provision(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap();
+        let same = key_service::get_api_key(db, &owner, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            fence(row.credential_api_key_id.clone()).await,
+            original_fence
+        );
+        assert!(same.state_version > original.state_version);
+
+        mutations::update_one(
+            db,
+            doc! {"_id": &row.credential_api_key_id},
+            doc! {"$set": {"allow_all_services": false}},
+            None,
+        )
+        .await
+        .unwrap();
+        let changed_fence = fence(row.credential_api_key_id.clone()).await;
+        assert!(changed_fence > original_fence);
+        load_or_provision(db, &state.encryption_keys, &owner, &row.id)
+            .await
+            .unwrap();
+        let restored = key_service::get_api_key(db, &owner, &row.credential_api_key_id)
+            .await
+            .unwrap();
+        assert!(restored.allow_all_services);
+        assert!(fence(row.credential_api_key_id.clone()).await > changed_fence);
     }
 
     #[tokio::test]

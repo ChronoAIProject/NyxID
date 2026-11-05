@@ -92,11 +92,11 @@ export function NameInput({
         }
       />
       {effectiveError ? (
-        <p id={errorId} className="text-xs text-destructive">
+        <p id={errorId} className="text-13 text-destructive">
           {effectiveError}
         </p>
       ) : hint ? (
-        <p id={hintId} className="text-xs text-muted-foreground">
+        <p id={hintId} className="text-13 text-muted-foreground">
           {hint}
         </p>
       ) : null}

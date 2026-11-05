@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -70,7 +71,7 @@ export function InsightsUnavailable({
 }) {
   return (
     <div
-      className="flex items-center justify-between gap-4 p-3 text-xs text-muted-foreground"
+      className="flex items-center justify-between gap-4 p-3 text-13 text-muted-foreground"
       role="status"
     >
       <p>
@@ -153,7 +154,7 @@ function UsageDayTooltip({
   const day = active ? payload?.[0]?.payload.source : undefined;
   if (!day) return null;
   return (
-    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
+    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-13 shadow-md">
       <p className="font-medium">{shortDay(day.day)} (UTC)</p>
       <p className="tabular-nums">
         {day.calls.toLocaleString()} {day.calls === 1 ? "call" : "calls"}
@@ -217,8 +218,8 @@ function UsageTrendChart({
               aria-pressed={option === measure}
               onClick={() => setPicked(option)}
               className={cn(
-                "rounded px-2 py-0.5 text-11 text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
-                option === measure && "bg-muted font-medium text-foreground",
+                "rounded px-2 py-0.5 type-button text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+                option === measure && "bg-muted text-foreground",
               )}
             >
               {trendLabel(option)}
@@ -315,7 +316,7 @@ function FundingBar({ summary }: { readonly summary: ServiceUsageSummary }) {
           />
         ))}
       </div>
-      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-11">
+      <ul className="flex flex-wrap gap-x-4 gap-y-1 text-13">
         {parts.map((part) => (
           <li key={part.label} className="inline-flex items-center gap-1.5">
             <span
@@ -373,7 +374,7 @@ function BreakdownBars({
         ))}
       </ul>
       {items.length > shown.length && (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           +{items.length - shown.length} more
         </p>
       )}
@@ -450,7 +451,7 @@ function UsageWindows({ slug }: { readonly slug: string }) {
           />
         </BarChart>
       </ChartContainer>
-      <figcaption className="text-11 text-muted-foreground">
+      <figcaption className="text-13 text-muted-foreground">
         {windows
           .map(
             (slot) =>
@@ -473,7 +474,7 @@ function WindowTooltip({
   const slot = active ? payload?.[0]?.payload : undefined;
   if (!slot) return null;
   return (
-    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
+    <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-13 shadow-md">
       <p className="font-medium">{slot.label}</p>
       <p className="tabular-nums">
         {slot.calls.toLocaleString()} {slot.calls === 1 ? "call" : "calls"}
@@ -509,13 +510,13 @@ function ConnectionUsage({
       : null;
   return (
     <section
-      className="space-y-3 border-t border-border/60 pt-4 text-xs"
+      className="space-y-3 border-t border-border/60 pt-4 text-13"
       aria-labelledby={`usage-history-${connection.id}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h5
           id={`usage-history-${connection.id}`}
-          className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+          className="type-table-header uppercase tracking-[1.5px] text-text-tertiary"
         >
           Usage history
         </h5>
@@ -549,13 +550,13 @@ function ConnectionUsage({
           <dl className="grid gap-3 sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">Calls</dt>
-              <dd className="mt-1 text-sm font-medium tabular-nums">
+              <dd className="mt-1 type-row-title tabular-nums">
                 {summary.calls.toLocaleString()}
               </dd>
             </div>
             <div>
               <dt className="text-muted-foreground">Usage</dt>
-              <dd className="mt-1 text-sm font-medium tabular-nums">
+              <dd className="mt-1 type-row-title tabular-nums">
                 {summary.quantities
                   .map(
                     ({ metric, quantity }) =>
@@ -566,7 +567,7 @@ function ConnectionUsage({
             </div>
             <div>
               <dt className="text-muted-foreground">NyxID credits used</dt>
-              <dd className="mt-1 text-sm font-medium tabular-nums">
+              <dd className="mt-1 type-row-title tabular-nums">
                 {!summary.billable
                   ? "None"
                   : summary.charged == null
@@ -632,7 +633,7 @@ function ConnectionUsage({
           )}
         </>
       )}
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Counts calls made through <code>{connection.slug}</code> that were
         billed to your personal account. Other connections using the same
         address are counted together.
@@ -679,13 +680,13 @@ function ConnectionBillingPanel({
       aria-label={`Billing for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+        <h4 className="inline-flex items-center gap-2 type-row-title">
           <CreditCard className="size-4 text-primary-text" /> Billing
         </h4>
         {insight.billing?.context !== "configuration" &&
           !!insight.usage?.access.keys.length && (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-muted-foreground">Show for</span>
+            <div className="flex items-center gap-2 text-13">
+              <Label asChild><span className="text-muted-foreground">Show for</span></Label>
               <Select value={caller} onValueChange={setCaller}>
                 <SelectTrigger
                   aria-label="Preview billing for"
@@ -708,10 +709,10 @@ function ConnectionBillingPanel({
       {plain ? (
         <>
           <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-            <p className="text-sm font-medium">
+            <p className="type-row-title">
               {chargedAnyway ? "Credits were charged recently" : plain.headline}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               {chargedAnyway
                 ? `${formatExactCredits(recentCharged!)} NyxID credits were charged in the last 7 days for calls through ${connection.slug}, so don't treat this connection as free. ${plain.detail}`
                 : plain.detail}
@@ -723,16 +724,16 @@ function ConnectionBillingPanel({
           >
             <h5
               id={`billing-details-${connection.id}`}
-              className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+              className="type-table-header uppercase tracking-[1.5px] text-text-tertiary"
             >
               Details
             </h5>
-            <dl className="grid gap-3 text-xs sm:grid-cols-3">
+            <dl className="grid gap-3 text-13 sm:grid-cols-3">
               <div>
                 <dt className="text-muted-foreground">Whose key or app</dt>
                 <dd className="mt-1 font-medium">{plain.key.title}</dd>
                 {plain.key.note && (
-                  <dd className="mt-0.5 text-11 text-muted-foreground">
+                  <dd className="mt-0.5 text-13 text-muted-foreground">
                     {plain.key.note}
                   </dd>
                 )}
@@ -747,7 +748,7 @@ function ConnectionBillingPanel({
               </div>
             </dl>
             {!!plain.tips.length && (
-              <ul className="list-disc space-y-1 pl-4 text-11 text-muted-foreground">
+              <ul className="list-disc space-y-1 pl-4 text-13 text-muted-foreground">
                 {plain.tips.map((tip) => (
                   <li key={tip}>{tip}</li>
                 ))}
@@ -800,13 +801,13 @@ export function ConnectionInsightPanel({
         aria-label={`Agent key access for ${connection.label}`}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+          <h4 className="inline-flex items-center gap-2 type-row-title">
             <UsersRound className="size-4 text-primary-text" />{" "}
             {usage.access.basis === "configuration"
               ? "Agent keys in scope"
               : "Agent keys with access"}
           </h4>
-          <span className="text-11 text-muted-foreground">
+          <span className="text-13 text-muted-foreground">
             {usage.access.visibility === "own_keys"
               ? "Your keys only"
               : "Keys you manage"}{" "}
@@ -816,7 +817,7 @@ export function ConnectionInsightPanel({
         {usage.access.keys.length ? (
           <div className="overflow-x-auto">
             <table
-              className="w-full text-left text-xs"
+              className="w-full text-left text-13"
               aria-label="Agent keys with access"
             >
               <thead className="text-muted-foreground">
@@ -866,7 +867,7 @@ export function ConnectionInsightPanel({
             </table>
           </div>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {usage.access.visibility === "unavailable"
               ? "Agent key inventory could not be loaded."
               : usage.access.incomplete
@@ -886,12 +887,12 @@ export function ConnectionInsightPanel({
           </Button>
         )}
         {usage.access.truncated && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Showing a limited set of keys. Open Agent keys to review the full
             inventory.
           </p>
         )}
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {usage.access.basis === "configuration"
             ? "Configured scope; live permissions and credentials are checked at execution. "
             : ""}
@@ -906,7 +907,7 @@ export function ConnectionInsightPanel({
   if (usage.activity.tracking === "unavailable")
     return (
       <section
-        className="space-y-2 p-3 text-xs"
+        className="space-y-2 p-3 text-13"
         aria-label={`Recent requests for ${connection.label}`}
       >
         <h4 className="font-medium">Request attribution unavailable</h4>
@@ -923,10 +924,10 @@ export function ConnectionInsightPanel({
       aria-label={`Recent requests for ${connection.label}`}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="inline-flex items-center gap-2 text-sm font-medium">
+        <h4 className="inline-flex items-center gap-2 type-row-title">
           <Activity className="size-4 text-primary-text" /> Recent requests
         </h4>
-        <span className="text-11 text-muted-foreground">
+        <span className="text-13 text-muted-foreground">
           {usage.activity.visibility === "own_requests"
             ? "Your requests"
             : "Visible requests"}{" "}
@@ -936,7 +937,7 @@ export function ConnectionInsightPanel({
       {usage.activity.requests.length ? (
         <div className="overflow-x-auto">
           <table
-            className="w-full text-left text-xs"
+            className="w-full text-left text-13"
             aria-label="Recent connection requests"
           >
             <thead className="text-muted-foreground">
@@ -987,13 +988,13 @@ export function ConnectionInsightPanel({
           </table>
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No requests with exact connection attribution were recorded in this
           period.
         </p>
       )}
       {usage.activity.request_count > 0 && (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {usage.activity.request_count.toLocaleString()} recorded
           {usage.activity.request_count === 1 ? " request" : " requests"}
           {usage.activity.truncated
@@ -1001,7 +1002,7 @@ export function ConnectionInsightPanel({
             : " in this period"}
         </p>
       )}
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {usage.activity.tracking === "partial"
           ? "Tracking is partial. Older requests and unsupported request paths may not identify this connection. "
           : ""}

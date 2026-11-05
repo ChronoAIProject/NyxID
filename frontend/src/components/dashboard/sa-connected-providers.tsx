@@ -141,7 +141,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
               <TableBody>
                 {saProviders.map((token) => (
                   <TableRow key={token.provider_id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       {token.provider_name}
                     </TableCell>
                     <TableCell>
@@ -182,7 +182,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             No providers connected to this service account.
           </p>
         )}
@@ -252,7 +252,7 @@ function ConnectProviderDropdown({
           <DropdownMenuItem key={p.id} onClick={() => onSelect(p)}>
             <ProviderTypeIcon type={p.provider_type} />
             <span>{p.name}</span>
-            <Badge variant="secondary" className="ml-auto text-xs">
+            <Badge variant="secondary" className="ml-auto text-12">
               {providerTypeLabel(p.provider_type)}
             </Badge>
           </DropdownMenuItem>

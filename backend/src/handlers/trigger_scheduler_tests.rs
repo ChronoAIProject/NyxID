@@ -647,6 +647,10 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_task: None,
+        execution_permission: None,
         business_system_success: false,
         collaboration_thread: false,
         channel_adapter_origin: None,
@@ -680,6 +684,10 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_task: None,
+        execution_permission: None,
         business_system_success: false,
         collaboration_thread: false,
         invocation_controlled: false,
@@ -1133,6 +1141,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            execution_task: None,
             connect_own: None,
             activity_id: None,
             invocation_id: None,

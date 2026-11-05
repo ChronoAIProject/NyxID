@@ -54,7 +54,7 @@
 
 | 项 | 状态 | 说明 |
 |----|------|------|
-| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 默认使用 `PROD_API_BASE_URL`；`PROD_USE_NEW_DOMAINS=true` 时使用 `PROD_NEW_API_BASE_URL`（`https://api.nyxid.ai/api/v1`）。见 [域名迁移](DOMAIN_MIGRATION.md)，所选 API 须在审核环境可访问 |
+| 提审/生产 API | ✅ | `pnpm build:ios` / `pnpm release:ios` 内置 `PROD_API_BASE_URL` 与可选的 `PROD_NEW_API_BASE_URL`（`https://api.nyxid.ai/api/v1`），启动时由 NyxID 管理后台功能开关 `mobile:new-domains` 选择。见 [域名迁移](DOMAIN_MIGRATION.md)，两个 API 域名在审核期间都须可访问 |
 | URL Scheme | ✅ | `nyxid`，用于 OAuth 回调 |
 | Associated Domains | ✅ | 根据所选 API / Universal Link 域名生成；新域名模式包含 `applinks:api.nyxid.ai`，保留已有 Universal Link 域名与路径（构建时 prebuild 更新 entitlements） |
 | 最低系统版本 | ✅ | LSMinimumSystemVersion 12.0 |
@@ -68,6 +68,8 @@
 | 审核员删掉唯一测试账号 | 在审核备注中说明：请使用提供的账号浏览主要功能；若要测试删除，请先新建账号再删，或注明已提供第二个测试账号 |
 | 审核时 API 不可用 | 确保构建所选 API 域名在审核期间稳定、无 IP 限制或需 VPN；旧版本使用期间保留旧域名 |
 | 隐私营养标签与 App 不一致 | 在 App Store Connect → App 隐私 中如实填写收集的数据类型（邮箱、设备 ID、使用数据等），与隐私政策一致 |
+| AI 生成内容（1.2） | 每条已完成的 Agent 回复下方有「举报」旗标：选择原因后以 `Report: <原因>` 的差评写入现有回复反馈，管理员在 `/admin/assistant/feedback`（筛选差评）处理。群聊仅限邀请加入，不提供公开或匿名聊天 |
+| 联系方式（1.2） | 设置页底部「Contact support」打开发往 `contact@chrono-ai.fun` 的邮件，与法律页面公布的地址一致；App Store Connect 的 Support URL 同样须填写 |
 | 年龄分级 | 若未设 17+，建议与隐私政策「不面向 16 岁以下」一致，选 4+ 或 12+ 并确认无违规内容 |
 
 ---
@@ -81,6 +83,8 @@ Test account: [你的测试邮箱/说明]
 Password: [若为邮箱密码登录则提供；当前为社交登录则写：Please use "Continue with Google/GitHub/Apple" to sign in.]
 
 Account deletion: Available under Account tab → Account & Security → Danger Zone → Delete Account. Deletion is permanent; if you sign in again with the same provider (Apple/Google/GitHub), a new account will be created and previous data will not be restored. To test deletion, please create a second account first, or use the provided account only for feature review.
+
+AI responses: NyxBot is a utility assistant for managing the user's own NyxID account and connected services. Every completed agent response has a flag button below it to report offensive, harmful or inaccurate content; reports reach the NyxID team for review. Group chats are invite-only (no public or anonymous chat). Support: Settings → Contact support (contact@chrono-ai.fun).
 ```
 
 ---

@@ -33,7 +33,7 @@ export function CredentialBindingChoice({
       ariaLabel="Credential"
       footer={
         showPricing && resaleBillable ? (
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Platform-key use may also incur the separate resale fee.
           </p>
         ) : null

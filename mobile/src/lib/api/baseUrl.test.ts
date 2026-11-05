@@ -11,6 +11,7 @@ import { executeAuthenticatedRequest } from "./authenticatedTransport";
 import { guardedJsonTransport } from "./guardedTransport";
 
 type ApiUrlModule = typeof import("./baseUrl");
+type DomainsModule = typeof import("../domains");
 type HttpModule = typeof import("./http");
 type MobileApiModule = typeof import("./mobileApi");
 
@@ -24,11 +25,25 @@ function loadModule<T>(filename: string, context: Record<string, unknown>): T {
   return exported as T;
 }
 
-function loadResolver(configuredUrl?: string) {
-  const env = { EXPO_PUBLIC_API_BASE_URL: configuredUrl };
-  const api = loadModule<ApiUrlModule>("./baseUrl.ts", { process: { env } });
-  return { api, env };
+function loadResolver(configuredUrl?: string, extraEnv: Record<string, string> = {}) {
+  const env: Record<string, string | undefined> = { EXPO_PUBLIC_API_BASE_URL: configuredUrl, ...extraEnv };
+  const domains = loadModule<DomainsModule>("../domains.ts", { process: { env } });
+  const api = loadModule<ApiUrlModule>("./baseUrl.ts", {
+    require: (name: string) => {
+      assert.equal(name, "../domains");
+      return domains;
+    },
+  });
+  return { api, domains, env };
 }
+
+const NEW_DOMAIN_ENV = {
+  EXPO_PUBLIC_FRONTEND_URL: "https://nyx.chrono-ai.fun",
+  EXPO_PUBLIC_LEGAL_BASE_URL: "https://nyx.chrono-ai.fun",
+  EXPO_PUBLIC_NEW_API_BASE_URL: "https://api.nyxid.ai/api/v1/",
+  EXPO_PUBLIC_NEW_FRONTEND_URL: "https://nyxid.ai",
+  EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "https://nyxid.ai",
+};
 
 for (const [configuredUrl, expected] of [
   ["https://nyx-api.chrono-ai.fun/api/v1", "https://nyx-api.chrono-ai.fun/api/v1"],
@@ -38,9 +53,9 @@ for (const [configuredUrl, expected] of [
   ["https://self-host.example/gateway/api/v1", "https://self-host.example/gateway/api/v1"],
 ] as const) {
   test(`resolves and joins endpoint paths for ${configuredUrl.trim()}`, () => {
-    const { api } = loadResolver(configuredUrl);
+    const { api, domains } = loadResolver(configuredUrl);
     assert.equal(api.getApiBaseUrl(), expected);
-    assert.equal(api.NYXID_API_BASE_URL, expected);
+    assert.equal(domains.NYXID_API_BASE_URL, expected);
     assert.equal(api.buildApiUrl("/users/me"), `${expected}/users/me`);
     assert.equal(api.buildApiUrl("auth/device/preview"), `${expected}/auth/device/preview`);
   });
@@ -55,11 +70,36 @@ test("keeps one resolved API base for the app lifetime", () => {
 
 test("missing API configuration fails before a request instead of choosing a default host", () => {
   for (const configuredUrl of [undefined, "", " "]) {
-    const { api } = loadResolver(configuredUrl);
-    assert.equal(api.NYXID_API_BASE_URL, "");
+    const { api, domains } = loadResolver(configuredUrl);
+    assert.equal(domains.NYXID_API_BASE_URL, "");
     assert.throws(() => api.getApiBaseUrl(), /API base URL is not configured/);
     assert.throws(() => api.buildApiUrl("/users/me"), /API base URL is not configured/);
   }
+});
+
+test("the launch selection switches every request to the embedded new domain set", () => {
+  const { api, domains } = loadResolver("https://nyx-api.chrono-ai.fun/api/v1", NEW_DOMAIN_ENV);
+  assert.equal(api.buildApiUrl("/users/me"), "https://nyx-api.chrono-ai.fun/api/v1/users/me");
+  domains.selectNewDomains(true);
+  assert.equal(api.buildApiUrl("/users/me"), "https://api.nyxid.ai/api/v1/users/me");
+  assert.equal(domains.NYXID_FRONTEND_URL, "https://nyxid.ai");
+  assert.equal(domains.NYXID_LEGAL_BASE_URL, "https://nyxid.ai");
+  assert.equal(domains.NYXID_USING_NEW_DOMAINS, true);
+  domains.selectNewDomains(false);
+  assert.equal(api.buildApiUrl("/users/me"), "https://nyx-api.chrono-ai.fun/api/v1/users/me");
+  assert.equal(domains.NYXID_FRONTEND_URL, "https://nyx.chrono-ai.fun");
+});
+
+test("builds without a complete new set ignore the flag", () => {
+  const { api, domains } = loadResolver("https://nyx-api.chrono-ai.fun/api/v1", {
+    ...NEW_DOMAIN_ENV,
+    EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "",
+  });
+  assert.equal(domains.DOMAIN_SETS.new, null);
+  assert.equal(domains.CONFIGURED_DOMAIN_SETS.length, 1);
+  domains.selectNewDomains(true);
+  assert.equal(api.getApiBaseUrl(), "https://nyx-api.chrono-ai.fun/api/v1");
+  assert.equal(domains.NYXID_USING_NEW_DOMAINS, false);
 });
 
 test("endpoint inputs cannot select a different host or scheme", () => {

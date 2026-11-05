@@ -50,6 +50,10 @@ pub enum AuthMethod {
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
+    pub(crate) execution_enrolled: bool,
+    /// Request-local server context, populated only from the live person enrollment.
+    pub(crate) execution_permission:
+        Option<std::sync::Arc<crate::services::execution_permission_dispatch::RequestContext>>,
     pub user_id: Uuid,
     pub session_id: Option<Uuid>,
     /// Assurance from the live first-party session, never from JWT claims.
@@ -886,7 +890,9 @@ pub(crate) async fn api_key_auth_user_for_watch(
     } else {
         false
     };
-    api_key_auth_user_inner(db, key, None, None, None, shared_resume).await
+    let mut auth = api_key_auth_user_inner(db, key, None, None, None, shared_resume).await?;
+    crate::services::execution_permission_dispatch::exclude(&mut auth);
+    Ok(auth)
 }
 
 /// Only voice's exact private-thread loader can use an idle key. This never
@@ -904,8 +910,9 @@ pub(crate) async fn api_key_auth_user_for_voice(
         &thread.credential_api_key_id,
     )
     .await?;
-    let auth =
+    let mut auth =
         api_key_auth_user_inner(db, &key, None, None, None, thread.shared_agent_thread).await?;
+    crate::services::execution_permission_dispatch::exclude(&mut auth);
     if auth.assistant_chat.as_ref().is_none_or(|chat| {
         chat.conversation_id != thread.id || chat.user_id != thread.user_id || chat.guest
     }) {
@@ -934,7 +941,7 @@ async fn api_key_auth_user_inner(
         .collection::<User>(USERS)
         .find_one(doc! { "_id": &key.user_id })
         .await?;
-    if !user.is_some_and(|user| user.is_active) {
+    if !user.as_ref().is_some_and(|user| user.is_active) {
         return Err(AppError::Unauthorized("User account is inactive".into()));
     }
     let org_agent_access =
@@ -946,7 +953,7 @@ async fn api_key_auth_user_inner(
     // in assistant_agent_credentials, so this lookup cleanly distinguishes
     // them from real per-thread conversation credentials. The ordinary-key
     // path does not read this collection.
-    let assistant_chat = if is_assistant_conversation_key_candidate(key) {
+    let mut assistant_chat = if is_assistant_conversation_key_candidate(key) {
         crate::services::assistant_acknowledgement_service::for_key_with_access(
             db,
             &key.user_id,
@@ -969,7 +976,33 @@ async fn api_key_auth_user_inner(
     {
         return Err(AppError::AssistantTurnRequired);
     }
+    let marker = user
+        .as_ref()
+        .filter(|u| {
+            u.user_type.is_person() && key.purpose == crate::models::api_key::ApiKeyPurpose::General
+        })
+        .and_then(|u| u.execution_permission_enrollment);
+    let execution_permission =
+        crate::services::execution_permission_dispatch::RequestContext::enrolled(
+            marker.or_else(|| {
+                assistant_chat
+                    .as_ref()
+                    .and_then(|c| c.execution_task.as_ref())
+                    .map(|_| 1)
+            }),
+            &key.user_id,
+            &key.id,
+            assistant_chat.as_deref(),
+        );
+    if let Some(context) = &execution_permission {
+        context.bind_key(key, credential_id.as_deref());
+    }
+    if let Some(chat) = assistant_chat.as_mut() {
+        std::sync::Arc::make_mut(chat).execution_permission = execution_permission.clone();
+    }
     Ok(AuthUser {
+        execution_enrolled: marker == Some(1),
+        execution_permission,
         mfa_assured: false,
         mfa_enabled: None,
         user_id,
@@ -1062,6 +1095,8 @@ pub(crate) async fn machine_external_gateway_auth_user(
                 })
                 .ok_or(AppError::MachinePermissionRevoked)?;
             AuthUser {
+                execution_enrolled: false,
+                execution_permission: None,
                 mfa_assured: false,
                 mfa_enabled: None,
                 user_id: Uuid::parse_str(&user.id).map_err(|_| AppError::MachineNotAllowed)?,
@@ -1107,6 +1142,7 @@ pub(crate) async fn machine_external_gateway_auth_user(
     auth.allowed_node_ids = vec![node_id.into()];
     auth.allow_all_services = false;
     auth.allowed_service_ids = effective;
+    crate::services::execution_permission_dispatch::exclude(&mut auth);
     Ok(auth)
 }
 
@@ -1272,6 +1308,8 @@ impl FromRequestParts<AppState> for AuthUser {
                         })?;
 
                         return Ok(AuthUser {
+                            execution_enrolled: false,
+                            execution_permission: None,
                             mfa_assured: false,
                             mfa_enabled: None,
                             org_agent_access: None,
@@ -1488,6 +1526,8 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
                     let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
+                        execution_enrolled: first_party_session && user.execution_permission_enrollment == Some(1),
+                        execution_permission: None,
                         mfa_assured,
                         mfa_enabled: (first_party_session
                             && user.user_type == crate::models::user::UserType::Person)
@@ -1577,6 +1617,8 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
+                                    execution_enrolled: u.execution_permission_enrollment == Some(1),
+                                    execution_permission: None,
                                     mfa_assured: sess.mfa_assured == Some(true),
                                     mfa_enabled: (u.user_type == crate::models::user::UserType::Person)
                                         .then_some(u.mfa_enabled),
@@ -2351,6 +2393,8 @@ mod tests {
 
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -3962,6 +4006,8 @@ mod tests {
         };
         let user_id = Uuid::new_v4().to_string();
         let auth = AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             assistant_turn_fence: Some(Box::new(
@@ -4038,6 +4084,8 @@ mod tests {
             .await
             .unwrap();
         let mut auth = AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             assistant_turn_fence: Some(Box::new(
@@ -4166,6 +4214,8 @@ mod tests {
     #[test]
     fn api_key_auth_includes_key_identity() {
         let user = AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,

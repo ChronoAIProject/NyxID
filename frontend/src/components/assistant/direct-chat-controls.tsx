@@ -1,10 +1,15 @@
+import { Label } from "@/components/ui/label";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedSelectTrigger as SelectTrigger,
+} from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { Info, X } from "lucide-react";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import {
@@ -27,7 +32,7 @@ export function DirectModeBanner() {
   return (
     <div
       aria-label="Direct chat mode notice"
-      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-11 text-muted-foreground sm:px-6"
+      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-13 text-muted-foreground sm:px-6"
       role="status"
     >
       <Info aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
@@ -63,20 +68,23 @@ export function DirectChatControls({
     useDirectConversationSettings(conversationId, defaultModel);
 
   return (
-    <div className="ml-[30px] flex min-w-0 flex-wrap items-start gap-2 pb-1.5">
-      <div className="w-[150px] min-w-0">
-        <label
+    <GroupedList
+      title="Direct chat options"
+      footer="A skill teaches the model about NyxID; it cannot take actions here."
+    >
+      <GroupedRow>
+        <Label
           htmlFor="direct-chat-model"
-          className="mb-1 block text-10 font-medium text-text-tertiary"
+          className="min-w-0 flex-1"
         >
           Model
-        </label>
+        </Label>
         <Select
           value={settings.model}
           onValueChange={setModel}
           disabled={disabled || !canUpdate || models.isLoading}
         >
-          <SelectTrigger id="direct-chat-model" className="h-7 rounded-md px-2">
+          <SelectTrigger id="direct-chat-model">
             <SelectValue placeholder="Choose model" />
           </SelectTrigger>
           <SelectContent>
@@ -87,14 +95,14 @@ export function DirectChatControls({
             ))}
           </SelectContent>
         </Select>
-      </div>
-      <div className="w-[150px] min-w-0">
-        <label
+      </GroupedRow>
+      <GroupedRow>
+        <Label
           htmlFor="direct-chat-effort"
-          className="mb-1 block text-10 font-medium text-text-tertiary"
+          className="min-w-0 flex-1"
         >
           Reasoning effort
-        </label>
+        </Label>
         <Select
           value={settings.effort ?? "default"}
           onValueChange={(value) =>
@@ -102,10 +110,7 @@ export function DirectChatControls({
           }
           disabled={disabled || !canUpdate || efforts.isLoading}
         >
-          <SelectTrigger
-            id="direct-chat-effort"
-            className="h-7 rounded-md px-2"
-          >
+          <SelectTrigger id="direct-chat-effort">
             <SelectValue placeholder="Model default" />
           </SelectTrigger>
           <SelectContent>
@@ -117,20 +122,20 @@ export function DirectChatControls({
             ))}
           </SelectContent>
         </Select>
-      </div>
-      <div className="min-w-[190px] flex-1">
-        <label
+      </GroupedRow>
+      <GroupedRow>
+        <Label
           htmlFor="direct-chat-skill"
-          className="mb-1 block text-10 font-medium text-text-tertiary"
+          className="min-w-0 flex-1"
         >
           NyxID knowledge
-        </label>
+        </Label>
         <Select
           value={settings.skillSlug ?? "none"}
           onValueChange={(value) => setSkill(value === "none" ? null : value)}
           disabled={disabled || !canUpdate || skills.isLoading}
         >
-          <SelectTrigger id="direct-chat-skill" className="h-7 rounded-md px-2">
+          <SelectTrigger id="direct-chat-skill">
             <SelectValue placeholder="No skill" />
           </SelectTrigger>
           <SelectContent>
@@ -142,10 +147,7 @@ export function DirectChatControls({
             ))}
           </SelectContent>
         </Select>
-        <p className="mt-1 text-10 leading-normal text-text-tertiary">
-          A skill teaches the model about NyxID; it cannot take actions here.
-        </p>
-      </div>
-    </div>
+      </GroupedRow>
+    </GroupedList>
   );
 }

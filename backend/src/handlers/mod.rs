@@ -226,3 +226,6 @@ pub mod nyxbot_gateway_releases;
 pub mod monitoring;
 
 pub mod collaboration_group;
+
+pub mod cma_sessions;
+pub mod org_specialist_channels;

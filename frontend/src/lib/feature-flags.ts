@@ -21,6 +21,8 @@ export const FEATURE_FLAG = {
   // Off permits mobile social first-factor holders to sign in without MFA.
   MOBILE_MFA: "auth:mobile-mfa",
   INVITATION_CODE: "auth:invitation-code",
+  // Global only: mobile builds with both domain sets read it at launch.
+  MOBILE_NEW_DOMAINS: "mobile:new-domains",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
   SERVICE_MONITORING: "services:monitoring",
@@ -35,6 +37,7 @@ export const FEATURE_FLAG = {
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
   ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
+  ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
   ORG_AGENTS: "assistant:org-agents",
   SHARED_AGENTS: "assistant:shared-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
@@ -76,6 +79,16 @@ export function userHasFeature(
   flag: FeatureFlag,
 ): boolean {
   return user?.capabilities?.enabled_features?.includes(flag) ?? false;
+}
+
+/** Read before sign-in through `/public/config`; only a global override applies. */
+const GLOBAL_ONLY_FLAGS: readonly string[] = [
+  FEATURE_FLAG.INVITATION_CODE,
+  FEATURE_FLAG.MOBILE_NEW_DOMAINS,
+];
+
+export function isGlobalOnlyFlag(key: string): boolean {
+  return GLOBAL_ONLY_FLAGS.includes(key);
 }
 
 /** All flag keys as an array (iteration, validation, tests). */

@@ -750,6 +750,7 @@ mod tests {
     fn finalized_row(transaction_id: &str) -> UsageMeterRow {
         let now = Utc::now() - Duration::seconds(120);
         UsageMeterRow {
+            org_channel_guest: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: transaction_id.to_string(),

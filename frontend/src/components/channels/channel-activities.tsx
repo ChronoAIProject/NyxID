@@ -92,7 +92,7 @@ export function ChannelActivities({
     <DetailSection title="Received activities">
       <div className="space-y-4 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {query.error
               ? "Activity count unavailable"
               : query.isPending
@@ -120,7 +120,7 @@ export function ChannelActivities({
             </SelectContent>
           </Select>
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Received means NyxID recorded the activity. Callback acceptance means
           the agent acknowledged it; it does not confirm processing. Message
           content is not stored here.
@@ -131,9 +131,9 @@ export function ChannelActivities({
             onRetry={() => void query.refetch()}
           />
         ) : query.isPending ? (
-          <p className="text-xs text-muted-foreground">Loading activities…</p>
+          <p className="text-13 text-muted-foreground">Loading activities…</p>
         ) : !query.data.activities.length ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             No matching activity received in this period.
           </p>
         ) : (
@@ -144,25 +144,36 @@ export function ChannelActivities({
                   <Badge variant="secondary">
                     {activityLabel(activity.kind, descriptors)}
                   </Badge>
-                  <span className="text-xs text-muted-foreground">
+                  <span className="text-13 text-muted-foreground">
                     {formatRelativeTime(activity.received_at)}
                   </span>
-                  <span className="text-xs">
+                  <span className="text-13">
                     {callbackLabel(activity.callback_status)}
                   </span>
                 </div>
-                <p className="break-all text-xs text-muted-foreground">
+                <p className="break-all text-13 text-muted-foreground">
                   From {activity.sender_platform_id ?? "unknown sender"} ·{" "}
                   {activity.platform_conversation_id ?? "unknown conversation"}
                 </p>
+                {activity.nyxbot_admission && (
+                  <div className="space-y-1 break-all text-13 text-muted-foreground" aria-label="NyxBot admission">
+                    <p>NyxBot admission: {activity.nyxbot_admission.disposition.replaceAll("_", " ")}</p>
+                    <p>Bot mentioned: {activity.nyxbot_admission.bot_mentioned === null ? "unknown" : activity.nyxbot_admission.bot_mentioned ? "yes" : "no"}
+                      {activity.nyxbot_admission.managed_role_mentioned ? " (own managed role)" : ""} · Broadcast roles: {activity.nyxbot_admission.broadcast_roles ?? "unknown"}
+                      {activity.nyxbot_admission.broadcast_everyone_or_here ? " · @everyone/@here" : ""}</p>
+                    <p>Address: {activity.nyxbot_admission.address} · Thread follow: {activity.nyxbot_admission.thread_follow_selection ?? "not evaluated"}</p>
+                    {activity.nyxbot_admission.resolved_thread_id && <p>Thread: {activity.nyxbot_admission.resolved_thread_id}</p>}
+                    <p>{activity.nyxbot_admission.turn_id ? `Turn: ${activity.nyxbot_admission.turn_id}` : "No agent turn started."}</p>
+                  </div>
+                )}
                 {activity.content_availability === "encrypted" && (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Encrypted message received. Text and replies are
                     unavailable.
                   </p>
                 )}
                 {activity.content_availability === "metadata_only" && (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Metadata notification. Replies are unavailable.
                   </p>
                 )}
@@ -211,7 +222,7 @@ export function ActivityCallbackSettings({
   return (
     <DetailSection title="Typed activity callbacks">
       <div className="space-y-3 p-4">
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Enable activity types only after your agent declares support for this
           route. Encrypted chat and own-post notifications contain metadata and
           cannot be replied to. Enabling applies to new activity; earlier
@@ -220,12 +231,12 @@ export function ActivityCallbackSettings({
         {query.error ? (
           <ErrorBanner message="Agent activity support could not be loaded." />
         ) : query.isPending ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Loading agent support…
           </p>
         ) : (
           <>
-            <p className="text-xs">
+            <p className="text-13">
               {query.data.declared
                 ? `Agent supports: ${query.data.kinds.map((kind) => activityLabel(kind, descriptors)).join(", ")}`
                 : "The assigned agent has not declared support for its current callback. Existing callbacks continue normally."}
