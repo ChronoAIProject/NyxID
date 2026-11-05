@@ -74,6 +74,27 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// Per-person rollout for CMA's prepaid Sandbox allocation billing. This is
+/// deliberately separate from the general billing flag so operators can
+/// enable CMA for a pilot owner independently of other metered traffic. The
+/// operational `CMA_BILLING_ENABLED` setting remains a fleet-wide admission
+/// gate; both gates must allow new Sandbox coverage.
+pub const CMA_SANDBOX_BILLING_FLAG_KEY: &str = "experimental:cma-sandbox-billing";
+
+const CMA_SANDBOX_BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMA_SANDBOX_BILLING_FLAG_KEY,
+    description: "Enable prepaid CMA Sandbox allocation billing for the selected global, organization, or personal rollout audience.",
+    default_enabled: false,
+};
+
+/// Lago plan writes are shared across owners and have an independent runtime gate.
+pub const CMA_SANDBOX_RATE_SYNC_FLAG_KEY: &str = "experimental:cma-sandbox-rate-sync";
+const CMA_SANDBOX_RATE_SYNC_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
+    description: "Synchronize CMA Sandbox rate cards to Lago (global only). Disabling preserves existing rates and does not change billing admission gates.",
+    default_enabled: true,
+};
+
 /// Personal rollout for new hosted Machine admission and runtime-rate writes.
 /// Existing management, runtime accounting and cleanup remain available.
 pub const REMOTE_MACHINES_FLAG_KEY: &str = "experimental:remote-machines";
@@ -333,8 +354,12 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
-/// Flags read before any user or organization is known; only a global override applies.
-const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[INVITATION_CODE_FLAG_KEY, MOBILE_NEW_DOMAINS_FLAG_KEY];
+/// Flags resolved without a user or organization; only a global override applies.
+const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
+    INVITATION_CODE_FLAG_KEY,
+    MOBILE_NEW_DOMAINS_FLAG_KEY,
+    CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
+];
 
 pub(crate) fn is_global_only(flag_key: &str) -> bool {
     GLOBAL_ONLY_FLAG_KEYS.contains(&flag_key)
@@ -439,6 +464,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
+    CMA_SANDBOX_BILLING_FLAG,
+    CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -490,6 +517,8 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
+    CMA_SANDBOX_BILLING_FLAG,
+    CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -1005,6 +1034,11 @@ pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool>
 /// Read by unauthenticated mobile launches, so only the global override applies.
 pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &MOBILE_NEW_DOMAINS_FLAG).await
+}
+
+/// Resolve live for each retry pass; turning off shared Lago writes needs no redeploy.
+pub async fn cma_sandbox_rate_sync_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &CMA_SANDBOX_RATE_SYNC_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
@@ -3108,6 +3142,8 @@ mod tests {
                 "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
+                "experimental:cma-sandbox-billing",
+                "experimental:cma-sandbox-rate-sync",
                 "experimental:remote-machines",
                 "services:monitoring",
                 "experimental:aevatar-chat-wire-log",
