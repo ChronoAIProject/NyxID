@@ -63,7 +63,7 @@ import {
 } from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite, canCreateFeatureFlags } from "@/types/api";
-import { isGlobalOnlyFlag } from "@/lib/feature-flags";
+import { isGlobalOnlyFlag, isUserOnlyFlag } from "@/lib/feature-flags";
 import { FlagOrganizationEditor } from "@/components/admin/feature-flags/flag-organization-editor";
 import {
   FlagBrowserControls,
@@ -236,12 +236,16 @@ export function AdminFeatureFlagsPage() {
               delete next[item.key];
           return next;
         });
-        const failed = batch.filter(
-          (_, index) => results[index]?.status === "rejected",
-        );
+        const failed = batch.flatMap((item, index) => {
+          const result = results[index];
+          if (result?.status !== "rejected") return [];
+          const reason =
+            result.reason instanceof Error ? result.reason.message : "";
+          return [{ item, reason }];
+        });
         if (failed.length)
           toast.error(
-            `Applied ${successful.length}; failed: ${failed.map((item) => `${item.flagKey} / ${item.type} ${item.id}`).join(", ")}. Review remaining changes before retrying.`,
+            `Applied ${successful.length}; failed: ${failed.map(({ item, reason }) => `${item.flagKey} / ${item.type} ${item.id}${reason ? ` (${reason})` : ""}`).join(", ")}. Review remaining changes before retrying.`,
           );
         else toast.success(`${successful.length} changes applied`);
       } finally {
@@ -990,11 +994,17 @@ function FlagTableRows({
                   disabled={!canWrite}
                   onChange={(s) => stage("global", "", s)}
                 />
+                {isUserOnlyFlag(flag.key) && (
+                  <p className="mt-2 type-secondary text-text-tertiary">
+                    Per-person only: global and organization enables are
+                    refused. Enable individual people under By user.
+                  </p>
+                )}
               </Group>
 
               {!isGlobalOnlyFlag(flag.key) && (
                 <Group label="By organization">
-                  {canWrite && (
+                  {canWrite && !isUserOnlyFlag(flag.key) && (
                     <AccountSearchPicker
                       flagKey={flag.key}
                       kind="org"
