@@ -127,3 +127,25 @@ test("requester falls back to the real requester type when an agent label is abs
     fixture.requester_type,
   );
 });
+
+
+test("execution proposals remain link-only and never enable legacy mobile approval", () => {
+  const detail = mapBackendRequestToChallenge({ ...fixture,
+    expires_at: new Date(Date.now() + 120_000).toISOString(),
+    execution_proposal: {version: 1, supported: true, can_decide: true,
+      review_path: "/assistant/approvals", state: "pending"},
+  });
+  assert.equal(getChallengeActionState(detail).canDecide, false);
+  assert.equal(detail.execution_proposal?.review_path, "/assistant/approvals");
+});
+
+test("unknown execution proposal versions also refuse mobile decisions while legacy requests remain decidable", () => {
+  const live = { ...fixture, expires_at: new Date(Date.now() + 120_000).toISOString() };
+  assert.equal(getChallengeActionState(mapBackendRequestToChallenge(live)).canDecide, true);
+  const detail = mapBackendRequestToChallenge({ ...live,
+    execution_proposal: { version: 2, supported: false, can_decide: true,
+      review_path: "/assistant/approvals", state: "unsupported" },
+  });
+  assert.equal(getChallengeActionState(detail).canDecide, false);
+  assert.match(getChallengeActionState(detail).reason ?? "", /web app/);
+});

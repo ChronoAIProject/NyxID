@@ -110,8 +110,10 @@ pub(crate) async fn bind_key(
     row: &AssistantConversation,
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    let b = binding(row)?;
-    transactions::update_one(db,doc! {"_id":&row.credential_api_key_id,"user_id":&row.user_id,"is_active":true},doc! {"$set":{"assistant_group_id":&b.group_id,"allow_all_nodes":false,"allowed_node_ids":[],"scopes":credentials::ASSISTANT_SCOPES}},Some(&mut *session)).await?;
+    binding(row)?;
+    // KeyAuthority::Collaboration applies the complete key authority at
+    // provisioning/convergence. Only mark the encrypted row here; repeating
+    // an identical security mutation invalidates reviewed pending effects.
     db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME)
         .update_one(doc! {"conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"user_id":&row.user_id},doc! {"$set":{"collaboration":true}})
         .session(session).await?;
@@ -162,6 +164,13 @@ pub(super) async fn retire_thread(
         )
         .session(&mut *session)
         .await?;
+    super::super::execution_permission_dispatch::proposals::cancel_in_session(
+        db,
+        session,
+        doc! {"execution_proposal.v1.conversation_id":id},
+        "group_authority_changed",
+    )
+    .await?;
     db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
         .update_many(
             doc! {"assistant_group.conversation_id":id,"status":{"$in":["pending","approved"]}},
@@ -183,7 +192,7 @@ pub(crate) async fn key_authority(
     let agent = &access.agent(&b.agent_id).ok_or_else(missing)?.agent;
     let mut grants = agent.grants.clone();
     grants.account_read = false;
-    if b.authority.lane == model::Lane::Shared {
+    let authority = if b.authority.lane == model::Lane::Shared {
         let shared =
             svc::shared_agent_service::require(db, &b.original_requester_id, agent).await?;
         if shared.revision() != b.authority.revision {
@@ -194,18 +203,18 @@ pub(crate) async fn key_authority(
         grants
             .platform_service_ids
             .retain(|id| shared.level(id).is_some());
-        Ok(KeyAuthority::Shared(
-            grants,
-            shared.operation_scopes(),
-            agent.user_id.clone(),
-        ))
+        KeyAuthority::Shared(grants, shared.operation_scopes(), agent.user_id.clone())
     } else {
-        Ok(KeyAuthority::Subagent(
+        KeyAuthority::Subagent(
             grants,
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
-        ))
-    }
+        )
+    };
+    Ok(KeyAuthority::Collaboration(
+        Box::new(authority),
+        b.group_id.clone(),
+    ))
 }
 
 /// Privacy projection applies even when the requester owns this specialist.
@@ -316,7 +325,7 @@ pub(super) async fn begin_ready(
                 if row.collaboration.as_ref().is_some_and(|old|old.request_id!=request) {
                     let waiting=db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).find_one(doc! {"conversation_id":id,"kind":"action","status":{"$in":["pending","allowed"]},"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some()
                         || db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).find_one(doc! {"conversation_id":id,"decision":{"$in":["pending","once"]},"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some();
-                    let approval_waiting=db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME).find_one(doc! {"assistant_group.conversation_id":id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some();
+                    let approval_waiting=db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME).find_one(doc! {"assistant_group.conversation_id":id,"$or":[{"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},{"execution_proposal.v1.state":{"$in":["queued","preparing","dispatched","waiting"]},"execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}}]}).session(&mut *session).await?.is_some();
                     if waiting || approval_waiting {return Err(AppError::AssistantTurnActive);}
                     db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).update_many(doc! {"conversation_id":id,"decision":"skip"},doc! {"$set":{"decision":"revoked","updated_at":bson::DateTime::now()}}).session(&mut *session).await?;
                     // Completed request cards cannot authorize a different chain.

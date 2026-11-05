@@ -1240,6 +1240,7 @@ function NyxAgentThreadPage() {
                         type: "approval_card",
                         block_id: message.id,
                         approval_request_id: approval.id,
+                        execution_proposal: approval.execution_proposal,
                         body: `${approval.service_name}: ${approval.summary}`,
                         service_slug: approval.service_slug,
                         agent_key_prefix: approval.agent_key_prefix,

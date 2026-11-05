@@ -1495,6 +1495,31 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .await?;
     ensure_exact_service_semantic_effect_index(&approval_requests).await?;
 
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v1.effect_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("execution_proposal_effect_v1".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v1.effect_id":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc! {"execution_proposal.version":1,"execution_proposal.v1.delivered_turn_id":1,"execution_proposal.v1.maintenance_at":1,"created_at":1}).build()).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v1.gap_key":1,"created_at":-1})
+                .build(),
+        )
+        .await?;
+
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants

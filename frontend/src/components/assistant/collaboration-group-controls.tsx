@@ -1,3 +1,4 @@
+import { ExecutionPermissionCard } from "./blocks/execution-permission-card";
 import { useState } from "react";
 import { Switch } from "@/components/ui/switch";
 import { GroupAgentAccessRequest } from "./group-agent-access";
@@ -588,7 +589,9 @@ export function CollaborationCards({
   const mutation = useCollaborationDecision(group.id);
   return (
     <div className="mx-auto max-w-3xl space-y-2 px-4">
-      {decisions.map((card, i) => (
+      {decisions.map((card, i) => card.execution_proposal && card.id && card.can_decide ? (
+        <ExecutionPermissionCard key={card.id} requestId={card.id} proposal={card.execution_proposal} />
+      ) : (
         <div
           key={card.id ?? `${card.requester_id}-${String(i)}`}
           className="space-y-2 rounded-lg border border-border bg-card p-3 text-12"

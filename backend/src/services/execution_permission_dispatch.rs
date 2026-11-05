@@ -1,5 +1,5 @@
 //! Opt-in HTTP execution admission. Enrollment is a read-budget hint, never authority.
-//! Gaps retain the legacy prompt chain. No permission authoring or proposal cards.
+//! Recoverable assistant gaps use human-authored proposals; other gaps retain legacy prompts.
 use std::sync::{Arc, OnceLock};
 
 use bson::{Document, doc};
@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod authority;
+pub(crate) mod proposals;
 pub(crate) mod tasks;
 
 pub const READINESS: &str = "permissions:execution-dispatch-v1";
@@ -32,6 +33,9 @@ pub(crate) struct RequestContext {
     pub(crate) actor: String,
     pub(crate) principal: Principal,
     pub(crate) operation_id: String,
+    authoring: std::sync::atomic::AtomicBool,
+    generated_correlation: OnceLock<String>,
+    resume: Option<Arc<proposals::Resume>>,
     drain: OnceLock<Drain>,
     authenticated_key: OnceLock<String>,
     source_credential: OnceLock<String>,
@@ -58,6 +62,48 @@ struct Drain {
 }
 
 impl RequestContext {
+    /// Set only when the proxy itself generated the header; caller-supplied
+    /// correlation IDs remain exact inputs and cannot use this exemption.
+    pub(crate) fn bind_generated_correlation(&self, value: &str) {
+        let _ = self.generated_correlation.set(value.to_owned());
+    }
+    pub(crate) fn enable_authoring(&self) {
+        self.authoring
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub(crate) fn for_resume(
+        auth: &mut crate::mw::auth::AuthUser,
+        resume: proposals::Resume,
+    ) -> AppResult<()> {
+        let chat = auth
+            .assistant_chat
+            .as_deref()
+            .filter(|c| proposals::supported_chat(c))
+            .ok_or_else(refused)?;
+        let context = Self::enrolled(Some(VERSION), &chat.user_id, &chat.api_key_id, Some(chat))
+            .ok_or_else(refused)?;
+        let mut context = Arc::try_unwrap(context).map_err(|_| refused())?;
+        let authenticated = auth.execution_permission.as_ref().ok_or_else(refused)?;
+        if let Some(key) = authenticated.authenticated_key.get() {
+            let _ = context.authenticated_key.set(key.clone());
+        }
+        if let Some(credential) = authenticated.source_credential.get() {
+            let _ = context.source_credential.set(credential.clone());
+        }
+        context.operation_id = resume.effect_id.clone();
+        if let Some(value) = resume.effect.generated_correlation.as_deref() {
+            context.bind_generated_correlation(value);
+        }
+        context.resume = Some(Arc::new(resume));
+        context.enable_authoring();
+        let context = Arc::new(context);
+        let mut chat = chat.clone();
+        chat.execution_permission = Some(context.clone());
+        auth.execution_permission = Some(context);
+        auth.assistant_chat = Some(Arc::new(chat));
+        Ok(())
+    }
+
     pub(crate) fn participating(&self) -> bool {
         self.drain.get().is_some()
     }
@@ -113,6 +159,9 @@ impl RequestContext {
                 |c| Principal::Agent(c.agent_id.clone()),
             ),
             operation_id: Uuid::new_v4().to_string(),
+            authoring: std::sync::atomic::AtomicBool::new(false),
+            generated_correlation: OnceLock::new(),
+            resume: None,
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
@@ -309,6 +358,8 @@ pub(crate) struct Permit {
     source_credential: Option<String>,
     claim_id: String,
     authority: Arc<authority::Snapshot>,
+    resume: Option<Arc<proposals::Resume>>,
+    generated_correlation: Option<String>,
 }
 
 impl Permit {
@@ -352,6 +403,9 @@ pub(crate) fn risk_gate(
 fn prepared_headers(headers: &axum::http::HeaderMap) -> AppResult<Vec<(String, String)>> {
     let mut values: Vec<_> = headers
         .iter()
+        // This is NyxID control metadata, never an input to the provider.
+        // A retained MCP effect can carry it when a separate floor was approved.
+        .filter(|(name, _)| name.as_str() != super::assistant_service_execution::ACK_HEADER)
         .map(|(name, value)| {
             Ok((
                 name.as_str().to_owned(),
@@ -524,11 +578,21 @@ pub(crate) fn prepare<'a>(
         } else {
             CanonicalPath::from_rest_decoded(effect.path)?
         };
+        let scope_headers = proposals::scope_headers(
+            effect.headers,
+            context.generated_correlation.get().map(String::as_str),
+        );
         let digest = super::mcp_service::canonical_sha256(
             json!({"method":effect.method,"path":effect.path,
-        "query":effect.query,"body":effect.body,"headers":effect.headers,"endpoint":effect.endpoint,
+        "query":effect.query,"body":effect.body,"headers":scope_headers,"endpoint":effect.endpoint,
         "target":target_digest(effect.target),"subject":subject,"binding":binding,"audience":audience}),
         );
+        if context.resume.is_none()
+            && context.authoring.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(chat) = chat.filter(|c| proposals::supported_chat(c))
+        {
+            proposals::existing_effect(db, chat, effect.connection, &digest).await?;
+        }
         let mut candidates: Vec<_> = rows.iter().collect();
         candidates.sort_by_key(|row| {
             match row
@@ -545,8 +609,39 @@ pub(crate) fn prepare<'a>(
         });
         let mut prohibited = None;
         let mut gap = rows.is_empty();
+        let mut gaps = Vec::new();
+        if rows.is_empty() {
+            gaps.push(contract::Gap::MissingPermission);
+        }
         let mut failure = None;
         for grant in candidates {
+            if let Some(resume) = &context.resume {
+                if grant.id != resume.grant_id {
+                    continue;
+                }
+                if digest != resume.prepared_digest || authority.digest() != resume.authority_digest
+                {
+                    return Err(refused());
+                }
+            }
+            if grant.execution_review.is_some()
+                && grant
+                    .execution
+                    .as_ref()
+                    .and_then(|e| e.v1.as_ref())
+                    .is_some_and(|c| !matches!(c.validity, Validity::Operation { .. }))
+                && !proposals::reusable_shape(
+                    effect.method,
+                    effect.body,
+                    effect.content_type,
+                    &scope_headers,
+                )
+            {
+                gap = true;
+                gaps.push(contract::Gap::Operation);
+                continue;
+            }
+
             let claim = match grant.execution_use.as_ref() {
                 None => contract::ClaimState::Available,
                 Some(use_)
@@ -626,6 +721,8 @@ pub(crate) fn prepare<'a>(
                         source_credential: context.source_credential.get().cloned(),
                         claim_id: Uuid::new_v4().to_string(),
                         authority,
+                        resume: context.resume.clone(),
+                        generated_correlation: context.generated_correlation.get().cloned(),
                     });
                     context
                         .decision
@@ -633,7 +730,12 @@ pub(crate) fn prepare<'a>(
                         .map_err(|_| refused())?;
                     return Ok(Some(permit));
                 }
-                Ok(contract::Decision::RequestableGap(_)) => gap = true,
+                Ok(contract::Decision::RequestableGap(reason)) => {
+                    gap = true;
+                    if !gaps.contains(&reason) {
+                        gaps.push(reason);
+                    }
+                }
                 Ok(contract::Decision::Prohibited(reason)) => {
                     prohibited.get_or_insert(reason);
                 }
@@ -655,6 +757,27 @@ pub(crate) fn prepare<'a>(
         }
         if !gap && prohibited.is_some() {
             return Err(refused());
+        }
+        if context.resume.is_some() {
+            return Err(refused());
+        }
+        if context.authoring.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(chat) = chat
+            && let Some(request) = proposals::create(
+                db, keys, context, chat, &effect, subject, binding, audience, digest, &authority,
+                &gaps,
+            )
+            .await?
+        {
+            return Err(
+                if request.status == "pending" && request.expires_at > Utc::now() {
+                    AppError::ApprovalRequired {
+                        request_id: request.id,
+                    }
+                } else {
+                    AppError::ApprovalFailed { request_id: request.id, reason: "This operation already has a terminal or saved decision; it will not be repeated".into(), approve_url: "/assistant/approvals".into() }
+                },
+            );
         }
         let _ = context.decision.set(Resolution::Gap);
         Ok(None)
@@ -700,6 +823,9 @@ impl Permit {
                 actor: self.subject.actor_user_id.clone(),
                 principal: self.subject.principal.clone(),
                 operation_id: self.operation_id.clone(),
+                authoring: std::sync::atomic::AtomicBool::new(false),
+                generated_correlation: OnceLock::new(),
+                resume: None,
                 drain: OnceLock::new(),
                 authenticated_key: OnceLock::new(),
                 source_credential: OnceLock::new(),
@@ -733,6 +859,21 @@ impl Permit {
     }
 
     fn validate_grant(&self, grant: &ApprovalGrant) -> AppResult<()> {
+        if grant.execution_review.is_some()
+            && grant
+                .execution
+                .as_ref()
+                .and_then(|e| e.v1.as_ref())
+                .is_some_and(|c| !matches!(c.validity, Validity::Operation { .. }))
+            && !proposals::reusable_shape(
+                &self.method,
+                &self.body,
+                self.content_type.as_deref(),
+                &proposals::scope_headers(&self.headers, self.generated_correlation.as_deref()),
+            )
+        {
+            return Err(refused());
+        }
         if let Some(use_) = &grant.execution_use {
             if use_.version != VERSION
                 || matches!(
@@ -1082,7 +1223,18 @@ impl Permit {
             {
                 return Err(refused());
             }
+            if let Some(resume) = &self.resume {
+                resume.fence(&self.db, session, dispatch).await?;
+            }
             if dispatch {
+                self.db
+                    .collection::<Document>("approval_grants")
+                    .update_one(
+                        doc! {"_id":&current.id},
+                        doc! {"$set":{"execution_last_used_at":bson::DateTime::now()}},
+                    )
+                    .session(&mut *session)
+                    .await?;
                 let key = super::audit_service::audit_chain_hmac_key()
                     .ok_or_else(|| AppError::Internal("Audit chain unavailable".into()))?;
                 super::audit_service::log_actor_event_in_session(&self.db,session,key,&super::audit_service::AuditActor {user_id:self.subject.actor_user_id.clone(),api_key_id:Some(self.key.clone()),api_key_name:None,ip_address:None,user_agent:None},
@@ -1305,9 +1457,39 @@ pub(crate) fn admit_http<'a>(
                 }
             }
         }
-        if floors.is_empty() {
+        if let Some(resume) = &context.resume {
+            let grant = context
+                .candidates(&state.db, connection)
+                .await?
+                .iter()
+                .find(|g| g.id == resume.grant_id)
+                .ok_or_else(refused)?;
+            for floor in &grant
+                .execution
+                .as_ref()
+                .and_then(|e| e.v1.as_ref())
+                .ok_or_else(refused)?
+                .satisfies
+            {
+                if !floors.contains(floor) {
+                    floors.push(*floor);
+                }
+            }
+        }
+        if floors.is_empty()
+            && !(context.authoring.load(std::sync::atomic::Ordering::Relaxed)
+                && auth
+                    .assistant_chat
+                    .as_deref()
+                    .is_some_and(proposals::supported_chat))
+        {
             return Ok(());
         }
+        let endpoint = context
+            .resume
+            .as_ref()
+            .and_then(|r| r.effect.endpoint.as_deref())
+            .or(endpoint);
         let semantic_headers = if endpoint.is_some() {
             prepared_headers(headers)?
         } else {
@@ -1357,7 +1539,7 @@ pub(crate) fn approval_outcome(
         && owner == permit.subject.actor_user_id
         && connection
             .is_some_and(|id| permit.satisfies(ExecutionFloor::PersonalServiceApproval, id))
-        && matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p) if !p.resolution.from_org_policy)
+        && matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p) if !p.resolution.from_org_policy && p.primary_owner_user_id == permit.subject.actor_user_id)
     {
         super::approval_service::ApprovalOutcome::Allowed { required: false }
     } else {

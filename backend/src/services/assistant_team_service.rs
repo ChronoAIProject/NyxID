@@ -829,7 +829,7 @@ async fn create_thread_with_kind(
         db, &row, session, snapshot,
     ))
     .await?;
-    row.shared_agent_thread = matches!(authority, KeyAuthority::Shared(..));
+    row.shared_agent_thread = authority.is_shared();
 
     let credential = credentials::load_or_provision_in_session(
         db,

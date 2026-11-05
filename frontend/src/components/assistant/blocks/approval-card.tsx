@@ -1,3 +1,4 @@
+import { ExecutionPermissionCard } from "./execution-permission-card";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import {
@@ -163,7 +164,7 @@ function SubmittedCard({
   );
 }
 
-export function ApprovalCard({
+function LegacyApprovalCard({
   block,
   disabled = false,
   onDecide,
@@ -307,4 +308,10 @@ export function ApprovalCard({
       </div>
     </section>
   );
+}
+
+export function ApprovalCard(props: Parameters<typeof LegacyApprovalCard>[0]) {
+  return props.block.execution_proposal
+    ? <ExecutionPermissionCard requestId={props.block.approval_request_id} proposal={props.block.execution_proposal} disabled={props.disabled} />
+    : <LegacyApprovalCard {...props} />;
 }

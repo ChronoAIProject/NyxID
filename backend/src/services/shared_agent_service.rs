@@ -1518,6 +1518,7 @@ pub async fn update(
             .await?;
     }
     if authority_changed {
+        super::execution_permission_dispatch::proposals::cancel_in_session(db,&mut session,doc!{"execution_proposal.v1.contract.subject.principal":{"kind":"agent","id":id},"execution_proposal.v1.contract.subject.lane":"shared"},"sharing_changed").await?;
         // Narrowing or changing authority invalidates every consent. Late tool
         // requests still resolve live ACLs, even before stopped turns settle.
         db.collection::<bson::Document>(model::CONSENTS_COLLECTION_NAME)

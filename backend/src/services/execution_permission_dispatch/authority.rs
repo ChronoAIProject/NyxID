@@ -38,6 +38,12 @@ fn projection(collection: &str) -> Document {
     }
     let mut projection = doc! {"last_used_at":0,"updated_at":0,"created_at":0,"execution_dispatch_fence":0,
     "execution_task_fence":0,"mutation_fence":0,"reference_fence":0};
+    if collection == "org_memberships" {
+        // Live collaboration admission writes this lock counter in the same
+        // transaction. It is not a membership/role revision; those authority
+        // fields remain compared and the row remains transactionally fenced.
+        projection.insert("collaboration_fence", 0);
+    }
     // Keep the required shape for typed normalization of legacy defaults. The
     // snapshot stays private and never implements Debug or leaves the process.
     if collection == "api_keys" {
@@ -238,6 +244,12 @@ impl Snapshot {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn digest(&self) -> String {
+        super::super::mcp_service::canonical_sha256(
+            serde_json::to_value(&self.0).expect("snapshot encoding"),
+        )
     }
 
     pub(super) fn same(&self, other: &Self) -> bool {

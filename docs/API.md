@@ -8598,6 +8598,27 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/requests/550e8400-e29b-41d4-a716-446655440000/decide
 ```
 
+### Decide an assistant execution permission (default off)
+
+`POST /api/v1/approvals/requests/{request_id}/execution-decision` is a dedicated
+first-party-human endpoint for `execution_proposal` cards. The body contains
+`approved`, `expected_revision`, `choice_id`, `choice_digest`, and an
+`idempotency_key`; denial uses null choice fields. Operation is the default.
+The response is the current approval-request DTO, including the additive proposal
+review and independent operation status. A saved permission is not proof that the
+provider call completed. The server resumes the retained effect; clients must not
+reconstruct or automatically retry it.
+
+Only enrolled assistant MCP/proxy sources with live server task lineage create
+these cards. The authoring readiness capability is required, along with reader
+and dispatch readiness; enrollment is per-person only. The legacy `/decide` path
+refuses every proposal before mutation. Card detail and approved scope/input
+review are visible only to the acting first-party human, including requester-only
+group cards. Existing list/revoke routes manage the resulting execution grants.
+Mobile/Telegram offer a web link. See [execution permissions](EXECUTION_PERMISSIONS.md#permission-updates-and-resume-2195-part-a)
+for supported request shapes, four validity choices, encrypted retention limits
+and crash/recovery behavior. Existing legacy requests keep their semantics.
+
 ### List Active Grants
 
 ```

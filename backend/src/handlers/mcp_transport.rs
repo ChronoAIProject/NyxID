@@ -7888,6 +7888,8 @@ mod tests {
 
         db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
             .insert_one(ApprovalGrant {
+                execution_review: None,
+                execution_last_used_at: None,
                 execution_use: None,
                 execution: None,
                 id: uuid::Uuid::new_v4().to_string(),

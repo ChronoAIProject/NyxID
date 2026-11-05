@@ -5,6 +5,10 @@ pub const COLLECTION_NAME: &str = "approval_grants";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalGrant {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_review: Option<super::execution_proposal::Review>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub execution_last_used_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Mutable one-operation claim, separate from immutable permission scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_use: Option<super::execution_permission::ExecutionUse>,
@@ -88,6 +92,8 @@ mod tests {
 
     fn make_approval_grant() -> ApprovalGrant {
         ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
             execution_use: None,
             execution: None,
             id: uuid::Uuid::new_v4().to_string(),

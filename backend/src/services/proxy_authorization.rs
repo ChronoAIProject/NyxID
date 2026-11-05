@@ -41,7 +41,6 @@ impl CanonicalPath {
         Ok(Self { segments })
     }
 
-    #[cfg(test)]
     pub fn as_policy_path(&self) -> String {
         if self.segments.is_empty() {
             "/".to_string()

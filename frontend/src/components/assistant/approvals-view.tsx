@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
+import { ExecutionPermissionCard } from "@/components/assistant/blocks/execution-permission-card";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -140,11 +141,17 @@ function HistorySection({
     );
   }
 
+  const legacy = entries.filter((entry) => !entry.block.execution_proposal);
   return (
     <>
+      <div className="space-y-3">
+        {entries.filter((entry) => entry.block.execution_proposal).map((entry) => (
+          <ExecutionPermissionCard key={entry.requestId} requestId={entry.requestId} proposal={entry.block.execution_proposal!} />
+        ))}
+      </div>
       {/* Mobile card view */}
       <div className="flex flex-col gap-3 md:hidden">
-        {entries.map((entry) => (
+        {legacy.map((entry) => (
           <div
             key={entry.requestId}
             className="rounded-xl border border-border/50 bg-card p-4"
@@ -186,7 +193,7 @@ function HistorySection({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {entries.map((entry) => (
+            {legacy.map((entry) => (
               <TableRow key={entry.requestId}>
                 <TableCell>
                   <div className="flex min-w-0 flex-col gap-0.5">
@@ -277,7 +284,7 @@ export function ApprovalsView() {
         </h1>
         <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
           Write actions gated by your NyxID policy wait here for your decision.
-          Deciding here, in Telegram, or on mobile converges to the same result.
+          Execution permissions are reviewed here on the web. Other approvals also support Telegram and mobile.
         </p>
       </div>
 

@@ -790,7 +790,17 @@ pub async fn proxy_request(
     request
         .extensions_mut()
         .insert(ProxyExchangeStartedAt(started_at));
+    let generated_id = !request.headers().contains_key("x-request-id");
     let request_id = ensure_proxy_request_id(request.headers_mut());
+    if generated_id
+        && auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(crate::services::execution_permission_dispatch::proposals::supported_chat)
+        && let Some(context) = auth_user.execution_permission.as_ref()
+    {
+        context.bind_generated_correlation(&request_id);
+    }
     let mut resolved_slug = String::new();
     // Keep nested proxy dispatch off the handler frame (also called by
     // assistant operation-scope checks through the full router).
@@ -1143,7 +1153,17 @@ pub async fn proxy_request_by_slug(
     request
         .extensions_mut()
         .insert(ProxyExchangeStartedAt(started_at));
+    let generated_id = !request.headers().contains_key("x-request-id");
     let request_id = ensure_proxy_request_id(request.headers_mut());
+    if generated_id
+        && auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(crate::services::execution_permission_dispatch::proposals::supported_chat)
+        && let Some(context) = auth_user.execution_permission.as_ref()
+    {
+        context.bind_generated_correlation(&request_id);
+    }
     let mut resolved_slug = String::new();
     let mut result = Box::pin(proxy_request_by_slug_inner(
         &state,
@@ -4620,13 +4640,16 @@ async fn execute_resolved_proxy_inner<'a>(
 
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
-    if auth_user.execution_permission.is_some()
+    if let Some(execution_permission) = auth_user.execution_permission.as_ref()
         && machine_ingress.is_none()
         && permission_ingress.is_none()
         && !is_ws_candidate
         && !shared_connect
         && streaming_body.is_none()
     {
+        if !all_headers.contains_key(crate::services::assistant_service_execution::ACK_HEADER) {
+            execution_permission.enable_authoring();
+        }
         let mut permission_body = force_stream_usage_for_service(
             &target.service.slug,
             path,
@@ -4636,8 +4659,7 @@ async fn execute_resolved_proxy_inner<'a>(
         let mut permission_path = path.to_owned();
         let mut permission_method = method_str.as_str();
         let mut permission_headers = all_headers.clone();
-        if auth_user.execution_permission.is_some()
-            && target.service.slug == "llm-openai-codex"
+        if target.service.slug == "llm-openai-codex"
             && !is_pool_attempt
             && target.target_id.is_none()
             && is_codex_transport_path(path)

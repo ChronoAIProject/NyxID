@@ -129,7 +129,7 @@ describe("feature flag catalog", () => {
       ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
       HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
-  GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
+      GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
       CHANNEL_MEDIA: "assistant:channel-media",
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",

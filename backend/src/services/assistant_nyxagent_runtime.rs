@@ -1221,6 +1221,19 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
     }
+    if let Some(text) =
+        super::execution_permission_dispatch::proposals::resume_turn(state, egress, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
+    {
+        *partial = text.clone();
+        return Ok(TurnResult {
+            text,
+            session_id: row.nyxagent_session_id.clone(),
+            response_id: None,
+            error: None,
+        });
+    }
     let attempt = super::assistant_service_execution::begin_model_attempt(&state.db, row)
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;

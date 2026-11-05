@@ -429,6 +429,9 @@ async fn twenty_duplicate_operation_claims_send_once_and_uncertain_never_replays
             actor: f.owner.clone(),
             principal: Principal::ApiKey(f.key.clone()),
             operation_id: initial.operation_id.clone(),
+            authoring: std::sync::atomic::AtomicBool::new(false),
+            generated_correlation: OnceLock::new(),
+            resume: None,
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
@@ -488,6 +491,9 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
         actor: f.owner.clone(),
         principal: Principal::ApiKey(f.key.clone()),
         operation_id: initial.operation_id.clone(),
+        authoring: std::sync::atomic::AtomicBool::new(false),
+        generated_correlation: OnceLock::new(),
+        resume: None,
         drain: OnceLock::new(),
         authenticated_key: OnceLock::new(),
         source_credential: OnceLock::new(),
@@ -1415,6 +1421,9 @@ async fn operation_candidates_use_independent_claims_and_prefer_reusable_coverag
         actor: f.owner.clone(),
         principal: Principal::ApiKey(f.key.clone()),
         operation_id: original.operation_id.clone(),
+        authoring: std::sync::atomic::AtomicBool::new(false),
+        generated_correlation: OnceLock::new(),
+        resume: None,
         drain: OnceLock::new(),
         authenticated_key: OnceLock::new(),
         source_credential: OnceLock::new(),
@@ -2539,3 +2548,6 @@ async fn mcp_denial_and_gap_keep_transport_parity_without_provider_effects() {
         f.cleanup().await;
     }
 }
+
+#[path = "proposal_tests.rs"]
+mod proposal_tests;
