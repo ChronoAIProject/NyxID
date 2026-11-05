@@ -151,6 +151,12 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::async_service_operation::QUOTAS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (
+            m::generated_artifact::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (m::generated_artifact::DELIVERIES, doc! {"user_id":owner}),
+        (m::generated_artifact::SERIES, doc! {"user_id":owner}),
         (m::saved_login::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::machine_setup::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::machine_desktop::COLLECTION_NAME, doc! {"user_id":owner}),

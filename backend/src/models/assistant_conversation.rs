@@ -253,6 +253,9 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     /// Whether this tool image may accompany a reply sent to a channel chat.
     #[serde(default)]
     pub chat_delivery: Option<bool>,
@@ -332,6 +335,8 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_watch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
@@ -513,6 +518,8 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_head: Option<super::generated_artifact::DeliveryHead>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     /// Server-created, tool-free visitor model initialization. Never client input.

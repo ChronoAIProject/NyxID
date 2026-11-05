@@ -81,9 +81,11 @@ export function setupSettingsScreen(
   let dimensions = { width: 402, height: 874, fontScale: 1, scale: 3 };
   let pending = false;
   const mutations: unknown[] = [];
+  const deviceChoices: boolean[] = [];
   const pushes: unknown[][] = [];
   const preferences: unknown[] = [];
-  const sheets: Array<{ options: string[]; pick: (index: number) => void }> = [];
+  const sheets: Array<{ options: string[]; pick: (index: number) => void }> =
+    [];
   const jsx = (type: unknown, props: Element["props"], key?: number) => ({
     type,
     props,
@@ -119,9 +121,7 @@ export function setupSettingsScreen(
           "RefreshControl",
           "ActivityIndicator",
           "Modal",
-        ].map(
-          (name) => [name, name],
-        ),
+        ].map((name) => [name, name]),
       ),
       StyleSheet: {
         create: (styles: unknown) => styles,
@@ -145,6 +145,8 @@ export function setupSettingsScreen(
     "@tanstack/react-query": {
       useQueryClient: () => ({}),
       useQuery: ({ queryKey }: { queryKey: string[] }) => ({
+        isFetching: false,
+        isError: false,
         data:
           queryKey[1] === "profile"
             ? {
@@ -197,7 +199,11 @@ export function setupSettingsScreen(
     "../../components/ToastOverlay": { ToastOverlay: "ToastOverlay" },
     "../auth/AuthSessionContext": { useAuthSession: () => ({ signOut() {} }) },
     "../../lib/consent": {
-      useMobileConsent: () => ({ accountId: "account", enabled: false }),
+      useMobileConsent: () => ({
+        accountId: "account",
+        enabled: false,
+        setConsent: (value: boolean) => deviceChoices.push(value),
+      }),
     },
     "../../lib/analyticsConsentState": {},
     "../../lib/analyticsRelay": {},
@@ -207,7 +213,9 @@ export function setupSettingsScreen(
       useNetworkStatus: () => ({ isConnected: true }),
     },
     "../../lib/api/mobileApi": { mobileApi: {} },
-    "../../lib/api/assistantVoiceApi": { assistantVoiceFeatures: async () => [] },
+    "../../lib/api/assistantVoiceApi": {
+      assistantVoiceFeatures: async () => [],
+    },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
     "../../lib/notifications/pushNotifications": {},
     "../../theme/ThemeContext": theme,
@@ -259,6 +267,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
+    deviceChoices,
     sheets,
     pushes,
     preferences,
