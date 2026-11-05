@@ -12,12 +12,7 @@ import { dictationLocale } from "./voice/dictationLocale";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
 
-type Phase =
-  | "idle"
-  | "permission"
-  | "connecting"
-  | "listening"
-  | "stopping";
+type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 
 const NO_SPEECH = "No speech was detected. Try again.";
 const DENIED =
@@ -225,7 +220,12 @@ export function useComposerDictation({
       // speech dispatches automatically, so only a successful native final
       // result may cross its sender boundary.
       if (!continuous && (failure || interimText.trim() || !finalText.trim())) {
-        setError(failure ?? NO_SPEECH);
+        const silence = !text && (!failure || failure === NO_SPEECH);
+        setError(
+          silence
+            ? undefined
+            : (failure ?? "Speech wasn't finalized. Please try again."),
+        );
         return;
       }
       if (!text) {
@@ -325,7 +325,7 @@ export function useComposerDictation({
           if (!message || (message === NO_SPEECH && spoken())) return;
           if (event.error === "not-allowed") setPermissionDenied(true);
           failure = message;
-          setError(message);
+          if (continuous || message !== NO_SPEECH) setError(message);
         }),
         Recognizer.addListener("end", () => {
           if (!valid()) return;

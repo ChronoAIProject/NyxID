@@ -24,27 +24,194 @@ function routes(data: unknown) {
   assert.ok(state, `Native route missing for ${href}`);
   return state.routes.flatMap((r) => r.state?.routes ?? [r]);
 }
-test("backend assistant, voice, automation and group payloads resolve to exact native threads", () => {
-  for (const type of [
-    "assistant_reply",
-    "assistant_voice_completed",
-    "automation_result",
-  ]) {
-    const result = routes({
-      type,
+// Payloads built by notification_service.rs (including the callers in trigger_service,
+// mfa_service, channel_bot_health, machine_update_service and handlers/devices),
+// plus approval_service.rs:1357. push_service transports these maps unchanged.
+const backendPayloads: [
+  string,
+  Record<string, string>,
+  string,
+  Record<string, unknown> | undefined,
+][] = [
+  [
+    "automation result",
+    { type: "automation_result", conversation_id: c },
+    "Assistant",
+    { conversationId: c, draft: false, openLatest: false },
+  ],
+  [
+    "group mention",
+    {
+      type: "group_mention",
+      group_id: g,
+      deeplink: `https://nyx.example/assistant?c=${g}`,
+    },
+    "GroupChat",
+    { groupId: g },
+  ],
+  [
+    "approval",
+    {
+      type: "approval_request",
+      request_id: "request",
+      challenge_id: "request",
+      deeplink: "nyxid://challenge/request",
+      http_method: "POST",
+      resource: "/resource",
+      verb: "write",
+    },
+    "Activity",
+    { challengeId: "request" },
+  ],
+  [
+    "execution proposal",
+    {
+      type: "approval_request",
+      request_id: "request",
+      challenge_id: "request",
+      deeplink: "nyxid://challenge/request",
+      decision_kind: "execution_permission",
+      can_decide: "false",
+      review_path: "/assistant/approvals",
+    },
+    "Activity",
+    { challengeId: "request" },
+  ],
+  [
+    "organization approval",
+    {
+      type: "approval_request",
+      request_id: "request",
+      challenge_id: "request",
+      deeplink: "nyxid://challenge/request",
+      from_org_policy: "true",
+      org_id: "org",
+      org_name: "Team",
+    },
+    "Activity",
+    { challengeId: "request" },
+  ],
+  [
+    "decision",
+    { type: "approval_decision", request_id: "request", decision: "approved" },
+    "Activity",
+    { challengeId: "request" },
+  ],
+  [
+    "expiry",
+    { type: "approval_expired", request_id: "request" },
+    "Activity",
+    { challengeId: "request" },
+  ],
+  ["MFA recovery", { type: "mfa_recovery_used" }, "AccountSecurity", undefined],
+  ["MFA disabled", { type: "mfa_disabled" }, "AccountSecurity", undefined],
+  [
+    "machine lifecycle",
+    {
+      type: "machine_lifecycle",
+      machine_id: "machine",
+      operation_id: "operation",
+      url: "https://nyx.example/machines?machine=machine",
+    },
+    "Machines",
+    { machine: "machine" },
+  ],
+  [
+    "machine control",
+    {
+      type: "machine_control",
+      url: `https://nyx.example/assistant/machines/node/desktop?conversation_id=${c}&context_id=context&display=display`,
+    },
+    "MachineDesktop",
+    {
+      nodeId: "node",
       conversation_id: c,
-      request_id: "voice-work-is-not-an-approval",
-      agent_id: "agent",
-      acknowledgement_id: "card",
-    }).at(-1)!;
-    assert.equal(result.name, "Assistant");
-    assert.equal((result.params as any).conversationId, c);
-    assert.equal((result.params as any).agentId, "agent");
-    assert.equal((result.params as any).acknowledgementId, "card");
-    assert.equal((result.params as any).draft, false);
-  }
+      context_id: "context",
+      display: "display",
+    },
+  ],
+  [
+    "trigger",
+    {
+      type: "trigger_event",
+      trigger_label: "Webhook",
+      event_id: "event",
+      preview: "Preview",
+    },
+    "Automations",
+    undefined,
+  ],
+  [
+    "device binding",
+    {
+      type: "device_bind_success",
+      template: "device_bind_success",
+      hw_id: "hardware",
+      device_label: "Laptop",
+      node_id: "credential-node",
+    },
+    "Activity",
+    undefined,
+  ],
+  [
+    "device failures",
+    {
+      type: "device_repeated_fail",
+      template: "device_repeated_fail",
+      hw_id: "hardware",
+      device_label: "Laptop",
+      node_id: "credential-node",
+      failed_poll_count: "5",
+    },
+    "Activity",
+    undefined,
+  ],
+  [
+    "device lock",
+    {
+      type: "device_lock_alert",
+      template: "device_lock_alert",
+      hw_id: "hardware",
+      device_label: "Laptop",
+      locked_until: "2026-11-06T10:00:00Z",
+      failed_poll_count: "10",
+    },
+    "Activity",
+    undefined,
+  ],
+  [
+    "expired connection",
+    {
+      type: "connection_expired",
+      service_slug: "service",
+      user_service_id: "binding",
+      api_key_id: "key",
+      reconnect_url: "https://nyx.example/keys",
+    },
+    "Plugins",
+    { tab: "connectors" },
+  ],
+  [
+    "failed channel bot",
+    {
+      type: "channel_bot_failed",
+      bot_id: "bot",
+      recommended_action: "reconnect",
+      url: "https://nyx.example/channel-bots/bot",
+    },
+    "Plugins",
+    { tab: "connectors" },
+  ],
+];
+for (const [label, payload, name, params] of backendPayloads) {
+  test(`backend push map: ${label} reaches its native destination`, () => {
+    const row = routes(payload).at(-1)!;
+    assert.equal(row.name, name);
+    assert.deepEqual(row.params, params);
+  });
+}
+test("group conversation IDs and canonical browser links retain exact threads", () => {
   for (const data of [
-    { type: "group_mention", group_id: g },
     { conversation_id: g },
     { deeplink: `https://nyx.example/assistant?c=${g}` },
   ]) {
@@ -120,4 +287,11 @@ test("trusted browser links stay native and external, credential-bearing or malf
   ]) {
     assert.equal(nativeNotificationUrl(url, config), null, url);
   }
+});
+
+test("reconnect_url maps /keys independently of the type fallback", () => {
+  assert.deepEqual(
+    routes({ reconnect_url: "https://nyx.example/keys" }).at(-1)!.params,
+    { tab: "connectors" },
+  );
 });

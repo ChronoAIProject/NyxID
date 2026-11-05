@@ -114,7 +114,7 @@ function classifyLinkType(url: string): LinkType {
 
 // No telemetry buffer: pre-consent/pre-login events cannot acquire later
 // permission or become associated with a newly selected account.
-function reportDeepLinkOpened(url: string): void {
+export function reportDeepLinkOpened(url: string): void {
   void capture({
     name: "mobile.deep_link_opened",
     props: { link_type: classifyLinkType(url) },

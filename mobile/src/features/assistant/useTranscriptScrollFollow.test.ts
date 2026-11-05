@@ -305,3 +305,78 @@ test("opening stays hidden through loading and geometry changes until native lat
   );
   h.unmount();
 });
+
+test("opening reveals by 800ms despite loading, no native acknowledgement or changing geometry", () => {
+  for (const condition of ["loading", "no-ack", "changing-geometry"]) {
+    let now = 0,
+      id = 0;
+    const timers = new Map<number, { at: number; callback: () => void }>();
+    const clock = animationClock();
+    let scope = "first";
+    let historyError = false;
+    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>(
+      { "./assistantTranscriptScroll": scrollFollower },
+      {
+        ...clock.globals,
+        setTimeout: (callback: () => void, delay: number) => {
+          timers.set(++id, { at: now + delay, callback });
+          return id;
+        },
+        clearTimeout: (key: number) => timers.delete(key),
+      },
+    );
+    const advance = (ms: number) => {
+      now += ms;
+      for (const [key, timer] of [...timers])
+        if (timer.at <= now) {
+          timers.delete(key);
+          timer.callback();
+        }
+      h.flush();
+    };
+    const hook = h.load(
+      fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
+    ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
+    h.mount(() =>
+      hook({ current: { scrollToOffset: () => {} } }, scope, {
+        loading: condition === "loading",
+        historyError,
+      }),
+    );
+    h.value().listProps.onLayout(layout(400));
+    h.value().listProps.onContentSizeChange(300, 2000);
+    advance(799);
+    if (condition === "changing-geometry") {
+      for (let i = 0; i < 10; i++) {
+        h.value().listProps.onContentSizeChange(300, 2000 + i * 10);
+        clock.frame();
+      }
+    }
+    assert.equal(h.value().ready, false, condition);
+    advance(1);
+    assert.equal(h.value().ready, true, condition);
+    assert.equal(timers.size, 0);
+    scope = "second";
+    h.render();
+    assert.equal(h.value().ready, false);
+    assert.equal(timers.size, 1);
+    advance(400);
+    scope = "third";
+    h.render();
+    advance(400);
+    assert.equal(
+      h.value().ready,
+      false,
+      "the prior scope's deadline is cancelled",
+    );
+    historyError = true;
+    h.render();
+    assert.equal(h.value().ready, true, "history errors reveal immediately");
+    assert.equal(timers.size, 0);
+    scope = "fourth";
+    historyError = false;
+    h.render();
+    h.unmount();
+    assert.equal(timers.size, 0, "unmount clears deadline");
+  }
+});

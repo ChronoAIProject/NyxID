@@ -27,6 +27,8 @@ function response(
 }
 function setup() {
   let ready = false;
+  let epoch = 1;
+  const telemetry: any[] = [];
   let state: any = { ...fixture(), routes: [{ name: "Auth" }] };
   const guards = { current: new Set<symbol>() };
   const actions: any[] = [];
@@ -60,7 +62,12 @@ function setup() {
     "../lib/linkingPrefixes": {
       buildLinkingPrefixes: () => ["nyxid://", "https://nyx.example"],
     },
-    "../lib/telemetry": { capture: async () => {} },
+    "../lib/telemetry": {
+      capture: async (event: any) => {
+        telemetry.push(event);
+      },
+    },
+    "../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../lib/notifications/notificationDestination": destination,
     "./navigationHierarchy": hierarchy,
     "./navigationLinking": config,
@@ -87,6 +94,10 @@ function setup() {
     h,
     guards,
     actions,
+    telemetry,
+    changeAccount: () => {
+      epoch++;
+    },
     cached,
     linking,
     tap: (r: any) => tap(r),
@@ -110,6 +121,9 @@ test("cold notification waits through sign-in and navigation readiness and is de
   f.tap(response({ conversation_id: "thread" }));
   assert.equal(f.actions.length, 1);
   assert.equal(f.cleared(), 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.telemetry)), [
+    { name: "mobile.deep_link_opened", props: { link_type: "other" } },
+  ]);
   f.h.unmount();
   assert.equal(f.unsubscribed(), true);
 });
@@ -165,5 +179,51 @@ test("a foreground Open fences a late cached cold response while navigation is g
   assert.equal(f.actions.length, 1);
   assert.match(JSON.stringify(f.actions[0]), /foreground-thread/);
   assert.doesNotMatch(JSON.stringify(f.actions[0]), /stale-cold-thread/);
+  f.h.unmount();
+});
+
+test("warm and toast taps report only link_type once and stale cold reads do not report", async () => {
+  const f = setup();
+  f.signIn();
+  f.tap(response({ type: "approval_request", request_id: "secret-id" }));
+  f.tap(response({ type: "approval_request", request_id: "secret-id" }));
+  f.h.value().open("https://nyx.example/assistant?c=secret-thread");
+  f.cached.resolve(response({ conversation_id: "stale" }, "cold"));
+  await f.h.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.telemetry)), [
+    { name: "mobile.deep_link_opened", props: { link_type: "challenge" } },
+    { name: "mobile.deep_link_opened", props: { link_type: "other" } },
+  ]);
+  f.h.unmount();
+});
+test("pending taps and delayed cold reads cannot cross an auth epoch", async () => {
+  for (const cold of [false, true]) {
+    const f = setup();
+    if (!cold) f.tap(response({ conversation_id: "account-a" }));
+    f.changeAccount();
+    if (cold) {
+      f.cached.resolve(response({ conversation_id: "account-a" }));
+      await f.h.settle();
+      assert.equal(f.telemetry.length, 0);
+    }
+    f.signIn();
+    assert.equal(f.actions.length, 0);
+    f.tap(response({ conversation_id: "account-b" }, "new"));
+    assert.equal(f.actions.length, 1);
+    assert.match(JSON.stringify(f.actions[0]), /account-b/);
+    f.h.unmount();
+  }
+});
+test("unrecognized destinations and empty payload taps fall back to native Activity", () => {
+  const f = setup();
+  f.signIn();
+  f.h.value().open("https://nyx.example/no-native-route");
+  f.tap(response({}));
+  assert.equal(f.actions.length, 2);
+  assert.ok(
+    f.actions.every((action) => /Activity/.test(JSON.stringify(action))),
+  );
+  f.h.value().flush();
+  assert.equal(f.actions.length, 2);
   f.h.unmount();
 });

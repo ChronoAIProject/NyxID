@@ -281,3 +281,41 @@ test("live Dynamic Type remeasures onboarding and next steps while preserving an
   assert.equal(f.tab(1).props.accessibilityState.selected, true);
   f.h.unmount();
 });
+
+test("offline Not now and native close dismiss locally without saving and allow another intro", () => {
+  for (const native of [false, true]) {
+    const f = setup();
+    f.props.online = false;
+    f.h.render();
+    assert.equal(f.button("Not now").props.disabled, undefined);
+    if (native) f.h.value().props.onRequestClose();
+    else f.button("Not now").props.onPress();
+    assert.equal(f.events.filter((e) => e[0] === "close").length, 1);
+    assert.equal(
+      f.events.filter((e) => e[0] === "save" || e[0] === "cache").length,
+      0,
+    );
+    assert.equal(f.props.state.show_intro, true);
+    f.props.visible = false;
+    f.h.render();
+    f.props.visible = true;
+    f.h.render();
+    assert.ok(f.button("Let's get started"));
+    assert.equal(f.props.state.show_intro, true);
+    f.h.unmount();
+  }
+});
+test("local close immediately fences in-flight saves from navigation and cache publication", async () => {
+  const f = setup();
+  f.button("Skip for now").props.onPress();
+  f.button("Not now").props.onPress();
+  f.resolve();
+  await f.h.settle();
+  assert.deepEqual(
+    f.events
+      .filter((e) => ["save", "cache", "close", "start"].includes(e[0]))
+      .map((e) => e[0]),
+    ["save", "close"],
+  );
+  f.h.unmount();
+});

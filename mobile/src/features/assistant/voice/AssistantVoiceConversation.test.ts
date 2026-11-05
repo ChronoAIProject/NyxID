@@ -338,6 +338,12 @@ function setup(
     "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
     "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
   });
+  harness.mock(
+    "./VoiceComposerShell",
+    harness.load(
+      fileURLToPath(new URL("./VoiceComposerShell.tsx", import.meta.url)),
+    ),
+  );
   const component = harness.load(
     fileURLToPath(new URL("./AssistantVoiceConversation.tsx", import.meta.url)),
   ).AssistantVoiceConversation as (props: unknown) => Element;
@@ -981,5 +987,27 @@ test("minimizing preserves media and session; tapping or typing expands and text
       .all()
       .some((n) => n.type === "ScrollView" && n.props.style?.maxHeight < 140),
   );
+  f.harness.unmount();
+});
+
+test("paid tariff and saved voice remain visible while auto-start is connecting", () => {
+  const f = setup({
+    source: {
+      ...source,
+      pricing: {
+        metric: "voice_seconds",
+        credits_per_unit: "0.025",
+        sync_status: "synced",
+        components: [],
+      } as any,
+    },
+  });
+  f.voice.starting = true;
+  f.harness.render();
+  assert.match(f.text(), /Cedar voice/);
+  assert.match(f.text(), /0.025 credits per second/);
+  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Voice tariff"));
+  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
+  assert.equal(f.events.filter((e) => e[0] === "start").length, 1);
   f.harness.unmount();
 });

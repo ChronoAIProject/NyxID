@@ -342,6 +342,7 @@ function GroupChat({
   const list = useRef<FlatList<GroupMessage>>(null);
   const transcriptScroll = useTranscriptScrollFollow(list, groupId, {
     loading: chat.isPending,
+    historyError: chat.isError,
     reducedMotion,
   });
   const sendLock = useRef(false);
@@ -915,6 +916,7 @@ function GroupChat({
             )}
             {voiceOpen ? (
               <CrewVoiceComposer
+                crewName={group.name}
                 scope={`${chat.epoch}:${groupId}`}
                 enabled={
                   !chat.recoveryRequired &&

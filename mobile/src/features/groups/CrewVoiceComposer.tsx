@@ -1,29 +1,31 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  AppState,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  TextInput,
-  View,
-} from "react-native";
+import { AppState, ScrollView, StyleSheet, View, Text } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import * as Speech from "expo-speech";
 import { Mic, MicOff, PhoneOff } from "lucide-react-native";
-import { ActionButton, Label } from "../../components/workspace/WorkspaceUI";
+import { Label } from "../../components/workspace/WorkspaceUI";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
+import { useSharedValue } from "react-native-reanimated";
 import {
-  ChatComposerFrame,
-  ComposerSubmitButton,
-} from "../assistant/ChatComposer";
+  VoiceComposerShell,
+  VoiceComposerHeader,
+  VoiceComposerTextRow,
+  VoiceComposerControls,
+  VoiceMainButton,
+  VoiceIconButton,
+  useVoiceComposerHeight,
+} from "../assistant/voice/VoiceComposerShell";
+import { voiceSpeechText } from "../assistant/voice/voiceSpeechText";
 import { useComposerDictation } from "../assistant/useComposerDictation";
 import type { GroupMessage } from "./groupContracts";
 
 type Props = {
   scope: string;
+  crewName: string;
   enabled: boolean;
   busy?: boolean;
   messages: readonly GroupMessage[];
@@ -42,6 +44,13 @@ type Props = {
 export function CrewVoiceComposer(props: Props) {
   const { colors } = useTheme();
   const focused = useIsFocused();
+  const reducedMotion = useReducedMotion();
+  const panelHeight = useVoiceComposerHeight();
+  const inputLevel = useSharedValue(0);
+  const outputLevel = useSharedValue(0);
+  const [foreground, setForeground] = useState(true);
+  const appActive = useRef(true);
+  const closed = useRef(false);
   const { sheetOpen } = useWorkspaceAccessibility();
   const epoch = getAuthEpoch();
   const [paused, setPaused] = useState(false);
@@ -53,18 +62,25 @@ export function CrewVoiceComposer(props: Props) {
   const mounted = useRef(true);
   const current = useRef(props);
   current.current = props;
-  const watermark = useRef(Math.max(0, ...props.messages.map((row) => row.seq)));
+  const watermark = useRef(
+    Math.max(0, ...props.messages.map((row) => row.seq)),
+  );
   const queue = useRef<string[]>([]);
   const playback = useRef(0);
   const playing = useRef(false);
   const sendLock = useRef(false);
   const available = () =>
-    mounted.current && epoch === getAuthEpoch() && current.current.enabled;
+    mounted.current &&
+    !closed.current &&
+    appActive.current &&
+    epoch === getAuthEpoch() &&
+    current.current.enabled;
   const dictation = useComposerDictation({
     scope: `crew-voice:${props.scope}`,
     enabled:
       props.enabled &&
       focused &&
+      foreground &&
       !sheetOpen &&
       !props.busy &&
       !paused &&
@@ -103,6 +119,8 @@ export function CrewVoiceComposer(props: Props) {
     void Speech.stop().catch(() => {});
   }
   function close() {
+    closed.current = true;
+    setForeground(false);
     recognition.current.discard();
     stopPlayback();
     props.onClose();
@@ -110,17 +128,21 @@ export function CrewVoiceComposer(props: Props) {
   useEffect(() => {
     mounted.current = true;
     const subscription = AppState.addEventListener("change", (state) => {
-      // iOS permission prompts temporarily make the app inactive. The speech
-      // hook waits for foreground after those prompts before opening capture.
-      if (
-        state !== "active" &&
+      if (state === "active") {
+        appActive.current = true;
+        if (!closed.current) setForeground(true);
+      } else if (
         !(state === "inactive" && recognition.current.phase === "permission")
       ) {
+        appActive.current = false;
+        setForeground(false);
         recognition.current.discard();
         stopPlayback();
         setSpeaking(false);
-        setPaused(true);
-        if (state === "background") current.current.onClose();
+        if (state === "background") {
+          closed.current = true;
+          current.current.onClose();
+        }
       }
     });
     return () => {
@@ -131,17 +153,33 @@ export function CrewVoiceComposer(props: Props) {
   }, []);
   useEffect(() => {
     if (!focused) close();
-    if (!props.enabled || paused || sheetOpen) {
+    if (
+      !props.enabled ||
+      paused ||
+      sheetOpen ||
+      !foreground ||
+      error ||
+      dictation.error
+    ) {
       stopPlayback();
       setSpeaking(false);
     }
-  }, [focused, props.enabled, paused, sheetOpen]);
+  }, [
+    focused,
+    props.enabled,
+    paused,
+    sheetOpen,
+    foreground,
+    error,
+    dictation.error,
+  ]);
   useEffect(() => {
     if (dictation.recording)
       setConnectedAt((previous) => previous ?? Date.now());
     if (
       props.enabled &&
       focused &&
+      foreground &&
       !sheetOpen &&
       !props.busy &&
       !paused &&
@@ -155,6 +193,7 @@ export function CrewVoiceComposer(props: Props) {
   }, [
     props.enabled,
     focused,
+    foreground,
     sheetOpen,
     props.busy,
     paused,
@@ -178,11 +217,20 @@ export function CrewVoiceComposer(props: Props) {
       watermark.current,
       ...fresh.map((row) => row.seq),
     );
-    if (!available() || paused || !focused || sheetOpen) return;
+    if (
+      !available() ||
+      paused ||
+      error ||
+      dictation.error ||
+      !focused ||
+      sheetOpen
+    )
+      return;
     queue.current.push(
       ...fresh
         .filter((row) => row.role === "agent" && row.text.trim())
-        .map((row) => row.text),
+        .map((row) => voiceSpeechText(row.text))
+        .filter(Boolean),
     );
     if (playing.current || !queue.current.length) return;
     recognition.current.discard();
@@ -210,24 +258,36 @@ export function CrewVoiceComposer(props: Props) {
           onDone: finish,
           onStopped: finish,
           onError: () => {
-            if (available() && ticket === playback.current)
-              setError(
-                "The reply could not be read aloud. It is available in the transcript.",
-              );
-            finish();
+            if (!available() || ticket !== playback.current || finished) return;
+            setError(
+              "The reply could not be read aloud. It is available in the transcript.",
+            );
+            finished = true;
+            stopPlayback();
+            setSpeaking(false);
           },
         });
       } catch {
         setError("Speech playback is unavailable. Continue in the transcript.");
-        finish();
+        stopPlayback();
+        setSpeaking(false);
       }
     };
     next();
-  }, [props.messages, props.enabled, paused, focused, sheetOpen]);
+  }, [
+    props.messages,
+    props.enabled,
+    paused,
+    focused,
+    sheetOpen,
+    foreground,
+    error,
+    dictation.error,
+  ]);
 
   const notice = error ?? dictation.error;
   const status =
-    !props.enabled || paused || sheetOpen
+    !props.enabled || paused || sheetOpen || !foreground
       ? "Microphone paused"
       : notice
         ? "Voice paused"
@@ -246,105 +306,128 @@ export function CrewVoiceComposer(props: Props) {
     seconds === undefined
       ? "-"
       : `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  useEffect(
+    () =>
+      dictation.subscribeLevel((level) => {
+        inputLevel.value = level;
+      }),
+    [dictation.subscribeLevel, inputLevel],
+  );
+  const togglePause = () => {
+    recognition.current.discard();
+    setError(undefined);
+    setPaused((value) => !value);
+  };
   return (
-    <ChatComposerFrame bounce={false}>
+    <VoiceComposerShell
+      minimized={props.minimized}
+      reducedMotion={reducedMotion}
+      phase={
+        notice || paused || !foreground || !props.enabled
+          ? "muted"
+          : speaking
+            ? "speaking"
+            : sending || props.busy
+              ? "thinking"
+              : dictation.recording
+                ? "listening"
+                : "connecting"
+      }
+      input={inputLevel}
+      output={outputLevel}
+    >
       {!props.minimized && (
-        <ScrollView style={styles.body} contentContainerStyle={styles.content}>
-          <Label>
-            Crew voice · {status} · {duration}
-          </Label>
+        <ScrollView
+          style={{ maxHeight: Math.max(44, panelHeight - 64) }}
+          keyboardShouldPersistTaps="handled"
+          contentContainerStyle={styles.content}
+        >
+          <VoiceComposerHeader
+            name={props.crewName}
+            status={status}
+            duration={duration}
+            error={!!notice}
+          />
           <Label muted>
             To {props.recipientLabel}. Speak to send. New agent replies are read
             aloud.
           </Label>
           {dictation.text ? <Label>{dictation.text}</Label> : null}
-          {notice ? <Label accessibilityRole="alert">{notice}</Label> : null}
           {notice ? (
-            <ActionButton
-              label="Retry crew voice"
-              disabled={!props.enabled}
-              onPress={() => {
-                dictation.discard();
-                setError(undefined);
-              }}
-            />
+            <Label accessibilityRole="alert" style={{ color: colors.danger }}>
+              {notice}
+            </Label>
           ) : null}
-          <ActionButton
-            label={paused ? "Resume crew microphone" : "Pause crew microphone"}
-            variant="secondary"
-            onPress={() => setPaused((value) => !value)}
-          />
+          <VoiceComposerControls>
+            <View style={styles.sideSpacer} />
+            <View style={styles.holdColumn}>
+              <VoiceMainButton
+                label={
+                  notice
+                    ? "Retry crew voice"
+                    : paused
+                      ? "Resume crew microphone"
+                      : "Pause crew microphone"
+                }
+                fill={paused || notice ? colors.danger : colors.textPrimary}
+                disabled={!props.enabled || !foreground}
+                onPress={
+                  notice
+                    ? () => {
+                        dictation.discard();
+                        setError(undefined);
+                        setPaused(false);
+                      }
+                    : togglePause
+                }
+              >
+                {paused ? (
+                  <MicOff color={colors.onPrimary} size={26} />
+                ) : (
+                  <Mic
+                    color={paused || notice ? colors.onPrimary : colors.bg}
+                    size={26}
+                  />
+                )}
+              </VoiceMainButton>
+              <Text style={[styles.holdHint, { color: colors.textSecondary }]}>
+                {paused ? "Paused" : "Hands-free"}
+              </Text>
+            </View>
+            <VoiceIconButton large label="End voice and close" onPress={close}>
+              <PhoneOff color={colors.danger} size={20} />
+            </VoiceIconButton>
+          </VoiceComposerControls>
         </ScrollView>
       )}
-      <View style={styles.row}>
-        <Pressable
-          style={styles.control}
-          accessibilityRole="button"
-          accessibilityLabel="Expand crew voice"
-          onPress={props.onExpand}
-        >
-          {paused ? (
-            <MicOff color={colors.textPrimary} size={20} />
-          ) : (
-            <Mic color={colors.textPrimary} size={20} />
-          )}
-        </Pressable>
-        <TextInput
-          style={[styles.input, { color: colors.textPrimary }]}
-          accessibilityLabel="Message during crew voice"
-          value={props.draft}
-          placeholder={status}
-          placeholderTextColor={colors.textSecondary}
-          onFocus={props.onExpand}
-          onChangeText={(text) => {
-            recognition.current.discard();
-            stopPlayback();
-            setSpeaking(false);
-            props.onExpand();
-            props.onChangeText(text);
-          }}
-          returnKeyType="send"
-          onSubmitEditing={() => {
-            if (props.canSendText) props.onSendText();
-          }}
-        />
-        {props.minimized ? <Label muted>{duration}</Label> : null}
-        {props.draft.trim() ? (
-          <ComposerSubmitButton
-            kind="send"
-            label="Send message during crew voice"
-            disabled={!props.canSendText}
-            onPress={props.onSendText}
-          />
-        ) : null}
-        <Pressable
-          style={styles.control}
-          accessibilityRole="button"
-          accessibilityLabel="End crew voice"
-          onPress={close}
-        >
-          <PhoneOff color={colors.danger} size={20} />
-        </Pressable>
-      </View>
-    </ChatComposerFrame>
+      <VoiceComposerTextRow
+        minimized={props.minimized}
+        status={status}
+        duration={duration}
+        inputLabel="Message during crew voice"
+        draft={props.draft}
+        onExpand={props.onExpand}
+        onChangeText={(text) => {
+          recognition.current.discard();
+          stopPlayback();
+          setSpeaking(false);
+          props.onChangeText(text);
+        }}
+        onSendText={props.onSendText}
+        canSendText={props.canSendText}
+        onClose={close}
+      />
+    </VoiceComposerShell>
   );
 }
-
 const styles = StyleSheet.create({
-  body: { maxHeight: 180, flexGrow: 0 },
-  content: { gap: 10, padding: 12 },
-  row: { flexDirection: "row", alignItems: "center", minHeight: 44 },
-  control: {
-    width: 44,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  input: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 44,
-    fontFamily: fonts.body,
-    fontSize: 14,
+  content: { gap: 10 },
+  sideSpacer: { width: 48, height: 48 },
+  holdColumn: { alignItems: "center", gap: 6 },
+  holdHint: {
+    fontFamily: fonts.bodySemi,
+    fontSize: 12,
+    lineHeight: 16,
+    minHeight: 16,
   },
 });

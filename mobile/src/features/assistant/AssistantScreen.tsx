@@ -215,7 +215,11 @@ export function AssistantScreen({
   const transcriptScroll = useTranscriptScrollFollow(
     transcript,
     assistant.conversationId,
-    { reducedMotion, loading: assistant.loading },
+    {
+      reducedMotion,
+      loading: assistant.loading,
+      historyError: !!assistant.error,
+    },
   );
   const conversation = assistant.history?.conversation;
   const currentAgent = assistant.agent ?? conversation?.agent;

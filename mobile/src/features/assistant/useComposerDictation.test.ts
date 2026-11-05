@@ -496,3 +496,32 @@ test("crew speech never dispatches an interrupted or still-interim utterance", a
     x.h.unmount();
   }
 });
+
+test("silent crew utterances end without error or delivery and can re-arm; failures retain errors", async () => {
+  for (const event of [
+    "nomatch",
+    "no-speech",
+    "speech-timeout",
+    "empty",
+    "not-allowed",
+    "service-not-allowed",
+  ]) {
+    const x = setup({ continuous: false });
+    await x.begin();
+    if (event === "nomatch") x.native.emit(event, null);
+    else if (event !== "empty") x.native.emit("error", { error: event });
+    x.native.emit("end");
+    x.h.flush();
+    assert.deepEqual(x.inserted, []);
+    assert.equal(
+      !!x.h.value().error,
+      ["not-allowed", "service-not-allowed"].includes(event),
+      event,
+    );
+    if (!x.h.value().error) {
+      await x.begin();
+      assert.equal(x.h.value().active, true);
+    }
+    x.h.unmount();
+  }
+});

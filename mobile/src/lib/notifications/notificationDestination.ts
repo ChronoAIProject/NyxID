@@ -30,6 +30,8 @@ export function nativeNotificationUrl(
       path = `/activity?${new URLSearchParams({ challengeId: decodeURIComponent(challenge[1]!) })}`;
     else if (/^\/machines\/?$/.test(parsed.pathname))
       path = `/assistant/machines${parsed.search}`;
+    else if (/^\/channel-bots(?:\/[^/]+)?\/?$/.test(parsed.pathname))
+      path = "/plugins?tab=connectors";
     else if (/^\/keys\/?$/.test(parsed.pathname))
       path = "/plugins?tab=connectors";
     return `${config.scheme}:/${path}`;
@@ -89,7 +91,14 @@ export function notificationDestination(
         path = `activity?${new URLSearchParams({ challengeId: challenge })}`;
     }
     if (path) return `${config.scheme}://${path}`;
-    for (const key of ["deeplink", "deep_link", "url", "link", "review_path"]) {
+    for (const key of [
+      "deeplink",
+      "deep_link",
+      "url",
+      "link",
+      "review_path",
+      "reconnect_url",
+    ]) {
       const href = string(row[key]);
       if (!href) continue;
       const normalized = nativeNotificationUrl(
@@ -102,6 +111,19 @@ export function notificationDestination(
     }
     if (agent)
       return `${config.scheme}://chat?${new URLSearchParams({ agentId: agent, openLatest: "true" })}`;
+    if (row.type === "channel_bot_failed")
+      return `${config.scheme}://plugins?tab=connectors`;
+    if (row.type === "machine_lifecycle" || row.type === "machine_control")
+      return `${config.scheme}://assistant/machines${string(row.machine_id) ? `?${new URLSearchParams({ machine: string(row.machine_id)! })}` : ""}`;
+    // Credential-node device notifications have no native device detail route.
+    if (
+      [
+        "device_bind_success",
+        "device_repeated_fail",
+        "device_lock_alert",
+      ].includes(String(row.type))
+    )
+      return `${config.scheme}://activity`;
     if (row.type === "connection_expired")
       return `${config.scheme}://plugins?tab=connectors`;
     if (row.type === "mfa_disabled" || row.type === "mfa_recovery_used")

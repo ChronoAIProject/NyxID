@@ -166,6 +166,11 @@ export function FirstRunIntro({
     }
   }
 
+  function dismissLocally() {
+    presentation.current++;
+    onClose();
+  }
+
   async function skip() {
     const finished = index === LAST || state.profile?.outcome === "completed";
     if (!(await persist(finished ? "completed" : "skipped"))) return;
@@ -229,12 +234,20 @@ export function FirstRunIntro({
       visible={visible}
       animationType={reducedMotion ? "none" : "slide"}
       presentationStyle="pageSheet"
-      onRequestClose={skip}
+      onRequestClose={dismissLocally}
     >
       <SafeAreaView
         style={[styles.fill, { backgroundColor: colors.bg }]}
         edges={["top", "bottom", "left", "right"]}
       >
+        <View style={styles.dismissRow}>
+          <ActionButton
+            label="Not now"
+            variant="secondary"
+            compact
+            onPress={dismissLocally}
+          />
+        </View>
         {step === "welcome" ? null : (
           <View style={styles.progress} accessibilityRole="tablist">
             {STEPS.map((item, position) => (
@@ -578,6 +591,7 @@ function Chips({
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
+  dismissRow: { alignItems: "flex-end", paddingHorizontal: 12 },
   progress: {
     flexDirection: "row",
     gap: 6,

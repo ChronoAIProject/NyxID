@@ -45,7 +45,12 @@ export function useTranscriptScrollFollow(
   {
     reducedMotion = false,
     loading = false,
-  }: { reducedMotion?: boolean; loading?: boolean } = {},
+    historyError = false,
+  }: {
+    reducedMotion?: boolean;
+    loading?: boolean;
+    historyError?: boolean;
+  } = {},
 ) {
   const follower = useRef(createTranscriptScrollFollower()).current;
   const [following, setFollowing] = useState(true);
@@ -55,6 +60,9 @@ export function useTranscriptScrollFollow(
   const revealFrame = useRef<
     ReturnType<typeof requestAnimationFrame> | undefined
   >(undefined);
+  const revealDeadline = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
   const currentLoading = useRef(loading);
   currentLoading.current = loading;
   const currentScope = useRef({ key: scopeKey, generation: 0 });
@@ -94,6 +102,14 @@ export function useTranscriptScrollFollow(
       cancelAnimationFrame(revealFrame.current);
     revealFrame.current = undefined;
   };
+  const reveal = () => {
+    if (!available() || initial.current.done) return;
+    cancelReveal();
+    clearTimeout(revealDeadline.current);
+    revealDeadline.current = undefined;
+    initial.current.done = true;
+    setRevealed(generation);
+  };
   const settleOpening = () => {
     if (
       !available() ||
@@ -112,8 +128,7 @@ export function useTranscriptScrollFollow(
       revealFrame.current = requestAnimationFrame(() => {
         revealFrame.current = undefined;
         if (!available() || currentLoading.current) return;
-        initial.current.done = true;
-        setRevealed(generation);
+        reveal();
       });
     });
   };
@@ -123,6 +138,7 @@ export function useTranscriptScrollFollow(
     return () => {
       mounted.current = false;
       cancelReveal();
+      clearTimeout(revealDeadline.current);
     };
   }, []);
   useLayoutEffect(() => {
@@ -132,11 +148,18 @@ export function useTranscriptScrollFollow(
     follower.reset();
     setFollowing(true);
     setShowJump(false);
+    // Geometry and loading may never settle; keep errors and partial history reachable.
+    revealDeadline.current = setTimeout(reveal, 800);
+    return () => {
+      cancelReveal();
+      clearTimeout(revealDeadline.current);
+    };
   }, [follower, scopeKey]);
 
   useEffect(() => {
-    if (!loading) settleOpening();
-  }, [loading, scopeKey]);
+    if (historyError) reveal();
+    else if (!loading) settleOpening();
+  }, [loading, historyError, scopeKey]);
 
   return {
     ready: revealed === generation,
