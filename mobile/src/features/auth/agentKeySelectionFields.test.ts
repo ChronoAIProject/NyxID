@@ -61,9 +61,11 @@ function commonMocks() {
         "KeyboardAvoidingView",
       ].map((name) => [name, name]),
     ),
-    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "./useAuthTheme": { useAuthTheme: () => ({ colors: {} }) },
+    "./AuthTextInput": { AuthTextInput: "TextInput" },
     "./deviceLoginStyles": { createDeviceLoginStyles: () => ({}) },
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
+    "./AuthSubmitButton": { AuthSubmitButton: "PrimaryButton" },
     "../../components/settings/SettingsList": {
       SettingsGroup: "SettingsGroup",
       SettingsRow: "SettingsRow",

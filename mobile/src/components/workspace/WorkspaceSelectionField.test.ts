@@ -3,6 +3,8 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
 import type { WorkspaceSelectionOption } from "./WorkspaceSelectionField";
+import { authSurfaceColors } from "../../features/auth/authAppearance";
+import { lightColors } from "../../theme/mobileTheme";
 
 type Element = { type: unknown; props: Record<string, any> };
 const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
@@ -139,6 +141,20 @@ function setup(overrides: Record<string, any> = {}, field = false) {
     },
   };
 }
+
+test("auth selectors keep the local soft palette in the trigger and search sheet", () => {
+  const surfaceColors = authSurfaceColors(lightColors, "light");
+  const field = setup({ surfaceColors }, true);
+  assert.equal(field.label("Members: Option 0").props.style[1].backgroundColor, surfaceColors.cardSoft);
+  field.label("Members: Option 0").props.onPress();
+  field.harness.flush();
+  assert.equal(field.all().find((row) => row.type === field.exports.WorkspaceSelectionSheet)?.props.surfaceColors, surfaceColors);
+  const sheet = setup({ surfaceColors });
+  const search = sheet.one((row) => row.type === "View" && row.props.style?.[1]?.backgroundColor === surfaceColors.card);
+  assert.equal(search.props.style[1].borderColor, surfaceColors.controlBorder);
+  field.harness.unmount();
+  sheet.harness.unmount();
+});
 
 test("summary stays bounded and read-only users can inspect the full selector", () => {
   const state = setup(

@@ -1020,6 +1020,14 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   the safe-area inset rather than adding a second padded strip. The one-row
   private header stays compact; group name, ownership context and settings
   share one header, with member details retained.
+- Native auth screens scope their light palette locally: #F1F1F4 filled
+  provider pills and fields, #E5E5EB pressed fill, #82828D control/divider edges,
+  and #60606A placeholders and quiet labels. A focused field uses a single
+  #79649F edge with no added glow or geometry change; error edges take priority.
+  Text meets 4.5:1 and control edges meet 3:1 on normal/pressed fills and the
+  white canvas. Sign-in, device codes, Agent Key login and MFA share this
+  treatment. Workspace tokens, dark auth styling and the existing faint brand
+  halo remain unchanged.
 - Native pending attachment chips keep their width and text-scaled height through
   waiting, upload, checking, ready and error states, with a 44pt remove target.
   A thin bottom bar shows upload progress; waiting/checking gently pulse a short
@@ -1086,8 +1094,12 @@ Reduce Motion), a 30pt Space Grotesk "Welcome to NyxID" with NyxID in the
 on-tint violet, a two-line lead, provider rows as 52pt soft filled pills
 (mark and label centred, pressing in slightly), "or continue with email",
 52pt rounded fields with leading mail and lock icons and a show/hide password
-toggle, and Sign in, which stays a quiet neutral button until there is
-something to submit and then takes the primary gradient. One-time login codes sit centred in their own panel (mono
+toggle, and Sign in, which always uses the primary gradient (user decision
+2026-11-06). Empty/blocked forms dim only the gradient to 0.5 opacity, keep an
+opaque legible label and primary boundary, disable press-in and announce disabled
+to assistive technology. Ready uses full primary; pending keeps full primary
+with a spinner and a busy/disabled state. MFA, device-login and Agent Key primary
+submit buttons share this rule. One-time login codes sit centred in their own panel (mono
 30pt, letter-spaced) with Copy, a live "Expires in m:ss · works once" line and
 the terminal command in a monospace chip.
 

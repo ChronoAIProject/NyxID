@@ -13,11 +13,10 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import Svg, { Path } from "react-native-svg";
-import { LinearGradient as ExpoLinearGradient } from "expo-linear-gradient";
+import { AuthSubmitButton } from "./AuthSubmitButton";
 import type { RootStackParamList } from "../../app/AppNavigator";
 
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -38,7 +37,8 @@ import {
 } from "./socialCallback";
 import { capture } from "../../lib/telemetry";
 import { getFrontendUrl } from "../../lib/env";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme } from "./useAuthTheme";
+import { AuthTextInput } from "./AuthTextInput";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
 import { BrandNebula, BreathingMark, RiseIn } from "../../components/brand/BrandNebula";
@@ -93,8 +93,8 @@ function SocialAuthButton({
   loading?: boolean;
   onPress: () => void;
 }) {
-  const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const { colors, mode } = useAuthTheme();
+  const styles = useMemo(() => createStyles(colors, mode), [colors, mode]);
   const iconColor = colors.textPrimary;
 
   return (
@@ -106,8 +106,8 @@ function SocialAuthButton({
       accessibilityState={{ disabled, busy: loading }}
       style={({ pressed }) => [
         styles.socialAuthButton,
-        pressed && styles.socialAuthButtonPressed,
-        pressed && styles.pressed,
+        pressed && !disabled && styles.socialAuthButtonPressed,
+        pressed && !disabled && styles.pressed,
         disabled && styles.socialAuthButtonDisabled,
       ]}
     >
@@ -160,8 +160,8 @@ export function AuthHomeScreen({ navigation }: Props) {
     networkMode: "always",
   });
   const loginConfig = publicConfig.isError ? undefined : publicConfig.data;
-  const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
+  const { colors, mode } = useAuthTheme();
+  const styles = useMemo(() => createStyles(colors, mode), [colors, mode]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const [isSocialAuthPending, setIsSocialAuthPending] = useState(false);
   const [pendingSocialProvider, setPendingSocialProvider] =
@@ -385,9 +385,9 @@ export function AuthHomeScreen({ navigation }: Props) {
 
   const prompt = mfaPrompt(mfaProvider, recoveryMode);
   const isAnyPending = isSocialAuthPending || isEmailAuthPending;
-  // Until there is something to submit, Sign in is a quiet neutral button.
-  const signInBlocked =
-    !isEmailAuthPending && (mfaChallenge ? !mfaCode : !email.trim() || !password);
+  const signInBlocked = isAnyPending || (mfaChallenge
+    ? !/^(?:\d{6}|[A-Za-z0-9_-]{8}|[a-fA-F0-9]{32})$/.test(mfaCode)
+    : !email.trim() || !password);
 
   const openRegistration = async () => {
     if (!loginConfig?.emailAuthEnabled || isAnyPending || mfaChallenge || registrationPending || registrationLock.current) return;
@@ -511,9 +511,9 @@ export function AuthHomeScreen({ navigation }: Props) {
               ) : null}
               {prompt.showPasswordFields && (
                 <>
-                  <View style={styles.field}>
-                  <Mail size={18} color={colors.textMuted} />
-                  <TextInput
+                  <AuthTextInput
+                    frameStyle={styles.field}
+                    leading={<Mail size={18} color={colors.textMuted} />}
                     style={styles.input}
                     accessibilityLabel="Email"
                     placeholder="Email"
@@ -525,10 +525,9 @@ export function AuthHomeScreen({ navigation }: Props) {
                     autoCapitalize="none"
                     autoComplete="email"
                   />
-                  </View>
-                  <View style={styles.field}>
-                  <LockKeyhole size={18} color={colors.textMuted} />
-                  <TextInput
+                  <AuthTextInput
+                    frameStyle={styles.field}
+                    leading={<LockKeyhole size={18} color={colors.textMuted} />}
                     style={styles.input}
                     accessibilityLabel="Password"
                     placeholder="Password"
@@ -538,8 +537,7 @@ export function AuthHomeScreen({ navigation }: Props) {
                     editable={!isAnyPending && !mfaChallenge}
                     secureTextEntry={!showPassword}
                     autoComplete="current-password"
-                  />
-                  <Pressable
+                    trailing={<Pressable
                     accessibilityRole="button"
                     accessibilityLabel={showPassword ? "Hide password" : "Show password"}
                     hitSlop={8}
@@ -551,13 +549,13 @@ export function AuthHomeScreen({ navigation }: Props) {
                     ) : (
                       <Eye size={18} color={colors.textSecondary} />
                     )}
-                  </Pressable>
-                  </View>
+                  </Pressable>}
+                  />
                 </>
               )}
               {mfaChallenge && <View>
                 <Text style={styles.heroTagline}>{prompt.title}</Text>
-                <TextInput accessibilityLabel={prompt.label}
+                <AuthTextInput frameStyle={mode === "light" ? styles.field : undefined} accessibilityLabel={prompt.label}
                   placeholder={prompt.placeholder}
                   keyboardType={recoveryMode ? "default" : "number-pad"} style={styles.input} value={mfaCode}
                   onChangeText={setMfaCode} maxLength={32} autoCapitalize="none" autoCorrect={false}
@@ -569,35 +567,13 @@ export function AuthHomeScreen({ navigation }: Props) {
                   <Text style={styles.heroTagline}>Back to sign-in</Text>
                 </Pressable>
               </View>}
-              {/* DESIGN.md §Buttons: primary CTA uses `nyx-gradient-vivid`. */}
-              <Pressable
+              <AuthSubmitButton
                 onPress={() => void handleEmailLogin()}
-                accessibilityRole="button"
-                disabled={isAnyPending || (mfaChallenge ? !/^(?:\d{6}|[A-Za-z0-9_-]{8}|[a-fA-F0-9]{32})$/.test(mfaCode) : !email.trim() || !password)}
-                style={({ pressed }) => [
-                  styles.signInButtonWrap,
-                  signInBlocked && styles.signInIdle,
-                  pressed && !signInBlocked && styles.pressed,
-                ]}
-              >
-                <ExpoLinearGradient
-                  colors={
-                    signInBlocked
-                      ? [colors.card, colors.card]
-                      : [colors.gradientStart, colors.gradientEnd]
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 0 }}
-                  style={styles.signInButton}
-                >
-                  <View style={styles.socialAuthContent}>
-                    {isEmailAuthPending ? (
-                      <ActivityIndicator size="small" color={colors.onPrimary} />
-                    ) : null}
-                    <Text style={[styles.signInButtonText, signInBlocked && { color: colors.textMuted }]}>{isEmailAuthPending ? "Signing in..." : mfaChallenge ? "Verify & sign in" : "Sign In"}</Text>
-                  </View>
-                </ExpoLinearGradient>
-              </Pressable>
+                disabled={signInBlocked}
+                loading={isEmailAuthPending}
+                style={{ marginTop: 4 }}
+                label={isEmailAuthPending ? "Signing in..." : mfaChallenge ? "Verify & sign in" : "Sign In"}
+              />
             </>
 
           {loginConfig?.emailAuthEnabled && !mfaChallenge ? (
@@ -677,7 +653,7 @@ export function AuthHomeScreen({ navigation }: Props) {
   );
 }
 
-const createStyles = (c: ThemeColors) =>
+const createStyles = (c: ThemeColors, mode: string) =>
   StyleSheet.create({
     scrollContentExtra: {
       paddingBottom: spacing.xxxl,
@@ -714,12 +690,11 @@ const createStyles = (c: ThemeColors) =>
       paddingLeft: 16,
       paddingRight: 6,
       borderRadius: 14,
-      borderWidth: StyleSheet.hairlineWidth,
+      borderWidth: mode === "light" ? 1 : StyleSheet.hairlineWidth,
       borderColor: c.borderSoft,
       backgroundColor: c.card,
     },
     fieldAction: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
-    signInIdle: { shadowOpacity: 0 },
     pressed: { transform: [{ scale: 0.98 }] },
     heroTagline: {
       ...typeScale.caption,
@@ -730,7 +705,6 @@ const createStyles = (c: ThemeColors) =>
       ...typeScale.bodyStrong,
       color: c.textPrimary,
     },
-    // DESIGN.md §Inputs: rounded-lg (8px) with 50%-opacity chrome.
     input: {
       flex: 1,
       minHeight: 50,
@@ -738,33 +712,6 @@ const createStyles = (c: ThemeColors) =>
       color: c.textPrimary,
       fontFamily: fonts.body,
       fontSize: 16,
-    },
-    signInButtonWrap: {
-      marginTop: 4,
-      borderRadius: 14,
-      overflow: "hidden",
-      // Soft purple ambient matching the web `shadow-[0_0_12px_rgba(90,42,241,0.25)]`.
-      shadowColor: c.primary,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.3,
-      shadowRadius: 12,
-      elevation: 6,
-    },
-    signInButton: {
-      borderRadius: 14,
-      paddingVertical: spacing.lg,
-      minHeight: 52,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    signInButtonText: {
-      color: c.onPrimary,
-      fontFamily: fonts.bodySemi,
-      fontSize: 15,
-      lineHeight: 20,
-    },
-    buttonDisabled: {
-      opacity: 0.5,
     },
     createAccountLink: {
       minHeight: 44,
@@ -812,7 +759,7 @@ const createStyles = (c: ThemeColors) =>
       gap: 10,
       backgroundColor: c.card,
       borderColor: c.borderSoft,
-      borderWidth: StyleSheet.hairlineWidth,
+      borderWidth: mode === "light" ? 1 : StyleSheet.hairlineWidth,
       borderRadius: 14,
       paddingVertical: spacing.sm,
       paddingHorizontal: spacing.xxl,

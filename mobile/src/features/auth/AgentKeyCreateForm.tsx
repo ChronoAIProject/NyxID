@@ -1,8 +1,9 @@
+import { AuthSubmitButton } from "./AuthSubmitButton";
+import { AuthTextInput } from "./AuthTextInput";
 import { useMemo, useState } from "react";
-import { Switch, Text, TextInput, View } from "react-native";
-import { PrimaryButton } from "../../components/PrimaryButton";
+import { Switch, Text, View } from "react-native";
 import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme as useTheme } from "./useAuthTheme";
 import {
   agentKeyScopes,
   newAgentKeySchema,
@@ -39,7 +40,7 @@ export function AgentKeyCreateForm({
   return (
     <View style={styles.inputSection}>
       <Text style={styles.inputLabel}>Name</Text>
-      <TextInput
+      <AuthTextInput
         accessibilityLabel="Key name"
         value={draft.name}
         maxLength={64}
@@ -47,7 +48,7 @@ export function AgentKeyCreateForm({
         editable={!disabled}
         style={[styles.codeInput, { textAlign: "left" }]}
       />
-      <WorkspaceSelectionField
+      <WorkspaceSelectionField surfaceColors={colors}
         label="Owner"
         title="Choose key owner"
         options={[
@@ -77,7 +78,7 @@ export function AgentKeyCreateForm({
           });
         }}
       />
-      <WorkspaceSelectionField
+      <WorkspaceSelectionField surfaceColors={colors}
         label="Scopes"
         title="Choose key scopes"
         options={agentKeyScopes.map((scope) => ({
@@ -121,7 +122,7 @@ export function AgentKeyCreateForm({
               />
             </View>
             {!draft[allField] && (
-              <WorkspaceSelectionField
+              <WorkspaceSelectionField surfaceColors={colors}
                 label={kind === "services" ? "Service access" : "Node access"}
                 title={kind === "services" ? "Choose services" : "Choose nodes"}
                 options={resources.map((item) => {
@@ -226,7 +227,7 @@ export function AgentKeyCreateForm({
           </View>
         );
       })}
-      <WorkspaceSelectionField
+      <WorkspaceSelectionField surfaceColors={colors}
         label="Key expiry"
         title="Choose key expiry"
         options={["7", "30", "90", "365", "custom", "none"].map((choice) => ({
@@ -257,7 +258,7 @@ export function AgentKeyCreateForm({
         }}
       />
       {expiry === "custom" && (
-        <TextInput
+        <AuthTextInput
           accessibilityLabel="Custom key expiry"
           placeholder="YYYY-MM-DD"
           placeholderTextColor={colors.textMuted}
@@ -274,7 +275,7 @@ export function AgentKeyCreateForm({
               ? "Requests per second"
               : "Burst"}
           </Text>
-          <TextInput
+          <AuthTextInput
             accessibilityLabel={
               field === "rate_limit_per_second"
                 ? "Requests per second"
@@ -292,7 +293,7 @@ export function AgentKeyCreateForm({
           />
         </View>
       ))}
-      <WorkspaceSelectionField
+      <WorkspaceSelectionField surfaceColors={colors}
         label="Platform"
         title="Choose client platform"
         options={[
@@ -313,7 +314,7 @@ export function AgentKeyCreateForm({
           {error}
         </Text>
       )}
-      <PrimaryButton
+      <AuthSubmitButton
         label="Review permissions"
         disabled={disabled}
         onPress={() => {

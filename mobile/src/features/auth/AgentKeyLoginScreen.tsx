@@ -1,3 +1,4 @@
+import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useMfaStepUp } from "./useMfaStepUp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
@@ -7,7 +8,6 @@ import {
   Pressable,
   ScrollView,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { ChevronLeft, KeyRound, UserRound } from "lucide-react-native";
@@ -17,7 +17,8 @@ import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
-import { useTheme } from "../../theme/ThemeContext";
+import { useAuthTheme as useTheme } from "./useAuthTheme";
+import { AuthTextInput } from "./AuthTextInput";
 import { agentKeyLoginApi } from "../../lib/api/agentKeyLoginApi";
 import {
   loginCodeApi,
@@ -362,14 +363,14 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     ? "Login rejected"
                     : "Login request expired"}
               </Text>
-              <PrimaryButton label="Done" onPress={back} />
+              <AuthSubmitButton label="Done" onPress={back} />
             </View>
           ) : (
             <>
               {step === "code" && (
                 <View style={styles.inputSection}>
                   <Text style={styles.inputLabel}>User code</Text>
-                  <TextInput
+                  <AuthTextInput
                     accessibilityLabel="User code"
                     value={code}
                     editable={!pending}
@@ -381,7 +382,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     }
                     style={styles.codeInput}
                   />
-                  <PrimaryButton
+                  <AuthSubmitButton loading={pending}
                     label="Continue"
                     disabled={pending || !normalizeAuthDeviceUserCode(code)}
                     onPress={() => void act(loadPreview)}
@@ -486,18 +487,18 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                 (isAuthenticated &&
                 (flow === "agent-key" ||
                   preview?.supports_grant_choice === true) ? (
-                  <PrimaryButton
+                  <AuthSubmitButton
                     label="Choose an Agent Key"
                     disabled={pending || expired}
                     onPress={() => void act(loadOptions)}
                   />
                 ) : !isAuthenticated ? (
-                  <PrimaryButton
+                  <AuthSubmitButton
                     label="Sign in on this phone"
                     onPress={() => navigation.navigate("Auth")}
                   />
                 ) : (
-                  <PrimaryButton
+                  <AuthSubmitButton
                     label="Review account login"
                     onPress={() =>
                       navigation.navigate("DeviceLogin", { user_code: code })
@@ -515,7 +516,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     credentials, and organization permissions. The session can
                     refresh until it expires or you revoke it.
                   </Text>
-                  <PrimaryButton
+                  <AuthSubmitButton loading={pending}
                     label="Generate account login code"
                     disabled={pending}
                     onPress={() =>
@@ -534,7 +535,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               )}
               {step === "options" && options && (
                 <View style={styles.inputSection}>
-                  <WorkspaceSelectionField
+                  <WorkspaceSelectionField surfaceColors={colors}
                     label="Agent Key"
                     title="Choose an Agent Key"
                     description="Choose a key to review its full effective permissions before approving."
@@ -561,7 +562,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                       setStep("confirm");
                     }}
                   />
-                  <PrimaryButton
+                  <AuthSubmitButton
                     label="Create a new key"
                     disabled={pending || expired}
                     onPress={() => setStep("new")}
@@ -596,7 +597,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   <Text style={styles.inputLabel}>
                     Credential expiry (blank: 90 days, bounded by key expiry)
                   </Text>
-                  <TextInput
+                  <AuthTextInput
                     accessibilityLabel="Credential expiry"
                     placeholder="YYYY-MM-DDTHH:mm:ssZ"
                     placeholderTextColor={colors.textMuted}
@@ -608,7 +609,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                       { textAlign: "left", fontSize: 14 },
                     ]}
                   />
-                  <PrimaryButton
+                  <AuthSubmitButton loading={pending}
                     label={mint ? "Generate restricted login code" : "Approve"}
                     disabled={pending || expired}
                     onPress={() => void act(() => decide(true))}
