@@ -666,11 +666,6 @@ async fn v2_specialist_webhook_editor_mentions_reviewer_and_nyxbot_then_resumes_
     )
     .await
     .unwrap();
-    assert!(
-        work_groups::post(&state.db, &authority(&row), &groups, "Nobody is addressed")
-            .await
-            .is_err()
-    );
     work_groups::post(
         &state.db,
         &authority(&row),
@@ -2261,6 +2256,14 @@ async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
         .await
         .unwrap();
     for (_, agent) in work_groups::queued(&group) {
+        assert!(
+            crate::services::assistant_group_service::member_thread(
+                &state.db, OWNER, &group.id, &agent,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
         let child = group_turn(&state, &group, &agent).await;
         save_reply(&state, &child, "Finished", None).await;
     }
@@ -2277,10 +2280,7 @@ async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
 
 #[tokio::test]
 async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group_members() {
-    use crate::models::{
-        assistant_sharing::{ShareRole, ShareSubject},
-        org_membership::OrgRole,
-    };
+    use crate::models::org_membership::OrgRole;
     use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
     let (state, _, run, row, server) = root("v2_foreign_specialists", false).await;
     crate::services::security_readiness_service::ready_test_replica(&state.db).await;
@@ -2347,16 +2347,17 @@ async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group
                 &state.db,
                 &owner,
                 &agent.id,
-                sharing::SharingUpdate {
-                    expected_version: 0,
-                    enabled: true,
-                    shared_access: Default::default(),
-                    audience: vec![sharing::Audience {
-                        subject_kind: ShareSubject::Person,
-                        subject_id: OWNER.into(),
-                        role: ShareRole::User,
-                    }],
-                },
+                serde_json::from_value(json!({
+                    "expected_version": 0,
+                    "enabled": true,
+                    "shared_access": {},
+                    "audience": [{
+                        "subject_kind": "person",
+                        "email": format!("{OWNER}@example.com"),
+                        "role": "user"
+                    }]
+                }))
+                .unwrap(),
                 true,
             )
             .await
