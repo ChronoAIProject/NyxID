@@ -22,6 +22,11 @@ import { messageTime } from "@/lib/assistant/message-time";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { ReviewCardNavigation } from "./review-card-target";
 
+vi.mock("./blocks/crm-artifact-block", () => ({
+  CrmArtifactBlock: ({ artifacts }: { artifacts?: readonly { title: string }[] }) =>
+    artifacts?.length ? <div aria-label="CRM artifact">{artifacts[0]?.title}</div> : null,
+}));
+
 const BASE: ChatMessage = {
   id: "assistant-1",
   role: "assistant",
@@ -761,12 +766,13 @@ describe("canonical chat presentation", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders accumulated media with the shipped artifact block", () => {
+  it("renders generated media and CRM cards together with the shipped artifact block", () => {
     const { container } = render(
       <ChatMessageBubble
         message={{
           ...BASE,
           content: "",
+          crmArtifacts: [{ kind: "view", id: "view", owner_id: "owner", title: "Live CRM view", role: "created" }],
           artifacts: [
             {
               type: "artifact",
@@ -783,6 +789,7 @@ describe("canonical chat presentation", () => {
       />,
     );
     expect(screen.getByText("chart.png")).toBeVisible();
+    expect(screen.getByLabelText("CRM artifact")).toHaveTextContent("Live CRM view");
     expect(
       screen.getByRole("link", { name: "Download chart.png" }),
     ).toHaveAttribute("href", "data:image/png;base64,aGVsbG8=");

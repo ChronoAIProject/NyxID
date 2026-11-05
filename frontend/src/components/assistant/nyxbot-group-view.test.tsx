@@ -14,6 +14,11 @@ vi.mock("@/hooks/use-collaboration-groups", async (importOriginal) => ({
   useCollaborationRead: vi.fn(),
 }));
 
+vi.mock("./blocks/crm-artifact-block", () => ({
+  CrmArtifactBlock: ({ artifacts }: { artifacts?: readonly { title: string }[] }) =>
+    artifacts?.length ? <div aria-label="CRM artifact">{artifacts[0]?.title}</div> : null,
+}));
+
 const post = vi.fn();
 let group: AssistantGroup;
 let groupLoaded = true;
@@ -299,6 +304,16 @@ describe("delivered message recipients", () => {
     const message: AssistantGroupMessage = { id: "notice", seq: 1, role: "notice", text: "This agent cannot reply with your current access.", agent: { id: RESEARCHER, name: "researcher", display_name: "Office Agent", kind: "specialist" }, created_at: "2026-10-01T00:00:00Z" };
     render(<GroupMessageRow groupId="group" message={message} names={[]} onOpenAgent={() => undefined} />);
     expect(screen.getByRole("note")).toHaveTextContent("Office Agent: This agent cannot reply with your current access.");
+  });
+
+  it("renders CRM artifact-only agent replies in the group transcript", () => {
+    const message: AssistantGroupMessage = {
+      id: "crm-reply", seq: 2, role: "agent", agent: null, text: "",
+      created_at: "2026-11-06T00:00:00Z",
+      crm_artifacts: [{ kind: "object", id: "dataset", owner_id: "owner", object_key: "research", title: "Research dataset", role: "created" }],
+    };
+    render(<GroupMessageRow groupId="group" message={message} names={[]} onOpenAgent={() => undefined} />);
+    expect(within(screen.getByRole("article")).getByLabelText("CRM artifact")).toHaveTextContent("Research dataset");
   });
 
   it("renders a member's tool image through the group attachment endpoint", () => {
