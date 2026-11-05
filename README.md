@@ -85,6 +85,11 @@ Feature flag access can be delegated to any user or group with
 `feature-flag-admin` (manage all flags, including built-ins). Both roles use
 Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
 
+NyxBot can retain generated Sandbox files privately in owner Web chats when
+`assistant:generated-artifacts` is enabled. Images and supported videos preview
+inline, other files download, and saved results recover onto the original reply
+without rerunning the Sandbox. See [generated files and rollout](docs/chat/10-uploads.md#generated-sandbox-files).
+
 ## What NyxID Does
 
 - **Allocate repeatable credits** — admin Credits supports exact one-time or recurring allocations, optional shared-total service ceilings, and reclaim of each allocation's unspent remainder. Existing free-unit allowances stay separate. New policy authoring is off until all billing writers are upgraded; see [credit allocation accounting and rollout](docs/BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim).

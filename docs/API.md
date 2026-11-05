@@ -9120,6 +9120,24 @@ and settles provider-confirmed input duration. See the
 [transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
 for limits, exact duration handling and recovery.
 
+## Generated Sandbox attachments
+
+The default-off `assistant:generated-artifacts` flag enables private generated
+files on owner Web conversations. History adds optional attachment metadata and
+`artifact_delivery` state only while enabled. Existing attachment values remain
+unchanged. See [generated files](chat/10-uploads.md#generated-sandbox-files) for
+limits, retention, rollout order and recovery semantics.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/attachments/{attachment_id}` | Existing authenticated owner attachment route. Generated rows additionally bind conversation keys to their own conversation and return a complete HTTP 200 response with safe download/preview headers; Range is ignored. Retained owner reads remain available while the flag is off, until live expiry. |
+| `POST /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery` | First-party human owner only, enabled feature and no active turn. Requires an empty body. Recovers saved bytes onto the original associated reply without another Sandbox execution; returns `{ "status": "materialized" }`. Disabled routes return 404; active turns return 409; expired attachments return 410. |
+
+Eligible owner NyxAgent chat keys also receive `nyx__artifact_delivery`, accepting
+an empty object. The server freezes its original-reply target and preflights
+recoverability before auditing or requesting an owner confirmation. Disabled or
+ineligible callers retain the ordinary unknown-tool response.
+
 ## Assistant skill review and image input
 
 `GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`
