@@ -3,7 +3,6 @@ import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Image,
-  Modal,
   Pressable,
   StyleSheet,
   View,
@@ -13,6 +12,7 @@ import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius } from "../../theme/designTokens";
 import type { PendingAssistantUpload } from "./AssistantUploadSession";
+import { AssistantImagePreview } from "./AssistantImagePreview";
 
 export function AssistantPendingUploads({
   files,
@@ -124,34 +124,12 @@ export function AssistantPendingUploads({
           })}
         </OverflowScrollView>
       ) : null}
-      <Modal
-        visible={!!preview}
-        animationType="fade"
-        onRequestClose={() => setPreview(undefined)}
-      >
-        <View style={[styles.preview, { backgroundColor: colors.bg }]}>
-          <View style={styles.previewHeader}>
-            <Label numberOfLines={1} style={styles.fill}>
-              {preview?.file.name}
-            </Label>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Close file preview"
-              onPress={() => setPreview(undefined)}
-              style={styles.close}
-            >
-              <X size={24} color={colors.textPrimary} />
-            </Pressable>
-          </View>
-          {preview ? (
-            <Image
-              source={{ uri: preview.file.uri }}
-              resizeMode="contain"
-              style={styles.fullImage}
-            />
-          ) : null}
-        </View>
-      </Modal>
+      <AssistantImagePreview
+        uri={preview?.file.uri}
+        label={preview?.file.name ?? "Image"}
+        closeLabel="Close file preview"
+        onClose={() => setPreview(undefined)}
+      />
     </>
   );
 }
@@ -178,12 +156,4 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  preview: {
-    flex: 1,
-    paddingTop: 60,
-    paddingBottom: 32,
-    paddingHorizontal: 20,
-  },
-  previewHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
-  fullImage: { flex: 1, width: "100%" },
 });
