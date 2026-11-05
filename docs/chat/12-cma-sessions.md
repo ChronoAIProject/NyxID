@@ -265,6 +265,8 @@ actions remain separate capabilities.
 - `backend/src/handlers/cma_sessions.rs`: additive minimal projection DTOs.
 - `frontend/src/components/assistant/cma-session-provider.tsx`: one observer
   lifetime across routes, shared with cards and the source-session indicator.
+  Route children stay mounted across sign-in, account replacement and logout;
+  only the account-scoped observer resets. Observations publish before paint.
 - `frontend/src/components/assistant/cma-session-card.tsx`: responsive cards,
   pin/minimise controls, source and external navigation, global floating stack.
 - `frontend/src/hooks/use-cma-session.ts`, `cma-session-api.ts`, and
@@ -274,10 +276,14 @@ actions remain separate capabilities.
   absent attribution, guest/group exclusion, connection changes, scoped/pinned
   projection, source deletion, source/other-page visibility, reload and unpin,
   specialist deep links, supplied callback validation, account reset, stream
-  cancellation, and existing replay/cursor behavior.
+  cancellation, app-login return URLs (including password-MFA to app login),
+  and existing replay/cursor behavior.
 - `frontend/e2e/cma-session.spec.ts` exercises the real UI against HTTP fixtures,
   including the shared machine/CMA column, mobile keyboard/layout, disclosure
   controls, cross-page pins, slow pin refresh without stream restart, and
   clickable/keyboard-reachable recovery at short viewport heights. Multi-connection
   API regressions distinguish denial from transient route/list failures and
   receipt withdrawal. These fixtures establish no live CMA connection.
+- `frontend/e2e/login-redirect.spec.ts` checks app approval and password-MFA to
+  app login against HTTP fixtures, preserving the absolute `return_to` and its
+  assistant conversation query through profile restoration.

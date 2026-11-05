@@ -187,7 +187,7 @@ type Stage =
 type PostClaimStage = Exclude<Stage, { readonly phase: "enter-code" }>;
 
 export function CliPairPage() {
-  const { isAuthenticated, isLoading } = useAuthStore();
+  const { user, isAuthenticated, isLoading } = useAuthStore();
 
   useEffect(() => {
     if (isLoading) return;
@@ -214,7 +214,7 @@ export function CliPairPage() {
     );
   }
 
-  return <StageRouter />;
+  return <StageRouter key={user?.id} />;
 }
 
 /**
