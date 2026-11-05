@@ -4,13 +4,10 @@ use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamS
 use crate::models::usage_meter::CredentialClass;
 
 impl BillingService {
-    /// These two messages are part of CMA's exact quote-refusal contract.
-    /// Resolve exclusion before any paid-billing dependency; only these gates
-    /// authorize CMA to proceed unbilled, never a generic provider failure.
+    /// The exclusion message is part of CMA's exact quote-refusal contract.
+    /// Resolve exclusion before any paid-billing dependency; only this flag
+    /// authorizes CMA to proceed unbilled, never a generic provider failure.
     pub(super) async fn require_sandbox_rollout(&self, owner_id: &str) -> AppResult<()> {
-        if !self.config.cma_billing_enabled {
-            return Err(unavailable("CMA paid admission is disabled"));
-        }
         if !crate::services::feature_flag_service::personal_flag_enabled(
             &self.db,
             owner_id,
@@ -23,16 +20,19 @@ impl BillingService {
         Ok(())
     }
 
-    pub(super) fn require_sandbox_admission(&self) -> AppResult<&str> {
+    pub(super) async fn require_sandbox_admission(
+        &self,
+        producer: &ProducerAuthority,
+    ) -> AppResult<DownstreamService> {
         if !self.config.billing_enabled || self.config.billing_fail_closed {
             return Err(unavailable("CMA billing dependencies are unavailable"));
         }
-        let service = self
-            .config
-            .cma_billing_service_id
-            .as_deref()
-            .ok_or_else(|| unavailable("CMA catalog service is not configured"))?;
-        uuid(service)?;
+        let service = super::super::sandbox_settings::resolve_service(&self.db).await?;
+        if service.id != producer.service_id {
+            return Err(unavailable(
+                "Sandbox producer does not belong to the active CMA service",
+            ));
+        }
         Ok(service)
     }
 
@@ -45,7 +45,7 @@ impl BillingService {
     ) -> AppResult<SandboxBillingQuote> {
         uuid(owner_id)?;
         self.require_sandbox_rollout(owner_id).await?;
-        let service_id = self.require_sandbox_admission()?;
+        let service = self.require_sandbox_admission(producer).await?;
         sandbox_id(sandbox)?;
         super::super::sandbox_runtime_math::finite_quantities(units(&allocation), 300)
             .map_err(invalid)?;
@@ -55,12 +55,6 @@ impl BillingService {
             ));
         }
         super::super::exact_migration::require_ready(&self.db).await?;
-        let service = self
-            .db
-            .collection::<DownstreamService>(SERVICES)
-            .find_one(doc! {"_id":service_id,"is_active":true})
-            .await?
-            .ok_or_else(|| unavailable("CMA catalog service is unavailable"))?;
         let card = super::super::sandbox_rates::effective(&self.db, Utc::now()).await?;
         if card.sync_status != PricingSyncStatus::Synced
             || card.plan_code != self.config.lago_plan_code

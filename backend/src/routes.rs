@@ -1437,6 +1437,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_billing::resync_service),
         )
         .route(
+            "/billing/services/{id}/sandbox",
+            get(handlers::admin_sandbox_settings::get).put(handlers::admin_sandbox_settings::put),
+        )
+        .route(
             "/billing/services/{id}",
             get(handlers::admin_billing::get_service)
                 .put(handlers::admin_billing::update_service_billing),

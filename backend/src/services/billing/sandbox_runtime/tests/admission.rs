@@ -2,7 +2,7 @@ use super::*;
 use crate::services::feature_flag_service::{self as flags, FlagTarget};
 use axum::{body::to_bytes, response::IntoResponse};
 
-const FLEET_EXCLUSION: &str = "Billing provider unavailable: CMA paid admission is disabled";
+const LEGACY_FLEET_EXCLUSION: &str = "Billing provider unavailable: CMA paid admission is disabled";
 const COHORT_EXCLUSION: &str =
     "Billing provider unavailable: Sandbox owner is outside the billing rollout";
 
@@ -46,14 +46,14 @@ async fn excluded_quotes_and_new_windows_do_not_read_paid_billing_dependencies()
         id: Uuid::new_v4().to_string(),
         token_jti: Uuid::new_v4().to_string(),
         credential_generation: 0,
+        service_id: Uuid::new_v4().to_string(),
+        settings_revision: 1,
     };
     let mut billing = BillingService::new(
         db.clone(),
         Arc::new(AppConfig {
-            cma_billing_enabled: true,
             billing_enabled: false,
             billing_fail_closed: true,
-            cma_billing_service_id: None,
             ..crate::test_utils::test_app_config()
         }),
     );
@@ -79,7 +79,6 @@ async fn excluded_quotes_and_new_windows_do_not_read_paid_billing_dependencies()
             let config = Arc::make_mut(&mut billing.config);
             config.billing_enabled = true;
             config.billing_fail_closed = false;
-            config.cma_billing_service_id = Some(Uuid::new_v4().to_string());
             for collection in [
                 "billing_migrations",
                 "downstream_services",
@@ -126,40 +125,6 @@ async fn excluded_quotes_and_new_windows_do_not_read_paid_billing_dependencies()
             "exclusion may only read rollout and recover existing receipts: {reads:?}"
         );
     }
-    Arc::make_mut(&mut billing.config).cma_billing_enabled = false;
-    // A broken flag record must not mask the earlier, local fleet gate.
-    db.collection::<Document>("feature_flag_overrides")
-        .insert_one(doc! {
-            "_id": "broken-flag", "org_user_id": null, "enabled": "invalid",
-        })
-        .await
-        .unwrap();
-    observed.lock().unwrap().clear();
-    assert_excluded(
-        billing
-            .quote_sandbox(&producer, &owner, &input.sandbox_id, allocation())
-            .await
-            .unwrap_err(),
-        FLEET_EXCLUSION,
-    )
-    .await;
-    assert!(
-        observed.lock().unwrap().is_empty(),
-        "fleet exclusion needs no database reads"
-    );
-    assert_excluded(
-        billing
-            .reserve_sandbox_window(&producer, input)
-            .await
-            .unwrap_err(),
-        FLEET_EXCLUSION,
-    )
-    .await;
-    assert_eq!(
-        *observed.lock().unwrap(),
-        [WINDOW_COLLECTION],
-        "only receipt recovery precedes new-window exclusion"
-    );
     for collection in [
         QUOTE_COLLECTION,
         WINDOW_COLLECTION,
@@ -175,7 +140,12 @@ async fn excluded_quotes_and_new_windows_do_not_read_paid_billing_dependencies()
         );
     }
     // Unable to resolve enrollment is a failure, never an explicit exclusion.
-    Arc::make_mut(&mut billing.config).cma_billing_enabled = true;
+    db.collection::<Document>("feature_flag_overrides")
+        .insert_one(doc! {
+            "_id": "broken-flag", "org_user_id": null, "enabled": "invalid",
+        })
+        .await
+        .unwrap();
     let error = billing
         .quote_sandbox(
             &producer,
@@ -185,7 +155,7 @@ async fn excluded_quotes_and_new_windows_do_not_read_paid_billing_dependencies()
         )
         .await
         .unwrap_err();
-    assert!(![FLEET_EXCLUSION, COHORT_EXCLUSION].contains(&error.to_string().as_str()));
+    assert!(![LEGACY_FLEET_EXCLUSION, COHORT_EXCLUSION].contains(&error.to_string().as_str()));
 }
 
 #[tokio::test]
@@ -257,6 +227,40 @@ async fn cma_quote_cohort_precedence_is_global_then_org_then_personal() {
         .unwrap();
     assert_eq!(admitted.components.len(), 3);
     assert!(wallet(&f).await.reserved_credits > Credits::ZERO);
+
+    // An organization cohort alone admits its member's personal wallet even
+    // when the global baseline is off and there is no personal override.
+    flags::clear_platform_override(&f.db, flags::CMA_SANDBOX_BILLING_FLAG_KEY, &user)
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &f.db,
+        flags::CMA_SANDBOX_BILLING_FLAG_KEY,
+        &FlagTarget::Global,
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    flags::set_platform_org_override(
+        &f.db,
+        &org,
+        flags::CMA_SANDBOX_BILLING_FLAG_KEY,
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let held = wallet(&f).await.reserved_credits;
+    let input = request(&f, 60).await;
+    let admitted = f
+        .billing
+        .reserve_sandbox_window(&f.producer, input)
+        .await
+        .unwrap();
+    assert_eq!(admitted.owner_id, f.owner);
+    assert_eq!(admitted.components.len(), 3);
+    assert!(wallet(&f).await.reserved_credits > held);
 }
 
 #[tokio::test]
@@ -273,7 +277,7 @@ async fn enrolled_billing_failures_never_use_the_unbilled_exclusion_contract() {
             .await
             .unwrap_err();
         assert!(matches!(&error, AppError::BillingProviderUnavailable(_)));
-        assert!(![FLEET_EXCLUSION, COHORT_EXCLUSION].contains(&error.to_string().as_str()));
+        assert!(![LEGACY_FLEET_EXCLUSION, COHORT_EXCLUSION].contains(&error.to_string().as_str()));
     }
     let config = Arc::make_mut(&mut f.billing.config);
     config.billing_enabled = true;
@@ -311,7 +315,7 @@ async fn enrolled_billing_failures_never_use_the_unbilled_exclusion_contract() {
         .quote_sandbox(&f.producer, &f.owner, &sandbox, allocation())
         .await
         .unwrap_err();
-    assert!(![FLEET_EXCLUSION, COHORT_EXCLUSION].contains(&error.to_string().as_str()));
+    assert!(![LEGACY_FLEET_EXCLUSION, COHORT_EXCLUSION].contains(&error.to_string().as_str()));
     for collection in [QUOTE_COLLECTION, WINDOW_COLLECTION, USAGE] {
         assert_eq!(
             f.db.collection::<Document>(collection)
