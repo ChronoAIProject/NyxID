@@ -34,7 +34,7 @@ async fn crm_matched_revision_one_is_not_created_and_committed_result_survives_t
         )
         .await
         .unwrap();
-    let result = super::super::artifacts::committed_result(
+    let result = crate::services::crm::artifacts::committed_result(
         &f.state.db,
         &f.chat,
         Ok(TurnCrmArtifact::Record {
@@ -83,7 +83,7 @@ async fn crm_empty_delivery_never_reads_the_database() {
     assert!(
         !tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            super::super::artifacts::enabled_for(&db, "owner", &[])
+            crate::services::crm::artifacts::enabled_for(&db, "owner", &[])
         )
         .await
         .unwrap()
@@ -96,7 +96,7 @@ async fn crm_empty_delivery_never_reads_the_database() {
     .unwrap();
     tokio::time::timeout(
         std::time::Duration::from_millis(100),
-        super::super::artifacts::publish_group(&db, &f.row, &message),
+        crate::services::crm::artifacts::publish_group(&db, &f.row, &message),
     )
     .await
     .unwrap()
@@ -313,7 +313,7 @@ async fn crm_async_chat_and_trigger_links_are_exact_once_and_flag_gated() {
     );
     feature_flag_service::set_platform_override(
         &f.state.db,
-        super::super::FLAG_KEY,
+        crate::services::crm::FLAG_KEY,
         &FlagTarget::User(f.owner.clone()),
         false,
         &f.owner,
