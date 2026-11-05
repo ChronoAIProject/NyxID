@@ -28,7 +28,7 @@ function loadCard(name: "HistoryCard" | "ChallengeCard", openedUrls: string[] = 
     "./ServiceIcon": { ServiceIcon: "ServiceIcon" },
     "./GroupedCell": { GroupedCell: "GroupedCell" },
     "./settings/SettingsList": { SettingsRow: "SettingsRow" },
-    "../lib/env": { NYXID_FRONTEND_URL: "https://app.example.test" },
+    "../lib/env": { getFrontendUrl: () => "https://app.example.test" },
     "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
       Linking: { openURL: async (url: string) => { openedUrls.push(url); } },

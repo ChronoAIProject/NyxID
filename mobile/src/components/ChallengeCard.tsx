@@ -1,5 +1,5 @@
 import { ServiceIcon } from "./ServiceIcon";
-import { NYXID_FRONTEND_URL } from "../lib/env";
+import { getFrontendUrl } from "../lib/env";
 import { useMemo } from "react";
 import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChevronRight } from "lucide-react-native";
@@ -220,7 +220,7 @@ export function ChallengeCard({
             label="Review in the web app"
             accessibilityRole="link"
             onPress={() =>
-              void Linking.openURL(`${NYXID_FRONTEND_URL}/assistant/approvals`)
+              void Linking.openURL(`${getFrontendUrl()}/assistant/approvals`)
             }
           />
         </View>
