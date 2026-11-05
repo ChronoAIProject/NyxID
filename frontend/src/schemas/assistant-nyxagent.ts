@@ -8,7 +8,7 @@ import { cmaOperationSchema } from "./cma-operation";
 const crmArtifactFields = {
   id: z.string().min(1),
   owner_id: z.string().min(1),
-  title: z.string().max(200),
+  title: z.string().refine((value) => [...value].length <= 200, "Must be at most 200 characters"),
   role: z.enum(["created", "presented"]),
 };
 const crmArtifactObjectKey = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/);

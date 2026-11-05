@@ -24,3 +24,22 @@ it("requires object keys for record and dataset references and keeps literal wir
     kind: "view",
   });
 });
+
+it("uses the backend's 200 Unicode character title bound", () => {
+  const artifact = {
+    kind: "view",
+    id: "unicode-view",
+    owner_id: "person",
+    title: "🧪".repeat(200),
+    role: "presented",
+  };
+  expect(turnCrmArtifactSchema.parse(artifact).title).toBe("🧪".repeat(200));
+  expect(
+    turnCrmArtifactSchema.safeParse({ ...artifact, title: "🧪".repeat(201) })
+      .success,
+  ).toBe(false);
+  expect(
+    turnCrmArtifactSchema.safeParse({ ...artifact, title: "x".repeat(201) })
+      .success,
+  ).toBe(false);
+});
