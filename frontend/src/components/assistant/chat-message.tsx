@@ -1,4 +1,5 @@
 import { useRouter, useRouterState } from "@tanstack/react-router";
+import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
 import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
@@ -28,6 +29,7 @@ import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
@@ -100,7 +102,7 @@ function ThinkingBlock({
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex items-center gap-1.5 py-1 text-11 text-text-tertiary transition-colors hover:text-muted-foreground"
+        className="flex items-center gap-1.5 py-1 text-13 text-text-tertiary transition-colors hover:text-muted-foreground"
       >
         <ChevronRight
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
@@ -110,7 +112,7 @@ function ThinkingBlock({
         {streaming ? <PulseDot /> : null}
       </button>
       {open ? (
-        <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-11 leading-relaxed text-text-tertiary whitespace-pre-wrap">
+        <div data-scroll-fade="" className="ml-3.5 max-h-56 overflow-auto border-l border-hairline pl-3 text-13 text-text-tertiary whitespace-pre-wrap">
           {text}
         </div>
       ) : null}
@@ -243,7 +245,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
     <span
       title={decisionTitle(row)}
       className={cn(
-        "shrink-0 rounded border px-1 font-sans text-9 leading-4",
+        "shrink-0 rounded border px-1 font-sans text-12 ",
         denied
           ? "border-warning/30 bg-warning/10 text-warning"
           : "border-hairline bg-overlay text-text-tertiary",
@@ -261,13 +263,21 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
  * waits and channel delivery. Denials and failures surface in the line
  * itself; the rest is on demand.
  */
-function TurnSummary({ message }: { readonly message: ChatMessage }) {
+function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMessage; readonly selectedDecisionId?: string }) {
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const decisions = message.decisions ?? [];
   const count = steps.length + tools.length;
   const total = Math.max(count, message.activityTotal ?? 0);
-  const [open, setOpen] = useState(false);
+  const selected = decisions.some((row) => row.id === selectedDecisionId);
+  const target = selected ? selectedDecisionId : undefined;
+  const navigation = useReviewCardNavigation();
+  const reveal = selected && !navigation?.handled;
+  const [expansion, setExpansion] = useState({ target, navigation, open: reveal });
+  if (expansion.target !== target || expansion.navigation !== navigation) {
+    setExpansion({ target, navigation, open: expansion.open || reveal });
+  }
+  const open = expansion.open || ((expansion.target !== target || expansion.navigation !== navigation) && reveal);
   const capacityWaitMs = message.turnMetadata?.capacityWaitMs ?? 0;
   const attempts = message.turnMetadata?.attempts ?? 0;
   const waited = message.status === "complete" && (capacityWaitMs > 0 || attempts > 1);
@@ -294,7 +304,7 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
     <div className={cn("mb-2", ACCORDION_MAX_W, BANNER_FRAME, BANNER_NEUTRAL)}>
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => setExpansion({ target, navigation, open: !open })}
         aria-expanded={open}
         aria-label={`Turn details: ${[...parts, failed ? `${String(failed)} failed` : "", deliveryFailed ? "delivery failed" : ""].filter(Boolean).join(", ")}`}
         className={cn(BANNER_ROW, "text-muted-foreground transition-colors hover:bg-overlay")}
@@ -326,7 +336,7 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
       {open ? (
         <div className="space-y-1 border-t border-hairline px-3 py-2">
           {steps.map((step) => (
-            <div key={step.id} className="flex items-start gap-2 text-11">
+            <div key={step.id} className="flex items-start gap-2 text-13">
               {step.status === "running" ? (
                 <PulseDot className="mt-1" />
               ) : step.status === "error" ? (
@@ -343,14 +353,15 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
                 </span>
               ) : null}
               {step.stepType ? (
-                <span className={cn("shrink-0 font-mono text-9", step.status === "error" ? "text-destructive" : "text-text-tertiary")}>
+                <span className={cn("shrink-0 font-mono text-12", step.status === "error" ? "text-destructive" : "text-text-tertiary")}>
                   {step.stepType}
                 </span>
               ) : null}
             </div>
           ))}
           {tools.map((tool) => (
-            <details key={tool.id} className="text-11 text-muted-foreground">
+            <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
+            <details className="text-13 text-muted-foreground">
               <summary
                 data-tool-status={tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
@@ -366,7 +377,7 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
                     {describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
-                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-10", tool.status === "error" ? "text-destructive" : "text-text-tertiary")}>
+                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", tool.status === "error" ? "text-destructive" : "text-text-tertiary")}>
                     <span className="truncate">{tool.name || tool.id}</span>
                     {Number.isFinite(tool.startedAt) ? <span className="shrink-0"><ToolElapsed
                       startedAt={new Date(tool.startedAt).toISOString()}
@@ -382,16 +393,19 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
                 ) : null}
               </summary>
               {tool.result ? (
-                <pre data-scroll-fade="" className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-10 text-text-tertiary">
+                <pre data-scroll-fade="" className="ml-5 mt-1 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-overlay px-2 py-1.5 font-mono text-14 text-text-tertiary">
                   {tool.result.slice(0, 500)}
                 </pre>
               ) : null}
             </details>
+            </ReviewCardTarget>
           ))}
           {loose.length ? (
             <ul aria-label="Permissions used" className="space-y-1 pt-0.5">
-              {groupDecisions(loose).map(({ row, count: times }) => (
-                <li key={row.id} title={decisionTitle(row)} className="flex items-start gap-2 text-11 text-muted-foreground">
+              {groupDecisions(loose, selectedDecisionId).map(({ row, count: times }) => (
+                <li key={row.id} title={decisionTitle(row)}>
+                <ReviewCardTarget selected={row.id === selectedDecisionId}>
+                <div className="flex items-start gap-2 text-13 text-muted-foreground">
                   {row.status === "denied" ? (
                     <X aria-hidden="true" className="mt-0.5 h-3 w-3 shrink-0 text-warning" />
                   ) : (
@@ -402,13 +416,15 @@ function TurnSummary({ message }: { readonly message: ChatMessage }) {
                     {" · "}{decisionText(row)}
                     {row.reason?.trim() ? <span className="text-text-tertiary"> · {row.reason}</span> : null}
                   </span>
-                  {times > 1 ? <span className="shrink-0 tabular-nums text-10 text-text-tertiary">×{times}</span> : null}
+                  {times > 1 ? <span className="shrink-0 tabular-nums text-12 text-text-tertiary">×{times}</span> : null}
+                </div>
+                </ReviewCardTarget>
                 </li>
               ))}
             </ul>
           ) : null}
           {waited || delivery ? (
-            <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pt-0.5 text-10 text-text-tertiary">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 pt-0.5 text-12 text-text-tertiary">
               {waited ? <CapacityDetails attempts={message.turnMetadata?.attempts} capacityWaitMs={capacityWaitMs} /> : null}
               {delivery ? <><dt>delivery</dt><dd className={cn(deliveryFailed && "text-warning")}>{deliveryText(delivery)}</dd></> : null}
             </dl>
@@ -430,7 +446,7 @@ function BillingRemedyWithRouter() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const panel = useAccountPanel();
   if (!isAssistantShellRoute(pathname)) return null;
-  return <button type="button" className="mt-2 block text-11 underline"
+  return <button type="button" className="mt-2 block type-row-title underline"
     onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
 }
 
@@ -458,10 +474,12 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
     .filter(Boolean)
     .join(" / ");
   return (
-    <details className="mt-2 max-w-[900px] text-11 text-text-tertiary">
+    <details className="mt-2 max-w-[900px] text-13 text-text-tertiary">
       <summary className="cursor-pointer">Details</summary>
-      {failure?.source === "nyxid" && failure.code === "guest_model_route_required" ? (
-        <p className="mt-1">Send one message to this agent as its owner using its configured model to record the route for guest replies.</p>
+      {failure?.source === "nyxid" && (failure.code === "guest_model_route_required" || failure.stage === "guest_setup") ? (
+        <p className="mt-1">{failure.model_route?.reason === "credits_unavailable"
+          ? "Add credits to the linking owner's account. Visitor setup retries automatically."
+          : "Check this assistant's configured model and model connection. Visitor setup retries automatically."}</p>
       ) : null}
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
         <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
@@ -559,6 +577,7 @@ export function ChatMessageBubble({
   onCheckRecovery,
   conversationId,
   feedbackEnabled = true,
+  selectedDecisionId,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
@@ -566,10 +585,12 @@ export function ChatMessageBubble({
   readonly onCheckRecovery?: () => Promise<unknown> | void;
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
+  readonly selectedDecisionId?: string;
 }) {
   const streaming = message.status === "streaming";
   const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
+  const [retryConfirmed, setRetryConfirmed] = useState(false);
   const [retryError, setRetryError] = useState<string>();
   const [reviewOpen, setReviewOpen] = useState(false);
   const [copyState, setCopyState] = useState<"copied" | "failed">();
@@ -577,6 +598,10 @@ export function ChatMessageBubble({
   const [checkError, setCheckError] = useState<string>();
   const retry = async () => {
     if (!onRetry) return;
+    if (message.actionOutcome?.retry_warning && !retryConfirmed) {
+      setRetryConfirmed(true);
+      return;
+    }
     setRetrying(true);
     setRetryError(undefined);
     try {
@@ -596,6 +621,7 @@ export function ChatMessageBubble({
     parentId: conversationId ?? "",
     messageId: message.id,
     initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
     onVoted: (vote) =>
       capture({
         name: "ui.assistant_feedback_submitted",
@@ -603,14 +629,14 @@ export function ChatMessageBubble({
       }),
   });
   if (message.continuation_of) {
-    return <p role="status" className="px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
+    return <p role="status" className="px-[7px] text-13 text-muted-foreground">Continuing after your decision</p>;
   }
   if (message.role === "user") {
     return (
-      <div className="group/message ml-auto flex max-w-[78%] flex-col items-end gap-1">
-        <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+      <div className="group/message ml-auto flex min-w-0 max-w-[90%] flex-col items-end gap-1 sm:max-w-[78%]">
+        <UserMessageBubble className="max-w-full text-16 [overflow-wrap:anywhere]">
           {message.steering && (
-            <p className="mb-1 text-11 text-muted-foreground" role="note">
+            <p className="mb-1 text-13" role="note">
               Steering ·{" "}
               {steeringNotice(message.steering.code, message.steering.outcome)}
             </p>
@@ -623,7 +649,7 @@ export function ChatMessageBubble({
             </div>
           ) : null}
           {content}
-        </div>
+        </UserMessageBubble>
         <div className="flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1 opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 [@media(hover:none)]:opacity-100">
           <MessageTime value={message.timestamp} />
           <MessageCopyAction text={content} />
@@ -680,7 +706,7 @@ export function ChatMessageBubble({
     >
       <div className="min-w-0 w-full pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
-        <TurnSummary message={message} />
+        <TurnSummary message={message} selectedDecisionId={selectedDecisionId} />
         {message.toolCalls
           ?.filter((tool) => tool.machine)
           .map((tool) => (
@@ -699,7 +725,7 @@ export function ChatMessageBubble({
           </div>
         ) : null}
         {capacityNote ? (
-          <p role="note" className="text-12 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
+          <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
         {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
@@ -719,26 +745,42 @@ export function ChatMessageBubble({
         {message.status === "error" && message.errorDetail ? (
           <ErrorDetails detail={message.errorDetail} />
         ) : null}
+        {message.status === "error" && message.actionOutcome ? (
+          <div role="note" className="mt-2 space-y-1 text-13 text-muted-foreground">
+            <p>{message.actionOutcome.summary}</p>
+            {message.actionOutcome.actions.length > 0 ? (
+              <ul className="list-disc space-y-1 pl-5">
+                {message.actionOutcome.actions.map((action) => (
+                  <li key={action.activity_id}>{action.summary}</li>
+                ))}
+              </ul>
+            ) : null}
+            {!message.actionOutcome.complete ? <p>The action record may be incomplete.</p> : null}
+          </div>
+        ) : null}
         {message.status === "error" && onRetry ? (
           <div className="mt-2">
+            {message.actionOutcome?.retry_warning ? (
+              <p role="note" className="mb-1 text-13 text-muted-foreground">{message.actionOutcome.retry_warning}</p>
+            ) : null}
             <button
               type="button"
-              className="inline-flex items-center gap-1 text-11 underline disabled:opacity-50"
+              className="inline-flex items-center gap-1 type-row-title underline disabled:opacity-50"
               disabled={retrying}
               onClick={() => void retry()}
             >
               <RotateCcw className="size-3" aria-hidden />
-              {retrying ? "Retrying…" : "Retry"}
+              {retrying ? "Retrying…" : retryConfirmed ? "Retry anyway" : "Retry"}
             </button>
             {retryError ? (
-              <p role="alert" className="mt-1 text-11 text-destructive">
+              <p role="alert" className="mt-1 text-13 text-destructive">
                 {retryError}
               </p>
             ) : null}
           </div>
         ) : null}
         {message.status === "error" && message.recovery?.status === "review" ? (
-          <div className="mt-2 space-y-2 text-11 text-muted-foreground">
+          <div className="mt-2 space-y-2 text-13 text-muted-foreground">
             <p>{recoveryReason(message.recovery.reason)}</p>
             {message.recovery.text !== null ? (
               <>
@@ -778,7 +820,7 @@ export function ChatMessageBubble({
           </div>
         ) : null}
         {message.status === "error" && onCheckRecovery ? (
-          <div className="mt-2 text-11">
+          <div className="mt-2 text-13">
             <button type="button" className="inline-flex items-center gap-1 underline disabled:opacity-50"
               disabled={checking} onClick={() => {
                 setChecking(true);
@@ -810,7 +852,7 @@ export function ChatMessageBubble({
         {streaming ? (
           <div
             data-turn-status
-            className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
+            className="flex min-h-5 items-center gap-1 text-13 text-muted-foreground"
           >
             {!content ? <span data-streaming-dots {...(thinking ? { "data-assistant-halo": "" } : {})}><PulseDot /></span> : null}
             <span
@@ -843,7 +885,7 @@ export function ChatMessageBubble({
           <p
             role="status"
             aria-label="Turn stopped"
-            className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
+            className="flex min-h-5 items-center gap-1 text-13 text-muted-foreground"
           >
             <CircleAlert aria-hidden="true" className="h-3 w-3" />
             Stopped
@@ -853,7 +895,7 @@ export function ChatMessageBubble({
             streaming reply has no settled instant yet. */}
         {streaming ? null : (
           <div className="mt-2 flex flex-wrap items-center gap-1 empty:hidden">
-            <MessageCopyAction text={content} />
+            <MessageCopyAction text={content} format="markdown" />
             {showFeedback ? <ReplyFeedbackVotes feedback={feedback} /> : null}
             <MessageTime
               value={message.timestamp}
@@ -875,6 +917,7 @@ export function ChatMessageEntry({
   feedbackEnabled = true,
   onRetry,
   onCheckRecovery,
+  selectedDecisionId,
 }: {
   readonly message: ChatMessage;
   readonly interactiveCards?: boolean;
@@ -882,6 +925,7 @@ export function ChatMessageEntry({
   readonly feedbackEnabled?: boolean;
   readonly onRetry?: () => Promise<void> | void;
   readonly onCheckRecovery?: () => Promise<unknown> | void;
+  readonly selectedDecisionId?: string;
 }) {
   if (
     message.role === "system" &&
@@ -891,7 +935,7 @@ export function ChatMessageEntry({
       <p
         role="note"
         aria-label="Conversation context reset"
-        className="text-xs text-text-tertiary"
+        className="text-13 text-text-tertiary"
       >
         {message.content}
       </p>
@@ -904,7 +948,7 @@ export function ChatMessageEntry({
         {authorName ? (
           <div
             className={cn(
-              "text-10 text-text-tertiary",
+              "text-12 text-text-tertiary",
               message.role === "user" ? "self-end" : undefined,
             )}
           >
@@ -913,6 +957,7 @@ export function ChatMessageEntry({
         ) : null}
         <ChatMessageBubble
           message={message}
+          selectedDecisionId={selectedDecisionId}
           interactiveCards={interactiveCards}
           conversationId={conversationId}
           feedbackEnabled={feedbackEnabled}
@@ -933,14 +978,14 @@ export function ChatMessageEntry({
         <MessageSquare className="h-3 w-3" />
       </div>
       <div className="min-w-0 max-w-[84%] flex-1">
-        <div className="text-11 font-medium text-foreground">{displayName}</div>
+        <div className="type-secondary-emphasis text-foreground">{displayName}</div>
         {message.thinking ? (
-          <p className="mt-1 text-11 italic text-text-tertiary">
+          <p className="mt-1 text-13 italic text-text-tertiary">
             {message.thinking}
           </p>
         ) : null}
         {message.content ? (
-          <div className="mt-1 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
+          <div className="mt-1 text-14 text-foreground whitespace-pre-wrap">
             {message.content}
           </div>
         ) : null}
@@ -951,7 +996,7 @@ export function ChatMessageEntry({
 
 function EmptyState({ children }: { readonly children?: ReactNode }) {
   return (
-    <div className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
+    <div className="flex flex-1 items-center justify-center px-6 text-center text-14 text-text-tertiary">
       {children ??
         "Ask NyxID to help with services, access, and account operations."}
     </div>
@@ -1094,6 +1139,9 @@ export function ChatMessageList({
     overscan: ROW_OVERSCAN,
     gap: rowGap,
     scrollMargin,
+    // Match unwindowed jumps and reach scrollTop=0 for the first row, so
+    // expanding the compact toolbar preserves the beginning of the thread.
+    scrollPaddingStart: 24,
     // Keep the rows on screen in place when older messages load above them.
     anchorTo: "end",
     // A transcript opens at its newest message.
@@ -1278,7 +1326,7 @@ export function ChatMessageList({
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1">
+    <div data-chat-transcript-viewport="" className="relative flex min-h-0 min-w-0 flex-1">
       <div
         ref={scrollRef}
         onScroll={handleScroll}

@@ -126,9 +126,10 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
                 doc! {"$set": {"relay_attempted_at": recheck}}).await?;
         } else {
             let outcome = Box::pin(move_to_direct(state, &row)).await;
+            let checked = load_channel(state, &row.user_id, &row.id).await?;
             audit(state, &row.user_id, "nyxbot_channel_transport_checked",
-                json!({"channel_agent_id": row.id, "platform": row.platform,
-                    "moved_to_direct": outcome.is_ok(), "error_code": outcome.err()})).await;
+                gateway_diagnostic_audit(json!({"channel_agent_id": row.id, "platform": row.platform,
+                    "moved_to_direct": outcome.is_ok(), "error_code": outcome.err()}), &checked)).await;
             return Ok(()); // At most one attempted move per sweep, either way.
         }
     }
@@ -149,19 +150,26 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
                 now - ChronoDuration::hours(GATEWAY_RETRY_HOURS) + ChronoDuration::minutes(MOVE_RECHECK_MINUTES))}}).await?;
     } else if let Err(code) = outcome {
         channels
-            .update_one(
-                doc! {"_id": &row.id, "transport": "direct"},
-                doc! {"$set": {"gateway_fallback_at": bson::DateTime::now()}},
-            )
+            .update_one(doc! {"_id": &row.id, "transport": "direct"}, {
+                let mut set = doc! {"gateway_fallback_at":bson::DateTime::now()};
+                if row.gateway_source.is_some() {
+                    set.insert("gateway_native_activation", code);
+                }
+                doc! {"$set":set}
+            })
             .await?;
         tracing::info!(code, platform = %row.platform, "NyxBot channel stays on NyxID's relay");
     }
+    let checked = load_channel(state, &row.user_id, &row.id).await?;
     audit(
         state,
         &row.user_id,
         "nyxbot_channel_transport_checked",
-        json!({"channel_agent_id": row.id, "platform": row.platform,
+        gateway_diagnostic_audit(
+            json!({"channel_agent_id": row.id, "platform": row.platform,
             "moved_to_gateway": outcome.is_ok(), "error_code": outcome.err()}),
+            &checked,
+        ),
     )
     .await;
     Ok(())
@@ -207,11 +215,43 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     if let Err(code) = ready_to_swap(state, row, false).await {
         return Err(discard(code).await);
     }
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        let bot = match channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await {
+            Ok(bot) => bot,
+            Err(_) => return Err(discard("bot_unavailable").await),
+        };
+        let relay_url = channel_bot_service::webhook_url(&state.config.base_url, &bot);
+        if crate::services::whatsapp_native::begin_restore(&state.db, &bot)
+            .await
+            .is_err()
+        {
+            return Err(discard("native_whatsapp_relay_restore_pending").await);
+        }
+        if crate::services::whatsapp_native::restore_relay(
+            &state.db,
+            &state.encryption_keys,
+            &bot,
+            &relay_url,
+        )
+        .await
+        .is_err()
+        {
+            return Err(discard("native_whatsapp_relay_callback_unverified").await);
+        }
+    }
     let mut fence = fence;
     fence.insert("pending_route_api_key_id", &next.id);
-    let update = doc! {"$set": {"transport": "direct", "gateway_no_progress": false, "route_api_key_id": &next.id, "updated_at": bson::DateTime::now()},
+    let mut set = doc! {"transport":"direct","gateway_no_progress":false,"route_api_key_id":&next.id,"updated_at":bson::DateTime::now()};
+    if row.gateway_source.is_some() {
+        set.insert("gateway_native_activation", "relay_draining");
+        set.insert("gateway_native_activation_detail", bson::Bson::Null);
+    }
+    let update = doc! {"$set": set,
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",
-        "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
+        "gateway_source": "", "gateway_native_phase": "", "gateway_record_id": "", "gateway_threads": "", "gateway_version": "", "binding_id": "", "gateway_bot_id": "",
         "gateway_groups": "", "gateway_groups_retry_at": "", "gateway_attempted_at": "", "gateway_fallback_at": "",
         "pending_agent_api_key_id": "", "pending_route_api_key_id": ""}};
     match swap_route(state, row, &next.id, fence, update).await {

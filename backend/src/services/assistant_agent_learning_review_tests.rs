@@ -846,6 +846,13 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 #[test]
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: false,
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: None,
@@ -891,6 +898,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         created_by: "user".into(),
         model: "default".into(),
         owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -1580,6 +1588,8 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                execution_task: None,
+                delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -1834,6 +1844,8 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            execution_task: None,
+            connect_own: None,
             activity_id: None,
             invocation_id: None,
             link: None,
@@ -2216,6 +2228,8 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
         )
         .insert_one(AssistantAcknowledgement {
+            execution_task: None,
+            connect_own: None,
             activity_id: None,
             invocation_id: None,
             link: None,

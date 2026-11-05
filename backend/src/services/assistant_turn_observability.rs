@@ -37,7 +37,17 @@ pub fn metadata(turn: &ActiveTurn, now: DateTime<Utc>) -> TurnMetadata {
         .map_or(0, |started| {
             (now - started).num_milliseconds().max(0) as u64
         });
+    let mut timing = turn.timing.clone();
+    timing.total_ms = (now - turn.started_at).num_milliseconds().max(0) as u64;
+    timing.admission_wait_ms = turn
+        .capacity_accepted_at
+        .zip(turn.engine_request_started_at)
+        .map_or(0, |(accepted, started)| {
+            (accepted - started).num_milliseconds().max(0) as u64
+        });
     TurnMetadata {
+        work: None,
+        timing: Some(timing),
         failure_reason: None,
         channel_delivery: None,
         attempts: Some(turn.engine_attempts),
@@ -141,7 +151,8 @@ pub async fn failed_in_session(
 ) -> AppResult<()> {
     let data = metadata(turn, now);
     audit_service::log_actor_event_in_transaction(db, session, &actor(&row.user_id), "assistant_turn_failed", json!({
-        "conversation_id": row.id, "turn_id": turn.turn_id, "code": error.code, "stage": error.stage,
+        "conversation_id": row.id, "turn_id": turn.turn_id, "channel_event_id":turn.channel_event_id,
+        "timing":data.timing,"code": error.code, "stage": error.stage,
         "upstream_code": error.upstream_code, "http_status": error.http_status, "origin": origin(turn),
         "failure_reason": error.metadata.as_ref().and_then(|data| data.failure_reason.as_ref()),
         "attempts": data.attempts, "capacity_wait_ms": data.capacity_wait_ms, "trigger_run_id": turn.trigger_run_id,
@@ -162,8 +173,16 @@ pub async fn run_metadata_in_session(
             .update_one(
                 doc! {"_id": run_id, "user_id": &row.user_id, "turn_id": &turn.turn_id},
                 vec![doc! {"$set": {
+                    "work": {
+                        "owner_id": {"$literal":row.agent_owner_id.as_deref().unwrap_or(&row.user_id)},
+                        "trigger_run_id": {"$literal":run_id},
+                        "source": {"$cond":[{"$ne":[{"$ifNull":["$confirmation_policy",null]},null]},"event","scheduled"]},
+                        "business_system_success": {"$or":[{"$ifNull":["$work.business_system_success",false]},turn.business_system_success]},
+                    },
                     "attempts": {"$add": [{"$ifNull": ["$attempts", 0]}, i64::from(turn.engine_attempts)]},
                     "capacity_wait_ms": {"$add": [{"$ifNull": ["$capacity_wait_ms", 0]}, data.capacity_wait_ms.unwrap_or(0) as i64]},
+                    "failure_reason": {"$literal": bson::to_bson(&data.failure_reason)
+                        .map_err(|e| crate::errors::AppError::Internal(e.to_string()))?},
                 }}],
             )
             .session(session)
@@ -300,4 +319,14 @@ pub fn capacity_message(wait_ms: Option<u64>) -> String {
         .filter(|ms| *ms > 0)
         .map_or_else(String::new, |ms| format!(" (waited {})", wait_duration(ms)));
     format!("NyxBot is at capacity right now{waited}. Try again shortly.")
+}
+
+/// One write on the first semantic model output, never on every SSE chunk.
+pub async fn first_output(db: &Database, row: &AssistantConversation) -> AppResult<()> {
+    let turn = row.active_turn.as_ref().expect("claimed turn");
+    db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+        doc! {"_id":&row.id,"active_turn.turn_id":&turn.turn_id,"active_turn.timing.first_output_ms":bson::Bson::Null},
+        doc! {"$set":{"active_turn.timing.first_output_ms":(Utc::now()-turn.started_at).num_milliseconds().max(0)}},
+    ).await?;
+    Ok(())
 }

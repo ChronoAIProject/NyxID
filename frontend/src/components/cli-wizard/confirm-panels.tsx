@@ -54,6 +54,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { WizardHeading } from "./wizard-heading";
 
 // ── api-key-create panel ────────────────────────────────────────────
 
@@ -199,14 +200,9 @@ export function ApiKeyCreateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Create an API key
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Review the details your CLI sent and confirm to mint the key.
-        </p>
-      </div>
+      <WizardHeading title="Create an API key">
+        Review the details your CLI sent and confirm to mint the key.
+      </WizardHeading>
       <div className="flex flex-col gap-4">
         <NameInput
           id="pair-api-key-name"
@@ -237,7 +233,7 @@ export function ApiKeyCreateConfirm({
                   side="right"
                   align="start"
                   sideOffset={8}
-                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
+                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13"
                 >
                   <div className="flex flex-col gap-4">
                     <p>
@@ -289,7 +285,7 @@ export function ApiKeyCreateConfirm({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Tags the key for audit attribution + per-agent rate limits.
           </p>
         </div>
@@ -310,7 +306,7 @@ export function ApiKeyCreateConfirm({
                   allowAllNodes: false,
                 }));
               }}
-              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
+              className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-15 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
             >
               <option value="">Personal (your account)</option>
               {orgs.data
@@ -321,7 +317,7 @@ export function ApiKeyCreateConfirm({
                   </option>
                 ))}
             </select>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-13 text-muted-foreground">
               Org-owned keys authenticate as the org; every admin of
               the selected org can rotate or delete them.
             </p>
@@ -330,7 +326,7 @@ export function ApiKeyCreateConfirm({
         <Field label="Key expiry" htmlFor="pair-api-key-expiry">
           <select id="pair-api-key-expiry" value={lifetime}
             onChange={(event) => setLifetime(event.target.value)}
-            className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground">
+            className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-15 text-foreground">
             <option value="default">90 days (default)</option>
             {["7", "30", "90", "365"].map((days) => <option key={days} value={days}>{days} days</option>)}
             {prefill.expires_in_days != null && prefill.expires_in_days > 0 &&
@@ -339,7 +335,7 @@ export function ApiKeyCreateConfirm({
             <option value="never">No expiry</option>
             {lifetime === "conflict" ? <option value="conflict">Conflicting prefill; select a lifetime</option> : null}
           </select>
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Key expiry: {lifetime === "never" ? "No expiry (explicitly selected)"
               : lifetime === "default" ? "90 days (default)"
               : lifetime === "conflict" ? "Choose either an expiry date or no expiry"
@@ -415,15 +411,10 @@ export function ApiKeyRotateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate API key
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> will issue a
-          new key and immediately revoke the previous one.
-        </p>
-      </div>
+      <WizardHeading title="Rotate API key">
+        Rotating <strong>{prefill.display_name}</strong> will issue a
+        new key and immediately revoke the previous one.
+      </WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading}>
         {loading ? "Rotating..." : "Rotate key"}
@@ -499,15 +490,10 @@ export function NodeRegisterConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Generate node registration token
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Use this token with <code>nyxid node register</code> to
-          connect a new node.
-        </p>
-      </div>
+      <WizardHeading title="Generate node registration token">
+        Use this token with <code>nyxid node register</code> to
+        connect a new node.
+      </WizardHeading>
       <NameInput
         id="pair-node-name"
         label="Node name (optional)"
@@ -581,15 +567,10 @@ export function NodeRotateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate node token
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> issues a new
-          auth token + signing secret and revokes the previous pair.
-        </p>
-      </div>
+      <WizardHeading title="Rotate node token">
+        Rotating <strong>{prefill.display_name}</strong> issues a new
+        auth token + signing secret and revokes the previous pair.
+      </WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading}>
         {loading ? "Rotating..." : "Rotate token"}
@@ -696,15 +677,10 @@ export function ServiceAccountCreateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Create a service account
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Service accounts authenticate via the OAuth client_credentials flow.
-          The client_secret is shown once, on the next screen.
-        </p>
-      </div>
+      <WizardHeading title="Create a service account">
+        Service accounts authenticate via the OAuth client_credentials flow.
+        The client_secret is shown once, on the next screen.
+      </WizardHeading>
       <div className="flex flex-col gap-4">
         <Field label="Name" htmlFor="pair-sa-name">
           <Input
@@ -750,7 +726,7 @@ export function ServiceAccountCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-15 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">Personal (your admin account)</option>
               {orgs.data?.map((org) => (
@@ -826,16 +802,11 @@ export function ServiceAccountRotateSecretConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate service account secret
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> immediately revokes
-          all existing access tokens issued under this service account and mints
-          a new client_secret.
-        </p>
-      </div>
+      <WizardHeading title="Rotate service account secret">
+        Rotating <strong>{prefill.display_name}</strong> immediately revokes
+        all existing access tokens issued under this service account and mints
+        a new client_secret.
+      </WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={loading}>
         {loading ? "Rotating..." : "Rotate secret"}
@@ -977,16 +948,11 @@ export function DeveloperAppCreateConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Create a developer OAuth app
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Confidential client — the client_secret is shown once on the next
-          screen. Use it to sign Sign-in-with-NyxID requests from your
-          downstream product.
-        </p>
-      </div>
+      <WizardHeading title="Create a developer OAuth app">
+        Confidential client — the client_secret is shown once on the next
+        screen. Use it to sign Sign-in-with-NyxID requests from your
+        downstream product.
+      </WizardHeading>
       <div className="flex flex-col gap-4">
         <Field label="App name" htmlFor="pair-app-name">
           <Input
@@ -1046,7 +1012,7 @@ export function DeveloperAppCreateConfirm({
             }}
             placeholder="openid profile email"
           />
-          <p className="text-xs text-muted-foreground">Space-separated.</p>
+          <p className="text-13 text-muted-foreground">Space-separated.</p>
         </Field>
         <Field label="Delegation scopes (optional)" htmlFor="pair-app-delegation">
           <Input
@@ -1061,7 +1027,7 @@ export function DeveloperAppCreateConfirm({
         <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
           <div className="flex flex-col gap-0.5">
             <Label htmlFor="pair-app-broker">Broker capability</Label>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Allow this app to broker downstream credentials.
             </p>
           </div>
@@ -1081,7 +1047,7 @@ export function DeveloperAppCreateConfirm({
               onChange={(e) => {
                 setOwnerId(e.target.value);
               }}
-              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-15 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">Personal</option>
               {orgs.data?.map((org) => (
@@ -1152,16 +1118,11 @@ export function DeveloperAppRotateSecretConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate developer app secret
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> mints a new
-          client_secret. Update any deployments using the previous value
-          immediately.
-        </p>
-      </div>
+      <WizardHeading title="Rotate developer app secret">
+        Rotating <strong>{prefill.display_name}</strong> mints a new
+        client_secret. Update any deployments using the previous value
+        immediately.
+      </WizardHeading>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={loading}>
         {loading ? "Rotating..." : "Rotate secret"}
@@ -1288,14 +1249,9 @@ export function MfaSetupConfirm({
   if (phase === "init") {
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1">
-          <h2 className="font-serif text-28 font-normal">
-            Setting up MFA
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Generating a TOTP secret on the server…
-          </p>
-        </div>
+        <WizardHeading title="Setting up MFA">
+          Generating a TOTP secret on the server…
+        </WizardHeading>
         {error ? <ErrorLine message={error} /> : null}
       </div>
     );
@@ -1303,16 +1259,11 @@ export function MfaSetupConfirm({
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Add MFA to your account
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Scan this QR with your authenticator app (1Password, Authy, Google
-          Authenticator). Then enter the 6-digit code it shows to verify and
-          finish enrollment.
-        </p>
-      </div>
+      <WizardHeading title="Add MFA to your account">
+        Scan this QR with your authenticator app (1Password, Authy, Google
+        Authenticator). Then enter the 6-digit code it shows to verify and
+        finish enrollment.
+      </WizardHeading>
 
       {qrDataUrl ? (
         <div className="flex justify-center rounded-md border border-border bg-white p-4 dark:bg-muted/30">
@@ -1323,7 +1274,7 @@ export function MfaSetupConfirm({
           />
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Couldn't render the QR code. Use the otpauth URL below instead.
         </p>
       )}
@@ -1331,7 +1282,7 @@ export function MfaSetupConfirm({
       <div className="flex flex-col gap-1.5">
         <Label>Or enter the secret manually</Label>
         <div className="flex items-center gap-2">
-          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm">
+          <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-14">
             {secretRevealed ? secret : "•".repeat(Math.max(secret?.length ?? 12, 12))}
           </code>
           <Button
@@ -1346,7 +1297,7 @@ export function MfaSetupConfirm({
           </Button>
         </div>
         {qrUrl ? (
-          <p className="break-all text-11 text-muted-foreground">
+          <p className="break-all text-13 text-muted-foreground">
             otpauth URL: <code className="font-mono">{qrUrl}</code>
           </p>
         ) : null}
@@ -1399,7 +1350,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
       {message}
     </p>
   );

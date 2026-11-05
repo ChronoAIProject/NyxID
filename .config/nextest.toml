@@ -22,6 +22,15 @@ path = "junit.xml"
 store-success-output = false
 store-failure-output = true
 
+# Preserve same-event transaction recovery diagnostics even when these journeys
+# pass, so the report distinguishes recovery from a run without contention.
+[[profile.ci.overrides]]
+filter = """
+test(=services::telegram_new_tests::manager_e2e::telegram_new_manager_public_channel_http_chat_reply_and_creation_end_to_end) |
+test(=services::telegram_new_tests::manager_e2e::telegram_new_manager_org_channel_http_chat_reply_and_creation_end_to_end)
+"""
+junit.store-success-output = true
+
 # The two concurrent deliveries in this journey exceed libtest's 2 MiB stack,
 # including in the unchanged base-coverage checkout. Match the 16 MiB used by
 # run_native_journey_test without changing other tests' stack requirements.

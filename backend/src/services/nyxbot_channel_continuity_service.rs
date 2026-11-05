@@ -48,7 +48,9 @@ async fn restore(
     // Deliberately inspect only the newest predecessor. An incompatible newest
     // record is a boundary, not permission to recover an older history.
     // A disconnected preparation never reached activation, which stores route_id.
-    if previous.route_id.is_none()
+    if row.org_specialist.is_some()
+        || previous.org_specialist.is_some()
+        || previous.route_id.is_none()
         || canonical(&previous.platform) != canonical(&row.platform)
         || owner(&previous) != owner(row)
         || previous.last_error.as_deref() == Some("platform_conversion")
@@ -89,7 +91,7 @@ async fn restore(
             owner_sender_ids.push(sender.clone());
         }
     }
-    channels.update_one(doc! {"_id":&row.id},doc! {"$set":{"owner_sender_ids":owner_sender_ids,"private_chats":&previous.private_chats,
+    channels.update_one(doc! {"_id":&row.id},doc! {"$set":{"owner_sender_ids":owner_sender_ids,"private_chats":&previous.private_chats,"private_chat_posts":previous.private_chat_posts,
         "continuity_from_channel_id":&previous.id,"continuity_restored_at":bson::DateTime::now()}}).session(&mut *session).await?;
     releases::audit(
         db,
@@ -123,6 +125,7 @@ pub(crate) async fn activate(
             let row=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&id,"user_id":&owner_id,"status":"pending"})
                 .session(&mut *session).await?.ok_or_else(conflict)?;
             super::platform_bot_authority::fence_personal_routes(&db,&row.channel_bot_id,owner(&row),session).await?;
+            if row.org_specialist.is_some() {super::org_channel_service::fence_management(&db,session,&row,&row.user_id).await?;}
             if db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"channel_bot_id":&row.channel_bot_id,"status":"active","_id":{"$ne":&row.id}})
                 .session(&mut *session).await?.is_some() {return Err(conflict());}
             // Serialize with route retirement and key invalidation.
@@ -139,7 +142,7 @@ pub(crate) async fn activate(
             if db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"pending","gateway_setup_release_id":&row.gateway_setup_release_id},
                 doc! {"$set":{"status":"active","route_id":&route,"link_code_hash":&link_hash,
                     "link_code_expires_at":bson::DateTime::from_chrono(now+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),
-                    "gateway_groups_retry_at":groups_due,"updated_at":bson::DateTime::from_chrono(now)},
+                    "gateway_groups_retry_at":groups_due,"gateway_native_phase":row.gateway_source.as_ref().map(|_|"ready"),"updated_at":bson::DateTime::from_chrono(now)},
                     "$unset":{"gateway_setup_release_id":""}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             Ok(())
         }).await;transactions::transaction_result(work)
@@ -165,6 +168,7 @@ pub(crate) async fn restore_existing(
             let row=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&id,"user_id":&owner_id,"status":"active"}).session(&mut *session).await?
                 .ok_or_else(conflict)?;
             super::platform_bot_authority::fence_personal_routes(&db,&row.channel_bot_id,owner(&row),session).await?;
+            if row.org_specialist.is_some() {super::org_channel_service::fence_management(&db,session,&row,&row.user_id).await?;}
             if row.continuity_from_channel_id.is_none() {restore(&db,&row,None,default_agent,session).await?;}
             db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"active"},doc! {"$set":{"link_code_hash":&link_hash,
                 "link_code_expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),"gateway_groups_retry_at":if row.transport=="gateway" {bson::Bson::DateTime(bson::DateTime::now())} else {bson::Bson::Null}}}).session(&mut *session).await?;

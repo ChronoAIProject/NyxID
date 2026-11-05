@@ -7,9 +7,12 @@ import {
   type CSSProperties,
 } from "react";
 import type { Root } from "mdast";
+import { mentionTokens } from "@/lib/assistant/nyxbot-mentions";
+import type { InlineMention } from "@/lib/assistant/group-mentions";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
 import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
 import { assistantModalLinkTarget } from "@/lib/assistant/assistant-link-target";
 import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
@@ -70,6 +73,7 @@ const SANITIZE_SCHEMA = {
   attributes: {
     ...defaultSchema.attributes,
     input: [...(defaultSchema.attributes?.input ?? []), "checked"],
+    span: [...(defaultSchema.attributes?.span ?? []), "dataGroupMention", "title"],
     th: [...(defaultSchema.attributes?.th ?? []), "align"],
     td: [...(defaultSchema.attributes?.td ?? []), "align"],
   },
@@ -86,7 +90,7 @@ const SANITIZE_SCHEMA = {
 
 // Inter-block rhythm without a container `space-y-*` — that would also push the
 // trailing streaming caret onto its own line. First block hugs the top.
-const BLOCK = "mt-2 first:mt-0";
+const BLOCK = "mt-[max(0.75em,calc(var(--spacing)*3))] first:mt-0";
 
 function allowedHref(href: string | undefined): string | null {
   if (!href) return null;
@@ -142,6 +146,32 @@ function remarkSafeModelContent() {
   };
 }
 
+/** Only server-projected group members become inline chips; names remain text. */
+function remarkMentionChips(mentions: readonly InlineMention[]) {
+  return () => (tree: Root) => {
+    type Node = { type: string; value?: string; children?: Node[]; data?: unknown };
+    function visit(node: Node) {
+      if (!node.children || node.type === "link") return;
+      node.children = node.children.flatMap((child) => {
+        if (child.type !== "text" || !child.value) { visit(child); return [child]; }
+        const text = child.value;
+        const nodes: Node[] = [];
+        let start = 0;
+        for (const token of mentionTokens(text)) {
+          const mention = mentions.find((m) => m.handle.toLowerCase() === token.name.toLowerCase());
+          if (!mention) continue;
+          if (token.start > start) nodes.push({ type: "text", value: text.slice(start, token.start) });
+          nodes.push({ type: "emphasis", children: [{ type: "text", value: `@${mention.label}` }], data: { hName: "span", hProperties: { dataGroupMention: "true", title: `@${mention.handle}` } } });
+          start = token.start + token.name.length + 1;
+        }
+        if (start < text.length) nodes.push({ type: "text", value: text.slice(start) });
+        return nodes;
+      });
+    }
+    visit(tree);
+  };
+}
+
 function tableCellStyle(
   style: CSSProperties | undefined,
   align: string | undefined,
@@ -165,16 +195,19 @@ function MarkdownHeadingTwo({ children }: ComponentProps<"h2">) {
   return insideFootnotes ? (
     <h2 className="sr-only">{children}</h2>
   ) : (
-    <h2 className={`${BLOCK} text-14 font-semibold text-foreground`}>
+    <h2 className={`${BLOCK} type-section-heading text-foreground`}>
       {children}
     </h2>
   );
 }
 
 const COMPONENTS: Components = {
+  span: ({ node, children, ...props }) => node?.properties.dataGroupMention
+    ? <span title={props.title} data-group-mention className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-13">{children}</span>
+    : <span {...props}>{children}</span>,
   p: ({ children }) => (
     <p
-      className={`${BLOCK} whitespace-pre-wrap leading-[1.65] text-foreground/90`}
+      className={`${BLOCK} whitespace-pre-wrap text-foreground/90`}
     >
       {children}
     </p>
@@ -187,28 +220,28 @@ const COMPONENTS: Components = {
     <del className="text-muted-foreground line-through">{children}</del>
   ),
   h1: ({ children }) => (
-    <h1 className={`${BLOCK} text-15 font-semibold text-foreground`}>
+    <h1 className={`${BLOCK} type-prose-heading text-foreground`}>
       {children}
     </h1>
   ),
   h2: MarkdownHeadingTwo,
   h3: ({ children }) => (
-    <h3 className={`${BLOCK} text-[0.84375rem] font-semibold text-foreground`}>
+    <h3 className={`${BLOCK} type-prose-subheading text-foreground`}>
       {children}
     </h3>
   ),
   h4: ({ children }) => (
-    <h4 className={`${BLOCK} text-13 font-medium text-foreground`}>
+    <h4 className={`${BLOCK} type-subheading text-foreground`}>
       {children}
     </h4>
   ),
   h5: ({ children }) => (
-    <h5 className={`${BLOCK} text-[0.78125rem] font-semibold text-foreground`}>
+    <h5 className={`${BLOCK} type-prose-minor-heading text-foreground`}>
       {children}
     </h5>
   ),
   h6: ({ children }) => (
-    <h6 className={`${BLOCK} text-12 font-medium text-foreground`}>
+    <h6 className={`${BLOCK} type-prose-minor-heading text-foreground`}>
       {children}
     </h6>
   ),
@@ -223,15 +256,16 @@ const COMPONENTS: Components = {
       {children}
     </ul>
   ),
-  ol: ({ children }) => (
+  ol: ({ children, start }) => (
     <ol
+      start={start}
       className={`${BLOCK} ml-4 list-decimal space-y-1 text-foreground/90 marker:text-text-tertiary`}
     >
       {children}
     </ol>
   ),
   li: ({ children }) => (
-    <li className="leading-[1.6] [&>p]:mt-0 [&>p]:inline">{children}</li>
+    <li className="[&>p]:mt-0 [&>p]:inline">{children}</li>
   ),
   blockquote: ({ children }) => (
     <blockquote
@@ -244,7 +278,7 @@ const COMPONENTS: Components = {
   pre: ({ children }) => (
     <pre
       data-scroll-fade=""
-      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono text-11 leading-relaxed text-foreground`}
+      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono type-code text-foreground [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit`}
     >
       {children}
     </pre>
@@ -255,7 +289,7 @@ const COMPONENTS: Components = {
       return <code className={className}>{children}</code>;
     }
     return (
-      <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-11 text-foreground">
+      <code className="rounded bg-muted px-1.5 py-0.5 font-mono type-code text-foreground">
         {children}
       </code>
     );
@@ -265,13 +299,13 @@ const COMPONENTS: Components = {
       data-scroll-fade=""
       className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline`}
     >
-      <table className="w-full border-collapse text-left text-12 text-foreground/90">
+      <table className="w-full border-collapse text-left text-14 text-foreground/90">
         {children}
       </table>
     </div>
   ),
   thead: ({ children }) => (
-    <thead className="border-b border-hairline bg-overlay text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <thead className="border-b border-hairline bg-overlay font-medium text-text-tertiary">
       {children}
     </thead>
   ),
@@ -289,7 +323,7 @@ const COMPONENTS: Components = {
   ),
   td: ({ children, style, align }) => (
     <td
-      className="px-3 py-2 align-top text-12"
+      className="px-3 py-2 align-top"
       style={tableCellStyle(style, align)}
     >
       {children}
@@ -305,15 +339,15 @@ const COMPONENTS: Components = {
     />
   ),
   sup: ({ children }) => (
-    <sup className="text-10 leading-none text-nyx-secondary-400">
+    <sup className="text-12 text-nyx-secondary-400">
       {children}
     </sup>
   ),
   section: ({ children }) => (
     <section
-      className={`${BLOCK} border-t border-hairline pt-2 text-11 text-foreground/90`}
+      className={`${BLOCK} border-t border-hairline pt-2 text-13 text-foreground/90`}
     >
-      <div className="mb-1 text-10 font-medium text-muted-foreground">
+      <div className="mb-1 type-group-label text-muted-foreground">
         Footnotes
       </div>
       <InsideFootnoteSectionContext.Provider value>
@@ -353,6 +387,8 @@ const COMPONENTS: Components = {
 type MarkdownProps = ComponentProps<typeof ReactMarkdown>;
 const REMARK_PLUGINS: MarkdownProps["remarkPlugins"] = [
   remarkGfm,
+  // Parse CJK punctuation boundaries without rewriting code or escaped markers.
+  remarkCjkFriendly,
   remarkSafeModelContent,
 ];
 const REHYPE_PLUGINS: MarkdownProps["rehypePlugins"] = [
@@ -374,15 +410,17 @@ const urlTransform: MarkdownProps["urlTransform"] = (url) =>
  * blocks into a fragment, so a split block's prefix and tail remain siblings
  * under one parent and the `first:mt-0` rhythm still resolves across the seam.
  */
-const MarkdownSegment = memo(function MarkdownSegment({
-  text,
+export const MarkdownContent = memo(function MarkdownContent({
+  text, mentions,
 }: {
   readonly text: string;
+  readonly mentions?: readonly InlineMention[];
 }) {
+  const plugins = useMemo(() => mentions?.length ? [...REMARK_PLUGINS!, remarkMentionChips(mentions)] : REMARK_PLUGINS, [mentions]);
   return (
     <ReactMarkdown
       allowedElements={ALLOWED_ELEMENTS}
-      remarkPlugins={REMARK_PLUGINS}
+      remarkPlugins={plugins}
       rehypePlugins={REHYPE_PLUGINS}
       urlTransform={urlTransform}
       components={COMPONENTS}
@@ -395,6 +433,7 @@ const MarkdownSegment = memo(function MarkdownSegment({
 export const TextBlock = memo(function TextBlock({
   text,
   streaming = false,
+  mentions,
 }: {
   readonly text: string;
   /**
@@ -403,6 +442,7 @@ export const TextBlock = memo(function TextBlock({
    * so the turn reads as "still writing" rather than freezing between chunks.
    */
   readonly streaming?: boolean;
+  readonly mentions?: readonly InlineMention[];
 }) {
   const revealed = useSmoothReveal(text, streaming);
   // Everything above the last settled block is frozen and memoized; only the
@@ -415,11 +455,11 @@ export const TextBlock = memo(function TextBlock({
 
   return (
     <div
-      className={`text-12 ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
+      className={`min-w-0 break-words type-chat-message [overflow-wrap:anywhere] ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
     >
       {prefix ? (
         <>
-          <MarkdownSegment text={prefix} />
+          <MarkdownContent text={prefix} mentions={mentions} />
           {/* mdast-util-to-hast separates top-level blocks with a newline text
               node. Two parses each produce their own but none at the seam, so
               this restores it and keeps split output byte-identical to a whole
@@ -427,7 +467,7 @@ export const TextBlock = memo(function TextBlock({
           {"\n"}
         </>
       ) : null}
-      <MarkdownSegment text={tail} />
+      <MarkdownContent text={tail} mentions={mentions} />
       {streaming ? (
         <span
           aria-hidden

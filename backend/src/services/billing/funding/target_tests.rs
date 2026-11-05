@@ -106,6 +106,7 @@ async fn member_removal_blocks_new_funding_but_preserves_admitted_reservations()
             .is_empty()
         );
         let row = UsageMeterRow {
+            org_channel_guest: None,
             rollup_pending: true,
             id: "row".into(),
             transaction_id: "transaction".into(),

@@ -82,10 +82,35 @@ group prevents overlapping delete passes. A pass is intentionally non-atomic:
 all Docker GHA readers were removed before this cleanup was introduced, so an
 index cannot be restored while its blobs are being retired.
 
-`ci-cache-warm.yml` separately refreshes the main Rust dependency and
-incremental generations when Publish Images reuses an already-successful gate.
-It is non-blocking and cancels older warm runs so only the newest main tree
-publishes cache generations.
+`ci-cache-warm.yml` is the only writer for ordinary main Rust dependency and
+incremental caches. `ci.yml` and the reusable `backend-tests.yml` explicitly pass
+`save-if: 'false'` and never save incremental directories. The composite also
+defaults to read-only; warm jobs explicitly opt in. Release caches and backend
+coverage baseline publication retain their separate writers.
+
+The warm workflow runs on main changes to Rust workspace sources, manifests,
+embedded inputs, build scripts, toolchain/configuration and CI workflows/actions,
+including backend-only pushes, and supports manual dispatch. It is non-blocking
+and cancels older warm runs so only the newest main tree publishes generations.
+It covers ten separate lanes: ordinary and instrumented backend archives,
+clippy, three KMS feature variants, CLI tests (also used by wizard freshness),
+CLI coverage, permissions and backend image inputs. No lanes are combined and
+no cache contents are reduced. Tests compare runner, toolchain, cache-prefix
+mode, hashed environment inputs, and incremental save/restore keys for every
+reader/writer pair. Feature flags are resolved from a static mapping inside the
+build step, after cache restoration, so their environment does not change keys.
+
+Ordinary Rust checks are now event-insensitive and eligible for exact-tree gate
+reuse only after every expected job succeeds. Feature job names use the simple
+`variant` matrix (`aws-kms`, `gcp-kms`, `aws-and-gcp-kms`); the last name is new,
+so an older result under `aws-kms,gcp-kms` cannot satisfy it. CLI head coverage
+still enforces 64%; its PR-only base measurement runs separately and the summary
+job preserves the `coverage-cli` artifact and PR delta. Claude checks continue
+to run on main. The strict reuse parser and its rejection of ambiguous names,
+`include`/`exclude` matrices and PR-only jobs are unchanged.
+Skipped or missing PR jobs always run on main. For example, a backend-only PR
+that did not exercise Machine Container E2E cannot reuse that check, so it may
+still determine publication time even when Rust checks are reusable.
 
 The tests cover newest-per-target dist retention, non-main dist cleanup, node
 family retention, coverage newest-30 plus 14-day retention, known Rust lanes,

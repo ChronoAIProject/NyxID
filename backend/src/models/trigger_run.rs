@@ -31,6 +31,8 @@ impl RunOutcome {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerRun {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<super::assistant_message::WorkEvidence>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub trigger_generation: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
@@ -56,6 +58,9 @@ pub struct TriggerRun {
     /// Includes upstream assistant error codes as well as scheduler reasons;
     /// this is deliberately an open diagnostic namespace.
     pub reason: Option<String>,
+    /// Sanitized model callback failure from the latest settled run turn.
+    #[serde(default)]
+    pub failure_reason: Option<Box<super::assistant_message::TurnFailureReason>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
@@ -71,6 +76,8 @@ pub struct TriggerRun {
     pub result_claimed: bool,
     #[serde(default)]
     pub image_refs: Vec<RunImageRef>,
+    #[serde(default)]
+    pub delegated_image_refs: Vec<super::assistant_delegated_image::DeliveryReference>,
     #[serde(default)]
     pub image_refs_truncated: u32,
     #[serde(default)]

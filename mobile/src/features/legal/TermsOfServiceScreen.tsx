@@ -1,8 +1,7 @@
-import { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { RootStackParamList } from "../../app/AppNavigator";
+import type { SheetScreenProps } from "../../app/navigationTypes";
 import { LegalDocumentScreen } from "./LegalDocumentScreen";
 
-type Props = NativeStackScreenProps<RootStackParamList, "TermsOfService">;
+type Props = SheetScreenProps<"TermsOfService">;
 
 export function TermsOfServiceScreen({ navigation }: Props) {
   return (

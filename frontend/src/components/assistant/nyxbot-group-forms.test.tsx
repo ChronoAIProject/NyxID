@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -115,11 +116,12 @@ it("preselects NyxBot, offers live agents only, and creates the group", async ()
   const dialog = screen.getByRole("dialog", { name: "New crew" });
   expect(within(dialog).getByRole("checkbox", { name: /NyxBot/ })).toBeChecked();
   expect(within(dialog).queryByRole("checkbox", { name: /old/ })).not.toBeInTheDocument();
-  const create = within(dialog).getByRole("button", { name: "Create crew" });
-  expect(create).toBeDisabled();
+  expect(
+    within(dialog).queryByRole("button", { name: "Create crew" }),
+  ).toBeDisabled();
   await user.type(within(dialog).getByRole("textbox", { name: "Name" }), "Launch crew");
   await user.click(within(dialog).getByRole("checkbox", { name: /researcher/ }));
-  await user.click(create);
+  await user.click(within(dialog).getByRole("button", { name: "Create crew" }));
   await waitFor(() => expect(onCreated).toHaveBeenCalledWith(GROUP));
   expect(requests).toContainEqual({
     method: "POST",
@@ -158,12 +160,14 @@ it("saves only what changed", async () => {
     </QueryClientProvider>,
   );
   const dialog = screen.getByRole("dialog", { name: "Group settings" });
-  const save = within(dialog).getByRole("button", { name: "Save" });
-  expect(save).toBeDisabled();
+  expect(
+    within(dialog).queryByRole("button", { name: "Save" }),
+  ).toBeDisabled();
   const name = within(dialog).getByRole("textbox", { name: "Name" });
   await user.clear(name);
   await user.type(name, "Release crew");
-  await user.click(save);
+  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+  await confirmChanges();
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   expect(requests).toContainEqual({
     method: "PATCH",
@@ -192,15 +196,68 @@ it("shows a destroyed member unchecked and drops it on save (the server refuses 
   expect(old).toBeDisabled();
   expect(dialog).toHaveTextContent("Destroyed — removed when you save");
   // Nothing else changed, but saving removes the destroyed member.
-  const save = within(dialog).getByRole("button", { name: "Save" });
+  const save = within(dialog).getByRole("button", {
+    name: "Remove unavailable agents",
+  });
   expect(save).toBeEnabled();
   await user.click(save);
+  await confirmChanges();
   await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
   expect(requests).toContainEqual({
     method: "PATCH",
     endpoint: "/assistant/nyxagent/groups/nyxg-1",
     body: { member_agent_ids: ["agent-nyxbot"] },
   });
+});
+
+it.each([false, true])("keeps crew removal reviewable and preserves a rejected draft (refused: %s)", async (refused) => {
+  const user = userEvent.setup();
+  const onOpenChange = vi.fn();
+  const group = {
+    ...GROUP,
+    members: [
+      GROUP.members[0]!,
+      { id: "agent-researcher", name: "researcher", kind: "specialist" as const, destroyed: false, working: true },
+    ],
+    working_agent_ids: ["agent-researcher"],
+  };
+  if (refused) {
+    respond = () => new Response(JSON.stringify({
+      error: "turn_active",
+      message: "A new turn started. Wait for it to finish, then try again.",
+    }), { status: 409 });
+  }
+  render(
+    <QueryClientProvider client={client}>
+      <GroupSettingsDialog group={group} agents={AGENTS} open onOpenChange={onOpenChange} onDeleted={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  const explanation = screen.getByText(/Removing an agent stops its crew work/);
+  expect(explanation.closest("[data-grouped-footer]")).not.toBeNull();
+  expect(explanation).toHaveTextContent("Re-adding starts a new thread. Published crew messages stay.");
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  const member = screen.getByRole("checkbox", { name: /researcher/ });
+  await user.click(member);
+  expect(requests.some((request) => request.method === "PATCH")).toBe(false);
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await confirmChanges();
+  await waitFor(() => expect(requests).toContainEqual({
+    method: "PATCH",
+    endpoint: "/assistant/nyxagent/groups/nyxg-1",
+    body: { member_agent_ids: ["agent-nyxbot"] },
+  }));
+  if (refused) {
+    expect(await screen.findByRole("alert")).toHaveTextContent("A new turn started.");
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(member).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Keep editing" }));
+    expect(member).not.toBeChecked();
+  } else {
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+  }
 });
 
 it("deletes only after confirmation", async () => {
@@ -212,9 +269,12 @@ it("deletes only after confirmation", async () => {
     </QueryClientProvider>,
   );
   await user.click(
-    within(screen.getByRole("region", { name: "Danger zone" })).getByRole("button", {
-      name: "Delete",
-    }),
+    within(screen.getByRole("region", { name: "Group actions" })).getByRole(
+      "button",
+      {
+        name: "Delete",
+      },
+    ),
   );
   expect(requests.some((request) => request.method === "DELETE")).toBe(false);
   const confirm = screen.getByRole("dialog", { name: "Delete Launch crew?" });
@@ -226,7 +286,6 @@ it("deletes only after confirmation", async () => {
     body: undefined,
   });
 });
-
 
 it("creates an organization group with only its agents and eligible participants", async () => {
   orgs = [{ id: "org-a", display_name: "Research Org", your_role: "member" }];
@@ -257,7 +316,9 @@ it("lets a participant leave but never edit or delete the organization group", a
   const group = { ...GROUP, owner: { type: "org" as const, id: "org-a", name: "Research Org" }, participants: [{ id: "owner", display_name: "Owner" }], your_role: "participant" as const };
   render(<QueryClientProvider client={client}><GroupSettingsDialog group={group} agents={AGENTS} open onOpenChange={vi.fn()} onDeleted={onDeleted} /></QueryClientProvider>);
   expect(screen.getByLabelText("Name")).toBeDisabled();
-  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(
+    screen.queryByRole("button", { name: "Save" }),
+  ).toBeDisabled();
   expect(screen.queryByRole("button", { name: "Delete group" })).not.toBeInTheDocument();
   expect(screen.getByText(/The creator or a participating Admin must remain/)).toHaveTextContent("Leaving as the last participant deletes the group.");
   expect(screen.getByText(/Wait for your running turns/)).toBeInTheDocument();
@@ -274,9 +335,18 @@ it("keeps org creation disabled until the rollout flag is enabled", async () => 
   expect(screen.getByRole("option", { name: "Research Org" })).toHaveAttribute("aria-disabled", "true");
 });
 
-
 it("preserves organization agents as choices in personal groups", () => {
   const orgAgent = agent({ id: "org-agent", name: "Org specialist", kind: "specialist", owner_id: "org-a", owner_kind: "org" });
   render(<QueryClientProvider client={client}><NewGroupDialog agents={[...AGENTS, orgAgent]} onClose={vi.fn()} onCreated={vi.fn()} /></QueryClientProvider>);
   expect(within(screen.getByRole("list", { name: "Agents" })).getByText("Org specialist")).toBeInTheDocument();
+});
+
+it("offers eligible shared agents in personal crew settings and marks lost access unavailable", () => {
+  const shared = agent({ id: "shared", kind: "specialist", name: "Shared researcher", share_role: "user", owner_name: "Publisher", can_use: true });
+  const unavailable = agent({ id: "revoked", kind: "specialist", name: "Revoked", share_role: "user", can_use: true }); // stale agent-list cache
+  const group = { ...GROUP, members: [...GROUP.members, { id: "revoked", name: "Revoked", kind: "specialist" as const, destroyed: false, working: false, unavailable: true }] };
+  render(<QueryClientProvider client={client}><GroupSettingsDialog group={group} agents={[...AGENTS, shared, unavailable]} open onOpenChange={vi.fn()} onDeleted={vi.fn()} /></QueryClientProvider>);
+  expect(screen.getByText(/Shared agent · Publisher/)).toBeVisible();
+  expect(screen.getByRole("checkbox", { name: /Shared researcher/ })).toBeEnabled();
+  expect(screen.getByRole("checkbox", { name: /Revoked/ })).toBeDisabled();
 });

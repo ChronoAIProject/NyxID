@@ -48,6 +48,10 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub media_event_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +126,11 @@ pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<Stri
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_execution: Option<Box<super::org_channel::Execution>>,
+    /// Original native provider event for asynchronous updates; never a capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_event_id: Option<String>,
     #[serde(default)]
     pub thread: Option<Box<super::channel_thread_follow::ThreadTurnBinding>>,
     /// The NyxBot channel (`nyxbot_channels._id`).
@@ -220,6 +229,9 @@ pub struct TurnActivity {
     pub label: String,
     #[serde(default)]
     pub digest: Option<String>,
+    /// Additive semantic retry identity; `digest` retains the legacy exact call.
+    #[serde(default)]
+    pub retry_identity: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]
@@ -246,6 +258,9 @@ pub struct TurnAttachment {
     pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
+    /// Bounded image-delivery reason; older readers retain the ordinary status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_reason: Option<String>,
     /// None preserves legacy automatic inspection. False requests display only.
     #[serde(default)]
     pub image_inspection: Option<bool>,
@@ -266,6 +281,17 @@ pub struct ToolProgress {
     pub started: i64,
     pub calls: i64,
     pub digest: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelRouteDiagnostic {
+    pub reason: String,
+    #[serde(default)]
+    pub unknown_fields: Vec<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -307,6 +333,16 @@ pub struct StreamReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default)]
+    pub business_system_success: bool,
+    #[serde(default)]
+    pub delegated_images: super::assistant_delegated_image::DelegatedImages,
+    #[serde(default)]
+    pub timing: super::assistant_message::TurnTiming,
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     /// Bounded resource handles issued in this turn.
     #[serde(default)]
@@ -325,6 +361,8 @@ pub struct ActiveTurn {
     pub model_attribution_uncertain: bool,
     #[serde(default)]
     pub model_refusal: Option<ModelRefusal>,
+    #[serde(default)]
+    pub model_route_diagnostic: Option<ModelRouteDiagnostic>,
     #[serde(default)]
     pub model_stream_fault: Option<ModelStreamFault>,
     #[serde(default)]
@@ -475,6 +513,11 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
+    /// Server-created, tool-free visitor model initialization. Never client input.
+    #[serde(default)]
+    pub guest_model_setup: bool,
     /// Invocation conversations always enforce live execution independently of the legacy rollout.
     #[serde(default)]
     pub invocation_controlled: bool,
@@ -538,6 +581,9 @@ pub struct AssistantConversation {
     /// Stable agent owner binding; the conversation itself belongs to the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_owner_id: Option<String>,
+    /// Actor-owned private history survives withdrawal of personal-agent sharing.
+    #[serde(default)]
+    pub shared_agent_thread: bool,
     /// L1 enrollment cohort. Missing or zero-valued legacy rows are not
     /// eligible evidence; new rows set this only when learning is enabled and
     /// the owner/member has opted in.

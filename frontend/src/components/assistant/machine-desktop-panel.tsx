@@ -144,6 +144,12 @@ export function MachineDesktopPanel({
   const [controller, setController] = useState("agent");
   const [action, setAction] = useState("");
   const [error, setError] = useState<string>();
+  const [stalled, setStalled] = useState(false);
+  useEffect(() => {
+    if (connected) return;
+    const timer = window.setTimeout(() => setStalled(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [connected, nodeId, conversationId, attempt, display, contextId]);
   const wasActive = useRef(Boolean(turnActive));
   useEffect(() => {
     if (turnActive) {
@@ -185,6 +191,9 @@ export function MachineDesktopPanel({
   }, []);
   useEffect(() => {
     const target = canvas.current;
+    setConnected(false);
+    setError(undefined);
+    setStalled(false);
     const ws = new WebSocket(
       desktopUrl(nodeId, conversationId, display, contextId),
     );
@@ -423,7 +432,7 @@ export function MachineDesktopPanel({
     <section
       ref={panel}
       className={cn(
-        "space-y-3 text-12",
+        "space-y-3 text-14",
         !pane && "rounded-xl border border-border/50 bg-card p-3",
         fullscreen && "overflow-auto bg-background p-4",
       )}
@@ -462,7 +471,7 @@ export function MachineDesktopPanel({
               title={value === "secure" ? "Secure browser" : "Dev browser"}
               disabled={controls && display !== value}
               className={cn(
-                "h-6 min-h-0 px-2 text-11",
+                "h-6 min-h-0 px-2 text-14",
                 display === value ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
               )}
               onClick={() => {
@@ -503,7 +512,7 @@ export function MachineDesktopPanel({
             <SelectTrigger
               aria-label="Desktop context"
               title={contexts.isError ? "Separated contexts are unavailable on this machine" : "Workspace and browser"}
-              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-11 [&>span]:min-w-0 [&>span]:truncate"
+              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-14 [&>span]:min-w-0 [&>span]:truncate"
             >
               <SelectValue />
             </SelectTrigger>
@@ -673,9 +682,6 @@ export function MachineDesktopPanel({
             {error ? (
               <>
                 <p role="alert" className="max-w-sm text-destructive">{error}</p>
-                {!connected ? (
-                  <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>Reconnect</Button>
-                ) : null}
               </>
             ) : (
               <p className="flex items-center gap-2 text-muted-foreground">
@@ -683,6 +689,9 @@ export function MachineDesktopPanel({
                 Connecting…
               </p>
             )}
+            {error || (!connected && stalled) ? (
+              <Button size="sm" onClick={() => setAttempt((value) => value + 1)}>Reconnect</Button>
+            ) : null}
             {reason ? <p role="status" className="max-w-sm text-warning">NyxBot needs you on this machine: {reason}</p> : null}
           </div>
         ) : null}
@@ -816,7 +825,7 @@ function MachineDesktopSwitcher({
             aria-selected={active}
             onClick={() => setSelected(key)}
             className={cn(
-              "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-12 transition-colors",
+              "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-14 transition-colors",
               active ? "bg-overlay-strong text-foreground" : "text-muted-foreground hover:bg-overlay hover:text-foreground",
             )}
           >
@@ -835,12 +844,10 @@ function MachineDesktopSwitcher({
     </div>
   ) : null;
   return (
-    <div className={cn("flex min-h-0 flex-col", pane && "h-full")}>
-      {/* In the column, the machine is one card in a stack; other cards
-          (pinned messages, for example) can sit beside it later. */}
-      <div className={cn(pane && "assistant-scrollbar min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain py-3 pl-3")}>
-        {/* Glued to the slab's right wall: square on that side. */}
-        <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
+    <div className="flex min-h-0 flex-col">
+      {/* The shell owns the preview stack's scrolling. Docked cards meet
+          the slab's right wall, with square corners on that side. */}
+      <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
         <MachineDesktopPanel
           key={conversationDesktopKey(shown)}
           nodeId={shown.node_id}
@@ -854,7 +861,6 @@ function MachineDesktopSwitcher({
           leading={tabs}
           onStatus={setShownStatus}
         />
-        </div>
       </div>
     </div>
   );
@@ -908,12 +914,12 @@ export function MachinePaneToggle({
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <Button
-      size="sm"
+      size={compact ? "icon" : "sm"}
       variant="ghost"
       aria-label={open ? "Hide machine" : "Show machine"}
       aria-pressed={open}
       title={open ? "Hide machine" : "Show machine"}
-      className={cn("relative", compact ? "h-7 w-7 px-0" : undefined, open && "bg-overlay-strong text-foreground")}
+      className={cn("relative", open && "bg-overlay-strong text-foreground")}
       onClick={onToggle}
     >
       <Monitor aria-hidden="true" />

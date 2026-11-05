@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { SidebarRailContext } from "./sidebar-rail-context";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
@@ -65,6 +66,26 @@ const SECOND_CONVERSATION: Conversation = {
   created_at: "2026-07-19T00:00:00.000Z",
   last_message_at: "2026-07-19T00:05:00.000Z",
 };
+
+it("keeps legacy New chat and previous chats in the rail, opening only on click", async () => {
+  const user = userEvent.setup();
+  const onNewChat = vi.fn();
+  const onSelect = vi.fn();
+  render(<TooltipProvider><SidebarRailContext value>
+    <AssistantSidebar conversations={[CONVERSATION, SECOND_CONVERSATION]} activeConversationId={CONVERSATION.id} onNewChat={onNewChat} onSelect={onSelect} onDelete={vi.fn()} />
+  </SidebarRailContext></TooltipProvider>);
+  await user.click(screen.getByRole("button", { name: "New chat" }));
+  expect(onNewChat).toHaveBeenCalledOnce();
+  const previous = screen.getByRole("button", { name: "Previous chats" });
+  await user.hover(previous);
+  expect(screen.queryByRole("list", { name: "Previous chats" })).not.toBeInTheDocument();
+  await user.click(previous);
+  const list = screen.getByRole("list", { name: "Previous chats" });
+  expect(within(list).getByRole("button", { name: CONVERSATION.title })).toHaveAttribute("aria-current", "page");
+  await user.click(within(list).getByRole("button", { name: SECOND_CONVERSATION.title }));
+  expect(onSelect).toHaveBeenCalledWith(SECOND_CONVERSATION.id);
+  expect(screen.queryByRole("list", { name: "Previous chats" })).not.toBeInTheDocument();
+});
 
 const USER: User = {
   id: "user-1",
@@ -777,7 +798,9 @@ describe("NyxBot agents in the sidebar", () => {
       ...fields,
     });
     const groups: SidebarGroups = {
-      groups: [group({}), group({ id: "nyxg-2", name: "Quiet", working_agent_ids: [] })],
+      groups: [group({ collaboration: { version: 1, creator_user_id: "owner", membership_revision: 1,
+        history_disclosure: "History", can_manage: true, your_request_ids: [], transfer_to_user_id: null,
+        guest_access: [], proposals: [], invites: [], unread_count: 4, mention_count: 2 } }), group({ id: "nyxg-2", name: "Quiet", working_agent_ids: [] })],
       selectedGroupId: "nyxg-2",
       onSelectGroup: vi.fn(),
       onNewGroup: vi.fn(),
@@ -790,6 +813,9 @@ describe("NyxBot agents in the sidebar", () => {
       "aria-current",
       "page",
     );
+    expect(within(crew).getByLabelText("Unread messages")).toBeVisible();
+    expect(within(crew).getByLabelText("2 mentions")).toHaveTextContent("@2");
+    expect(screen.getAllByLabelText("Unread messages")).toHaveLength(1);
     await user.click(crew);
     expect(groups.onSelectGroup).toHaveBeenCalledWith("nyxg-1");
     // Crews are created from the one "Create new agent" menu, not a second button.

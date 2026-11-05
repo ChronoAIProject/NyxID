@@ -13,8 +13,8 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  *   thread starts with; alone it lands on that agent's latest thread.
  * - `g`     opens a NyxBot group chat. With no `c`, `draft`, `agent` or `g`
  *   the NyxAgent engine shows the NyxBot home.
- * - `details` opens the agent details sheet on one section (`grants` or
- *   `skills`) for `agent`, else the open thread's agent. The sheet is URL
+ * - `details` opens the agent details sheet on one tab (`grants` is Access; `skills`,
+ *   `overview`, `memory` and `channels` keep their names) for `agent`, else the open thread's agent. The sheet is URL
  *   state, so a server link (`AssistantPage::AgentDetails`) survives reload
  *   and Back closes it; an inaccessible or destroyed agent shows an explicit
  *   no-access state instead of falling back to NyxBot.
@@ -24,7 +24,13 @@ import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel
  * search parser hands back a real boolean for its own round-tripped links,
  * but a hand-typed or copy-pasted URL arrives as a string.
  */
-export const AGENT_DETAILS_TABS = ["grants", "skills"] as const;
+export const AGENT_DETAILS_TABS = [
+  "overview",
+  "grants",
+  "skills",
+  "memory",
+  "channels",
+] as const;
 export type AgentDetailsTab = (typeof AGENT_DETAILS_TABS)[number];
 
 export interface AssistantSearch extends AccountPanelSearch {

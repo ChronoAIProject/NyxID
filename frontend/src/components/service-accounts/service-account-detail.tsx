@@ -317,10 +317,10 @@ function ServiceAccountDetailEditor({
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 text-lg font-semibold">
+        <h3 className="mb-2 type-card-title">
           Service account not found
         </h3>
-        <p className="mb-4 text-12 text-muted-foreground">
+        <p className="mb-4 text-14 text-muted-foreground">
           The service account you are looking for does not exist or has been
           deleted.
         </p>
@@ -400,7 +400,7 @@ function ServiceAccountDetailEditor({
             label="Catalog coverage"
             value="All current and future catalog services"
           />
-          <p className="px-4 py-3 text-12 text-muted-foreground">
+          <p className="px-4 py-3 text-14 text-muted-foreground">
             {sa.catalog_scope_authorized
               ? "Catalog read and write access follows the allowed scopes and the scopes on each token. Manage access with Edit."
               : "This account uses its existing catalog roles. A platform administrator can save its catalog scopes in Edit to manage catalog access through scopes."}
@@ -421,10 +421,10 @@ function ServiceAccountDetailEditor({
         <SaConnectedServices saId={saId} />
       ) : (
         <DetailSection title="Provider Connections">
-          <p className="px-4 py-3 text-12 text-muted-foreground">
+          <p className="px-4 py-3 text-14 text-muted-foreground">
             Provider connections for org-owned service accounts aren't yet
             available here. Use the{" "}
-            <code className="rounded bg-muted px-1 font-mono text-xs">
+            <code className="rounded bg-muted px-1 font-mono text-14">
               nyxid
             </code>{" "}
             CLI or API for now.
@@ -470,7 +470,7 @@ function ServiceAccountDetailEditor({
               className="space-y-4"
             >
               {form.formState.errors.root && (
-                <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+                <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                   {form.formState.errors.root.message}
                 </div>
               )}
@@ -553,10 +553,10 @@ function ServiceAccountDetailEditor({
                 render={({ field }) => (
                   <FormItem className="flex items-center justify-between rounded-lg border p-3">
                     <div className="space-y-0.5">
-                      <FormLabel className="text-12 font-medium">
+                      <FormLabel>
                         Active
                       </FormLabel>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Inactive accounts cannot authenticate.
                       </p>
                     </div>
@@ -619,18 +619,18 @@ function ServiceAccountDetailEditor({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-12 text-amber-700 dark:text-amber-400">
+                  <p className="text-14 text-amber-700 dark:text-amber-400">
                     Save this secret now. It cannot be retrieved later.
                   </p>
                 </div>
               </div>
 
               <div>
-                <p className="mb-1 text-xs font-medium text-muted-foreground">
+                <p className="mb-1 type-secondary-emphasis text-muted-foreground">
                   New Client Secret
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 rounded bg-muted px-2 py-1 text-12 font-mono break-all">
+                  <code className="flex-1 rounded bg-muted px-2 py-1 text-14 font-mono break-all">
                     {rotateResult.client_secret}
                   </code>
                   <Button

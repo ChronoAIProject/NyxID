@@ -23,6 +23,10 @@ const state = vi.hoisted(() => ({
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
+  expiredCard: false,
+  send: vi.fn(async () => undefined),
+  agentLoaded: true,
+  desktop: true,
   voice: false,
   savedVoice: true,
   voiceMounts: 0,
@@ -43,7 +47,7 @@ const conversation = {
 const staleCard: NyxAgentAcknowledgement = {
   id: "old-card", kind: "action", status: "pending", summary: "Publish legacy draft", decider: "user", decided_by: null,
   reason: null, service_slug: null, service_name: null, tool_name: "nyxid__draft_agent_skill",
-  created_at: "2026-10-14T00:00:00Z", decided_at: null, expires_at: "2026-10-14T00:15:00Z",
+  created_at: "2026-10-14T00:00:00Z", decided_at: null, expires_at: "2099-10-14T00:15:00Z",
 };
 vi.mock("@tanstack/react-router", async (original) => ({
   ...await original<typeof import("@tanstack/react-router")>(),
@@ -53,10 +57,11 @@ vi.mock("@tanstack/react-router", async (original) => ({
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,
 }));
+vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => state.desktop }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useNyxBotAgents: () => ({ data: { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } }),
-  selectedAgentOf: (rows: unknown[]) => rows[0],
-  nyxBotOf: (rows: unknown[]) => rows[0],
+  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
+  selectedAgentOf: (rows?: unknown[]) => rows?.[0],
+  nyxBotOf: (rows?: unknown[]) => rows?.[0],
   useNyxBotSettings: () => ({ data: { access_mode: state.mode, voice: state.savedVoice ? voicePreferences : null } }),
   useUpdateNyxBotSettings: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useNyxAgentModels: () => ({ data: [{ id: "nyxagent/chat", label: "chat", available: true }], isPending: false }),
@@ -67,22 +72,28 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   conversation: state.search.c ? conversation : undefined,
   session: { title: "Thread", messages: state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
-  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [staleCard] : [], approvals: [], conversations: [], threadsLoaded: false,
-  send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
+  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: [], conversations: [], threadsLoaded: false,
+  send: state.send, stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
-  getConversation: (id?: string) => id ? conversation : undefined,
+  getConversation: (id?: string) => id && state.agentLoaded ? conversation : undefined,
   capabilities: () => Promise.resolve({ steer: null }),
 } }));
-vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
+vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main> }));
 vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
 vi.mock("./nyxbot-agent-panels", () => ({
   ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
-  ThreadHeader: ({ controls }: { controls?: ReactNode }) => <header data-testid="thread-header">{controls}</header>,
+  ThreadHeader: ({ controls, title, loading }: { controls?: ReactNode; title?: string; loading?: boolean }) => <header data-testid="thread-header" data-title={title} data-loading={loading}>{controls}</header>,
   PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
 }));
 vi.mock("./nyxbot-agent-details", () => ({ AgentDetailsSheet: () => null }));
 vi.mock("./nyxbot-home", () => ({ NyxBotHome: () => <div>Home</div> }));
+vi.mock("@/hooks/use-assistant-onboarding", () => ({
+  useAssistantOnboarding: () => ({ data: undefined }),
+  useHideSuggestions: () => ({ mutate: () => undefined }),
+  useIntroReplay: (select: (state: { pending: boolean; consume: () => void }) => unknown) =>
+    select({ pending: false, consume: () => undefined }),
+}));
 vi.mock("./working-context-panel", () => ({ WorkingContextPanel: () => null }));
 vi.mock("./machine-desktop-panel", () => ({ ConversationMachineDesktops: () => null, MachinePane: () => null, MachinePaneToggle: () => null }));
 vi.mock("./chat-message", () => ({ ChatMessageList: ({ session, renderMessage }: {
@@ -114,11 +125,39 @@ beforeEach(() => {
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
+  state.expiredCard = false;
+  state.send.mockClear();
+  state.agentLoaded = true;
+  state.desktop = true;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+it.each([
+  { search: { draft: true }, desktop: true },
+  { search: { c: conversation.id }, desktop: true },
+  { search: { draft: true }, desktop: false },
+  { search: { c: conversation.id }, desktop: false },
+])("keeps one title owner before and after thread identity resolves: %j", ({ search, desktop }) => {
+  state.search = search;
+  state.desktop = desktop;
+  state.agentLoaded = false;
+  const view = mount();
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-loading", "true");
+  if (desktop) expect(screen.getByTestId("thread-header")).toHaveAttribute("data-title", "Thread");
+  else expect(screen.getByTestId("thread-header")).not.toHaveAttribute("data-title");
+  state.streaming = true;
+  view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toBeInTheDocument();
+  state.agentLoaded = true;
+  view.rerender(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("main")).toHaveAttribute("data-content-title", String(desktop));
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-loading", "false");
+  expect(screen.getAllByTestId("thread-header")).toHaveLength(1);
+});
 it.each([{}, { draft: true }, { draft: true, agent: agent.id }])("puts combined settings in the home/draft composer %j", (search) => {
   state.search = search; const view = mount();
   const controls = view.container.querySelector("[data-composer-footer]") as HTMLElement;
@@ -301,4 +340,19 @@ it("first voice use opens account settings without capture or a call", async () 
   expect(await screen.findByLabelText("Mock voice settings")).toBeInTheDocument();
   expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
   expect(state.voiceMounts).toBe(0);
+});
+
+
+it("2072 expired card requests a fresh owner turn without deciding or replaying the old action", async () => {
+  state.search = { c: conversation.id };
+  state.mode = "ask_every_time";
+  state.staleCard = true;
+  state.expiredCard = true;
+  mount();
+  expect(screen.getByRole("status")).toHaveTextContent("Expired");
+  expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Ask for a new confirmation" }));
+  await waitFor(() => expect(state.send).toHaveBeenCalledExactlyOnceWith(
+    "Please request a new confirmation for expired request old-card. Recheck the current state and permissions first; do not reuse the expired confirmation.",
+  ));
 });

@@ -383,6 +383,9 @@ pub async fn enrollment_epoch(
     agent: &AssistantAgent,
     snapshot: Option<&super::org_agent_service::RequestAccess>,
 ) -> AppResult<Option<i64>> {
+    if snapshot.is_some_and(|a| a.shared().is_some()) {
+        return Ok(None);
+    }
     let pilot = feature_flag_service::flag_enabled_people(db, FLAG_KEY).await?;
     if pilot
         .as_ref()
@@ -488,6 +491,7 @@ async fn candidate_threads(
         "learning_epoch": config.learning_epoch,
         "automation_thread": false,
         "channel": bson::Bson::Null,
+        "collaboration": bson::Bson::Null,
         "group_id": bson::Bson::Null,
         "guest_turn": false,
         "active_turn": bson::Bson::Null,
@@ -1066,7 +1070,8 @@ async fn evidence_is_current(
             "learning_epoch": run.learning_epoch,
             "automation_thread": false,
             "channel": bson::Bson::Null,
-            "group_id": bson::Bson::Null,
+            "collaboration": bson::Bson::Null,
+        "group_id": bson::Bson::Null,
             "guest_turn": false,
             "active_turn": bson::Bson::Null,
         })
@@ -1571,6 +1576,7 @@ mod tests {
             created_by: "learning-test-owner".into(),
             model: "test".into(),
             owner_model_route: None,
+            guest_model_notices: Default::default(),
             access_mode_override: None,
             home_conversation_id: None,
             memory: Vec::new(),

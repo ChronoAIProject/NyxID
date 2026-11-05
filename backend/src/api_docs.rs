@@ -64,6 +64,11 @@
         crate::handlers::service_preference::release_hidden,
         crate::handlers::keys::get_key,
         crate::handlers::keys::get_key_authorization,
+        crate::handlers::monitoring::get,
+        crate::handlers::monitoring::save,
+        crate::handlers::monitoring::clear,
+        crate::handlers::monitoring::validate,
+        crate::handlers::monitoring::probe,
         crate::handlers::keys::update_key,
         crate::handlers::keys::delete_key,
         // Hosted bot connection requests
@@ -150,6 +155,7 @@
         // Billing
         crate::handlers::billing::get_usage,
         crate::handlers::billing::get_wallet,
+        crate::handlers::billing::view_wallet,
         crate::handlers::billing::provision_wallet,
         crate::handlers::billing::create_topup,
         crate::handlers::billing::list_topups,
@@ -330,6 +336,7 @@
             crate::handlers::billing::ProvisionWalletRequest,
             crate::handlers::billing::TopUpRequest,
             crate::handlers::billing::BillingWalletResponse,
+            crate::handlers::billing::WalletViewResponse,
             crate::handlers::billing::CurrentBillResponse,
             crate::handlers::billing::BillChargeResponse,
             crate::handlers::billing::BillTaxResponse,

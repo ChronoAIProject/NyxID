@@ -65,6 +65,64 @@ beforeEach(() => {
     ),
   );
 });
+it("isolates organization benefits and clears personal totals while the selected account loads", async () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  let resolveOrg: (value: unknown) => void = () => {};
+  get.mockImplementation((path: string) => {
+    if (path.includes(`owner_id=${org}`)) {
+      return path.startsWith("/billing/wallet")
+        ? Promise.resolve({ ...billingWallet(), owner_id: org, available: "5" })
+        : new Promise((resolve) => {
+            resolveOrg = resolve;
+          });
+    }
+    return Promise.resolve(
+      path === "/billing/wallet"
+        ? { ...billingWallet(), available: "2.000000000001" }
+        : response(),
+    );
+  });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  function View({ ownerId }: { ownerId?: string }) {
+    return (
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <AvailableBenefits key={ownerId ?? "personal"} ownerId={ownerId} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+  }
+  const view = render(<View />);
+  await screen.findByTitle("14.000000000002");
+  view.rerender(<View ownerId={org} />);
+  expect(screen.queryByTitle("14.000000000002")).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(get).toHaveBeenCalledWith(
+      `/billing/benefits?page=1&owner_id=${org}`,
+    ),
+  );
+  await act(async () =>
+    resolveOrg({
+      ...response(),
+      summary: { ...response().summary, unreserved: "7" },
+    }),
+  );
+  expect(await screen.findByTitle("12")).toHaveTextContent("12 credits");
+  view.rerender(<View />);
+  expect(await screen.findByTitle("14.000000000002")).toHaveTextContent(
+    "14 credits",
+  );
+});
+it("shows zero spendable credits when an organization has no provisioned wallet", async () => {
+  get.mockImplementation((path: string) =>
+    Promise.resolve(path.startsWith("/billing/wallet") ? null : response()),
+  );
+  mount();
+  expect(await screen.findByTitle("0")).toHaveTextContent("0 credits");
+  expect(screen.getByRole("status")).toHaveTextContent("Provision a wallet");
+});
 it("adds exact wallet and spendable grants, with native allowance units and full-population totals", async () => {
   mount();
   expect(await screen.findByTitle("14.000000000002")).toHaveTextContent(

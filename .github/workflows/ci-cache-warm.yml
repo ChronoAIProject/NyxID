@@ -1,9 +1,9 @@
 name: CI Cache Warm
 
 # Publish Images can reuse successful PR jobs on an identical main tree. This
-# workflow keeps the main Rust dependency and incremental generations fresh
-# without rerunning any tests. It is deliberately non-blocking: a cache warm
-# failure must never gate a merge or release.
+# workflow is the sole writer for ordinary Rust dependency and incremental
+# caches; CI only restores them, even on main. It is deliberately non-blocking:
+# a cache warm failure must never gate a merge or release.
 on:
   push:
     branches: [main]
@@ -18,8 +18,16 @@ on:
       - 'service-adapters/**'
       - 'machine/**'
       - 'machine-updater/**'
+      - 'mcp-demo/**'
       - 'permissions/**'
       - 'nyxid-crypto/**'
+      - 'integrations/oracle/cdp-worker/worker.mjs'
+      - 'docs/AI_AGENT_PLAYBOOK.md'
+      - 'docs/assistant/CHANNEL_SETUP_GUIDE.md'
+      - 'skills/nyxid/scripts/**'
+      - 'tests/fixtures/**'
+      - 'scripts/**'
+      - '.dockerignore'
       - 'rust-toolchain*'
       - '.cargo/**'
       - '.config/**'
@@ -61,6 +69,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: backend-build
           incremental: 'true'
       - uses: taiki-e/install-action@v2
@@ -104,6 +113,7 @@ jobs:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: coverage-backend-build
           incremental: 'true'
       - uses: taiki-e/install-action@v2
@@ -145,6 +155,7 @@ jobs:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: rust-clippy
           incremental: 'true'
       - name: Compile clippy
@@ -161,19 +172,13 @@ jobs:
           key: v0-rust-incremental-rust-clippy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
 
   rust-features:
-    name: Warm ${{ matrix.cache-suffix }} feature cache
+    name: Warm ${{ matrix.variant }} feature cache
     continue-on-error: true
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - features: aws-kms
-            cache-suffix: aws-kms
-          - features: gcp-kms
-            cache-suffix: gcp-kms
-          - features: aws-kms,gcp-kms
-            cache-suffix: aws-and-gcp-kms
+        variant: [aws-kms, gcp-kms, aws-and-gcp-kms]
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 1
@@ -187,20 +192,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
-          shared-key: features-${{ matrix.cache-suffix }}-rust-features
+          save-if: 'true'
+          shared-key: features-${{ matrix.variant }}-rust-features
           incremental: 'true'
       - name: Build feature set
+        env:
+          FEATURES: ${{ fromJSON('{"aws-kms":"aws-kms","gcp-kms":"gcp-kms","aws-and-gcp-kms":"aws-kms,gcp-kms"}')[matrix.variant] }}
         run: >-
           python3 .github/scripts/retry_incremental.py
-          --log-file "$RUNNER_TEMP/features-${{ matrix.cache-suffix }}.log" --
-          cargo build -p nyxid --features ${{ matrix.features }}
+          --log-file "$RUNNER_TEMP/features-${{ matrix.variant }}.log" --
+          cargo build -p nyxid --features "$FEATURES"
       - name: Save incremental cache
         if: github.ref == 'refs/heads/main' && success()
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: target/debug/incremental
-          key: v0-rust-incremental-features-${{ matrix.cache-suffix }}-rust-features-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
+          key: v0-rust-incremental-features-${{ matrix.variant }}-rust-features-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock', 'rust-toolchain*', '.cargo/config.toml') }}-${{ github.sha }}
 
   cli-test:
     name: Warm CLI test cache
@@ -216,6 +224,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: cli-cli-test
           incremental: 'true'
       - uses: taiki-e/install-action@v2
@@ -257,6 +266,7 @@ jobs:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: coverage-cli-coverage-cli
           incremental: 'true'
       - uses: taiki-e/install-action@v2
@@ -290,6 +300,7 @@ jobs:
           components: rustfmt, clippy
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: permissions-test
           incremental: 'true'
       - name: Compile permissions
@@ -324,6 +335,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: ./.github/actions/ci-rust-cache
         with:
+          save-if: 'true'
           shared-key: backend-image-inputs-backend-image-inputs
       - name: Build backend release binary
         run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms

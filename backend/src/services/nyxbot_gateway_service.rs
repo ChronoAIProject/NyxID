@@ -39,15 +39,44 @@ pub(crate) async fn gateway_base(state: &AppState) -> AppResult<String> {
     let row =
         crate::services::assistant_service::resolve_admin_service_by_slug(&state.db, GATEWAY_SLUG)
             .await
-            .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
-    let base = row.base_url.trim_end_matches('/').to_owned();
+            .map_err(|error| {
+                AppError::ValidationError(
+                    match error {
+                        AppError::Internal(_) => "gateway_configuration_required",
+                        _ => "gateway_unavailable",
+                    }
+                    .into(),
+                )
+            })?;
+    validated_base(&row.base_url)
+}
+
+pub(crate) fn validated_base(value: &str) -> AppResult<String> {
+    let base = value.trim_end_matches('/').to_owned();
     let parsed = url::Url::parse(&base)
-        .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
+        .map_err(|_| AppError::ValidationError("gateway_configuration_required".into()))?;
     let local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
-    if !(parsed.scheme() == "https" || (local && parsed.scheme() == "http")) {
-        return Err(AppError::ValidationError("gateway_unavailable".into()));
+    if !(parsed.scheme() == "https" || (local && parsed.scheme() == "http"))
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::ValidationError(
+            "gateway_configuration_required".into(),
+        ));
     }
     Ok(base)
+}
+
+pub(crate) fn availability_code(error: &AppError) -> &'static str {
+    if matches!(error, AppError::ValidationError(code) if code == "gateway_configuration_required")
+    {
+        "gateway_configuration_required"
+    } else {
+        "gateway_unavailable"
+    }
 }
 
 const CREATOR_GATEWAY_PERMISSIONS: &[&str] = &[
@@ -483,7 +512,9 @@ mod tests {
             agent_api_key_id: None,
             completed: false,
             claim_id: None,
-            retry_at: chrono::Utc::now(),
+            // This fixture is immediately claimable against MongoDB's $$NOW,
+            // independently of small host/database clock differences.
+            retry_at: chrono::DateTime::UNIX_EPOCH,
             created_at: chrono::Utc::now(),
         };
         f.state

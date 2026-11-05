@@ -1,3 +1,4 @@
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -178,7 +179,7 @@ export function DeveloperAppDetail({
   if (!app) {
     return (
       <div className="space-y-4">
-        <h2 className="text-3xl md:text-5xl font-normal tracking-tight">
+        <h2 className="type-metric md:type-metric tracking-tight">
           Developer App
         </h2>
         <p className="text-muted-foreground">
@@ -234,18 +235,18 @@ export function DeveloperAppDetail({
             </Badge>
           </div>
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">
               Client ID
             </p>
-            <p className="break-all font-mono text-12 text-foreground">
+            <p className="break-all font-mono text-14 text-foreground">
               {app.id}
             </p>
           </div>
           <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">
               Created At
             </p>
-            <p className="text-12 text-foreground">
+            <p className="text-14 text-foreground">
               {new Date(app.created_at).toLocaleString()}
             </p>
           </div>
@@ -263,13 +264,13 @@ export function DeveloperAppDetail({
           {app.redirect_uris.map((uri) => (
             <div
               key={uri}
-              className="break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs"
+              className="break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-13"
             >
               {uri}
             </div>
           ))}
           {app.redirect_uris.length === 0 && (
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No redirect URIs configured.
             </p>
           )}
@@ -317,7 +318,7 @@ export function DeveloperAppDetail({
               ))}
             </div>
           ) : (
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No default services declared. Users see a sign-in-only consent
               unless they customize.
             </p>
@@ -341,9 +342,9 @@ export function DeveloperAppDetail({
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-12 font-medium" htmlFor="edit-app-name">
+              <Label htmlFor="edit-app-name">
                 Application Name
-              </label>
+              </Label>
               <Input
                 id="edit-app-name"
                 value={name}
@@ -351,21 +352,21 @@ export function DeveloperAppDetail({
               />
             </div>
             <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
+              <Label
+
                 htmlFor="edit-redirect-uris"
               >
                 Redirect URIs (one per line)
-              </label>
+              </Label>
               <textarea
                 id="edit-redirect-uris"
                 value={redirectUrisText}
                 onChange={(event) => setRedirectUrisText(event.target.value)}
-                className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
+                className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
               />
             </div>
             <div className="space-y-3">
-              <label className="text-12 font-medium">Allowed Scopes</label>
+              <Label>Allowed Scopes</Label>
               <div className="space-y-2">
                 {OIDC_SCOPES.map((scope) => (
                   <div key={scope.id} className="flex items-start gap-2">
@@ -381,20 +382,20 @@ export function DeveloperAppDetail({
                         );
                       }}
                     />
-                    <div className="grid gap-0.5 leading-none">
-                      <label
+                    <div className="grid gap-0.5">
+                      <Label
                         htmlFor={`scope-edit-${scope.id}`}
-                        className="text-12 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                        className="peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                       >
                         {scope.label}
                         {scope.required && (
-                          <span className="ml-1 text-xs text-muted-foreground">
+                          <FieldHelp className="ml-1 text-muted-foreground">
                             (required)
-                          </span>
+                          </FieldHelp>
                         )}
-                      </label>
+                      </Label>
                       {"hint" in scope && scope.hint && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           {scope.hint}
                         </p>
                       )}
@@ -405,10 +406,10 @@ export function DeveloperAppDetail({
             </div>
             <div className="space-y-3">
               <div>
-                <label className="text-12 font-medium">
+                <Label>
                   Default Services
-                </label>
-                <p className="text-xs text-muted-foreground">
+                </Label>
+                <p className="text-13 text-muted-foreground">
                   Catalog services this app requests at consent time. Users
                   keep the final say.
                 </p>
@@ -429,19 +430,19 @@ export function DeveloperAppDetail({
                         );
                       }}
                     />
-                    <label
+                    <Label
                       htmlFor={`default-service-${entry.slug}`}
-                      className="cursor-pointer text-12 font-medium leading-none"
+                      className="cursor-pointer"
                     >
                       {entry.name}
-                      <span className="ml-1 text-xs font-normal text-muted-foreground">
+                      <span className="ml-1 text-muted-foreground">
                         {entry.slug}
                       </span>
-                    </label>
+                    </Label>
                   </div>
                 ))}
                 {(catalog ?? []).length === 0 && (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     No catalog services available.
                   </p>
                 )}

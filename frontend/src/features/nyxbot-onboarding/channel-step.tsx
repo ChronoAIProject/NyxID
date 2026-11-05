@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -166,9 +167,9 @@ export function ChannelStep({
         className="nb-tiles nb-channel-tiles"
         disabled={createBot.isPending}
       >
-        <legend className="sr-only">{t("channelTitle")}</legend>
+        <Label asChild><legend className="sr-only">{t("channelTitle")}</legend></Label>
         {(["telegram", "whatsapp"] as const).map((option) => (
-          <label
+          <Label
             className={
               CHANNEL_AVAILABILITY[option]
                 ? "nb-tile"
@@ -203,7 +204,7 @@ export function ChannelStep({
                     : "available",
               )}
             </span>
-          </label>
+          </Label>
         ))}
         {[
           { id: "instagram", name: "Instagram" },

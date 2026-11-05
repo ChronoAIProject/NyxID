@@ -1,5 +1,11 @@
+import { assistantConnection } from "./connectionState";
 import { createSessionRefresh } from "../auth/sessionRefresh";
 import Constants from "expo-constants";
+import { fetch as expoFetch } from "expo/fetch";
+import { executeAuthenticatedRequest, type RequestOptions } from "./authenticatedTransport";
+import { mapBackendRequestToChallenge, mapChallengeStatus, type BackendApprovalRequestItem } from "./approvalAdapter";
+import { getAuthEpoch } from "../auth/authEpoch";
+import { readBoundedBytes } from "./readBoundedBytes";
 import { guardedJsonTransport } from "./guardedTransport";
 import { analyticsConsentState, analyticsDeviceHeaders } from "../analyticsConsentState";
 import { decodeJwtSub } from "../auth/jwt";
@@ -7,19 +13,18 @@ import { ACCOUNT_DELETION_POLICY_VERSION } from "../accountDeletionPolicy";
 
 import { ApiError } from "./ApiError";
 import { mfaChallengeFromResponse } from "../auth/mfaChallenge";
+import { buildApiUrl } from "./baseUrl";
 import {
   clearStoredAuthSession,
   commitRefreshedAuthSession,
   authSessionGeneration,
   loadStoredAuthSession,
-  persistAuthSession,
 } from "../auth/sessionStore";
 import {
   ApprovalMode,
   AccountProfile,
   ApprovalItem,
   ChallengeDetail,
-  ChallengeStatus,
   DeleteAccountResponse,
   NotificationSettings,
   PageResponse,
@@ -29,8 +34,6 @@ import {
   UpdateNotificationSettingsInput,
 } from "./types";
 
-const DEFAULT_API_BASE_URL = "http://localhost:3001/api/v1";
-const DEFAULT_CHALLENGE_DURATION_SEC = 24 * 60 * 60;
 const ACTIVITY_PAGE_SIZE = 20;
 const REFRESH_CONFLICT_RETRY_COUNT = 1;
 const REFRESH_CONFLICT_RETRY_DELAY_MS = 160;
@@ -46,16 +49,6 @@ let onSessionInvalidated: SessionInvalidationListener | null = null;
 export function setSessionInvalidationListener(listener: SessionInvalidationListener | null) {
   onSessionInvalidated = listener;
 }
-
-type RequestOptions = {
-  expectedAccountId?: string;
-  authorityGuard?: () => void;
-  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
-  body?: unknown;
-  requiresAuth?: boolean;
-  headers?: Record<string, string>;
-  retryOnAuthFailure?: boolean;
-};
 
 type LoginRequest = {
   email: string;
@@ -95,28 +88,6 @@ type SubmitDecisionResponse = {
 
 type RevokeApprovalResponse = {
   message: string;
-};
-
-type BackendApprovalRequestItem = {
-  id: string;
-  service_name: string;
-  service_slug: string;
-  requester_type: string;
-  requester_label?: string | null;
-  operation_summary: string;
-  action_description?: string | null;
-  http_method?: string | null;
-  resource?: string | null;
-  verb?: string | null;
-  approval_mode: ApprovalMode;
-  status: string;
-  created_at: string;
-  // Org context — optional so responses from older backends still
-  // parse. `from_org_policy` is the authoritative flag; `org_id` and
-  // `org_name` are only set when the flag is true.
-  from_org_policy?: boolean;
-  org_id?: string | null;
-  org_name?: string | null;
 };
 
 type BackendApprovalRequestsResponse = {
@@ -165,26 +136,6 @@ type MessageResponse = {
 
 type BackendNotificationSettingsResponse = NotificationSettings;
 
-function getApiBaseUrl(): string {
-  const rawBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL ?? DEFAULT_API_BASE_URL;
-  const normalized = rawBaseUrl.replace(/\/+$/, "");
-
-  if (normalized.endsWith("/mobile")) {
-    return normalized.slice(0, -"/mobile".length);
-  }
-
-  return normalized;
-}
-
-function buildUrl(path: string): string {
-  if (path.startsWith("http://") || path.startsWith("https://")) {
-    return path;
-  }
-
-  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  return `${getApiBaseUrl()}${normalizedPath}`;
-}
-
 async function readJsonSafely(response: Response): Promise<unknown> {
   const text = await response.text();
   if (!text) return null;
@@ -211,7 +162,7 @@ function buildApiError(payload: unknown, status: number): ApiError | Error {
     const reason = obj.details && typeof obj.details === "object" &&
       (obj.details as Record<string, unknown>).reason === "mfa_challenge_expired"
       ? "mfa_challenge_expired" : undefined;
-    return new ApiError({ errorKey, errorCode, statusCode: status, message, reason });
+    return new ApiError({ errorKey, errorCode, statusCode: status, message, reason, details: obj.details });
   }
 
   if (typeof payload === "string" && payload.length > 0) {
@@ -261,22 +212,6 @@ function resolveAccessTokenExpiresAt(session: {
   return decodeJwtExpiryMs(session.accessToken);
 }
 
-function parseOperationSummary(summary: string): { action: string; resource: string } {
-  const normalized = summary.replace(/^proxy:/i, "").trim();
-  const matched = normalized.match(/^([A-Z]+)\s+(.+)$/);
-  if (matched) {
-    return {
-      action: matched[1] ?? "Request",
-      resource: matched[2] ?? normalized,
-    };
-  }
-
-  return {
-    action: "Request",
-    resource: normalized || "Unknown resource",
-  };
-}
-
 function isIpv4Address(value: string): boolean {
   const parts = value.split(".");
   if (parts.length !== 4) return false;
@@ -307,65 +242,6 @@ function sanitizeOptionalDisplayValue(value: string | null | undefined): string 
   if (!trimmed) return null;
   if (isIpv4Address(trimmed) || isIpv6Address(trimmed)) return "Hidden";
   return trimmed;
-}
-
-function mapChallengeStatus(status: string): ChallengeStatus {
-  if (status === "approved") return "APPROVED";
-  if (status === "rejected") return "DENIED";
-  if (status === "expired") return "EXPIRED";
-  return "PENDING";
-}
-
-function deriveRiskLevel(action: string): "low" | "medium" | "high" {
-  if (action === "DELETE" || action === "PUT" || action === "PATCH") return "high";
-  if (action === "POST") return "medium";
-  return "low";
-}
-
-function deriveChallengeExpiry(createdAt: string): string {
-  const createdTime = Date.parse(createdAt);
-  if (!Number.isFinite(createdTime)) {
-    return new Date(Date.now() + DEFAULT_CHALLENGE_DURATION_SEC * 1000).toISOString();
-  }
-  return new Date(createdTime + DEFAULT_CHALLENGE_DURATION_SEC * 1000).toISOString();
-}
-
-function mapBackendRequestToChallenge(item: BackendApprovalRequestItem): ChallengeDetail {
-  const summary = item.action_description ?? item.operation_summary;
-  const parsed = parseOperationSummary(summary);
-  const action = sanitizeDisplayValue(item.http_method ?? item.verb, parsed.action);
-  const resource = sanitizeDisplayValue(item.resource, parsed.resource);
-
-  // Only surface org fields when the backend flags the request as
-  // created under an org policy. Falsy / missing `from_org_policy`
-  // yields the pre-existing personal-approval shape.
-  const fromOrgPolicy = item.from_org_policy === true;
-  const orgId = fromOrgPolicy ? item.org_id ?? null : undefined;
-  const orgName = fromOrgPolicy ? item.org_name ?? null : undefined;
-
-  return {
-    id: item.id,
-    title: sanitizeDisplayValue(item.service_name, "Unknown Service"),
-    action,
-    resource,
-    approval_mode: item.approval_mode,
-    risk_level: deriveRiskLevel(action),
-    status: mapChallengeStatus(item.status),
-    created_at: item.created_at,
-    expires_at: deriveChallengeExpiry(item.created_at),
-    summary,
-    request_context: {
-      client: sanitizeDisplayValue(item.requester_type, "Unknown"),
-      location: sanitizeDisplayValue(
-        item.requester_label ?? item.service_slug,
-        "Unknown"
-      ),
-    },
-    from_org_policy: fromOrgPolicy,
-    org_id: orgId,
-    org_name: orgName,
-    service_slug: item.service_slug,
-  };
 }
 
 function toBackendPushPlatform(platform: PushTokenRegisterRequest["platform"]): "apns" | "fcm" {
@@ -412,7 +288,7 @@ async function requestRefreshAccessToken(
   max409Retries = REFRESH_CONFLICT_RETRY_COUNT
 ): Promise<RefreshResponse | null> {
   for (let attempt = 0; attempt <= max409Retries; attempt += 1) {
-    const response = await fetch(buildUrl("/auth/refresh"), {
+    const response = await fetch(buildApiUrl("/auth/refresh"), {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -483,13 +359,41 @@ export async function refreshAccessTokenIfNeeded(): Promise<boolean> {
   return Boolean(refreshed);
 }
 
+function clientHeaders(): Record<string, string> {
+  return {
+    ...analyticsDeviceHeaders(),
+    "X-NyxID-Client": "mobile",
+    "X-NyxID-Client-Version": Constants.expoConfig?.version ?? "dev",
+  };
+}
+
+async function invalidateSession() {
+  if (onSessionInvalidated) onSessionInvalidated();
+  else await clearStoredAuthSession();
+}
+
+/** Expo's native fetch exposes a ReadableStream on iOS/Android; RN's global
+ * fetch can buffer the entire response. Both paths share secure admission. */
+export async function requestAuthenticatedResponse(path: string, options: RequestOptions = {}) {
+  const { response } = await executeAuthenticatedRequest({
+    url: buildApiUrl(path), options, clientHeaders: clientHeaders(),
+    transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init), init.signal ?? undefined), loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight, invalidate: invalidateSession,
+    toError: buildApiError, getAuthEpoch,
+  });
+  return response;
+}
+
 export async function requestJson<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? "GET";
   const requiresAuth = options.requiresAuth ?? true;
   const retryOnAuthFailure = options.retryOnAuthFailure ?? true;
+  const expectedEpoch = getAuthEpoch();
   const expectedSessionGeneration = authSessionGeneration();
   const guard = () => {
     options.authorityGuard?.();
+    if (options.signal?.aborted) throw Object.assign(new Error("Request cancelled"), { name: "AbortError" });
+    if (requiresAuth && getAuthEpoch() !== expectedEpoch) throw new Error("auth_session_changed");
     if (requiresAuth && authSessionGeneration() !== expectedSessionGeneration) throw new Error("auth_session_changed");
     if (options.expectedAccountId && analyticsConsentState.getSnapshot().accountId !== options.expectedAccountId)
       throw new Error("analytics_account_changed");
@@ -529,16 +433,18 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
 
   const send = () => {
     guard();
-    return fetch(buildUrl(path), {
+    return assistantConnection.observe(() => fetch(buildApiUrl(path), {
       method,
       headers,
+      signal: options.signal,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
-    });
+    }), options.signal);
 
   };
 
   return guardedJsonTransport<T>({
     send, read: readJsonSafely, guard, requiresAuth, retry: retryOnAuthFailure,
+    invalidateOnAuthFailure: options.invalidateSessionOnAuthFailure,
     refresh: async () => {
       const refreshed = await refreshAccessTokenWithSingleFlight();
       guard();
@@ -554,6 +460,113 @@ export async function requestJson<T>(path: string, options: RequestOptions = {})
     },
     failure: buildApiError,
   });
+}
+
+/** Raw upload shares the same secure admission and single 401 refresh as JSON. */
+export async function requestBinaryJson<T>(
+  path: string,
+  bytes: Uint8Array,
+  options: {
+    headers?: Record<string, string>;
+    signal?: AbortSignal;
+    onProgress?: (percent: number) => void;
+  } = {},
+): Promise<T> {
+  const { response, assertOwner } = await executeAuthenticatedRequest({
+    url: buildApiUrl(path),
+    options: {
+      method: "POST",
+      headers: options.headers,
+      signal: options.signal,
+      rawBody: new Uint8Array(bytes).buffer,
+    },
+    clientHeaders: clientHeaders(),
+    transport: (url, init) =>
+      new Promise<{ ok: boolean; status: number; text: () => Promise<string> }>(
+        (resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          const abort = () => xhr.abort();
+          const cleanup = () =>
+            init.signal?.removeEventListener("abort", abort);
+          xhr.open(init.method, url);
+          xhr.timeout = 60_000;
+          for (const [name, value] of Object.entries(init.headers))
+            xhr.setRequestHeader(name, value);
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable)
+              options.onProgress?.(
+                Math.min(99, Math.round((event.loaded / event.total) * 100)),
+              );
+          };
+          xhr.onerror = () => {
+            cleanup();
+            reject(
+              new Error("Upload failed. Check your connection and try again."),
+            );
+          };
+          xhr.ontimeout = () => {
+            cleanup();
+            reject(new Error("Upload timed out. Try a smaller file."));
+          };
+          xhr.onabort = () => {
+            cleanup();
+            reject(
+              Object.assign(new Error("Upload cancelled."), {
+                name: "AbortError",
+              }),
+            );
+          };
+          xhr.onload = () => {
+            cleanup();
+            resolve({
+              ok: xhr.status >= 200 && xhr.status < 300,
+              status: xhr.status,
+              text: async () => xhr.responseText,
+            });
+          };
+          if (init.signal?.aborted) {
+            cleanup();
+            reject(
+              Object.assign(new Error("Upload cancelled."), {
+                name: "AbortError",
+              }),
+            );
+            return;
+          }
+          init.signal?.addEventListener("abort", abort, { once: true });
+          xhr.send(init.body);
+        },
+      ),
+    loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight,
+    invalidate: invalidateSession,
+    toError: buildApiError,
+    getAuthEpoch,
+  });
+  const text = await response.text();
+  await assertOwner();
+  return JSON.parse(text) as T;
+}
+
+/** Bytes are consumed before the owner fence, so a late account response cannot be saved. */
+export async function requestAuthenticatedBytes(
+  path: string,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const { response, assertOwner } = await executeAuthenticatedRequest({
+    url: buildApiUrl(path),
+    options: { signal },
+    clientHeaders: clientHeaders(),
+    transport: (url, init) => assistantConnection.observe(() => expoFetch(url, init), init.signal ?? undefined),
+    loadSession: loadStoredAuthSession,
+    refresh: refreshAccessTokenWithSingleFlight,
+    invalidate: invalidateSession,
+    toError: buildApiError,
+    getAuthEpoch,
+  });
+  const bytes = await readBoundedBytes(response.body, 20 * 1024 * 1024);
+  await assertOwner();
+  return bytes;
 }
 
 async function listPendingApprovalRequests(
@@ -787,8 +800,8 @@ export async function unregisterPushTokenRequest(
   });
 }
 
-export async function getCurrentUserProfileRequest(): Promise<AccountProfile> {
-  return requestJson<AccountProfile>("/users/me");
+export async function getCurrentUserProfileRequest(signal?: AbortSignal): Promise<AccountProfile> {
+  return requestJson<AccountProfile>("/users/me", { signal });
 }
 
 export async function deleteCurrentUserAccountRequest(): Promise<DeleteAccountResponse> {

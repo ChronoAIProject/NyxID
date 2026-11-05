@@ -125,14 +125,14 @@ export function OwnershipTransferDialog({
           </DialogDescription>
         </DialogHeader>
         {review ? (
-          <div className="space-y-4 text-sm">
+          <div className="space-y-4 text-14">
             <dl className="space-y-2 rounded-md border p-3">
               <dt className="text-muted-foreground">Current owner</dt>
               <dd className="break-all">
                 {review.preview.previous_owner_name ??
                   review.preview.previous_owner_user_id}
                 {review.preview.previous_owner_name && (
-                  <span className="block text-xs text-muted-foreground">
+                  <span className="block text-13 text-muted-foreground">
                     {review.preview.previous_owner_user_id}
                   </span>
                 )}
@@ -145,7 +145,7 @@ export function OwnershipTransferDialog({
               </dt>
               <dd>
                 {review.preview.destination_name}
-                <span className="block break-all text-xs text-muted-foreground">
+                <span className="block break-all text-13 text-muted-foreground">
                   {review.preview.new_owner_user_id}
                 </span>
               </dd>
@@ -220,7 +220,7 @@ export function OwnershipTransferDialog({
                 }}
               />
               {form.formState.errors.new_owner_user_id && (
-                <p role="alert" className="text-sm text-destructive">
+                <p role="alert" className="text-14 text-destructive">
                   {form.formState.errors.new_owner_user_id.message}
                 </p>
               )}
@@ -228,7 +228,7 @@ export function OwnershipTransferDialog({
           </form>
         )}
         {error && (
-          <p role="alert" className="text-sm text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {error}
           </p>
         )}

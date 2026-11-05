@@ -11,17 +11,26 @@ use axum::{Router, response::sse::Event, routing::post};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[path = "nyxbot_private_posts_tests.rs"]
+mod private_posts_tests;
 #[path = "nyxbot_transport_tests.rs"]
 mod transport_tests;
 
 #[path = "nyxbot_discord_tests.rs"]
 mod discord_tests;
+#[path = "nyxbot_native_tests.rs"]
+mod native_tests;
 
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
+
+#[path = "nyxbot_custom_event_tests.rs"]
+mod custom_event_tests;
+#[path = "nyxbot_org_channel_tests.rs"]
+mod org_channel_tests;
 
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
@@ -75,27 +84,79 @@ pub(super) fn relay_callback_completed(channel_id: &str, message_id: &str) {
     }
 }
 
-async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+fn setup<'a>(
+    name: &'a str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_impl(name))
+}
+
+async fn setup_impl(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
     setup_with_reply(name, "Here is your answer").await
 }
-async fn setup_with_reply(
+
+fn setup_with_reply<'a>(
+    name: &'a str,
+    reply: &'static str,
+) -> futures::future::BoxFuture<'a, (AppState, Calls, tokio::task::JoinHandle<()>)> {
+    Box::pin(setup_with_reply_impl(name, reply))
+}
+
+async fn setup_with_reply_impl(
     name: &str,
     reply: &'static str,
 ) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
-    let db = connect_transaction_test_database(name).await;
-    engine::ensure_indexes(&db).await.unwrap();
-    db.collection(USERS)
-        .insert_one(test_user(OWNER, UserType::Person))
-        .await
-        .unwrap();
+    let db = Box::pin(connect_transaction_test_database(name)).await;
+    Box::pin(engine::ensure_indexes(&db)).await.unwrap();
+    Box::pin(async {
+        db.collection(USERS)
+            .insert_one(test_user(OWNER, UserType::Person))
+            .await
+            .unwrap();
+    })
+    .await;
+    let state = test_app_state(db.clone());
+    let callbacks = Router::new()
+        .route(
+            "/api/v1/proxy/s/{slug}/{*path}",
+            axum::routing::any(guest_model_tests::model_callback),
+        )
+        .layer(axum::Extension(
+            crate::handlers::assistant_nyxagent::SERVER_TURN_POLICY,
+        ))
+        .with_state(state.clone());
+    let setup_db = db.clone();
     let calls: Calls = Arc::new(Mutex::new(Vec::new()));
     let sink = calls.clone();
     let upstream = Router::new().route(
         "/v1/responses",
-        post(move |Json(body): Json<Value>| {
+        post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
+            let callbacks = callbacks.clone();
+            let db = setup_db.clone();
             async move {
-                sink.lock().await.push(body);
+                // General channel tests mock the conversation engine. Visitor
+                // initialization now needs a real, authenticated model admission;
+                // exercise it without counting the hidden turn as user input.
+                use tower::ServiceExt;
+                let hidden = if body["input"] == crate::services::assistant_guest_model_setup::INSTRUCTION {
+                    let raw = headers["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
+                    let (_, key, _) = key_service::validate_api_key(&db, raw).await.unwrap();
+                    db.collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one(doc!{"credential_api_key_id":&key.id,"guest_model_setup":true}).await.unwrap().is_some()
+                } else {false};
+                if hidden {
+                    assert_eq!(body["input"], crate::services::assistant_guest_model_setup::INSTRUCTION);
+                    let response = callbacks.oneshot(axum::http::Request::builder().method("POST")
+                        .uri("/api/v1/proxy/s/fixture-model/responses")
+                        .header("authorization", headers["authorization"].clone())
+                        .header("content-type", "application/json").header("accept", "*/*")
+                        .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
+                    let status = response.status();
+                    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    assert_eq!(status, StatusCode::OK, "setup model callback: {}", String::from_utf8_lossy(&bytes));
+                } else {
+                    sink.lock().await.push(body);
+                }
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
                 let stream = async_stream::stream! {
@@ -115,6 +176,10 @@ async fn setup_with_reply(
     let upstream=upstream.route("/v1/capabilities",axum::routing::get(||async {
         Json(json!({"protocol":"nyxagent-input-image-v1","input_image":{"version":1,"sources":["nyxid_attachment_url"],"max_images":10,"max_image_bytes":20971520,"max_total_bytes":20971520,"content_types":["image/png","image/jpeg"]}}))
     }));
+    let upstream = upstream.route(
+        "/fixture-model/responses",
+        post(|| async { Json(json!({"id":"fixture-model-response","output":[]})) }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -130,11 +195,32 @@ async fn setup_with_reply(
     row.forward_access_token = true;
     row.inject_delegation_token = false;
     row.credential_encrypted.clear();
-    db.collection::<DownstreamService>(SERVICES)
-        .insert_one(row)
+    Box::pin(async {
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(row)
+            .await
+            .unwrap();
+    })
+    .await;
+    let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+    model.id = Uuid::new_v4().to_string();
+    model.slug = "fixture-model".into();
+    model.base_url = format!("http://{address}/fixture-model");
+    model.service_category = "internal".into();
+    model.auth_method = "bearer".into();
+    model.requires_user_credential = false;
+    model.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"fixture-model-key")
         .await
         .unwrap();
-    (test_app_state(db), calls, server)
+    model.inference =
+        Some(serde_json::from_value(json!({"wire_protocol":"openai_responses"})).unwrap());
+    db.collection::<DownstreamService>(SERVICES)
+        .insert_one(model)
+        .await
+        .unwrap();
+    (state, calls, server)
 }
 
 async fn key(state: &AppState, name: &str) -> key_service::CreatedApiKey {
@@ -159,12 +245,62 @@ async fn key(state: &AppState, name: &str) -> key_service::CreatedApiKey {
     .unwrap()
 }
 
+#[tokio::test]
+async fn guest_setup_2092_closed_private_chat_settings_do_not_start_billed_setup() {
+    let (state, calls, server) = setup("guest_setup_closed_private").await;
+    let (channel, _) = channel(&state, "direct").await;
+    let chat = chats::record_chat(
+        &state,
+        &channel,
+        "private-owner",
+        &chats::ChatFacts {
+            kind: "private",
+            chat_id: "owner-chat".into(),
+            thread_id: None,
+            owner: true,
+            title: Some("Owner".into()),
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    chats::update_chat(
+        &state,
+        OWNER,
+        &chat.id,
+        &chats::ChatSettings {
+            allow_posts: Some(false),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+            .count_documents(doc! {"kind":crate::services::assistant_guest_model_setup::KIND})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
 /// An active channel as `connect` leaves it, without the gateway round trip.
 async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let route = key(state, "route").await;
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        org_specialist: None,
+        gateway_source: None,
+        gateway_native_phase: None,
+        gateway_native_activation: None,
+        gateway_native_activation_detail: None,
+        gateway_native_delivery: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -217,6 +353,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         source_conversation_id: None,
         agent_id: None,
         private_chats: None,
+        private_chat_posts: None,
         delivery_status: None,
         delivery_error: None,
         delivery_failed_at: None,
@@ -1416,6 +1553,7 @@ fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
         partition: PARTITION.into(),
         event_id: event_id.into(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -1567,6 +1705,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
         partition: PARTITION.into(),
         event_id: arrived.clone(),
         relay_message_id: None,
+        custom_binding_id: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -2628,6 +2767,9 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: None,
+            owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: None,
@@ -3151,6 +3293,12 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            org_specialist: None,
+            gateway_source: None,
+            gateway_native_phase: None,
+            gateway_native_activation: None,
+            gateway_native_activation_detail: None,
+            gateway_native_delivery: None,
             gateway_bot_mentions: Default::default(),
             gateway_threads: Default::default(),
             follow_capacity_revision: 0,
@@ -3192,6 +3340,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             source_conversation_id: None,
             agent_id: None,
             private_chats: None,
+            private_chat_posts: None,
             delivery_status: None,
             delivery_error: None,
             delivery_failed_at: None,
@@ -3690,6 +3839,9 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: None,
+            owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
             invocation_id: None,
@@ -3825,6 +3977,8 @@ async fn the_same_question_is_not_worked_on_twice() {
         .unwrap()
         .unwrap();
     let asked_from = ChannelOrigin {
+        org_execution: None,
+        native_event_id: None,
         thread: None,
         nyxbot_channel_id: telegram.id.clone(),
         partition: chat_row.partition.clone(),
@@ -4230,10 +4384,19 @@ async fn mock_gateway(
                 );
             }
             let channel_id = format!("cmaeg1.ch.{}", body["record_id"].as_str().unwrap());
-            let response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
+            if body["sources"][0]["type"] == "discord" {
+                // Remote auto-activation can race the local transport swap.
+                let pending = respond(&nyxid, &key, &json!({}), "preparation-probe").await;
+                assert_eq!(pending.status(), StatusCode::TOO_MANY_REQUESTS);
+            }
+            let mut response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
                 "endpoints":{"nyxid_callback_url":format!("{callback_base}/callbacks/{channel_id}")},"provider":{"slug":"nyxbot","binding_id":binding},
                 "definition":{"owner":{"kind":"human","subject":claims.sub},"sources":body["sources"],
                     "reply":body["reply"],"profile":body["profile"]}});
+            if body["sources"][0]["type"] == "discord" {
+                response["native_discord_activation"] = json!({"state":"pending_discovery"});
+                response["definition"]["routing"] = body["routing"].clone();
+            }
             remote
                 .lock()
                 .await
@@ -4260,7 +4423,7 @@ async fn mock_gateway(
                 return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
             }
             current["version"] = json!(expected + 1);
-            for field in ["sources", "reply", "profile"] {
+            for field in ["sources", "reply", "profile", "routing", "partition"] {
                 current["definition"][field] = body[field].clone();
             }
             (StatusCode::OK, Json(current.clone()))
@@ -4343,6 +4506,8 @@ async fn mock_gateway(
         }
     };
     let routes = Router::new()
+        .route("/channel-capabilities",axum::routing::get(||async {Json(json!({"relay_authoring":{
+            "native_discord_writes_enabled":true,"native_discord_auto_activation_enabled":true,"multi_consumer_writes_enabled":true}}))}))
         .route("/channels", post(create))
         .route("/channel-records/{id}", axum::routing::get(read.clone()))
         .route(
@@ -6439,4 +6604,425 @@ async fn channel_http_links_refuse_org_specialists_with_typed_guidance() {
         assert_eq!(body["details"]["hint"], ORGANIZATION_AGENT_CHANNEL_HINT);
     }
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_watch_reports_gateway_configuration_separately_from_outage() {
+    for status in [None, Some(401), Some(403), Some(503)] {
+        let (mut state, _, upstream) = setup("nyxbot_watch_gateway_failure").await;
+        state.config.jwt_issuer = "https://nyxid.test".into();
+        let agent = crate::services::assistant_team_service::ensure_nyxbot(&state.db, OWNER)
+            .await
+            .unwrap();
+        let home = crate::services::assistant_team_service::home_thread(
+            &state.db,
+            &state.encryption_keys,
+            &agent,
+        )
+        .await
+        .unwrap();
+        // Without a configured creation manager this selects the real manual
+        // Telegram flow, whose completed bot must use the same platform.
+        let (value, _) = setup_link_tool(
+            &state,
+            OWNER,
+            &home.id,
+            "telegram",
+            None,
+            &agent,
+            LEGACY_PROVENANCE,
+        )
+        .await
+        .unwrap();
+        let link = hosted_setup_link(&state, &value).await;
+        assert_eq!(link.platform, "telegram");
+        let watch = state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"connect_link_id": &link.id, "status": "pending"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(watch.platform.as_deref(), Some("telegram"));
+        let gateway = wiremock::MockServer::start().await;
+        if let Some(status) = status {
+            let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+            service.id = Uuid::new_v4().to_string();
+            service.slug = "cmaeg".into();
+            service.base_url = gateway.uri();
+            service.requires_user_credential = false;
+            state
+                .db
+                .collection::<DownstreamService>(SERVICES)
+                .insert_one(service)
+                .await
+                .unwrap();
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(
+                    wiremock::ResponseTemplate::new(status)
+                        .set_body_string("PRIVATE-UPSTREAM-SENTINEL"),
+                )
+                .mount(&gateway)
+                .await;
+        }
+        let bot = bot_doc("telegram", "Saved specialist bot");
+        let bot_id = bot.get_str("_id").unwrap().to_owned();
+        state
+            .db
+            .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(bot)
+            .await
+            .unwrap();
+        complete_hosted_setup(&state, &link.id, &bot_id).await;
+        channel_bot_watch(&state, &watch).await.unwrap();
+        let watch_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "POST" && request.url.path() == "/channels")
+            .count();
+        assert_eq!(
+            watch_posts,
+            usize::from(status.is_some()),
+            "configured cases must reach the actual gateway status fixture"
+        );
+        let expected = match status {
+            None => "gateway_configuration_required",
+            Some(401) => "gateway_not_authenticated",
+            Some(403) => "gateway_permission_required",
+            _ => "gateway_unavailable",
+        };
+        let saved = state
+            .db
+            .collection::<NyxbotWatch>(WATCHES)
+            .find_one(doc! {"_id": &watch.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.status, "failed");
+        assert_eq!(saved.last_error.as_deref(), Some(expected));
+        let event = wait_for_event(&state, &home.id, expected).await;
+        assert!(!event.contains("SENTINEL"));
+        assert!(event.contains(gateway_error_guidance(expected)));
+        let tool_error = connect_tool(&state, OWNER, &home.id, &bot_id, &agent)
+            .await
+            .unwrap_err();
+        assert!(matches!(&tool_error, AppError::ValidationError(message)
+            if message == &format!("{expected}: {}", gateway_error_guidance(expected))));
+        assert!(!tool_error.to_string().contains("SENTINEL"));
+        let tool_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.method == "POST" && request.url.path() == "/channels")
+            .count();
+        assert_eq!(
+            tool_posts,
+            watch_posts + usize::from(status.is_some()),
+            "the direct tool must independently reach the configured gateway fixture"
+        );
+        assert_eq!(
+            gateway.received_requests().await.unwrap().is_empty(),
+            status.is_none()
+        );
+        // CLI/mobile consume this same HTTP envelope; the MCP tool above also
+        // retains the bounded code alongside guidance, without upstream prose.
+        let error = match connect(&state, OWNER, Some(&home.id), &bot_id, &agent).await {
+            Err(error) => error,
+            Ok(_) => panic!("gateway rejection must fail the HTTP connection"),
+        };
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let envelope: Value = serde_json::from_str(&body_text(response).await).unwrap();
+        assert_eq!(envelope["error"], "validation_error");
+        assert_eq!(
+            envelope["message"],
+            format!(
+                "Validation error: {expected}: {}",
+                gateway_error_guidance(expected)
+            )
+        );
+        assert!(!envelope.to_string().contains("SENTINEL"));
+        let http_posts = gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method == "POST" && r.url.path() == "/channels")
+            .count();
+        assert_eq!(http_posts, tool_posts + usize::from(status.is_some()));
+        upstream.abort();
+    }
+}
+
+#[tokio::test]
+async fn relay_gateway_recovery_survives_dropped_observer_and_replays_once() {
+    use crate::services::nyxbot_response_recovery as recovery;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    for recover in [true, false] {
+        let (state, calls, server) = setup("relay_response_recovery").await;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        enable_relay_response_recovery(&state).await;
+        let (mut row, key) = channel(&state, "gateway").await;
+        row.owner_sender_ids = vec!["7".into()];
+        row.gateway_channel_id = Some("cmaeg1.ch.test".into());
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .replace_one(doc! {"_id":&row.id}, &row)
+            .await
+            .unwrap();
+        assert_eq!(
+            put_binding(
+                State(state.clone()),
+                Path("bnd_chats".into()),
+                bearer(&key),
+                Json(binding_body(&key, OWNER))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        ensure_partition(&state, &key, PARTITION).await;
+        row = load_channel(&state, OWNER, &row.id).await.unwrap();
+        let gateway = MockServer::start().await;
+        relay_responses::clear_capabilities(&gateway.uri());
+        let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+        svc.id = Uuid::new_v4().to_string();
+        svc.slug = GATEWAY_SLUG.into();
+        svc.base_url = gateway.uri();
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(svc)
+            .await
+            .unwrap();
+        Mock::given(path("/channel-capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"relay_authoring":{"response_recovery_providers":["nyxbot"]}}),
+            ))
+            .expect(1)
+            .mount(&gateway)
+            .await;
+        Mock::given(path("/events/cmaeg1.ev.sealed-reference/reply-target"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "reply_target_ref":"cmaeg1.rt.recovery", "expires_at":(Utc::now()+ChronoDuration::hours(23)).timestamp()
+        }))).mount(&gateway).await;
+        Mock::given(path("/reply-targets/cmaeg1.rt.recovery/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
+            )
+            .expect(if recover { 0 } else { 1 })
+            .mount(&gateway)
+            .await;
+        let mut request = event("Hello", "7", "relay-recovery-event");
+        request["metadata"] = json!({"cmaeg.channel":&sha256_hex("cmaeg1.ch.test")[..16],"cmaeg.event":"relay-recovery-event","cmaeg.partition":"0123456789abcdef","cmaeg.actor":"7"});
+        let blocked = calls.lock().await;
+        let response = respond(&state, &key, &request, "relay-recovery-command").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response.headers()["x-cma-response-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        // CMA's submission observer disappears before model work completes.
+        drop(response);
+        if recover {
+            let snapshot =
+                native_responses::snapshot(State(state.clone()), Path(id.clone()), bearer(&key))
+                    .await;
+            assert_eq!(snapshot.status(), StatusCode::OK);
+        }
+        let admitted = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
+        drop(blocked);
+        if !recover {
+            // A legacy CMA consumer never asks for recovery. NyxID's detached
+            // sender must still deliver the committed answer exactly once.
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    late_delivery::process(&state, &admitted.event_key).await;
+                    let event = state
+                        .db
+                        .collection::<NyxbotEvent>(EVENTS)
+                        .find_one(doc! {"_id":&admitted.event_key})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if event.delivery.as_ref().is_some_and(|d| d.state == "sent") {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let body = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let response = native_responses::snapshot(
+                    State(state.clone()),
+                    Path(id.clone()),
+                    bearer(&key),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::OK);
+                let body: Value = serde_json::from_str(&body_text(response).await).unwrap();
+                if body["status"] == "completed" {
+                    break body;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(body.to_string().contains("Here is your answer"), recover);
+        if !recover {
+            assert_eq!(body["output"], json!([]));
+        }
+        let stored = recovery::load(&state.db, &row, &id).await.unwrap().unwrap();
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"_id":&stored.event_key})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            event.delivery.unwrap().state,
+            if recover { "replay" } else { "sent" }
+        );
+        late_delivery::process(&state, &stored.event_key).await;
+        let wire = body_text(respond(&state, &key, &request, "relay-recovery-command").await).await;
+        assert_eq!(wire.matches("event: response.completed").count(), 1);
+        assert!(wire.contains("response.completed"));
+        assert_eq!(calls.lock().await.len(), 1);
+        let payload = recovery::payload(&state.encryption_keys, &stored)
+            .await
+            .unwrap();
+        for (n, frame) in payload.frames.iter().enumerate() {
+            assert_eq!(frame["sequence_number"], n);
+        }
+        let resumed = native_responses::events(
+            State(state.clone()),
+            Path(id),
+            axum::extract::Query(native_responses::Cursor {
+                starting_after: Some(
+                    wire.lines()
+                        .filter_map(|line| line.strip_prefix("id: "))
+                        .next_back()
+                        .unwrap()
+                        .to_owned(),
+                ),
+            }),
+            bearer(&key),
+        )
+        .await;
+        assert_eq!(body_text(resumed).await, "");
+        // A different event also negotiates recovery, using the cached public
+        // capability. The gateway expectation above remains exactly one GET.
+        request["event_context"]["activity"]["event_id"] = json!("relay-recovery-second");
+        request["metadata"]["cmaeg.event"] = json!("relay-recovery-second");
+        let second = respond(&state, &key, &request, "relay-recovery-second-command").await;
+        assert!(second.headers().contains_key("x-cma-response-id"));
+        assert!(body_text(second).await.contains("Here is your answer"));
+        assert_eq!(calls.lock().await.len(), 2);
+        gateway.verify().await;
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+async fn enable_relay_response_recovery(state: &AppState) {
+    state
+        .db
+        .collection::<bson::Document>("feature_flag_overrides")
+        .insert_one(doc! {
+            "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
+            "flag_key":feature_flag_service::NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG_KEY,
+            "target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"admin",
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn relay_gateway_recovery_flag_off_preserves_live_stream_without_discovery() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let (state, calls, server) = setup("relay_recovery_flag_off").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let (mut row, key) = channel(&state, "gateway").await;
+    row.owner_sender_ids = vec!["7".into()];
+    row.gateway_channel_id = Some("cmaeg1.ch.test".into());
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&row.id}, &row)
+        .await
+        .unwrap();
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_chats".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER))
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    ensure_partition(&state, &key, PARTITION).await;
+    let gateway = MockServer::start().await;
+    relay_responses::clear_capabilities(&gateway.uri());
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.id = Uuid::new_v4().to_string();
+    service.slug = GATEWAY_SLUG.into();
+    service.base_url = gateway.uri();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+    Mock::given(path("/channel-capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "relay_authoring":{"response_recovery_providers":["nyxbot"]}
+        })))
+        .expect(0)
+        .mount(&gateway)
+        .await;
+    let mut request = event("Hello", "7", "relay-flag-off");
+    // Even malformed recovery-only metadata remains irrelevant with flag off.
+    request["metadata"] = json!({"cmaeg.channel":"wrong","cmaeg.event":"wrong",
+        "cmaeg.partition":"wrong","cmaeg.actor":"wrong"});
+    let response = respond(&state, &key, &request, "relay-flag-off-command").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("x-cma-response-id"));
+    let wire = body_text(response).await;
+    assert!(wire.contains("Here is your answer"));
+    assert_eq!(wire.matches("event: response.completed").count(), 1);
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(EVENTS)
+            .count_documents(doc! {"gateway_response_id":{"$exists":true}})
+            .await
+            .unwrap(),
+        0
+    );
+    gateway.verify().await;
+    server.abort();
+    state.db.drop().await.unwrap();
 }

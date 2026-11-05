@@ -105,6 +105,88 @@ use mongodb::ClientSession;
 const TRANSCRIPT_CHARS: usize = 12_000;
 const TRANSCRIPT_MESSAGES: i64 = 60;
 
+/// Shared authority is confined to private chats and the recipient's own
+/// single-person crews. This check is also used when minting/revalidating keys.
+pub fn check_shared_surface(row: &AssistantConversation) -> AppResult<()> {
+    if row.automation_thread
+        || row.platform_thread.is_some()
+        || row.channel.is_some()
+        || row.reply_channel.is_some()
+        || row.guest_turn
+        || row.group_request_id.is_some()
+        || row.voice_parent_conversation_id.is_some()
+    {
+        return Err(AppError::ValidationError(
+            "Shared agents support private chats and personal crews only; organization groups, automation and platform/channel threads are unavailable".into()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn fence_shared_group(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let Some(id) = row.group_id.as_deref() else {
+        return Ok(());
+    };
+    let result = db
+        .collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id": id, "user_id": &row.user_id, "created_by_user_id": null, "collaboration": null,
+            "member_agent_ids": row.agent_id.as_deref().unwrap_or_default(),
+            "participant_user_ids": {"$not": {"$elemMatch": {"$ne": &row.user_id}}}},
+            doc! {"$set": {"updated_at": bson::DateTime::now()}},
+        )
+        .session(&mut *session)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::ValidationError(
+            "Shared agents require membership in your own personal crew".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Personal crew admission and credential minting serialize with roster edits.
+/// Shared crews already use the stricter fence above; this also covers owned
+/// and org-owned agents participating in a person's legacy crew.
+pub(crate) async fn fence_member_thread(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let Some(id) = row.group_id.as_deref() else {
+        return Ok(());
+    };
+    if row.collaboration.is_some() {
+        return Ok(());
+    }
+    let group = db
+        .collection::<AssistantGroup>(GROUPS)
+        .find_one(doc! {"_id":id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    if super::org_group_service::is_org(&group) {
+        return Ok(());
+    }
+    let result = db
+        .collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id":id,"user_id":&row.user_id,"created_by_user_id":null,"collaboration":null,
+            "member_agent_ids":row.agent_id.as_deref().unwrap_or_default()},
+            doc! {"$inc":{"member_thread_fence":1_i64}},
+        )
+        .session(session)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
 fn not_found() -> AppError {
     AppError::NotFound("Group not found".into())
 }
@@ -118,7 +200,7 @@ fn owner_filter(owner: &str, id: &str) -> AppResult<bson::Document> {
     if !valid_id(id) {
         return Err(not_found());
     }
-    Ok(doc! {"_id": id, "user_id": owner})
+    Ok(doc! {"_id": id, "user_id": owner, "collaboration": null})
 }
 
 /// Resolve and check members: live agents of this owner, unique, bounded.
@@ -191,6 +273,7 @@ pub async fn create(
     let members = resolve_members(db, owner, member_ids).await?;
     let now = Utc::now();
     let group = AssistantGroup {
+        collaboration: None,
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: owner.into(),
         participant_user_ids: Vec::new(),
@@ -262,7 +345,7 @@ pub async fn find(db: &Database, owner: &str, reference: &str) -> AppResult<Assi
 pub async fn list(db: &Database, owner: &str) -> AppResult<Vec<AssistantGroup>> {
     Ok(db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"user_id": owner})
+        .find(doc! {"user_id": owner, "collaboration": null})
         .sort(doc! {"updated_at": -1})
         .limit(100)
         .await?
@@ -270,17 +353,109 @@ pub async fn list(db: &Database, owner: &str) -> AppResult<Vec<AssistantGroup>> 
         .await?)
 }
 
-/// Members in group order, including destroyed agents (shown as such).
-pub async fn members(
-    db: &Database,
-    owner: &str,
-    group: &AssistantGroup,
-) -> AppResult<Vec<AssistantAgent>> {
-    let agents = team::agents(db, owner, true).await?;
+/// A stored member is not execution authority. Keep unavailable members visible
+/// so losing a share never silently changes the meaning of an addressed message.
+pub struct Member {
+    pub agent: AssistantAgent,
+    pub available: bool,
+    /// A specialist owned by another person, even after its share is revoked.
+    /// Organization ownership is never personal sharing. This is not authority.
+    pub shared: bool,
+    pub owner_name: Option<String>,
+}
+
+impl std::ops::Deref for Member {
+    type Target = AssistantAgent;
+    fn deref(&self) -> &Self::Target {
+        &self.agent
+    }
+}
+
+/// Members in group order, including destroyed/revoked members. Only public
+/// profile fields may be returned to the caller; `available` is request-local.
+pub async fn members(db: &Database, owner: &str, group: &AssistantGroup) -> AppResult<Vec<Member>> {
+    super::assistant_group_kind::require_legacy(group)?;
+    let agents: Vec<AssistantAgent> = db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"_id": {"$in": &group.member_agent_ids}})
+        .await?
+        .try_collect()
+        .await?;
+    let foreign_owners: Vec<_> = agents
+        .iter()
+        .filter(|a| a.user_id != owner)
+        .map(|a| &a.user_id)
+        .collect();
+    let people: Vec<crate::models::user::User> = if foreign_owners.is_empty() {
+        Vec::new()
+    } else {
+        // Retain owner type after deactivation: an unavailable organization
+        // member must never be mistaken for a revoked personal share.
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .find(doc! {"_id": {"$in": foreign_owners}})
+            .await?
+            .try_collect()
+            .await?
+    };
+    let memberships = if people.iter().any(|p| p.user_type.is_org()) {
+        super::org_service::list_memberships_for_member(db, owner, false).await?
+    } else {
+        Vec::new()
+    };
+    let mut owners = vec![owner.to_owned()];
+    owners.extend(
+        people
+            .iter()
+            .filter(|p| {
+                p.is_active
+                    && p.user_type.is_org()
+                    && memberships
+                        .iter()
+                        .any(|m| m.org_user_id == p.id && m.role.can_proxy())
+            })
+            .map(|p| p.id.clone()),
+    );
+    let foreign: Vec<_> = agents
+        .iter()
+        .filter(|a| {
+            people
+                .iter()
+                .any(|p| p.id == a.user_id && p.user_type.is_person())
+        })
+        .map(|a| a.id.clone())
+        .collect();
+    // Owned/org-only groups do not acquire shared-policy reads.
+    let shared = if !foreign.is_empty() && !super::org_group_service::is_org(group) {
+        super::shared_agent_service::load(db, owner, Some(&foreign))
+            .await?
+            .agents
+    } else {
+        Default::default()
+    };
     Ok(group
         .member_agent_ids
         .iter()
         .filter_map(|id| agents.iter().find(|agent| &agent.id == id).cloned())
+        .map(|agent| {
+            let has_shared_access = shared.contains_key(&agent.id);
+            let shared_member = agent.user_id != owner
+                && people
+                    .iter()
+                    .any(|p| p.id == agent.user_id && p.user_type.is_person());
+            let available = agent.destroyed_at.is_none()
+                && (owners.contains(&agent.user_id) || has_shared_access)
+                && (!super::org_group_service::is_org(group) || agent.user_id == group.user_id);
+            let owner_name = people
+                .iter()
+                .find(|p| has_shared_access && p.id == agent.user_id)
+                .and_then(|p| p.display_name.clone());
+            Member {
+                agent,
+                available,
+                shared: shared_member,
+                owner_name,
+            }
+        })
         .collect())
 }
 
@@ -292,50 +467,179 @@ pub async fn update(
     member_ids: Option<&[String]>,
 ) -> AppResult<AssistantGroup> {
     let group = get(db, owner, id).await?;
-    let mut set = doc! {"updated_at": bson::DateTime::now()};
-    if let Some(name) = name {
-        set.insert("name", valid_name(name)?);
+    update_from_snapshot(db, owner, &group, name, member_ids).await
+}
+
+/// Incremental callers must pass the same snapshot they used to build the
+/// proposed member list, rather than silently rebasing it over a removal.
+pub(crate) async fn update_from_snapshot(
+    db: &Database,
+    owner: &str,
+    group: &AssistantGroup,
+    name: Option<&str>,
+    member_ids: Option<&[String]>,
+) -> AppResult<AssistantGroup> {
+    let name = name.map(valid_name).transpose()?;
+    let members = match member_ids {
+        Some(ids) => Some(resolve_members(db, owner, ids).await?),
+        None => None,
+    };
+    update_prepared(db, owner, group, name, members).await
+}
+
+/// Keep the observed roster fixed across transaction retries: a competing edit
+/// must conflict rather than replay an old member list over a newer removal.
+pub(crate) async fn update_prepared(
+    db: &Database,
+    owner: &str,
+    before: &AssistantGroup,
+    name: Option<String>,
+    members: Option<Vec<AssistantAgent>>,
+) -> AppResult<AssistantGroup> {
+    if super::org_group_service::is_org(before) || before.collaboration.is_some() {
+        return Err(AppError::ValidationError(
+            "Use the group's membership settings".into(),
+        ));
     }
-    let mut notice = None;
-    if let Some(member_ids) = member_ids {
-        let members = resolve_members(db, owner, member_ids).await?;
-        let ids: Vec<String> = members.iter().map(|member| member.id.clone()).collect();
-        let before = self::members(db, owner, &group).await?;
-        let joined: Vec<AssistantAgent> = members
+    let ids: Vec<String> = members.as_ref().map_or_else(
+        || before.member_agent_ids.clone(),
+        |members| members.iter().map(|a| a.id.clone()).collect(),
+    );
+    let removed: Vec<String> = before
+        .member_agent_ids
+        .iter()
+        .filter(|id| !ids.contains(id))
+        .cloned()
+        .collect();
+    let threads = if removed.is_empty() {
+        Vec::new()
+    } else {
+        member_threads(db, owner, &before.id).await?
+    };
+    // Settle through the normal Stop path before deleting any authority. The
+    // transaction below rejects a replacement turn that raced this preparation.
+    for row in threads
+        .iter()
+        .filter(|r| r.agent_id.as_ref().is_some_and(|id| removed.contains(id)))
+    {
+        match engine::request_stop_row(db, row).await {
+            Ok(()) | Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(turn) = &row.active_turn {
+            match engine::force_stop(db, owner, &row.id, &turn.turn_id).await {
+                Ok(_) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let previous_members = if members.is_some() {
+        self::members(db, owner, before).await?
+    } else {
+        Vec::new()
+    };
+    let mut parts = Vec::new();
+    if let Some(members) = &members {
+        let joined: Vec<_> = members
             .iter()
-            .filter(|member| !group.member_agent_ids.contains(&member.id))
+            .filter(|a| !before.member_agent_ids.contains(&a.id))
             .cloned()
             .collect();
-        let left: Vec<AssistantAgent> = before
-            .into_iter()
-            .filter(|member| !ids.contains(&member.id))
+        let left: Vec<_> = previous_members
+            .iter()
+            .filter(|a| removed.contains(&a.id))
+            .map(|a| a.agent.clone())
             .collect();
-        let mut parts = Vec::new();
         if !joined.is_empty() {
             parts.push(format!("{} joined.", names(&joined)));
         }
         if !left.is_empty() {
             parts.push(format!("{} left.", names(&left)));
         }
-        if !parts.is_empty() {
-            notice = Some(parts.join(" "));
-        }
-        set.insert("lead_agent_id", lead_of(&members));
-        set.insert("member_agent_ids", ids.clone());
-        db.collection::<AssistantGroup>(GROUPS)
-            .update_one(
-                owner_filter(owner, id)?,
-                doc! {"$pull": {"pending_agent_ids": {"$nin": &ids}, "last_recipient_ids": {"$nin": &ids}}},
-            )
-            .await?;
     }
-    db.collection::<AssistantGroup>(GROUPS)
-        .update_one(owner_filter(owner, id)?, doc! {"$set": set})
+    let mut session = db.client().start_session().await?;
+    let (group, children, retired) = session.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .and_run((db.clone(), owner.to_owned(), before.clone(), name, members, ids, removed), |session, context| {
+            let (db, owner, before, name, members, ids, removed) = &*context;
+            Box::pin(async move {
+                let result: AppResult<_> = async {
+                    let mut filter = owner_filter(owner, &before.id)?;
+                    filter.insert("created_by_user_id", bson::Bson::Null);
+                    filter.insert("member_agent_ids", bson::to_bson(&before.member_agent_ids).map_err(|e| AppError::Internal(e.to_string()))?);
+                    filter.insert("name", &before.name);
+                    let mut set = doc! {"updated_at": bson::DateTime::now()};
+                    if let Some(name) = name { set.insert("name", name); }
+                    if let Some(members) = members {
+                        set.insert("member_agent_ids", ids.clone());
+                        set.insert("lead_agent_id", lead_of(members));
+                    }
+                    let group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(filter,
+                        doc! {"$set":set,"$pull":{"pending_agent_ids":{"$nin":ids},"last_recipient_ids":{"$nin":ids}}})
+                        .return_document(ReturnDocument::After).session(&mut *session).await?
+                        .ok_or_else(|| AppError::Conflict("The crew changed; reload it before saving".into()))?;
+                    let mut cursor = db.collection::<AssistantConversation>(CONVERSATIONS)
+                        .find(doc! {"user_id":owner,"group_id":&before.id,"agent_id":{"$in":removed}})
+                        .session(&mut *session).await?;
+                    let rows: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
+                    // Admission writes the same parent in its transaction. A new
+                    // turn wins before us or is refused after us, never orphaned.
+                    if rows.iter().any(|r| r.active_turn.is_some()) {
+                        return Err(AppError::AssistantTurnActive);
+                    }
+                    let mut children = Vec::new();
+                    let mut retired = Vec::new();
+                    for row in rows {
+                        db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                            .update_many(doc! {"$or":[{"assistant_group.conversation_id":&row.id},{"requester_type":"api_key","requester_id":&row.credential_api_key_id}],"status":{"$in":["pending","approved"]}},
+                                doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+                        db.collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
+                            .update_many(doc! {"requester_type":"api_key","requester_id":&row.credential_api_key_id,"org_scoped":{"$ne":true}},
+                                super::approval_service::revoke_grant_update(Utc::now())).session(&mut *session).await?;
+                        let (_, revoked) = engine::delete_in_session(db, owner, &row.id, session).await?;
+                        children.extend(revoked);
+                        retired.push((row.id, row.agent_id));
+                    }
+                    Ok((group, children, retired))
+                }.await;
+                transactions::transaction_result(result)
+            })
+        }).await.map_err(transactions::map_transaction_error)?;
+    super::api_key_credential_service::audit_revocations(
+        db,
+        &children,
+        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
+    );
+    for (conversation_id, agent_id) in retired {
+        let _ = super::audit_service::log_actor_event(
+            db.clone(),
+            &super::audit_service::AuditActor {
+                user_id: owner.into(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            },
+            "assistant_crew_member_thread_retired",
+            Some(serde_json::json!({
+                "group_id":group.id,"conversation_id":conversation_id,"agent_id":agent_id
+            })),
+        )
+        .await;
+    }
+    if !parts.is_empty() {
+        append(
+            db,
+            owner,
+            &group.id,
+            "notice",
+            None,
+            &parts.join(" "),
+            Vec::new(),
+        )
         .await?;
-    if let Some(notice) = notice {
-        append(db, owner, id, "notice", None, &notice, Vec::new()).await?;
     }
-    get(db, owner, id).await
+    get(db, owner, &group.id).await
 }
 
 /// Delete a group, its transcript and its members' hidden threads (and their
@@ -465,6 +769,58 @@ pub async fn append_following(
     extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     follower: Option<&str>,
 ) -> AppResult<GroupMessage> {
+    append_following_bound(
+        db,
+        owner,
+        group_id,
+        role,
+        agent,
+        text,
+        recipients,
+        extra_attachments,
+        follower,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn append_member_reply(
+    db: &Database,
+    row: &AssistantConversation,
+    role: &str,
+    agent: &AssistantAgent,
+    text: &str,
+    attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+) -> AppResult<GroupMessage> {
+    append_following_bound(
+        db,
+        &row.user_id,
+        row.group_id.as_deref().ok_or_else(not_found)?,
+        role,
+        Some(agent),
+        text,
+        &[],
+        attachments,
+        None,
+        Some(&row.id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_following_bound(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+    follower: Option<&str>,
+    source_thread: Option<&str>,
+) -> AppResult<GroupMessage> {
+    let source_thread = source_thread.map(str::to_owned);
     let filter = owner_filter(owner, group_id)?;
     let db = db.clone();
     let owner = owner.to_owned();
@@ -494,7 +850,18 @@ pub async fn append_following(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if let Some(thread_id) = &source_thread {
+                    if agent_id.as_ref().is_none_or(|id| !group.member_agent_ids.contains(id)) {
+                        return Err(not_found());
+                    }
+                    let thread = db.collection::<AssistantConversation>(CONVERSATIONS).update_one(
+                        doc! {"_id":thread_id,"user_id":&owner,"group_id":&group_id,"agent_id":&agent_id},
+                        doc! {"$inc":{"group_reply_fence":1_i64}},
+                    ).session(&mut *session).await?;
+                    if thread.matched_count != 1 { return Err(not_found()); }
+                }
                 let message = GroupMessage {
+                    collaboration: None,
                     activities: Vec::new(),
                     org_group: false,
                     author_user_id: None,
@@ -510,6 +877,7 @@ pub async fn append_following(
                     agent_name: agent_name.clone(),
                     text: text.clone(),
                     recipient_agent_ids: recipients.clone(),
+                    mentioned_participant_ids: vec![],
                     created_at: now,
                 };
                 db.collection::<GroupMessage>(MESSAGES)
@@ -606,6 +974,7 @@ pub async fn append_with_recipients(
     ))
     .await?;
     let message = GroupMessage {
+        collaboration: None,
         activities: Vec::new(),
         org_group: false,
         author_user_id: None,
@@ -621,6 +990,7 @@ pub async fn append_with_recipients(
         agent_name: agent.map(|agent| agent.name.clone()),
         text: text.into(),
         recipient_agent_ids: recipients.to_vec(),
+        mentioned_participant_ids: vec![],
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)
@@ -639,7 +1009,7 @@ pub async fn messages(
     limit: i64,
     before_seq: Option<i64>,
 ) -> AppResult<Vec<GroupMessage>> {
-    let mut filter = doc! {"group_id": group_id, "user_id": owner};
+    let mut filter = doc! {"group_id": group_id, "user_id": owner, "collaboration": null};
     if let Some(before) = before_seq {
         filter.insert("seq", doc! {"$lt": before});
     }
@@ -655,28 +1025,44 @@ pub async fn messages(
     Ok(rows)
 }
 
-/// The members a text @mentions (by agent name, case-insensitive).
-pub fn mentions(text: &str, members: &[AssistantAgent]) -> Vec<String> {
-    let mut found = Vec::new();
-    for (index, _) in text.match_indices('@') {
-        // `mail@researcher` is not a mention: only a word start counts.
+/// Mention tokens, with the same word-boundary rule as the web composer.
+pub(crate) fn mention_tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices('@').filter_map(|(index, _)| {
         if text[..index]
             .chars()
             .next_back()
             .is_some_and(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
-            continue;
+            return None;
         }
-        let name: String = text[index + 1..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-            .collect();
-        if name.is_empty() {
-            continue;
-        }
-        if let Some(member) = members
-            .iter()
-            .find(|member| member.name.eq_ignore_ascii_case(&name))
+        let tail = &text[index + 1..];
+        let len = tail
+            .bytes()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+            .count();
+        (len > 0).then_some(&tail[..len])
+    })
+}
+
+pub fn ambiguous_mention(text: &str, members: &[AssistantAgent]) -> bool {
+    mention_tokens(text).any(|name| {
+        !members.iter().any(|m| m.id.eq_ignore_ascii_case(name))
+            && members
+                .iter()
+                .filter(|m| m.name.eq_ignore_ascii_case(name))
+                .count()
+                > 1
+    })
+}
+
+/// Exact IDs always win; ambiguous handles never select an arbitrary member.
+pub fn mentions(text: &str, members: &[AssistantAgent]) -> Vec<String> {
+    let mut found = Vec::new();
+    for name in mention_tokens(text) {
+        let exact = members.iter().find(|m| m.id.eq_ignore_ascii_case(name));
+        let mut named = members.iter().filter(|m| m.name.eq_ignore_ascii_case(name));
+        let first = named.next();
+        if let Some(member) = exact.or_else(|| first.filter(|_| named.next().is_none()))
             && !found.contains(&member.id)
         {
             found.push(member.id.clone());
@@ -1039,7 +1425,7 @@ pub async fn set_seen(db: &Database, owner: &str, thread_id: &str, seq: i64) -> 
 pub async fn with_pending(db: &Database) -> AppResult<Vec<AssistantGroup>> {
     let rows: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
+        .find(doc! {"collaboration": null, "$or": [{"pending_agent_ids.0": {"$exists": true}}, {"followers.0": {"$exists": true}}, {"created_by_user_id": {"$type": "string"}}]})
         .sort(doc! {"pending_checked_at": 1})
         .limit(50)
         .await?
@@ -1069,7 +1455,7 @@ fn pull_recipient(group: &AssistantGroup, agent_id: &str) -> bson::Document {
 pub async fn remove_agent(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
     let groups: Vec<AssistantGroup> = db
         .collection::<AssistantGroup>(GROUPS)
-        .find(doc! {"user_id": owner, "member_agent_ids": agent_id})
+        .find(doc! {"user_id": owner, "member_agent_ids": agent_id, "collaboration": null})
         .await?
         .try_collect()
         .await?;

@@ -47,7 +47,9 @@ pub(super) async fn prepare(
     let metadata = ChannelTurnDelivery {
         sender_kind: Some(sender.kind),
         version: 1,
-        state: if channel.transport == "gateway" {
+        state: if channel.gateway_source.is_some() && channel.transport == "gateway" {
+            "replay"
+        } else if channel.transport == "gateway" {
             "waiting"
         } else {
             "pending"
@@ -66,8 +68,14 @@ pub(super) async fn prepare(
         target_ciphertext: None,
         target_expires_at: None,
     };
+    let metadata = bson::to_bson(&metadata)
+        .map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?;
     let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null},
-        doc! {"$set": {"delivery": bson::to_bson(&metadata).map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?}}).await?;
+        vec![doc! {"$set": {"delivery": {"$mergeObjects": [
+            {"$literal": metadata},
+            {"$cond": [{"$eq": ["$gateway_replay_claimed", true]}, {"state":"replay"},
+                {"$cond":[{"$eq":["$gateway_observer_detached",true]},{"state":"pending"},{}]}]},
+        ]}}}]).await?;
     if prepared.matched_count != 1 {
         return Err(AppError::Conflict("Channel event already admitted".into()));
     }
@@ -106,6 +114,49 @@ pub(super) fn provider_stream(
     receiver: broadcast::Receiver<Value>,
     admitted_at: chrono::DateTime<Utc>,
 ) -> Response {
+    provider_stream_inner(
+        state,
+        event_key,
+        response_id,
+        created,
+        receiver,
+        admitted_at,
+        false,
+    )
+}
+
+/// Stream a custom-event response while retaining the direct relay delivery
+/// barrier. Custom CMA channels use an existing direct chat as their approved
+/// sink: the provider stream must expose the completion and the durable
+/// worker must still send the same completion to that chat.
+pub(super) fn provider_stream_direct(
+    state: AppState,
+    event_key: String,
+    response_id: String,
+    created: Value,
+    receiver: broadcast::Receiver<Value>,
+    admitted_at: chrono::DateTime<Utc>,
+) -> Response {
+    provider_stream_inner(
+        state,
+        event_key,
+        response_id,
+        created,
+        receiver,
+        admitted_at,
+        true,
+    )
+}
+
+fn provider_stream_inner(
+    state: AppState,
+    event_key: String,
+    response_id: String,
+    created: Value,
+    receiver: broadcast::Receiver<Value>,
+    admitted_at: chrono::DateTime<Utc>,
+    direct_delivery: bool,
+) -> Response {
     // Construct outside the generator so an unpolled/dropped body detaches too.
     let mut guard = StreamGuard {
         state: state.clone(),
@@ -119,6 +170,14 @@ pub(super) fn provider_stream(
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
             Ok(outcome) => {
+                let (allowed,org_guest)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false));
+                if !allowed {
+                    let _=refuse(&state,&event_key).await;
+                    guard.disarm();
+                    for frame in message_frames(&response_id,None) {yield frame;}
+                    return;
+                }
+                let outcome=if org_guest {outcome.map_err(|_|Box::new(engine::TurnError::new("org_channel_guest_unavailable")))} else {outcome};
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
                 // A completed empty result still owns a terminal delivery
                 // decision. Never acquire the stream/send barrier for silence.
@@ -127,20 +186,55 @@ pub(super) fn provider_stream(
                 {
                     guard.disarm();
                     for frame in message_frames(&response_id, None) { yield frame; }
+                } else if direct_delivery {
+                    // Direct custom destinations remain `pending`, so the
+                    // durable worker owns the chat send. Do not claim the
+                    // normal gateway stream barrier here: claiming it would
+                    // prevent that worker from dispatching the approved relay
+                    // receipt while still leaving the provider without a
+                    // completion frame.
+                    guard.disarm();
+                    match outcome {
+                        Ok(text) => {
+                            let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
+                            let wake_state = state.clone();
+                            let wake_event = event_key.clone();
+                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
+                        },
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
+                            let wake_state = state.clone();
+                            let wake_event = event_key.clone();
+                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
+                        },
+                        Err(error) => {
+                            let wake_state = state.clone();
+                            let wake_event = event_key.clone();
+                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            yield json!({"type": "response.failed", "response": {
+                                "id": &response_id, "status": "failed",
+                                "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}});
+                        }
+                    }
                 } else if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
+                    if let Ok(Some(event)) = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {"_id":&event_key}).await {
+                        audit(&state, &event.user_id, "nyxbot_channel_answer_delivery", json!({"event_id":event.id,
+                            "conversation_id":event.conversation_id,"turn_id":event.turn_id,"transport":"gateway",
+                            "outcome":"streamed","reason":"platform_delivery_unconfirmed"})).await;
+                    }
                     match outcome {
                         Ok(text) => {
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(code) if code == "guest_model_route_required" => {
-                            let text = engine::TurnError::new(&code).message;
-                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
+                            for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
-                        Err(code) => yield json!({"type": "response.failed", "response": {
+                        Err(error) => yield json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
-                            "error": {"code": identifier(&code), "message": "NyxBot could not finish this turn."}}}),
+                            "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}}),
                     }
                 } else {
                     // The deadline/sweeper won: the final answer belongs to the
@@ -179,6 +273,34 @@ pub(crate) fn spawn_sweep(state: AppState) {
 }
 
 pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
+    use crate::models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse};
+    let pending: Vec<GatewayResponse> = state
+        .db
+        .collection(RESPONSES)
+        .find(doc! {"terminal":false,"expires_at":{"$gt":bson::DateTime::now()}})
+        .sort(doc! {"checked_at":1})
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
+    for response in pending {
+        let event_key = &response.event_key;
+        crate::services::nyxbot_response_recovery::refresh(
+            &state.db,
+            &state.encryption_keys,
+            &response,
+            |text| async move {
+                stream_images(
+                    state,
+                    event_key,
+                    &text,
+                    std::time::Instant::now() + Duration::from_secs(135),
+                )
+                .await
+            },
+        )
+        .await?;
+    }
     let rows: Vec<NyxbotEvent> = state
         .db
         .collection(EVENTS)
@@ -281,7 +403,12 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     if d.state == "waiting" {
         return Ok(());
     }
-    let conversation = engine::get(&state.db, &event.user_id, conversation_id).await?;
+    let conversation = engine::get(
+        &state.db,
+        crate::services::org_channel_service::event_actor(&event),
+        conversation_id,
+    )
+    .await?;
     let Some((channel, _)) = eligible(state, &event, &d, &conversation).await? else {
         refuse(state, event_id).await?;
         return Ok(());
@@ -295,7 +422,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     };
     let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
-        "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
+        "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
     }).await? else { return Ok(()); };
     if successful_silence(&message) {
         if delivery::silence(&state.db, event_id).await? {
@@ -310,7 +437,9 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     }
     let text = if let Some(code) = message.error_code.as_deref() {
-        let failure = if code == "capacity_exceeded" {
+        let failure = if d.origin.org_execution.as_ref().is_some_and(|e| e.guest) {
+            crate::services::org_channel_service::UNAVAILABLE.into()
+        } else if code == "capacity_exceeded" {
             crate::services::assistant_turn_observability::capacity_message(
                 message
                     .error_detail
@@ -318,7 +447,16 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
                     .and_then(|detail| detail.capacity_wait_ms),
             )
         } else {
-            engine::TurnError::new(code).message
+            engine::TurnError::new(code)
+                .with_model_route_reason(
+                    message
+                        .turn_metadata
+                        .as_ref()
+                        .and_then(|data| data.failure_reason.as_ref())
+                        .and_then(|reason| reason.model_route.as_ref())
+                        .map(|route| route.reason.as_str()),
+                )
+                .message
         };
         if message.text.trim().is_empty() {
             failure
@@ -395,7 +533,7 @@ async fn event_images(
     report_or_failure(
         state,
         ImageSendContext {
-            owner: &event.user_id,
+            owner: crate::services::org_channel_service::event_actor(event),
             conversation_id: &conversation.id,
             turn_id: &message.turn_id,
             channel,
@@ -412,13 +550,14 @@ async fn event_images(
             fence: None,
         },
         &ImageSendPlan {
+            delegated: message.delegated_images.references.clone(),
             attachments: message.attachments.clone(),
         },
     )
     .await
 }
 
-async fn stream_images(
+pub(super) async fn stream_images(
     state: &AppState,
     event_id: &str,
     text: &str,
@@ -431,12 +570,12 @@ async fn stream_images(
         let (Some(delivery), Some(conversation_id), Some(turn_id)) = (&event.delivery, &event.conversation_id, &event.turn_id) else {
             return Ok(bounded_reply(text));
         };
-        let conversation = engine::get(&state.db, &event.user_id, conversation_id).await?;
+        let conversation = engine::get(&state.db, crate::services::org_channel_service::event_actor(&event), conversation_id).await?;
         let Some((channel, thread)) = eligible(state, &event, delivery, &conversation).await? else {
             return Ok(bounded_reply(text));
         };
         let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
-            "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
+            "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
         }).await? else { return Ok(bounded_reply(text)); };
         let report = event_images(state, &event, delivery, &channel, &thread, &conversation, &message, Some(deadline)).await;
         Ok(super::images::append_failure(&bounded_reply(text), &report))
@@ -454,7 +593,7 @@ async fn stream_images(
     }
 }
 
-async fn eligible(
+pub(super) async fn eligible(
     state: &AppState,
     event: &NyxbotEvent,
     d: &ChannelTurnDelivery,
@@ -466,7 +605,7 @@ async fn eligible(
         // with the older answer or replace the answer's original source.
         let thread = crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
-            &event.user_id,
+            crate::services::org_channel_service::event_actor(event),
             &d.origin,
             &conversation.id,
         )
@@ -508,13 +647,92 @@ async fn eligible(
     {
         return Ok(None);
     }
-    let admitted = if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
+    let custom_binding = if let Some(binding_id) = event.custom_binding_id.as_deref() {
+        let Some(binding) = state
+            .db
+            .collection::<crate::models::nyxbot_event_binding::NyxbotEventBinding>(
+                crate::models::nyxbot_event_binding::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": binding_id, "user_id": &event.user_id})
+            .await?
+        else {
+            return Ok(None);
+        };
+        let configured_destination = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {
+                "channel_id": &binding.destination_channel_id,
+                "user_id": &binding.user_id,
+                "partition": &binding.destination_partition,
+            })
+            .await?;
+        let destination_matches = configured_destination.as_ref().is_some_and(|configured| {
+            configured.last_message_id.is_some()
+                && configured.platform_chat_id == thread.platform_chat_id
+                && configured.platform_thread_id == thread.platform_thread_id
+                && configured.relay_partition == thread.relay_partition
+        });
+        if binding.destination_channel_id != channel.id
+            || event.partition != thread.partition
+            || !event.partition.starts_with("custom:")
+            || !destination_matches
+            || crate::services::nyxbot_event_binding_service::authorize_provider(state, &binding)
+                .await
+                .is_err()
+        {
+            return Ok(None);
+        }
+        true
+    } else {
+        false
+    };
+    let admitted = if let Some(e) = &d.origin.org_execution {
+        crate::services::org_channel_service::validate(
+            &state.db,
+            &d.origin,
+            &conversation.user_id,
+            &e.agent_id,
+        )
+        .await?;
+        if e.guest != d.guest
+            || channel.route_id != d.source_route_id
+            || d.source_route_api_key_id.as_deref() != Some(channel.route_api_key_id.as_str())
+        {
+            return Ok(None);
+        }
+        let mut projected = channel.clone();
+        projected.owner_sender_ids = if e.guest {
+            Vec::new()
+        } else {
+            vec![d.sender_id.clone()]
+        };
+        if d.origin.thread.is_some() {
+            if e.guest {
+                chats::Admission::Guest
+            } else {
+                chats::Admission::Owner
+            }
+        } else {
+            if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot)
+                && !chats::bot_guest_allowed(&thread, Some(d.addressed))
+            {
+                return Ok(None);
+            }
+            chats::admission(&projected, &thread, &d.sender_id, Some(d.addressed))
+        }
+    } else if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
         // Followed children inherit live consent from their settings chat,
         // checked by validate_delivery above. Their own default member fields
         // are not that policy. Every bot answer still retains guest authority.
         if !d.guest
             || (d.origin.thread.is_none() && !chats::bot_guest_allowed(&thread, Some(d.addressed)))
         {
+            return Ok(None);
+        }
+        chats::Admission::Guest
+    } else if custom_binding {
+        if !d.guest || !d.addressed {
             return Ok(None);
         }
         chats::Admission::Guest
@@ -704,7 +922,7 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
         .db
         .collection::<AssistantMessage>(MESSAGES)
         .find_one(doc! {
-            "user_id": &event.user_id, "conversation_id": conversation,
+            "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation,
             "turn_id": turn, "role": "assistant",
         })
         .await?
@@ -715,4 +933,34 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
         return Ok(false);
     }
     delivery::silence(&state.db, event_id).await
+}
+
+// Ordinary channels retain their existing response path. Org channel answers
+// must recheck the original actor and source immediately before streaming.
+async fn org_stream_authority(state: &AppState, id: &str) -> AppResult<(bool, bool)> {
+    let Some(event) = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":id})
+        .await?
+    else {
+        return Ok((true, false));
+    };
+    let Some(d) = event
+        .delivery
+        .as_ref()
+        .filter(|d| d.origin.org_execution.is_some())
+    else {
+        return Ok((true, false));
+    };
+    let Some(conversation) = event.conversation_id.as_deref() else {
+        return Ok((false, d.guest));
+    };
+    let row = engine::get(
+        &state.db,
+        crate::services::org_channel_service::event_actor(&event),
+        conversation,
+    )
+    .await?;
+    Ok((eligible(state, &event, d, &row).await?.is_some(), d.guest))
 }

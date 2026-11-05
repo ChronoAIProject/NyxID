@@ -18,6 +18,7 @@ function preview(
 ): ConnectLinkPreview {
   return {
     scopes: [],
+    assistant_intent_locked: false,
     service_name: "GitHub",
     service_slug: "github",
     label: null,

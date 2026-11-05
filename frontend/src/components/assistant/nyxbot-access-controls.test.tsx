@@ -1,4 +1,5 @@
 import { ComposerSettings } from "./composer-settings";
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { modelDisplayName } from "@/lib/assistant/nyxbot-labels";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   AccessModeSwitcher,
+  ModelSelect,
   ThreadModelSelect,
   modelOptions,
 } from "./nyxbot-access-controls";
@@ -264,4 +266,48 @@ it("disables Thinking when NyxAgent does not offer research", async () => {
   expect(toggle).toHaveAttribute("aria-disabled", "true");
   await user.click(toggle);
   expect(select).not.toHaveBeenCalled();
+});
+
+
+it("marks known text-only models in both model pickers without marking unknown models", async () => {
+  client.setQueryData(["assistant", "nyxagent", "owner", "models"], [
+    { id: "nyxagent/chat", label: "Text model", available: true, input_modalities: ["text"] },
+    { id: "nyxagent/research", label: "Unknown model", available: true },
+  ]);
+  const user = renderWith(<ThreadModelSelect conversationId={thread} model="nyxagent/chat" />);
+  await user.click(screen.getByRole("combobox", { name: "Model" }));
+  expect(screen.getByRole("option", { name: "Text model Can’t view images" })).toBeVisible();
+  expect(screen.getByRole("option", { name: "Unknown model" })).toBeVisible();
+  cleanup();
+  renderWith(<ComposerSettings model="nyxagent/chat" onDraftModelChange={() => {}} />);
+  await user.click(await screen.findByRole("button", { name: /Model and permissions: Text model/ }));
+  await user.click(screen.getByRole("menuitem", { name: /^Model / }));
+  expect(screen.getByRole("menuitemradio", { name: "Text model Can’t view images" })).toBeVisible();
+  expect(screen.getByRole("menuitemradio", { name: "Unknown model" })).toBeVisible();
+});
+
+it("preserves image capability notices and routing IDs in the grouped model picker", async () => {
+  client.setQueryData(["assistant", "nyxagent", "owner", "models"], [
+    { id: "provider/text", label: "Text model", available: true, input_modalities: ["text"] },
+    { id: "provider/vision", label: "Vision model", available: true, input_modalities: ["text", "image"] },
+    { id: "provider/unknown", label: "Unknown model", available: true },
+    { id: "provider/retired", label: "Retired model", available: false, input_modalities: ["text"] },
+  ]);
+  const onChange = vi.fn();
+  const user = renderWith(
+    <GroupedList title="Profile">
+      <GroupedRow title="Model">
+        <ModelSelect grouped label="Agent model" value="provider/text" onChange={onChange} />
+      </GroupedRow>
+    </GroupedList>,
+  );
+  const trigger = screen.getByRole("combobox", { name: "Agent model" });
+  expect(trigger).toHaveAttribute("data-slot", "grouped-select");
+  await user.click(trigger);
+  expect(screen.getByRole("option", { name: "Text model Can’t view images" })).toBeVisible();
+  expect(screen.getByRole("option", { name: "Vision model" })).toBeVisible();
+  expect(screen.getByRole("option", { name: "Retired model (unavailable) Can’t view images" })).toHaveAttribute("aria-disabled", "true");
+  await user.click(screen.getByRole("option", { name: "Unknown model" }));
+  expect(onChange).toHaveBeenCalledExactlyOnceWith("provider/unknown");
+  expect(writes).toEqual([]);
 });

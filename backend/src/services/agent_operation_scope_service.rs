@@ -995,7 +995,8 @@ async fn check_non_mcp_chat_context(
     if chat.guest {
         matched = None;
     }
-    let effect_limited = chat.guest || chat.confirmation_policy.is_some();
+    let shared = chat.org_agent_access.as_ref().and_then(|a| a.shared());
+    let effect_limited = chat.guest || shared.is_some() || chat.confirmation_policy.is_some();
     let effects = match matched {
         Some(effects) => effects,
         // Unscoped services keep their guest and webhook limits: classify from
@@ -1015,6 +1016,19 @@ async fn check_non_mcp_chat_context(
         None => mcp_service::operation_effects(&method_value, Default::default()),
     };
     let (reads, uses, destructive) = (effects.reads, effects.uses, effects.destructive);
+    let shared_owner = shared.is_some_and(|a| {
+        a.connections()
+            .get(service)
+            .is_some_and(|s| s.user_id == a.owner())
+    });
+    if shared_owner
+        && !super::shared_agent_service::permits(shared.and_then(|a| a.level(service)), effects)
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "Shared access does not permit this operation".into(),
+        ));
+    }
+
     if chat.guest {
         let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
         if is_scoped(&agent.guest_operation_scopes, service, catalog) {
@@ -1051,9 +1065,19 @@ async fn check_non_mcp_chat_context(
             ));
         }
     }
+    // Thinking is not a webhook-authored service change. Only the proxy's
+    // closed stateless model contract qualifies, on a live owner turn. Explicit
+    // destructive contracts, guest/shared access and operation scopes retain
+    // their gates. Selection, input admission and billing still run afterward.
+    let model_read = request.stateless_model
+        && chat.turn_live
+        && !chat.turn_stopped
+        && !chat.guest
+        && shared.is_none()
+        && !destructive;
     if super::assistant_acknowledgement_service::webhook_confirmation_required(
         chat,
-        reads,
+        reads || model_read,
         destructive,
     ) {
         return Err(AppError::ApiKeyScopeForbidden(
@@ -1850,4 +1874,8 @@ pub fn guest_level_allows(
 pub struct GuestHttpContext<'a> {
     pub query: Option<&'a str>,
     pub websocket: bool,
+    /// Server-computed closed inference contract on the actual outbound body.
+    /// Only relaxes the webhook confirmation floor; never guest or share ACLs.
+    /// Callers must reject method overrides before supplying this evidence.
+    pub stateless_model: bool,
 }

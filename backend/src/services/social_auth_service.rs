@@ -571,6 +571,7 @@ fn resolve_social_login(
     let email_lower = profile.email.to_lowercase();
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id,
         email: email_lower,
         password_hash: None,
@@ -784,6 +785,7 @@ mod tests {
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
+            chrono_probe_url: None,
             frontend_url: "http://localhost:3000".to_string(),
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
@@ -1072,6 +1074,7 @@ mod tests {
     ) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: Uuid::new_v4().to_string(),
             email: email.to_string(),
             password_hash: Some("hashed".to_string()),

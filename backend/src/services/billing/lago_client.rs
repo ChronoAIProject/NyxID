@@ -74,6 +74,17 @@ pub trait LagoApi: Send + Sync {
             "Lago runtime subscription verification is not supported".into(),
         ))
     }
+    /// Effective subscription charges and metric definitions for finite Sandbox
+    /// windows. A plan-cache read cannot prove customized subscription prices.
+    async fn sandbox_subscription(
+        &self,
+        _subscription_id: &str,
+        _metric_codes: &[String],
+    ) -> AppResult<SandboxProviderSnapshot> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago Sandbox subscription verification is not supported".into(),
+        ))
+    }
     /// Per-unit rates for the plan's standard charges, used to refresh the
     /// local rate cache. Defaults to empty so fakes opt in explicitly.
     async fn plan_rates(&self, _plan_code: &str) -> AppResult<PlanRates> {
@@ -178,6 +189,14 @@ pub struct RuntimeSubscription {
     pub plan_code: String,
     pub status: String,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxProviderSnapshot {
+    pub subscription: RuntimeSubscription,
+    pub rates: Vec<PlanRate>,
+}
+
+mod sandbox;
 
 /// A per-unit price from a Lago plan charge, converted to micro-credits
 /// (1 credit = 1 USD, matching the wallet rate_amount NyxID provisions).
@@ -775,6 +794,15 @@ impl LagoApi for LagoClient {
             ));
         }
         Ok(subscription)
+    }
+
+    async fn sandbox_subscription(
+        &self,
+        subscription_id: &str,
+        metric_codes: &[String],
+    ) -> AppResult<SandboxProviderSnapshot> {
+        self.sandbox_subscription_impl(subscription_id, metric_codes)
+            .await
     }
 
     async fn wallet_transaction_invoices(
@@ -3478,6 +3506,7 @@ mod tests {
     fn usage_event_uses_wallet_funded_decimal_quantity() {
         let now = chrono::Utc::now();
         let mut row = crate::models::usage_meter::UsageMeterRow {
+            org_channel_guest: None,
             rollup_pending: true,
             id: "row-1".to_string(),
             transaction_id: "tx-1".to_string(),

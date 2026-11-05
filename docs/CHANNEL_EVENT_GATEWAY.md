@@ -460,6 +460,56 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## Moving the gateway host
+
+Update the administrator-managed `cmaeg` catalog row to the new gateway API
+base (for example `https://cma.nyxid.ai/event-gateway/v1`) and the `cma` row to
+the corresponding application base. **Never rely on redirects for signed
+callbacks:** a 301 can turn the relay's POST into a body-less GET.
+Preserve CMA's channel records and token keys so the existing channel IDs
+remain valid on the new host.
+
+NyxID reconciles stored gateway destinations in the background immediately
+after startup and on the existing 30-second release sweep. A completed pass is
+remembered per process; another full pass runs when the catalog base changes or
+after one hour. Reads use batches of 64, paginated on the built-in `_id` index.
+No gateway HTTP request is needed for this repair. The catalog is the only source
+of the new destination; the stored HTTPS URL contributes only its validated
+`/callbacks/<channel-id>` suffix. Userinfo, queries, fragments, dot segments,
+encoded path spellings and non-CMA callbacks are refused.
+The channel suffix follows CMA's actual `cmaeg-core/src/seal.rs` format:
+`cmaeg1.ch.<canonical u8 key ID>.<unpadded base64url>`, at most 4,096 characters.
+Existing sealed IDs exceed 200 characters. Validation checks the envelope's
+syntax and minimum nonce/tag size; the reference remains opaque to NyxID.
+
+Only keys referenced by non-deleted NyxBot gateway links or active/prepared
+platform-entry gateways are eligible. Personal and org-owned route keys retain
+their owners. NyxBot updates compare the exact old callback and live route
+reference; platform-entry row and key changes commit together under their
+existing identity, revision and key fences. Every change also fences the exact
+catalog base. Mixed replicas can use the new callback without understanding the
+reconciler. Audit records contain local row kind/ID and old/new hosts only;
+logs contain aggregate counts, never opaque gateway IDs or full URLs.
+
+Pending releases move only when their captured catalog service ID is unchanged
+and their creator issuer is still accepted. Remote identity/version and active
+lease fences remain enforced. A review caused solely by
+`gateway_destination_changed` becomes due again; other review reasons remain
+in place. There is no persisted callback URL on release records to rewrite.
+
+Native WhatsApp webhooks registered at Meta need separate attention. The pass
+reports an aggregate `whatsapp_manual` count for retained native callbacks that
+differ from the new base; it does not rewrite Meta or claim verification. The
+activation helper requires relay state and can roll back on failure, so it
+cannot safely repair a live native channel. For affected dedicated BYO bots,
+turn off `nyxbot:gateway-whatsapp` for the linking person, wait for **verified
+relay restoration**, then enable it again after the catalog move. This uses
+the supported rollback/enrollment flow to register and verify the new CMA
+endpoint at Meta. If doing a manual Meta subscription repair instead, retain
+the exact channel ID and native Verify Token and verify the phone's effective
+webhook precedence (phone override, WABA override, then application); do not
+merely edit local verification metadata or leave an old override in place.
+
 ## NyxBot gateway creator authorization and recovery
 
 Gateway management uses a **creator credential** distinct from the channel's
@@ -513,6 +563,18 @@ explanations and a secondary stable code; a gateway 401 means authentication
 failed and a 403 means gateway permission is missing. Remote response bodies are
 never displayed. There is **no automatic reconnect** of failed rows.
 
+Confirmed missing/inactive/invalid local `cmaeg` configuration reports
+`gateway_configuration_required`; ask an administrator to verify the active
+service and its URL. Failed configuration reads, network errors and transport
+outages remain `gateway_unavailable` and can be retried. These bounded codes
+also survive hosted setup watches and NyxBot tool reporting. Authentication
+(401), permission (403), provider setup (502), and availability (503) remain
+separate. For 403, verify the actual gateway's full confidential introspection
+client ID association described above; do not grant broad CMA roles to the owner.
+A bot being saved or linked does not verify an agent reply: open the same bot,
+complete its existing owner-link step if needed, and send a unique message to
+observe the reply.
+
 REST and NyxBot tools list one current row per owner/bot. A pending/active row
 wins over failed attempts, even newer ones. Without a live row the latest record
 wins; a newer disconnection suppresses older failures. Creation time and then ID
@@ -545,56 +607,235 @@ channel and route key. A busy bot answers first and retries in ten minutes.
 Returning releases the gateway channel and deletes its agent key and old route
 key. Telegram always uses the gateway and is excluded from flag-off returns.
 
+### Independent custom-event channels
+
+When `nyxbot:gateway-custom-event` is enabled for a person, the first-party
+human API can create an independent CMAEG custom source without creating a chat
+bot. The binding is always attached to one existing NyxBot or specialist and to
+one owner-selected chat destination:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/assistant/nyxagent/custom-event-bindings` | List the owner's bindings (metadata only). |
+| POST | `/api/v1/assistant/nyxagent/custom-event-bindings` | Create a binding with `agent_id`, `destination_channel_id` and `destination_partition`. The response reveals the CMA producer `key_id` and HMAC `secret` once. |
+| GET | `/api/v1/assistant/nyxagent/custom-event-bindings/{id}` | Read one binding's status and CMA endpoint. |
+| POST | `/api/v1/assistant/nyxagent/custom-event-bindings/{id}/revoke` | Revoke the exact CMA channel, provider key and producer authority; repeated revocation is safe. |
+
+Creation is owner-only and requires live maintain authority for the selected
+agent, write access to the selected chat partition, and a live relay reply
+anchor in that partition. NyxID asks CMA for
+`sources:[{type:"custom",auth:{type:"hmac",key_id}}]`,
+`partition:{version:1,key:"per_event"}`, a synchronous sink, and the provider
+target `{type:"existing_agent",agent_id}`. The returned `custom_event_url`
+is the producer endpoint. A producer's CMA HMAC secret is separate from the
+NyxID provider agent key; NyxID never returns, logs, or accepts the producer
+secret at a provider endpoint, and the CMA URL cannot select another binding.
+
+Each event is admitted once using the binding and CMA event identity. NyxID
+creates a private destination thread partition derived from that event, so
+independent events never share a chat transcript. The destination is read from
+the binding row only; event data cannot redirect delivery. Ingress acceptance,
+agent completion and chat delivery remain separate statuses in the existing
+NyxBot event/turn records. Provider retries with the same event context replay
+the original result and never start another turn.
+
+Every provider operation rechecks the binding's current key, selected target,
+owner/org-admin authority, destination and feature flag. Revoked, transferred,
+destroyed or otherwise unauthorized agents fail closed. A binding is persisted
+as `preparing` before CMA creation and becomes `ready` only after CMA echoes
+the channel, binding, target and version; failed preparation is retained for
+operator-visible recovery. It is deliberately separate from `NyxbotChannel`,
+so a custom source cannot inherit a chat bot's route key or relay identity.
+
+The provider accepts only CMA's verified custom activity shape (`source.type`
+`custom`, system actor, custom conversation and event kind) and requires the
+same channel and conversation identity in the request and encrypted event
+context. It treats event data as untrusted input and runs the ordinary guest /
+webhook confirmation, grants, model and billing gates. CMA native media,
+cards/forms, reactions and platform replies are not silently emulated by this
+binding; unsupported capabilities receive the provider's normal explicit
+refusal until a corresponding NyxID destination bridge exists.
+
+### Native source foundation and provider recovery
+
+Native enrollment is opt-in through the existing personal
+`nyxbot:gateway-{platform}` flags. An absent `gateway_source` remains a relay
+source. `gateway_source` stores only the selected source and verified platform
+identity, never credentials. Every create and subsequent policy reconciliation
+uses that selection; a native definition has exactly one native source and no
+relay callback credential. Telegram/Lark/Feishu relay definitions and streams
+retain their existing wire format. Explicit Discord/WhatsApp relay definitions
+use CMA's `trust_normalized:true`; this does not grant native address evidence.
+
+`services/nyxbot_gateway_source.rs` is the source extension point for Track 2.
+Extend the serde-defaulted `GatewaySource` enum, `select` (eligibility,
+authenticated capability discovery and identity verification), `apply_policy`,
+`credentials`, `ready`, `provider_context`, `message_identity`, `matches_identity`
+and the source-specific activation validation/status projection. Keep the
+`Unsupported` reader arm fail-closed for newer source types. `verified_bot_id`
+provides Discord's receiving user identity; WhatsApp retains its own verified
+account/phone identity in its enum variant.
+Native credentials are assembled only for the management request. The common
+preparation, snapshot/replay, deduplication, status and retirement machinery
+stays shared. Dedicated-app BYO WhatsApp is implemented as Track 2 on this
+extension point; managed Embedded Signup and shared-app bots remain relay-only.
+Existing gateway rows without a source selection remain relay definitions. To
+move an existing Discord relay definition to native Discord, turn its per-person
+flag off, let retirement finish, then turn it on again. Do not replace a live
+source in place or bypass the retained cleanup/drain obligations.
+
+The native `nyxbot` provider exposes these authenticated recovery endpoints:
+
+| Method | Path | Contract |
+| --- | --- | --- |
+| GET | `/api/v1/nyxbot/responses/{response_id}` | Current persisted Responses snapshot; `404` when expired, purged or not bound to the caller. |
+| GET | `/api/v1/nyxbot/responses/{response_id}/events?starting_after=N` | Ordered durable SSE replay after canonical decimal cursor N; omit the cursor to start at zero. |
+
+After deploying and verifying these endpoints, the **CMA owner** can register
+both paths as `paths.recovery.response` and `paths.recovery.events` for `nyxbot`.
+NyxID does not change the CMA registry. Native POST and replay return exactly one
+`x-cma-response-id`; every durable frame has an SSE ID equal to its JSON
+`sequence_number`, contiguous from zero. Lifecycle frames contain the complete
+snapshot, exact command metadata, output and a stable `nyxbot_<digest>` provider
+conversation identity (bound to channel, binding and partition, distinct from
+CMA's conversation alias and the underlying assistant history row). POST exposes
+the durable acceptance prefix before Discord evidence reads or turn admission,
+keeping platform latency out of CMA's 20-second submission budget. Dropping that observer does not cancel
+dispatch; recovery reads never submit it again.
+
+Snapshots and frames are envelope encrypted in `nyxbot_gateway_responses`, with
+24-hour TTL. Native output remains capped at 32,000 characters; negotiated
+relay responses preserve complete answer text. The shared encrypted payload
+bound is 15 MiB, below MongoDB’s document limit.
+This is provider conversation state; relay messages and event logs remain
+metadata-only under ADR-013.
+Only the four non-secret CMA command identity fields (`cmaeg.channel`,
+`cmaeg.event`, `cmaeg.partition`, `cmaeg.actor`) may be echoed. Event references,
+keys and credentials never enter frames; an unexpected `cmaeg.event_ref` metadata
+field is refused rather than silently changed. Native sealed references exceed
+CMA's short-metadata limit and remain in encrypted event context.
+Conversation deletion, provider partition deletion and personal erasure purge
+replay content. Terminal writes never upsert or resurrect purged rows. Reads
+check the current dedicated channel key, binding and owner authority; they never
+POST a turn or create a conversation. Observation failures have no durable ID.
+A replay connection closes after 55 seconds if still pending and can resume.
+
+Silent and refused responses are durable too. Queued/accepted turns recover
+from the ordinary assistant transcript after restart. A crash before turn
+admission becomes a fenced failed response after two minutes; it cannot rerun
+work. Native delivery uses `delivery.state:replay`, which the legacy delayed
+sender does not claim. CMA owns the sole source send. Native message dedup
+commits atomically with response/event admission in the relay's existing native
+message namespace, so a transport change or different provider request key
+cannot execute the same Discord message twice.
+
+Native `ChannelOrigin.native_event_id` binds asynchronous updates to the original
+encrypted event context and the current channel/binding. Updates never substitute
+a newer chat reference or a relay-era anchor. Expired original references refuse
+delivery. The optional field is omitted from every legacy origin's serialized
+shape. Final answers, including coalesced queued answers, use replay exclusively;
+unrelated asynchronous updates use the source-bound gateway reply endpoint.
+
 ### Discord transport and provider boundary
 
-`channel:discord-gateway` enables NyxID's default-off relay socket worker;
-`nyxbot:gateway-discord` selects an accepted Agent Event Gateway connection.
-They are distinct flags. A pending or active gateway transport suppresses the
-NyxID socket. Pending setup fences relay admission and renewal, then waits for
-its lease to end before issuing remote creation. Setup still builds beside the
-existing route and swaps its key atomically only after acceptance. Definitive
-HTTP 400/401/403/422 create refusals settle as not-created. Ambiguous failures
-retain durable cleanup obligations and hold relay ingress until remote absence
-or deletion is proven. Flag-off returns retain chat settings and owner identity,
-retire the remote connection, then allow a relay lease again. This avoids a
-second IDENTIFY producer during migration; uncertain cleanup can pause chat.
-Successful activation atomically clears the old relay resume checkpoint. Return
-uses a fresh IDENTIFY, avoiding replay of gateway-owned traffic. Refused setup
-retains the checkpoint so relay ingress can recover its pause.
-Transfers have an ingress gap: NyxID does not transfer its relay resume cursor
-to the gateway, and ADR-013 provides no durable body queue.
+`channel:discord-gateway` controls NyxID's relay WebSocket ingress.
+`nyxbot:gateway-discord` selects **native Discord** only after authenticated
+`/channel-capabilities` discovery and a bot-token `/users/@me` identity check.
+The source uses intents `37377`, and passes `discord_bot_token` plus the dedicated
+provider `agent_key`. `gateway_bot_mentions` stays off. Upstream group intake is
+broad enough for followed threads; NyxID's local policy decides whether to act.
+Routing selects only the default provider, with textual `@name` and `/to`
+directives and unknown-target notices disabled. They never establish addressing.
 
-The ingress flag uses the existing security readiness roster/drain mechanism.
-Deploy all transport writers before enabling it; mixed binaries remain safe
-with the flag off. Runtime readiness loss also stops ingress. No new environment
-variable or remote source option is introduced.
+Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
+native enrollment. The existing roster/drained check refuses selection during a
+mixed rollout. A persisted `preparing` phase permits binding setup but refuses
+provider execution with CMA's exact pre-admission `429` JSON refusal
+`{"error":{"type":"invalid_request_error","code":"conversation_not_ready"}}`
+until the transaction commits
+`transport:gateway` and `gateway_native_phase:ready`. The provisional cleanup
+obligation survives crashes; abandoned preparation retires only its own attempt.
+The relay lease is drained before remote create. No active native connection
+retains an active relay callback source.
 
-NyxID authenticates provider requests against the active channel credential and
-rechecks the linking owner's live authority (including org-admin membership).
-Discord Activities use the existing common envelope: exact gateway channel,
-Discord source platform, matching route for a relay source, a sealed event
-reference, canonical snowflake actor/chat/thread IDs and an explicit private,
-group or channel kind. A private conversation cannot contain a thread. A Discord
-thread is an addressable channel: NyxID partitions by the thread channel ID,
-including when the envelope also supplies its parent as the conversation ID.
-DM partitions retain the relay mapping for migration back. Group members share
-one chat partition; separate threads do not share one.
+Flag-off builds the direct route, swaps, and retires the remote native identity.
+A second retained release guard blocks **old and new** NyxID ingress readers.
+Status reports `relay_draining` until all retained obligations permit relay ingress,
+then `relay_ready`. Remote DELETE/confirmed absence must settle first; then 90 seconds must pass
+before a fresh IDENTIFY or another native enrollment. The not-before boundary is
+persisted once using MongoDB server time. An unresolved delete has no automatic time escape.
+Old replica retirement can recover the captured native source identity from
+that guard. Drain completion atomically clears native source fields left behind
+by older flag-off writers. The relay resume checkpoint is cleared on successful adoption;
+refused setup retains its checkpoint. Transfers still have an ingress gap:
+NyxID does not transfer Discord session/resume state to CMA.
 
-Only authenticated human actors can use the owner link code. Unknown actors
-stay silent; self messages stay silent; other bots retain the default-off bot
-policy. The shared `reply_mode`/`members`/guest rules apply after gateway intake.
-Explicit `kind.mentions_bot` and independently retained reply evidence establish
-addressing; admission alone, broadcast text and display names do not. The sealed
-source event owns replies throughout their lifetime. Unsupported edits never
-start replacement turns, and media locators cannot trigger arbitrary downloads.
+Native validation requires the exact `source:{type:"discord",bot_id}`, channel,
+binding, human actor, original message and canonical snowflake identities.
+DMs have kind `private`; guild channels and threads have kind `group`. A thread's
+`thread_id` equals its channel ID. The separate relay validation is retained.
+DMs preserve the relay conversation mapping; group members share one partition
+and each thread remains separate. Human owner verification, guests, `members`
+and `reply_mode` all pass through shared admission.
 
-The CMA owner owns gateway-side Discord ingress, verified Activity production,
-admission and capability negotiation. This change neither selects their design
-nor adds a CMA proposal. NyxID's additive relay facts remain available if their
-implementation uses callbacks. The existing Lark/Feishu thread-follow contract
-is not silently extended to Discord; ordinary Discord thread partitions and
-per-chat settings work through the common provider envelope, while automatic
-follow negotiation requires the gateway's agreed capability contract.
+For guild messages NyxID makes bounded authenticated reads of the original
+Discord message and channel, and, when needed, the exact reply reference.
+REST message reads obtain the Gateway-only guild identity from that authenticated
+channel response.
+Structured mentions and verified reply authors supply addressing. Failure to
+verify a reply or thread supplies no reply/follow authority. Native thread facts
+reuse the existing follow selector and its expiry, stop, capacity, membership
+and other-user mention suppression rules. Gateway admission, names and words
+never prove addressing. Native edits, reactions and controls are not accepted
+as replacement original messages. Incoming media receives explicit unavailable
+feedback; tool images cannot use old relay anchors and report unavailable.
+
+Status exposes `gateway_native_phase`, `gateway_native_activation` and
+`gateway_native_delivery`. A rejected native setup also exposes the optional
+`gateway_native_activation_detail`: CMA's problem `code`, restricted to
+`[a-z0-9_.-]{1,64}`, beside the existing NyxID activation code. It is retained
+through relay fallback and included in connect/transport audit metadata and an
+info log with the channel agent ID. Upstream prose, URLs and credentials are
+never retained; a new preparation or successful activation clears the detail.
+
+Native Discord fallback visibility (#2183): `nyxbot_channel_connected` records
+the persisted transport after setup/fallback, plus `gateway_native_activation`
+and the bounded detail when present. A successful relay message is not native
+acceptance. The channel-agent API and bot settings retain these fields and add
+`gateway_next_retry_at` (last attempt plus 23 hours; a legacy fallback without
+an attempt timestamp is already eligible from its fallback time)
+and `gateway_retry_available_at` (last attempt plus ten minutes), plus a plain
+`gateway_fallback_reason`. The automatic
+time is an eligibility time, not a guarantee: the flag must remain enabled,
+the owner must be verified, the bot must be idle, and the bounded sweep rotates
+among eligible channels.
+
+An owner can use **Retry native gateway now** in the channel bot list or agent
+details, or ask NyxBot to call `nyxid__retry_channel_gateway`. The first-party
+human REST action is `POST /api/v1/assistant/nyxagent/channels/{id}/retry-native-gateway`.
+The tool is NyxBot-only (no guests/specialists) and follows the existing
+channel-management access-mode confirmation. Both paths require the linking
+owner's live org-admin authority, the existing gateway flag, an active verified
+Discord channel on direct transport, and no answer in progress. A timestamp CAS
+coordinates with the sweep and enforces ten minutes between attempts, including
+connect-time attempts; a pending preparation cannot be replaced. Retry reuses
+source verification, preparation, release/drain and build-beside-then-swap. A
+rejection keeps the relay and persists code/detail, with metadata-only
+`nyxbot_channel_native_gateway_retried` audit. Selecting native transport does
+not prove a Discord send: inspect native activation and delivery separately.
+Re-linking to another agent still does not trigger transport migration.
+
+Intake refusals/unavailability and response failures
+use stable codes. Activation reflects CMA's bounded activation codes;
+`response_ready` means the provider answer is available, **not** a confirmed
+Discord send. The CMA owner owns native connection/runtime and final delivery
+health. Polling activation does not infer socket health from source selection.
+For asynchronous replies NyxID checks CMA's delivery receipt, rather than the
+HTTP status alone. Only `confirmed` is success; rejected, unsupported,
+rate-limited and unknown outcomes are exposed as stable `reply_*` status codes
+without automatic resend. Native-thread mode comes from the original event's
+platform thread ID, not from the presence of a local followed reply chain.
+NyxID's additive verified relay facts remain available for relay consumers.
 
 ### Lark and Feishu media
 
@@ -707,9 +948,9 @@ Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
 | Lark / Feishu outbound media | Native adapter uploads supported attachments | **CMA:** renderer reduces attachments to safe link text | NyxID delivers NyxBot tool images itself through existing adapters before text, retaining exact thread targets. A CMA attachment-block renderer is **not required**. |
 | Edits | Adapter-specific edit hooks and authenticated outbound receipts | **CMA:** Lark/Feishu edits unsupported; only confirmed Telegram interactive cards edit | Follow-up: platform capabilities plus opaque receipt-bound edits through NyxID. Inbound edits need explicit replacement/dedup policy before they can affect an agent. |
 | Slack | `thread_ts`, structured mentions, native bound replies and bounded history | **CMA:** no raw verifier; `trust_normalized` gives unknown actors and no address/thread evidence; NyxID does not opt in | Follow-up: verify Slack raw events and correlate channel/sender/message, then enable the same contract. |
-| Discord | Leased relay-only Gateway ingress; authenticated addressing and thread facts, bound native replies | **NyxID:** validates the existing provider envelope, distinguishes DMs/guild channels/thread channels, preserves local sender/settings policy and original event references | Gateway-side Discord implementation is owned by the CMA owner. NyxID does not choose native gateway ingress versus relay callbacks; no Discord follow contract is negotiated implicitly. |
+| Discord | Leased relay-only Gateway ingress with verified facts | **NyxID:** explicit native source, durable provider recovery, authenticated reply/thread evidence and shared follow policy | Gateway-side native runtime and delivery are owned by the CMA owner; rollout requires the readiness and recovery registration above. |
 | Telegram / telegram-new | Forum topics and correlated reply chains; exact topic/reply anchor | **CMA:** forum topic ID retained, but no canonical reply-chain facts or other-user mention flag; native sends retain topic but not the full NyxID follow contract | Follow-up: topic/chain facts, exact bot reply evidence and bound source-message replies for both native and relay ingress. |
-| WhatsApp | Quoted replies, no subscribable thread-follow surface | **CMA:** normalized-only text; unknown actor, no address evidence | Follow-up: raw verifier and media/receipt parity; do not advertise thread follow. |
+| WhatsApp | Quoted replies, no subscribable thread-follow surface | **NyxID:** native dedicated-app BYO enrollment/validation is Track 2, using the shared source extension | CMA owns its native WhatsApp runtime. Managed Embedded Signup and shared-app bots are not automatically migrated. |
 | X | DM behavior and original-post-bound public replies; public follow out of scope | **CMA:** platform unsupported | Follow-up: verified ingress and original-post/DM-bound delivery before migration; no public follow here. |
 | Aurinko email | Mailbox thread facts, private sender gates, participant-safe history and single-recipient send barrier | **CMA:** platform unsupported | Follow-up: preserve verified mailbox/thread/address/participant authority and irreversible single-recipient send; never reply-all. |
 | Provider history | Bounded native history or supported metadata fallback | **CMA:** no generic history contract | NyxID retains bounded provider history through its existing adapter; never add scopes silently. |
@@ -734,9 +975,9 @@ The remaining platform surfaces need explicit parity before moving all traffic:
 | --- | --- | --- | --- |
 | Lark / Feishu | Contract 1 carries exact pinned-bot evidence and the other-user boolean; `@_all` is not a bot mention | Owner image/file/post ingress supported under the media flag and CMA prerequisites; NyxID sends NyxBot tool images directly; generic outgoing attachments remain link text | **CMA:** enable receipt-bound edits through NyxID's existing edit API. |
 | Slack | **CMA:** verify `app_mention`, structured bot/other-user mentions and broadcast tokens with native `thread_ts` | Incoming attachments rejected by generic verifier; outgoing link text only | **CMA:** use existing NyxID edit/upload APIs after implementing the raw verifier and target binding. |
-| Discord | **NyxID:** relay callbacks add versioned verified facts; provider group admission requires explicit addressing evidence or a known stored reply, never names or admission alone | Unnegotiated incoming attachments produce the existing unavailable-media note without URL fetches; outbound native images require a bound source, otherwise the existing safe failure note applies | NyxID accepts original message activities, not edit activities. Immediate/delayed replies retain their original event reference, including threads; no fallback to a parent channel or newer event. Gateway-side support is owned by the CMA owner. |
+| Discord | **NyxID:** relay callbacks add versioned verified facts; provider group admission requires explicit addressing evidence or a known stored reply, never names or admission alone | Incoming attachments produce explicit unavailable-media feedback without URL fetches; outbound native images are unsupported and cannot use relay anchors | NyxID accepts original message activities, not edit activities. Immediate/delayed replies retain their original event reference, including threads; no fallback to a parent channel or newer event. Gateway-side support is owned by the CMA owner. |
 | Telegram / telegram-new | Bot mention/reply evidence exists, but **CMA** lacks the full other-user boolean and topic/chain contract | Text-only message ingress; outgoing attachments are link text | Native Telegram supports ordinary message edits; relay edits are limited to confirmed interactive cards. **CMA:** extend verified attachment transport and receipt-bound relay edits while retaining the forum topic. |
-| WhatsApp | **CMA:** normalized-only unknown actor/address; no follow capability | Incoming attachments rejected; outgoing link text only | Neither side advertises edits. **CMA:** verify raw sender/quote evidence and bridge NyxID's media/receipt support. |
+| WhatsApp | **NyxID:** dedicated-app BYO native support uses the shared source, admission and recovery contract; native groups remain disabled | Native media/control mapping remains text-only with explicit unavailable feedback; delivery status is consumed from CMA Activity and the 24-hour free-form window remains | Gateway-side WhatsApp runtime and scoped `non_human` policy belong to the CMA owner; managed/shared-app bots stay on the relay. |
 | X / Aurinko | **CMA:** no platform source; do not claim addressing or follow parity | Unsupported in gateway | **Both:** design verified sources and credential/receipt boundaries before migration; preserve email single-recipient barriers and keep X public follow excluded. |
 
 The thread PR did not implement media or edits. Owner Lark/Feishu inbound media
@@ -773,8 +1014,8 @@ or event delivery retries. Creation reserves a UUID record ID and its determinis
 provider binding in `nyxbot_gateway_releases`, with a fixed 30-minute provisional
 deadline. Each acknowledged channel identity and positive version is persisted
 before the next external operation. Activation consumes the provisional record in
-the same transaction as adoption; it leaves no cleanup obligation for a healthy
-connection.
+the same transaction as adoption. Native Discord additionally retains a dormant
+drain guard until remote retirement and its not-before boundary complete.
 
 Disconnect, org access loss, fallback, transport changes and abandoned setup
 commit local retirement, key revocation, route retirement and cleanup responsibility
@@ -799,7 +1040,7 @@ An independent worker runs every 30 seconds, handles at most ten obligations per
 pass with two concurrent operations per replica, and uses 120-second database-time
 leases. Retries back off from 30 seconds to one hour. Every completion is fenced
 by claim, revision, state and lease. Recovery reads `/channel-records/{record_id}`
-and validates owner, provider, binding and relay source. It never creates a record
+and validates owner, provider, binding and the captured relay or native source. It never creates a record
 or replaces the captured deletion version with an observed version. Destination
 drift, version changes, malformed identity and live-reference conflicts require
 review. An uncertain POST that remains unobserved for 24 hours requires review:
@@ -842,3 +1083,274 @@ and their in-flight operations have drained**. Old transport-return, fallback,
 uncertain-create and stale pending-move paths can erase or never store remote
 identity. Before rollback to PR1, drain release workers; retain release records
 and continuity lineage fields.
+
+## Native WhatsApp: dedicated BYO apps (Track 2 checkpoint)
+
+Native WhatsApp is distinct from the existing `nyxid_relay` WhatsApp source.
+It remains behind default-off `nyxbot:gateway-whatsapp`. Independent settings
+and contract modules use the shared source-aware preparation, recovery,
+idempotency and activation machinery. Saving settings alone neither creates a
+gateway channel nor changes intake; the per-person flag and a successful,
+verified migration are both required.
+
+Only `credential_source = user` bots with their own dedicated Meta app are
+eligible. Embedded Signup bots (`platform`) share credentials and app-scoped
+callback fan-out, so return `dedicated_byo_app_required`. Connection-backed and
+unknown credential sources are also refused. The owner confirms dedication;
+this is not credential verification or a claim of global Meta app uniqueness.
+CMA verifies token ownership/scopes and WABA phone membership before creation.
+
+| Identity | NyxID storage | CMA native source |
+|---|---|---|
+| Real Meta App ID | `channel_whatsapp_native.meta_app_id` | `app_id` |
+| WhatsApp Business Account ID | native `waba_id`; legacy bot `app_id` remains WABA | `waba_id` |
+| Phone Number ID | bot `platform_bot_id`, bound native snapshot | `phone_number_id` |
+
+The settings record is keyed by bot UUID and binds owner and ownership
+version. Revision-fenced writes refuse changes during migration. An optional
+legacy WABA must match. Legacy credentials remain untouched. Callback state
+defaults to `relay`; unknown future phases fail closed. Debug omits IDs,
+callback URLs and gateway references. Audit includes bot UUID and revision.
+Settings lookups use the built-in `_id` index; an `owner_id, _id` index
+supports personal erasure, which also removes these records.
+
+Both `relay_authoring.native_whatsapp_writes_enabled` and
+`relay_authoring.native_whatsapp_auto_activation_enabled` must explicitly be
+true. Enrollment sends one atomic `credentials.whatsapp` bundle: `app_secret`,
+`access_token`, `verify_token`. Legacy BYO Verify Tokens are hash-only; generate
+and retain an encrypted fresh native token; never forward the relay hash or
+silently change the relay Verify Token. Omit source `group_ids` for private-only intake.
+
+During `awaiting_relay`, the owner can generate a replacement relay Verify Token
+from the rollback guidance, even with the gateway flag off. The first-party
+human-only `POST /channel-bots/{id}/native-whatsapp/relay-verify-token` requires
+live bot write access and the current settings revision. It issues 256 random
+bits, reveals the token once with `Cache-Control: private, no-store`, and stores
+only its SHA-256 hash, using the existing registration/handshake contract.
+The prior token stops verifying immediately. Token replacement, the settings
+revision fence and `channel_whatsapp_relay_verify_token_replaced` audit commit
+together. Audit contains bot ID, revision, rollback purpose, hash-only storage
+and `previous_token_invalidated_immediately: true`; no token or hash is logged.
+No read endpoint recovers a token, and the UI retains it only in the open reveal
+dialog. Lost tokens require another explicit replacement. The owner points
+Meta's callback back to the server-supplied relay URL with the new token.
+This action neither configures Meta nor changes transport or callback phase.
+
+Callback state progresses relay → awaiting_gateway → gateway → awaiting_relay
+→ relay. After CMA returns its per-channel endpoints.whatsapp_webhook_url,
+NyxID uses the dedicated app access token (app_id|app_secret) to POST Meta's
+/{app_id}/subscriptions with object=whatsapp_business_account,
+callback_url, verify_token and fields=messages. Meta performs CMA's GET
+handshake. The proof reads the app subscription using the app access token
+and the phone's `webhook_configuration` using the WhatsApp system token.
+Meta's effective callback is resolved in documented order:
+`webhook_configuration.phone_number`, then
+`webhook_configuration.whatsapp_business_account`, then
+`webhook_configuration.application`; empty strings and omitted fields are absent. NyxID requires
+that effective URL to match the expected URL. It always requires an active
+messages app subscription, and requires that subscription's callback URL to
+match when the application value wins. A matching phone override can therefore
+win over different WABA and application URLs. When the phone response reports
+a WABA override, NyxID cross-checks `subscribed_apps` with the system token:
+any non-empty `override_callback_uri` there must equal the reported
+`whatsapp_business_account` value, even when the phone override wins.
+Without a reported WABA override, this additional read is skipped.
+Missing or malformed webhook configuration is unverified; invalid field types
+never fall through to a lower-priority callback. No synthetic intake timestamp
+is accepted. Proof expires after 60 seconds and never fetches a callback URL
+or logs a secret. Activation and rollback use the same proof.
+A failed native activation is durably backed off for 15 minutes. If
+Meta accepted the native subscription but the subsequent proof or local fence
+fails, NyxID first moves the settings row to `awaiting_relay`, generates a
+fresh relay token, and attempts the same verified relay restoration before
+retiring the provisional CMA channel. A failed restoration remains
+owner-visible in `awaiting_relay` for the one-time replacement-token recovery
+flow.
+
+Flag-off requests restoration, **not** immediate gateway deletion. NyxID
+generates a fresh relay Verify Token and stores only its hash in the fenced
+settings/bot write, then POSTs Meta's subscription back to the server-supplied
+relay URL and repeats the effective-routing proof. If the Graph write fails,
+the owner can use the one-time replacement-token UI and point Meta back
+manually. While awaiting_relay, an authenticated private relay message is
+admitted through the normal atomic WAMID path and records restoration evidence,
+which fences native admission; status/receipt events alone do not. A signed
+relay message during gateway is dropped explicitly, records
+native_gateway_relay_conflict, and sends the owner a diagnostic notice.
+Uncertain remote cleanup remains the shared foundation's responsibility.
+
+Native actor `unknown` proves a WhatsApp account, not a human owner. The scoped
+validator requires the authenticated channel, exact app/WABA/phone snapshot,
+private conversation equal to the exact numeric `wa_id`, ordinary message kind
+and sealed event reference. Preserve leading digits in `wa_id`. Reactions
+(`event`) and controls (`interaction`) are excluded before owner linking or
+approval handling. Account admission still needs the existing one-time link
+proof for owner authority. Never globally map unknown actors to humans.
+
+**CMA operator policy:** after deploying NyxBot's durable provider recovery,
+set `routing.default_consumer.non_human: true` only for the `nyxbot`
+consumer of these dedicated native WhatsApp channels. Use only the WhatsApp source, no custom source or hand-off
+publishing, and replies bound to origin. Keep global
+`CMAEG_NON_HUMAN_PROVIDERS` unchanged. This exception admits verified WhatsApp
+accounts to NyxID's strict validator; it grants no owner authority. The checked
+manifest has only `cma_codex` in that global list and no NyxBot recovery paths.
+The CMA owner applies the scoped policy and provider recovery configuration.
+NyxID adds no environment variables.
+
+Receipt UI must consume the authenticated exact-channel CMA Activity snapshot:
+50 retained events, 16 observations per consumer, seven-day retention. Project
+only `default` / `nyxbot`, exact native source and private recipient,
+`platform_status` (`sent`, `delivered`, `read`, `played`) or `platform_failure`
+(`failed`). Keep each component's message ID and `confirmed_at`. A read does
+not invent delivered timestamps; one component never proves whole-reply
+delivery. Label these **CMA receipts**, not local NyxID receipts. Completed
+agent work or Graph acceptance is not recipient delivery. Status observations
+never start turns or resends. The 24-hour free-form window still applies.
+
+The native media contract requires explicit unavailable-media feedback in both
+directions until a bridge exists; dispatch wiring follows in the integration.
+Never fetch attachment locators or fall back to local
+adapter sends for attachments, templates or controls. Native groups and
+templates remain out of scope. The relay parser rejects group-addressed
+messages rather than interpreting the participant as a DM.
+
+References: CMA `CMAEG_Native_WhatsApp.md`, `CMAEG_Native_WhatsApp_Groups.md`,
+`CMAEG_Native_WhatsApp_Status.md`, Protocol/Operations, SDK activity/source
+types at CMA `5b23e23a7aadead851ca2651a220eda4825b2335`, and merged
+#1152, #1156, #1157, #1159. CMA's broader features do not
+imply NyxID support for media, templates, reactions, controls or groups.
+
+### Channel turn reliability (#2089, #2091, #2095)
+
+Relay-sourced provider responses can opt into the same encrypted, 24-hour durable
+snapshots and numbered event replay as native responses. The registered flag
+`nyxbot:relay-response-recovery` defaults off and resolves for the channel’s
+linking person (`row.user_id`), including live organization overrides. Flag-off
+returns to the existing live-stream path before recovery metadata validation or
+any capability request. In addition to this owner opt-in, NyxID requires the
+four exact `cmaeg.*` command identity fields and gateway discovery advertising
+`relay_authoring.response_recovery_providers` containing `nyxbot`. Gateways that
+omit these additive capabilities retain the existing live stream and late-reply
+barrier. Accepted commands never restart model/tool work on POST duplication or
+GET recovery. Dispatch survives the submission observer disconnecting. Streams
+retain 15-second SSE keepalives, including during relay image delivery; images
+use the existing per-image ledger before the final recovery text is persisted,
+so replay does not resend confirmed or uncertain media. Relay recovery preserves
+complete multipart answer text instead of applying the native 32,000-character
+cap; the encrypted replay document remains bounded below MongoDB’s document limit.
+
+A recovery GET atomically claims final delivery for CMA. Until then, the live
+POST stream and the existing asynchronous late sender retain their shared
+barrier. An observer disconnect detaches the event even before turn admission;
+a recovery claim can beat the late sender, but can never reclaim `sending`,
+`sent` or `unknown`. Recovery returns no sendable output if that sender already
+won. Cursor replay and stream output share the accepted response ID for CMA's
+deduplication. NyxID records
+`nyxbot_channel_answer_delivery` with `outcome: recovery_ready` and
+`reason: gateway_delivery_receipt_not_available` when the committed answer is
+available. This is **not** evidence of Telegram delivery. Legacy streams now
+record `outcome: streamed`, `reason: platform_delivery_unconfirmed`; a potentially
+sent answer is never retried as a late reply. Existing asynchronous sends retain
+confirmed `sent` versus `unknown` outcomes.
+
+Checked against CMA `7e0bbfe91dcc6f5523fa6c5deaf611e34332d147`: the legacy
+`turns/consume.rs` and `turns/runner.rs` consume the live response;
+`turns/routed/adapter.rs` uses the durable recovery contract.
+
+CMA operational requirement: the `nyxbot` provider must have both recovery routes
+configured **and the Telegram `nyxid_relay` execution path must use the routed,
+durable response journal**, not only the legacy `TurnRunner` live-stream
+consumer. `response_recovery_providers` advertises configured paths, not that a
+particular channel is executing through the journal. On submission disconnect,
+use the accepted response ID, GET the snapshot, then replay `/events` with the
+last durably delivered cursor. Do not start another provider turn or send the
+generic failure solely because the synchronous observer ended. Recovered text
+and stream text must share CMA's existing durable delivery barrier. A terminal
+platform outcome should be exposed to NyxID through a provider-authenticated,
+metadata-only receipt containing the accepted response ID and closed
+`confirmed|rejected|unknown` outcome; until that contract exists, NyxID cannot
+assert a recovered response reached Telegram. No CMA code is changed here.
+
+NyxID retries a structured pre-execution `dependency_unavailable` response
+(502/503/504) or a transport-proven failed connection only while the same live
+turn has no accepted response, output, model request or tool activity. There are
+at most three attempts, with 2s then 4s backoff inside a 15s retry window. The
+same command key, turn and live authority checks apply. A bare gateway 502/504,
+read timeout or reset after possible dispatch is ambiguous and is not retried.
+Exhausted proven refusals settle as `assistant_start_unavailable` and say that
+nothing was done; gateway presentation uses a human text reply instead of a
+generic failed-response fallback.
+
+Typing uses the retained event's advertised `capabilities.typing` and
+`POST /events/{event_ref}/typing`. Current CMA documents relay typing as
+unsupported. For Telegram `nyxid_relay`, NyxID therefore uses its own adapter's
+`sendChatAction` with the exact retained inbound chat/topic. Full owner/sender/
+route authority is checked once when the task resolves its destination. The bot
+credential (or gateway agent key and event-reference path) is held in `Zeroizing`
+only for that task’s lifetime. Each four-second tick checks the live turn/Stop,
+the retained event’s turn binding, and channel eligibility with three reads; it
+does not decrypt credentials or discover the gateway again. The first failed
+check or platform error ends the task; settle/cancellation aborts it. Typing
+creates no messages. Native
+or unsupported sources without the typing capability receive no typing calls.
+Telegram has no explicit stop-typing API; its last indicator expires naturally.
+
+Reader rollout is fenced by the existing security-readiness mechanism's
+`nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
+relay events through the legacy path until every declared replica can serve
+these responses. This uses the existing roster and drain configuration, with
+no new environment variables. The separately negotiated Lark/Feishu followed
+thread path retains its existing stream/late-send routing contract so its
+resolved `thread_reply` choice cannot change after the first durable frame.
+
+Only after the owner flag check, capability discovery uses a bounded in-process
+cache (64 gateway bases) with one refresh in flight per base. Positive results
+last five minutes, explicit negatives thirty seconds, and transport/HTTP errors
+only one second. A cache miss is best effort and bounded to two seconds: an
+unavailable capability endpoint leaves the legacy path available within CMA’s
+submission budget. Capability omission never upgrades the delivery owner.
+Even with discovery present, a lost observer only transfers ownership to CMA
+when a recovery read wins the event's atomic claim. This also keeps configured
+but non-routed legacy CMA consumers on the existing late-delivery fallback.
+
+Rollout: deploy all compatible readers first, then enable
+`nyxbot:relay-response-recovery` for one owner. Verify normal replies, observer
+disconnect recovery, exactly-once late delivery, and the metadata-only delivery
+audits for that owner before widening the flag to more people or organizations.
+Readiness and CMA advertisement alone never enable recovery. Turning the flag
+off restores legacy admission for new events; already accepted durable
+responses retain their recovery and delivery barriers.
+
+Diagnostic correlation: `nyxbot_channel_delivery_failing` describes callback or
+provider admission health, not final-answer delivery. Its notification queues a
+separate `origin=event` turn; ordinary inbound Telegram turns use `origin=channel`.
+A nearby event-origin model failure therefore cannot be attributed to the
+customer's confirmation from timestamps alone. Failure audits now include the
+nullable `channel_event_id` alongside the turn ID and timing metadata. The
+2026-10-29 evidence identifies a real missing-recovery/receipt path; it does not
+prove the exact CMA deadline or transport failure without CMA's execution log.
+
+CMA follow-up acceptance test: accept one `nyxbot` command, close its POST
+observer while its model is blocked, then let it commit tool writes and finish
+at 82 seconds. Fetch the same response snapshot and replay from the last
+committed cursor; exactly one final platform reply may be sent and no second
+provider POST may run. Repeat with NyxID's late-send claim winning first: the
+recovery snapshot must contain no sendable output. A receipt extension should
+bind `{response_id, delivery_id, outcome, reason}` to the current provider
+channel/key, use `delivery_id` for idempotency, and report closed outcomes
+`confirmed`, `rejected`, or `unknown` (no message text, tool data, tokens or opaque
+event/reply refs). `unknown` must remain terminal for sending. This is a proposed
+cross-service extension, not an endpoint implemented by this change.
+
+### Org-specialist execution behind the provider
+
+Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
+Provider/creator keys stay on the linking admin and route keys stay org-owned;
+CMA source contracts are unchanged. NyxID resolves each verified sender to a
+live org member or an explicitly delegated, budgeted org-paid guest. Optional
+versioned origins carry that actor through replay/queues/async replies. Native
+and relay events use the same authority checks and dedup namespace. There is no
+CMA-provided membership/payer and no fallback to a personal agent. See
+[org-specialist channel rules](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots)
+for verification, public transcript isolation, payer rules and mandatory rollout
+readiness.

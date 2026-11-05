@@ -118,6 +118,13 @@ pub async fn require_transactions(db: &Database) -> Result<(), mongodb::error::E
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    db.collection::<bson::Document>(crate::models::channel_whatsapp_native::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"owner_id": 1, "_id": 1})
+                .build(),
+        )
+        .await?;
     ensure_lark_base_write_indexes(db).await?;
     db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
         crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
@@ -137,6 +144,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // Poll index groups and migrations sequentially without retaining the
     // large index-construction frame while a migration calls into MongoDB.
     Box::pin(ensure_core_indexes(db)).await?;
+    crate::services::admin_assistant_analytics::real_work::ensure_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::assistant_message_feedback::COLLECTION_NAME)
         .create_index(
             mongodb::IndexModel::builder()
@@ -223,11 +231,40 @@ pub(crate) async fn ensure_lark_base_write_indexes(
 
 async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"kind":1,"pending":1,"created_at":1})
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(crate::services::assistant_service_execution::COLLECTION)
         .create_indexes([
             IndexModel::builder().keys(doc! {"expires_at": 1})
                 .options(IndexOptions::builder().expire_after(Duration::ZERO).build()).build(),
             IndexModel::builder().keys(doc! {"user_id": 1, "conversation_id": 1, "api_key_id": 1, "turn_id": 1, "kind": 1}).build(),
+            IndexModel::builder().keys(doc! {"kind":1,"user_id":1,"agent_id":1,"profile":1}).build(),
+            IndexModel::builder().keys(doc! {"kind":1,"status":1,"until":1}).build(),
         ]).await?;
+    db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"guest_setup_deadline":1})
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>("assistant_conversations")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"guest_model_setup":1,"created_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(doc! {"guest_model_setup":true})
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -274,8 +311,10 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::service_history::relay::ensure_indexes(db).await?;
     crate::services::catalog_skill_service::ensure_indexes(db).await?;
     crate::services::assistant_nyxagent::ensure_indexes(db).await?;
+    crate::services::cma_session_origin::ensure_indexes(db).await?;
     crate::services::assistant_invocation_service::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
+    crate::services::execution_permission_enrollment::jobs::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
     crate::services::channel_image_delivery::ensure_indexes(db).await?;
     crate::services::voice::session::ensure_indexes(db).await?;
@@ -288,6 +327,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::billing::machine_runtime::ensure_indexes(db)
         .await
         .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    crate::services::billing::sandbox_runtime::ensure_indexes(db)
+        .await
+        .map_err(|_| mongodb::error::Error::custom("Sandbox billing index migration failed"))?;
     crate::services::machine_external_grant_service::create_indexes(db)
         .await
         .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
@@ -317,6 +359,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::platform_personal_binding_service::ensure_indexes(db).await?;
     crate::services::platform_manager_ingress_service::ensure_indexes(db).await?;
     crate::services::platform_manager_delivery::ensure_indexes(db).await?;
+    crate::services::nyxbot_event_binding_service::ensure_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -708,6 +751,10 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     }
     // ── audit_log ──
     let audit = db.collection::<mongodb::bson::Document>("audit_log");
+    audit.create_index(IndexModel::builder()
+        .keys(doc! { "event_data.flag_key": 1, "event_data.definition_id": 1, "created_at": -1, "_id": -1 })
+        .options(mongodb::options::IndexOptions::builder().name("flag_history".to_string()).partial_filter_expression(doc! {"event_data.flag_key":{"$exists":true}}).build())
+        .build()).await?;
     audit
         .create_index(
             IndexModel::builder()
@@ -1452,6 +1499,31 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         .await?;
     ensure_exact_service_semantic_effect_index(&approval_requests).await?;
 
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v1.effect_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("execution_proposal_effect_v1".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v1.effect_id":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc! {"execution_proposal.version":1,"execution_proposal.v1.delivered_turn_id":1,"execution_proposal.v1.maintenance_at":1,"created_at":1}).build()).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v1.gap_key":1,"created_at":-1})
+                .build(),
+        )
+        .await?;
+
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants
@@ -1485,6 +1557,13 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+
+    // Additive candidate lookup; the existing expires_at TTL remains unchanged.
+    approval_grants.create_index(IndexModel::builder()
+        .keys(doc! {"execution.v1.subject.actor_user_id":1,"execution.v1.subject.principal":1,"execution.v1.binding.connection_id":1})
+        .options(IndexOptions::builder().name("execution_permission_candidates_v1".to_owned())
+            .partial_filter_expression(doc! {"execution.version":{"$exists":true}}).build())
+        .build()).await?;
 
     // ── service_approval_configs ──
     let sac = db.collection::<mongodb::bson::Document>("service_approval_configs");
@@ -2333,6 +2412,20 @@ async fn ensure_feature_flag_indexes(db: &Database) -> Result<(), mongodb::error
         )
         .await?;
 
+    // Single-flag enrollment snapshot/live reads must not scan every flag.
+    feature_flag_overrides
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"flag_key":1,"definition_id":1,"org_user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("feature_flag_single_scope".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     db.collection::<Document>(crate::models::feature_flag_definition::COLLECTION_NAME)
         .create_index(
             IndexModel::builder()
@@ -2983,6 +3076,8 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     ensure_feature_flag_indexes(db).await?;
+    crate::services::shared_agent_service::ensure_indexes(db).await?;
+    crate::services::org_channel_service::ensure_indexes(db).await?;
 
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");

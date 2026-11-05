@@ -175,6 +175,24 @@ this banner is mostly a defense against stale capability state rather than the n
 Backed by `GET /api/v1/billing/wallet` → `BillingWalletResponse` (`handlers/billing.rs:94-114`;
 model at `models/billing_wallet.rs`).
 
+Native read-only views use `GET /api/v1/billing/wallet/view`, which returns a
+dedicated `WalletViewResponse` for an existing personal wallet, or JSON `null`
+when none exists. Its only fields are the exact decimal strings `balance`,
+`available`, `overdraft_cap`, `reserved`, `pending_debits`, `pending_expiry`,
+and `unit: "credits"`. Available credits subtract reservations, pending debits
+and pending purchased-credit expiry with checked exact arithmetic. No provider
+identifiers, creation metadata or internal timestamps are returned.
+The handler requires a verified first-party Person access token or authenticated
+session cookie before owner resolution. Relay, service-account, delegated,
+API-key, OAuth-client and non-Person principals are refused regardless of the
+authorization scheme. The legacy billing routes retain their existing credential
+policy. The view shares their billing rollout gate and only reads the wallet;
+it never provisions a local wallet, contacts Lago or queues a refresh. The legacy
+`GET /billing/wallet` still auto-provisions when absent.
+Older servers return 404 for `/wallet/view`; clients must show an unavailable
+state and never fall back to the provisioning GET. A supported `null` response
+means "No billing account yet."
+
 For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
 ### Administrator credit allocations
@@ -276,8 +294,10 @@ Each selected metric/window shows independent frozen-period limits, consumed,
 effectively held and remaining units, plus reset/expiry. Patterned holds remain
 distinct from consumption; at most five allowances appear per group page.
 
-Wallet and benefit queries are scoped to the signed-in identity and refresh every
-30 seconds while the page is visible. Incomplete reads show Unavailable, not a
+Wallet and benefit queries are scoped to the signed-in identity and selected
+billing owner and refresh every 30 seconds while the page is visible. Switching
+between Personal and an administered organization resets the grant page and
+prevents the previous account's balances from carrying over. Incomplete reads show Unavailable, not a
 partial total. Failed refreshes label retained balances stale and expose Retry;
 authorization denial clears protected balance details. Balances remain independent
 of historical usage filters. Funding stays matching allowances first, then eligible

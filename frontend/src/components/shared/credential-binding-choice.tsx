@@ -1,5 +1,7 @@
+import { KeyRound } from "lucide-react";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
+import { ChoiceCard, ChoiceCardGroup } from "@/components/shared/choice-card";
 import { lanePriceLabel, type LanePricingView } from "@/schemas/platform-keys";
-import { cn } from "@/lib/utils";
 
 export function CredentialBindingChoice({
   value,
@@ -9,6 +11,7 @@ export function CredentialBindingChoice({
   legacyBillable = false,
   resaleBillable = false,
   disabled = false,
+  showPricing = true,
 }: {
   readonly value: boolean;
   readonly onChange: (platform: boolean) => void;
@@ -17,45 +20,49 @@ export function CredentialBindingChoice({
   readonly disabled?: boolean;
   readonly legacyBillable?: boolean;
   readonly resaleBillable?: boolean;
+  /** The CLI wizard keeps cost out of this step and shows what each key means. */
+  readonly showPricing?: boolean;
 }) {
+  const priceLabel = (price: LanePricingView | null | undefined) =>
+    !platformPrice && !byokPrice && legacyBillable
+      ? "Current service/plan pricing applies"
+      : lanePriceLabel(price);
   return (
-    <fieldset className="space-y-2" disabled={disabled}>
-      <legend className="mb-2 text-xs font-medium">Choose a key</legend>
-      {[
-        { platform: true, title: "Use NyxID's key", price: platformPrice },
-        { platform: false, title: "Use your own key", price: byokPrice },
-      ].map((option) => (
-        <label
-          key={String(option.platform)}
-          className={cn(
-            "flex cursor-pointer items-start gap-3 rounded-lg border p-3 text-xs",
-            value === option.platform
-              ? "border-primary/50"
-              : "border-border/50",
-          )}
-        >
-          <input
-            type="radio"
-            name="credential-binding"
-            checked={value === option.platform}
-            onChange={() => onChange(option.platform)}
-            className="mt-0.5 accent-primary"
-          />
-          <span>
-            <span className="block font-medium">{option.title}</span>
-            <span className="text-muted-foreground">
-              {!platformPrice && !byokPrice && legacyBillable
-                ? "Current service/plan pricing applies"
-                : lanePriceLabel(option.price)}
-            </span>
-          </span>
-        </label>
-      ))}
-      {resaleBillable && (
-        <p className="text-11 text-muted-foreground">
-          Platform-key use may also incur the separate resale fee.
-        </p>
-      )}
-    </fieldset>
+    <ChoiceCardGroup
+      label="Choose a key"
+      ariaLabel="Credential"
+      footer={
+        showPricing && resaleBillable ? (
+          <p className="text-13 text-muted-foreground">
+            Platform-key use may also incur the separate resale fee.
+          </p>
+        ) : null
+      }
+    >
+      <ChoiceCard
+        checked={value}
+        disabled={disabled}
+        onSelect={() => onChange(true)}
+        icon={<NyxidIcon className="h-5 w-5" alt="" />}
+        title="Use NyxID's key"
+        description={
+          showPricing
+            ? priceLabel(platformPrice)
+            : "NyxID supplies the key. Nothing to paste."
+        }
+      />
+      <ChoiceCard
+        checked={!value}
+        disabled={disabled}
+        onSelect={() => onChange(false)}
+        icon={<KeyRound className="h-5 w-5" />}
+        title="Use your own key"
+        description={
+          showPricing
+            ? priceLabel(byokPrice)
+            : "Use a key from your own account."
+        }
+      />
+    </ChoiceCardGroup>
   );
 }

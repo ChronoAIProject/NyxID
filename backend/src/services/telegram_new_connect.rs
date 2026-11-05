@@ -201,9 +201,11 @@ impl TelegramNewService<'_> {
         );
         super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
+        // Our own callback registered under a configured API alias (before a
+        // domain move) is not another application's webhook.
         if webhook["url"]
             .as_str()
-            .is_some_and(|url| !url.is_empty() && url != callback)
+            .is_some_and(|url| !url.is_empty() && !self.config.same_base_url(url, &callback))
         {
             return Err(AppError::Conflict("This bot has a webhook for another application. Clear that webhook before retrying.".into()));
         }
@@ -211,7 +213,10 @@ impl TelegramNewService<'_> {
         self.api.call(&token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": ["message", "edited_message", "channel_post"]})).await?;
         super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"] != callback {
+        if !webhook["url"]
+            .as_str()
+            .is_some_and(|url| self.config.same_base_url(url, &callback))
+        {
             return Err(AppError::ChannelPlatformError(
                 "Telegram webhook was not confirmed. Retry connecting the saved bot.".into(),
             ));
@@ -315,7 +320,7 @@ impl TelegramNewService<'_> {
                 let username = request.bot_username.as_deref().unwrap_or_default();
                 let _ = self.api.call(token, "sendMessage", json!({
                     "chat_id": request.telegram_user_id,
-                    "text": format!("@{username} is connected to NyxID. Setup is complete. Tap Open your bot and press Start to talk to it. You can choose an AI agent for replies in Bot settings."),
+                    "text": format!("@{username} is registered and connected to NyxID. An AI agent must be linked before it can reply. If you started setup for a specialist, return to that setup to finish or check the link. If no setup is in progress and no agent is linked, choose and link one in Bot settings. Once linking is complete, tap Open your bot, press Start, and send a message to verify the first reply."),
                     "reply_markup": {"inline_keyboard": [
                         [{"text": "Open your bot", "url": format!("https://t.me/{username}")}],
                         [{"text": "Bot settings", "url": format!("{}/channel-bots/{id}", self.config.frontend_url.trim_end_matches('/'))}],

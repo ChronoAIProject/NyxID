@@ -669,7 +669,8 @@ async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_n
             &agent,
             "Must not start",
             Some(&nyxbot.id),
-            None
+            None,
+            None,
         ))
         .await
         .is_err()
@@ -1442,7 +1443,11 @@ async fn loop_guards_and_direct_chats_never_wake_nyxbot() {
         &state.db,
         OWNER,
         &orchestrator.id,
-        vec![team::event("message", "note".into(), None)],
+        vec![team::event(
+            "message",
+            "note\n- a quoted bullet\ncontinuation".into(),
+            None,
+        )],
     )
     .await
     .unwrap();
@@ -1461,6 +1466,8 @@ async fn loop_guards_and_direct_chats_never_wake_nyxbot() {
     let calls = calls.lock().await;
     let instructions = calls[2].body["input"].as_str().unwrap();
     assert!(instructions.contains("NyxID events since your previous turn"));
+    assert!(instructions.contains("continuation lines are indented"));
+    assert!(instructions.contains("\n- note\n  - a quoted bullet\n  continuation"));
     assert!(instructions.contains("to helper"));
     server.abort();
 }
@@ -4128,6 +4135,315 @@ async fn personal_channel_targets_retain_owner_confirmation() {
                 assert_eq!(card.get_str("user_id").unwrap(), f.admin);
                 assert_eq!(card.get_str("tool_name").unwrap(), tool);
             }
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn readiness_2092_settings_read_is_human_owner_and_conversation_scoped() {
+    let (state, _, server) = setup("guest_readiness_owner").await;
+    let (_, chat) = orchestrator(&state).await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"visitor-helper","description":"Answers visitors"}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "visitor-helper")
+        .await
+        .unwrap();
+    let home = specialist_home(&state, "visitor-helper").await;
+    let read = |auth, conversation_id| {
+        guest_readiness(
+            State(state.clone()),
+            auth,
+            Path(agent.id.clone()),
+            Query(GuestReadinessQuery { conversation_id }),
+        )
+    };
+    let Json(value) = read(test_auth_user(OWNER), None).await.unwrap();
+    let value = serde_json::to_value(value).unwrap();
+    assert_eq!(value["status"], "not_ready");
+    assert_eq!(value["conversation_overrides"], json!([]));
+    assert!(
+        read(test_auth_user(OWNER), Some(home.id.clone()))
+            .await
+            .is_ok()
+    );
+    for id in [Uuid::new_v4().to_string(), chat.conversation_id.clone()] {
+        assert!(matches!(
+            read(test_auth_user(OWNER), Some(id)).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+    let other = Uuid::new_v4().to_string();
+    assert!(matches!(
+        read(test_auth_user(&other), None).await,
+        Err(AppError::NotFound(_))
+    ));
+    for key_id in [Uuid::new_v4().to_string(), chat.api_key_id.clone()] {
+        let mut auth = test_auth_user(OWNER);
+        auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        auth.api_key_id = Some(key_id);
+        assert!(matches!(
+            read(auth, None).await,
+            Err(AppError::ForbiddenWithGuidance { .. })
+        ));
+    }
+    state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&home.id},
+            doc! {"$set":{"model":"nyxagent/channel"}},
+        )
+        .await
+        .unwrap();
+    let Json(value) = read(test_auth_user(OWNER), None).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(value).unwrap()["conversation_overrides"],
+        json!([home.id])
+    );
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    crate::services::assistant_service_execution::readiness::READS
+        .scope(reads.clone(), async {
+            let Json(agents) = list_agents(
+                State(state.clone()),
+                test_auth_user(OWNER),
+                Query(AgentsQuery::default()),
+            )
+            .await
+            .unwrap();
+            assert!(
+                agents["agents"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["guest_readiness"].is_null())
+            );
+        })
+        .await;
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hosted_connect_guidance()
+{
+    let (state, _, server) = setup("settings_hosted_connect").await;
+    let (_, chat) = orchestrator(&state).await;
+    let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    catalog.id = Uuid::new_v4().to_string();
+    catalog.slug = "github-personal".into();
+    catalog.visibility = "public".into();
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    for reference in [&catalog.slug, &catalog.id] {
+        let (value, error) = execute_tool(
+            &state,
+            &chat,
+            "nyxid__settings_link",
+            &json!({"area":"add_service","service":reference}),
+        )
+        .await;
+        assert!(!error, "{value}");
+        assert_eq!(value["action"], "connect_service");
+        assert_eq!(value["catalog_service_id"], catalog.id);
+        assert_eq!(value["service_slug"], catalog.slug);
+        assert!(value.get("url").is_none());
+    }
+    // Without a named service there is still no page link: connect guidance only.
+    let (unnamed, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__settings_link",
+        &json!({"area":"add_service"}),
+    )
+    .await;
+    assert!(!error);
+    assert_eq!(unnamed["action"], "connect_service");
+    assert!(unnamed.get("url").is_none(), "{unnamed}");
+    state
+        .db
+        .collection::<bson::Document>(SERVICES)
+        .update_one(
+            doc! {"_id":&catalog.id},
+            doc! {"$set":{"visibility":"private","owner_user_id":"other","created_by":"other"}},
+        )
+        .await
+        .unwrap();
+    let (hidden, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__settings_link",
+        &json!({"area":"add_service","service":catalog.slug}),
+    )
+    .await;
+    assert!(error);
+    assert!(hidden.get("catalog_service_id").is_none());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn private_posts_2124_tool_refuses_guests_and_specialists_and_keeps_confirmation() {
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("posts2124_tool").await;
+    let args = json!({"channel_agent_id":Uuid::new_v4().to_string(),"private_chat_posts":true,"apply_to_existing":true});
+    assistant_team_tools::validate("update_channel_access", &args).unwrap();
+    assert_eq!(
+        acks::known_action_class("nyxid__update_channel_access", &args),
+        acks::known_action_class("nyxid__update_channel_chat", &json!({"allow_posts":true}))
+    );
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    let (value, error) =
+        execute_tool(&f.state, &guest, "nyxid__update_channel_access", &args).await;
+    assert!(error);
+    assert_eq!(value, acks::guest_refusal());
+    let specialist =
+        crate::services::assistant_authority_tests::direct_fixture("posts2124_specialist").await;
+    let (value, error) = execute_tool(
+        &specialist.state,
+        &specialist.chat,
+        "nyxid__update_channel_access",
+        &args,
+    )
+    .await;
+    assert!(error);
+    assert_eq!(value["error"], "orchestrator_only");
+    let (value, error) =
+        execute_tool(&f.state, &f.chat, "nyxid__update_channel_access", &args).await;
+    assert!(error);
+    assert!(value.get("acknowledgement_id").is_some(), "{value}");
+    // Full access dispatches the existing tool and returns the saved default.
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let id = args["channel_agent_id"].as_str().unwrap();
+    let bot = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME).insert_one(doc!{
+        "_id":id,"user_id":&f.owner,"channel_bot_id":&bot,"platform":"telegram","bot_label":"Customer bot",
+        "transport":"gateway","status":"active","route_api_key_id":"test-route","created_at":now,"updated_at":now
+    }).await.unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .insert_one(doc! {"_id":&bot,"user_id":&f.owner,"is_active":true,"status":"active"})
+        .await
+        .unwrap();
+    let (saved, error) =
+        execute_tool(&f.state, &f.chat, "nyxid__update_channel_access", &args).await;
+    assert!(!error);
+    assert_eq!(saved["private_chat_posts"], true);
+    assert_eq!(saved["applied_count"], 0);
+    let org = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection("org_memberships")
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            &f.owner,
+            crate::models::org_membership::OrgRole::Member,
+            None,
+        ))
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .update_one(doc! {"_id":id}, doc! {"$set":{"bot_owner_id":&org}})
+        .await
+        .unwrap();
+    let (_, error) = execute_tool(
+        &f.state,
+        &f.chat,
+        "nyxid__update_channel_access",
+        &json!({"channel_agent_id":id,"private_chat_posts":false}),
+    )
+    .await;
+    assert!(
+        error,
+        "a linking person who is no longer an org admin cannot change posting defaults"
+    );
+    f.state.db.drop().await.unwrap();
+    specialist.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_channel_enabled_admin_tools_retain_confirmation_and_members_cannot_link() {
+    use crate::services::{feature_flag_service as flags, org_channel_service as org};
+    let f = crate::services::org_agent_tests::Fixture::new("team_org_channel_enabled").await;
+    let (agent, _) = f.create().await;
+    flags::set_platform_override(
+        &f.state.db,
+        org::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.admin,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.admin,
+        "Link an organization bot",
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for (tool, args) in channel_target_calls(&agent.id) {
+        let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+        assert!(error, "{tool}: {value}");
+        if tool == "nyxid__channel_bot_setup_link" {
+            assert_eq!(value, acks::organization_agent_channel_refusal());
+        } else {
+            assert_eq!(
+                value["error"], "acknowledgement_required",
+                "{tool}: {value}"
+            );
+            assert!(
+                preflight_channel_target(
+                    &f.state,
+                    &f.member,
+                    tool.trim_start_matches("nyxid__"),
+                    &args
+                )
+                .await
+                .is_err()
+            );
         }
     }
     f.state.db.drop().await.unwrap();

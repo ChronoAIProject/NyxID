@@ -19,6 +19,7 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly actionOutcome?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["action_outcome"];
   readonly cmaOperations?: readonly import("@/schemas/cma-operation").CmaOperation[];
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
   readonly feedback?: { readonly vote: "up" | "down"; readonly comment?: string | null } | null;
@@ -70,6 +71,7 @@ export interface ChatImage {
   readonly origin?: "tool" | "user_upload";
   readonly expired?: boolean;
   readonly imageInput?: "sent" | "unavailable";
+  readonly imageInputReason?: string;
   readonly id: string;
   /** Assistant API endpoint, relative to the API root. */
   readonly endpoint: string;

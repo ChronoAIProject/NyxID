@@ -96,7 +96,7 @@ function EventRow({
       )}
       {open && notice.detail ? (
         <div className="border-t border-hairline px-3 py-2">
-          <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words leading-relaxed text-muted-foreground">
+          <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-muted-foreground">
             {notice.detail}
           </p>
           {action}
@@ -120,7 +120,7 @@ function AutomationNotice({ message }: { readonly message: ChatMessage }) {
         action={
           <Link
             to="/assistant/automations"
-            className="mt-2 inline-block text-11 text-muted-foreground underline hover:text-foreground"
+            className="mt-2 inline-block type-row-title text-muted-foreground underline hover:text-foreground"
           >
             Open Automations
           </Link>
@@ -161,11 +161,11 @@ const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
   return (
     <article aria-label="Message from NyxBot" className="group/message flex flex-col items-end gap-1">
-      <div className="flex items-center gap-1.5 text-10 text-text-tertiary">
+      <div className="flex items-center gap-1.5 text-12 text-text-tertiary">
         <AgentAvatar agent={NYXBOT_MARK} size="xs" />
         From NyxBot
       </div>
-      <div className="ml-auto max-w-[78%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-12 leading-relaxed text-foreground">
+      <div className="ml-auto max-w-[90%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-16 text-foreground [overflow-wrap:anywhere] sm:max-w-[78%]">
         {message.content}
       </div>
       <MessageTime value={message.timestamp} reveal />

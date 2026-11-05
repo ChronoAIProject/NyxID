@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
+  guestReadinessSettingsSchema,
   nyxAgentChannelThreadListSchema,
   nyxAgentChannelThreadStoppedSchema,
   assistantAgentCreatedSchema,
@@ -27,6 +28,10 @@ import {
   type NyxAgentChannelChatSettings,
   type NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
+import {
+  assistantOnboardingSchema,
+  type OnboardingAnswers,
+} from "@/schemas/assistant-onboarding";
 
 const ROOT = "/assistant/nyxagent";
 const agentPath = (id: string) => `${ROOT}/agents/${encodeURIComponent(id)}`;
@@ -42,6 +47,10 @@ export const nyxBotApi = {
   },
   async agent(id: string) {
     return assistantAgentDetailSchema.parse(await assistantJson(agentPath(id)));
+  },
+  async guestReadiness(id: string, conversationId?: string) {
+    const query = conversationId ? `?${new URLSearchParams({ conversation_id: conversationId })}` : "";
+    return guestReadinessSettingsSchema.parse(await assistantJson(`${agentPath(id)}/guest-readiness${query}`));
   },
   /** Blank display name and persona are left out (the agent has none). */
   async createAgent({ display_name, persona, ...body }: AssistantAgentCreate) {
@@ -105,6 +114,22 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/settings`, { method: "PUT", body: update }),
     );
   },
+  /** First-run intro state, the answer choices and next-step cards. */
+  async onboarding() {
+    return assistantOnboardingSchema.parse(await assistantJson(`${ROOT}/onboarding`));
+  },
+  /** Finish or skip the intro; replaces earlier answers. */
+  async saveOnboarding(answers: OnboardingAnswers) {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding`, { method: "PUT", body: answers }),
+    );
+  },
+  /** Hides the home's suggestions until the intro is retaken. */
+  async hideSuggestions() {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding/suggestions/hide`, { method: "POST" }),
+    );
+  },
   async channels() {
     return nyxAgentChannelListSchema.parse(await assistantJson(`${ROOT}/channels`))
       .channel_agents;
@@ -129,11 +154,20 @@ export const nyxBotApi = {
       }),
     );
   },
+  async retryChannelGateway(channelAgentId: string) {
+    return assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}/retry-native-gateway`, { method: "POST" });
+  },
   /** Who may talk to the agent in the bot's private chats. */
   async setPrivateChats(channelAgentId: string, privateChats: "owner" | "everyone") {
     await assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}`, {
       method: "PATCH",
       body: { private_chats: privateChats },
+    });
+  },
+  async setPrivateChatPosts(channelAgentId: string, enabled: boolean, applyToExisting: boolean) {
+    return assistantJson(`${ROOT}/channels/${encodeURIComponent(channelAgentId)}`, {
+      method: "PATCH",
+      body: { private_chat_posts: enabled, apply_to_existing: applyToExisting },
     });
   },
   /** The bot's chats, most recent first. */
@@ -201,7 +235,7 @@ export const nyxBotApi = {
   /** Accepted (202): replies arrive later as new messages. */
   async postGroupMessage(id: string, text: string, attachmentIds?: string[], recipientAgentIds?: string[]) {
     return assistantGroupPostedSchema.parse(
-      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}), ...(recipientAgentIds?.length ? { recipient_agent_ids: recipientAgentIds } : {}) } }),
+      await assistantJson(`${groupPath(id)}/messages`, { method: "POST", body: { text, ...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}), ...(recipientAgentIds !== undefined ? { recipient_agent_ids: recipientAgentIds } : {}) } }),
     );
   },
 };

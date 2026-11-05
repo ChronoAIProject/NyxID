@@ -8,8 +8,8 @@ inputs:
     description: Keep workspace crates and a lane-scoped incremental target cache.
     default: 'false'
   save-if:
-    description: Only a designated main-branch writer saves each compatible cache.
-    default: 'true'
+    description: Only CI Cache Warm opts in to writing ordinary main-branch caches.
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -50,8 +50,8 @@ runs:
       shell: bash
       run: echo 'CARGO_INCREMENTAL=1' >> "$GITHUB_ENV"
     # rust-cache intentionally removes incremental directories before saving.
-    # Restore them separately; each caller saves this path after its build so
-    # only the trusted main branch creates a new generation.
+    # Restore them separately; CI Cache Warm alone saves these paths after its
+    # builds. Ordinary CI is a reader even on main, keeping checks reusable.
     - name: Restore incremental build cache
       if: inputs.incremental == 'true'
       uses: actions/cache/restore@v4

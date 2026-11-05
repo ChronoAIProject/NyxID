@@ -1814,6 +1814,15 @@ pub async fn definitions(
     db: &Database,
     chat: &ChatAuthority,
 ) -> AppResult<Vec<super::mcp_service::McpToolDefinition>> {
+    // Shared instructions/pins never delegate a machine or saved login. Do not
+    // expose generic list/cancel tools even when there are no assignments.
+    if chat
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|access| access.shared().is_some())
+    {
+        return Ok(Vec::new());
+    }
     let rows = Box::pin(visible_assignments(db, chat)).await?;
     Ok(super::machine_tools::definitions()
         .into_iter()

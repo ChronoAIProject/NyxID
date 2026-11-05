@@ -3399,6 +3399,21 @@ curl -X POST http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef12
 
 ### Unified Keys (Streamlined Services)
 
+Connected-service health/readiness is exposed through the five fixed
+`/api/v1/keys/{id}/monitoring` routes. See [Service monitoring](SERVICE_MONITORING.md)
+for payloads, caller-token authority, revisions, timeouts and deployment requirements.
+The default-off `services:monitoring` flag resolves for the acting person,
+including live organization overrides. When off, every route returns a generic
+404 `not_found` before any service lookup or chrono-probe call; the frontend
+hides the section without requesting it. When on but `CHRONO_PROBE_URL` is unset
+or invalid, routes return 404 `monitoring_not_configured` (13301) and the UI hides
+the section. A configured upstream failure returns 503 `monitoring_unavailable`
+(13300). Explicit Check now and draft checks use the normal proxy with the
+caller's authority: **All requests** approval settings prompt per check, and a
+priced platform service bills each check to the caller. Status reads do not run
+checks.
+
+
 #### Agent discovery order per service group
 
 `GET /api/v1/service-preferences` returns only `{ "groups": [{ "group":
@@ -4193,6 +4208,8 @@ Forward any HTTP request to a downstream service using the service's slug instea
 The slug is resolved to the service UUID internally. All proxy behavior (credential injection, identity propagation, delegation token injection, transaction approval, path validation, header allowlists, body size limits) is the same as the UUID-based endpoint.
 
 Only active services are resolved by slug. Inactive services return `1003 not_found`.
+
+The service root accepts both `/api/v1/proxy/s/{slug}` and `/api/v1/proxy/s/{slug}/`; both forward `/` to the service. The UUID route (`/api/v1/proxy/{service_id}` and `/api/v1/proxy/{service_id}/`) and the public route (`/public/s/{slug}` and `/public/s/{slug}/`) behave the same way.
 
 **Auth:** Required
 
@@ -5898,17 +5915,57 @@ Update only the supplied metadata fields for a registered feature flag.
 | --- | --- | --- | --- |
 | `description` | string/null | No | Omission preserves; null or trimmed blank clears the custom description and displays the code-declared fallback. |
 | `owner` | string/null | No | Omission preserves; null or trimmed blank clears the owner. |
+| `group` | string/null | No | Up to 80 characters; null or trimmed blank restores namespace grouping. |
+| `tags` | string array | No | Replaces tags; `[]` clears. Up to 12 tags, each 1–40 lowercase letters, digits, hyphens or underscores, starting with a letter or digit. Trimmed, lowercased, sorted and deduplicated. Null is rejected. |
+| `expected_tags` | string array | No | Optional saved tag baseline. A mismatch returns 409, preventing an unseen concurrent tag edit from being overwritten. |
+| `sunset` | boolean | No | Hides the flag in the UI's default Active view. Never changes evaluation, defaults, or overrides. Null is rejected. |
 
 Unknown fields are rejected. An empty object leaves the metadata unchanged.
 An unknown flag key returns a bad-request error.
 
 **Response (200):** The saved metadata descriptor: `key`, effective `description`,
-`code_description`, nullable `custom_description`, nullable `owner`, and nullable
-`metadata_updated_at` / `metadata_updated_by`.
+`code_description`, nullable `custom_description`, nullable `owner`, nullable
+`group`, `tags`, `sunset`, and nullable `metadata_updated_at` / `metadata_updated_by`.
 
 For example, `{"owner":"Identity team"}` changes only the owner. The existing
-`PUT` route at this path keeps its replacement contract: omitted fields are
-cleared. Clients that need sparse updates should use `PATCH`.
+`PUT` route at this path replaces description and owner, preserving group, tags,
+and sunset. Clients that need sparse updates should use `PATCH`.
+
+#### GET /api/v1/admin/feature-flags/{flag_key}/history
+
+Uses the flag list's authorization: platform readers can read all histories;
+feature flag operators can read histories only for flags they created. Does not
+grant access to the general audit log or user directory.
+
+Returns up to 25 recorded changes, newest first. Optional `before` is the opaque
+`next_cursor` from a previous response; cursors use `(created_at, _id)` so new
+writes do not shift older pages. Each entry includes actor ID/name, event
+type, timestamp, and flag-specific details. Emails are available only to platform
+readers with read-all access. Rollout targets include a current display name or
+slug when available and retain the recorded scope and ID. New writes include before/after
+values for rollout and metadata. Unknown fields
+from the audit payload are excluded. `origin` reports the runtime definition's
+authoritative creator and creation timestamp even when its old audit entry is
+missing. Built-in origins are declared in code.
+
+Admin creation, override changes/removals, and metadata edits commit with their
+actor-attributed audit entry in one MongoDB transaction. An audit failure rolls
+back the change. No-op writes leave attribution and timestamps untouched and do
+not append a change event. Sunset flags remain
+in the list API, resolve normally, and retain editable rollout/history.
+
+History respects runtime definition identity. Legacy events lacking that identity
+are inferred using the persisted runtime creation timestamp. For a built-in
+shadowing a runtime key, ambiguous legacy entries are omitted and
+`legacy_ambiguous_omitted` is true. Such historical rows cannot be reconstructed
+when they were never recorded. Code deployments, startup migrations and org
+removal cascades remain outside this per-flag admin history.
+
+Deployment creates the partial `flag_history` audit index for rows containing
+`event_data.flag_key`; startup waits for this index build. Deploy the backend
+on every replica before the new frontend, which writes the additive metadata fields and calls
+the new history route. MongoDB must support transactions, as required by other
+admin policy writes.
 
 ---
 
@@ -8094,6 +8151,19 @@ configuration, stored-policy boundaries and sticky platform cutover/recovery.
 
 Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
 
+GET/PUT settings also expose additive `group_mentions_enabled` (boolean, default
+`true` for legacy absent fields; omitted PUT preserves the preference). This
+controls **Mentions in groups** pushes through registered FCM/APNs devices and
+also requires `push_enabled`. It does not disable in-app unread/mention counts.
+Mention pushes omit transcript previews, coalesce per person/group for five
+minutes, and deep-link to the collaboration group; no Telegram or email is sent.
+Collaboration responses include optional `last_seen_seq`, `unread_count`, and
+`mention_count` inside `collaboration`. Human participants advance the marker
+with `POST /api/v1/assistant/nyxagent/groups/{id}/read` and
+`{"last_seen_seq": 42}` (204). The server clamps to existing history and never
+moves the marker backwards. Nonparticipants receive not-found. New writes and
+pushes require the sharing flag and collaboration readiness gate.
+
 ### Get Notification Settings
 
 ```
@@ -8528,6 +8598,27 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/requests/550e8400-e29b-41d4-a716-446655440000/decide
 ```
 
+### Decide an assistant execution permission (default off)
+
+`POST /api/v1/approvals/requests/{request_id}/execution-decision` is a dedicated
+first-party-human endpoint for `execution_proposal` cards. The body contains
+`approved`, `expected_revision`, `choice_id`, `choice_digest`, and an
+`idempotency_key`; denial uses null choice fields. Operation is the default.
+The response is the current approval-request DTO, including the additive proposal
+review and independent operation status. A saved permission is not proof that the
+provider call completed. The server resumes the retained effect; clients must not
+reconstruct or automatically retry it.
+
+Only enrolled assistant MCP/proxy sources with live server task lineage create
+these cards. The authoring readiness capability is required, along with reader
+and dispatch readiness; enrollment is per-person only. The legacy `/decide` path
+refuses every proposal before mutation. Card detail and approved scope/input
+review are visible only to the acting first-party human, including requester-only
+group cards. Existing list/revoke routes manage the resulting execution grants.
+Mobile/Telegram offer a web link. See [execution permissions](EXECUTION_PERMISSIONS.md#permission-updates-and-resume-2195-part-a)
+for supported request shapes, four validity choices, encrypted retention limits
+and crash/recovery behavior. Existing legacy requests keep their semantics.
+
 ### List Active Grants
 
 ```
@@ -8737,6 +8828,7 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 | POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?, auto_connect?}`; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
+| POST | `/channel-bots/telegram-new/requests/{id}/creation-link` | Human-only, empty body; issue a native creation form URL for the same eligible bound request |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
 | POST | `/channel-bots/telegram-new/claims/preview` | Human-only, non-mutating preview of `{code}`; returns `{bot_username, expires_at}` without provider calls |
 | POST | `/channel-bots/telegram-new/claims/redeem` | Human-only `{code, label, target_org_id?}`; atomically save the claim destination and return HTTP 202 with the connection request; worker completes setup |
@@ -8744,6 +8836,8 @@ Routes below are relative to `/api/v1`. Creation routes require an authenticated
 | POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
 
 Request responses expose `auto_connect` (false for legacy requests) and nullable `connection_error` with safe automatic-retry text. Automatic connection continues while the browser is closed; clients poll the saved request rather than POSTing `/connect`.
+
+Creation-link responses contain `{request, creation_url}` with `no-store`/`no-referrer` headers and share the five-per-minute actor mutation limit. The server validates live owner, manager, expiry and exact saved hosted provenance. Legacy requests without explicit origin and platform-installation requests are ineligible. Request responses add optional `prompt_delivery` (safe phase/outcome/timestamps and bounded numeric diagnostics) and advisory `can_open_creation_form`. Accepted delivery does not prove rendering, creation or an agent reply. Recovery retains the request ID and original creation boundary, accepts no user redirect or target, and still requires fresh private creation proof. See [delivery diagnostics and recovery](TELEGRAM_NEW.md#delivery-diagnostics-and-recovery-api).
 
 The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
 
@@ -9001,6 +9095,18 @@ This first-party human, feature-gated mode returns caller-visible catalog metada
 and personal connections without creating a thread, reserving funds, or authorizing
 a call. Supplying `conversation_id` retains the live thread and source checks above;
 call startup always reauthorizes the selected connection against its actual thread.
+
+Devices use a published Bot Voice service with their own ordinary Agent Key.
+The human owner publishes a connection through
+`GET, PUT /api/v1/assistant/nyxagent/agents/{id}/voice-service` and grants its
+exact `UserService.id` through existing Key service scope. The service URL is
+`{BASE_URL}/api/v1/proxy/nyxbot-voice/{service_id}`; it exposes `/voice/options`,
+`/voice/sessions`, session status/control/stream and bounded announcements.
+Each connection fixes one Bot, and each call binds the actual login child
+credential. Existing browser routes remain first-party human only.
+See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
+independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
+work running; explicit Stop cancels it.
 
 Dictation adds two first-party human browser routes:
 
@@ -9321,3 +9427,103 @@ compatibility fence, including same-second revocation. Double submit before
 revocation is harmless. URI
 spelling is preserved exactly: tab/CR/LF anywhere and leading/trailing C0/space
 are rejected rather than normalized into a match.
+
+### Assistant hosted connection intent and discovery
+
+`nyx__connect_service` accepts `service_id` (catalog UUID), `service_slug`, or both matching the same authorized active catalog. Mismatch, missing and inaccessible catalogs are not-found-shaped; visibility and caller scope precede actionable results. When an eligible assistant chat key connects the owner's own credential (`use_platform_key` false or omitted on a credential-requiring catalog), it receives `pending_connection` with `connect_url`, `connect_link_id`, `catalog_service_id`, `service_slug` and expiry, and the link carries personal intent. Platform-key (`use_platform_key=true`) and credential-free connects keep their existing one-step behavior. Specialist keys remain denied with safe catalog guidance to NyxBot/Plugins and a separate grant step. Existing non-assistant credential/provisioning behavior is retained.
+
+Plugins **Connect** creates an ordinary `POST /api/v1/connect-links` with `service_slug`, leaving the credential choice to the hosted page. **Connect your own** (and the org card's action) sends `service_slug`, `use_platform_key:false`, `assistant_personal:true` under a first-party human session. After readiness activation of `assistant:hosted-connect-intent-v1`, assistant personal-intent links (MCP and Connect your own) store `assistant_intent_locked:true`. Preview exposes this default-false field. Completion and pinned-flow resume reject a differing explicit `use_platform_key`; stored intent controls. Legacy/non-assistant links remain overrideable. Link completion never grants a specialist automatically.
+
+MCP search/list and `nyxid__list_my_services` retain existing fields and add `connection` facts: visible `catalog_service_id`/`catalog_service_slug`, `owner_type` (`person`/`organization`), `relation` (`self`/`shared_person`/`organization`), `organization_name` and `account:{status:"unknown"}`. Ownership describes the actual owner UserType, not whether owner differs from actor. `granted` means scope access; covered org execution still needs instruction in Full access. Org action acknowledgements include `confirmation.reason:"org_connection"` and a `connect_own` object: supported offers contain safe catalog ID/slug; unsupported offers include an explicit reason and guidance. The UI creates the hosted personal link only on owner click.
+
+### Multi-person assistant groups
+
+The existing `/api/v1/assistant/nyxagent/groups` routes dispatch explicit
+collaboration groups separately from legacy personal crews and org groups.
+Create one with `collaboration: true`, `name`, and 1–8 `member_agent_ids` (specialists
+only). Creation and new work require the default-off `assistant:shared-agents`
+flag and full-fleet `assistant:collaboration-groups-v1` readiness. Human
+`GET /api/v1/assistant/nyxagent/collaboration` returns `{ "available": boolean }`.
+Legacy groups are never converted. Non-participants receive a not-found-shaped
+denial, and hidden execution IDs/keys are never returned.
+
+Under that prefix, `POST /groups/{id}/membership` accepts `expected_revision` and
+a tagged `action`: `invite`, `cancel_invite`, `quick_add`, `remove`, `leave`,
+`delete`, `propose_transfer`, `accept_transfer`, `add_agent`, `propose_agent`,
+`accept_agent`, `remove_agent`, `guest_access`, `rename`, or `lead`. Stale
+membership revisions return 409. Transfer proposal/acceptance is human-only.
+Dedicated invite, participant, leave and guest-access aliases are documented in
+[the complete contract](chat/12-shared-agents-and-groups.md#10-rest-nyxbot-tools-and-mcp-parity).
+
+Invites return their seven-day single-use token once. The invite action and
+`POST /groups/{id}/invites` accept optional `intended_user_id` to bind the token
+to an existing person; omit it for a bearer link. Human
+`POST /group-invites/preview` accepts `{ "token": "..." }`; acceptance adds
+`"history_disclosed": true` and requires a signed-in person. New participants
+see all retained history, and quick-add requires the same disclosure. A creator
+must complete an accepted management transfer before leaving, or delete the
+group. No invite message is sent automatically.
+
+Messages accept exact `recipient_agent_ids` and attachment IDs. Every reply and
+handoff runs for the original requester: owner/org/shared authority first, then
+owner-opted-in guests, otherwise a fixed refusal without model work. Shared
+usage bills the requester; org BYOK/platform and owner/guest billing retain their
+existing rules. `POST /groups/{id}/requests/{request_id}/cancel` stops only that
+requester's work. `POST /groups/{id}/decisions/{decision_id}` accepts `kind`
+(`action`/`consent`) and `decision` (`allow`/`deny` or `once`/`always`/`skip`).
+Service approvals use the existing approval decision endpoint. Exact cards and
+account labels are visible only to their requester; other participants see
+waiting status. Group membership changes invalidate those decisions.
+
+A personal specialist owner may read `GET /agents/{id}/group-access` to manage
+that agent's guest settings by group ID and policy/membership revision, even
+without joining. It reveals no group names, participants or transcript. Enabling
+guests covers current and future unauthorized participants and bills the owner;
+NyxBot always requires an owner card, including in Full access.
+
+Native tools and MCP expose `create_collaboration_group`,
+`list_collaboration_groups`, `manage_collaboration_group`, and
+`post_to_collaboration_group` through the same service boundaries. Public REST
+writes remain first-party human only. Flag-off preserves authorized retained
+history, cancellation, departure and deletion; binary rollback requires the
+archive/drain procedure in the design.
+
+
+## CMA Sandbox billing producer API
+
+The routes below require a verified service-account JWT from the single
+configured CMA producer and issued/live `billing:sandbox:write` scope. They do
+not accept user sessions, user access tokens, API keys, delegated or relay
+credentials. New admission defaults to disabled. Full request/response examples,
+units, retry semantics and rollout requirements are in [CMA billing](CMA_BILLING.md).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/v1/billing/sandboxes/quotes` | Quote the existing catalog service prices for an owner and full Sandbox allocation. |
+| POST | `/api/v1/billing/sandboxes/windows` | Atomically reserve at most 300 seconds across all applicable resource metrics. |
+| GET | `/api/v1/billing/sandboxes/cursors/{sandbox_id}` | Recover the durable ordered allocation-evidence checkpoint. |
+| GET | `/api/v1/billing/sandboxes/receipts/{request_id}` | Recover an already committed producer request, including during an admission/provider outage. |
+| POST | `/api/v1/billing/sandboxes/windows/{window_id}/evidence` | Finalize retained allocation intervals and queue the existing settlement/reconciliation path. |
+
+Bodies are bounded to 512 KiB; evidence is bounded to 1,024 intervals. Client
+price/amount fields and other unknown fields are rejected. A reused request ID
+with different input, changed final evidence, or changed retained ledger
+revision is a conflict. Evidence acceptance is distinct from provider emission.
+
+CMA service-owned producer settings: `GET` (admin/operator) and `PUT` (platform
+admin only) at `/api/v1/admin/billing/services/{id}/sandbox`. `{id}` must be the
+unique active catalog service with slug `cma`. GET returns `service_id`,
+`authorized_producer_service_account_id` (null when unset), and `revision` (0
+before configuration). PUT requires both `expected_revision` and
+`authorized_producer_service_account_id` (a canonical UUID v4 or explicit null).
+Stale revisions and changes with unreported funded windows return 409. Only an
+active General-purpose account with `billing:sandbox:write` can be selected;
+saving protects its credential management and atomically appends a chained audit.
+No setting means no authorized producer. These settings do not enable admission
+or alter prices; `experimental:cma-sandbox-billing` controls admission rollout.
+
+CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
+(admin/operator) and `POST /api/v1/admin/billing/cma-rate-cards` (admin-only)
+list and publish immutable effective-dated resource prices. See
+[CMA billing](CMA_BILLING.md#enablement-and-runtime-rate-configuration) for
+exact decimal payloads, validation, audit and activation semantics.

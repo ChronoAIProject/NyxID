@@ -38,15 +38,27 @@ use crate::{
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
+    super::org_channel_service::FLAG,
+    "assistant:shared-agents",
+    super::collaboration_group_service::READINESS,
+    super::shared_agent_transport::READINESS,
     "assistant:operation-scopes",
     "assistant:guest-operation-scopes",
     "assistant:machine-capabilities",
     "assistant:machine-contexts",
     "assistant:live-turn-gate",
     PLATFORM_POLICY,
+    super::feature_flag_service::ORG_INSTRUCTION_FLAG_KEY,
+    super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
+    "permissions:execution-dispatch-v1",
+    "permissions:execution-authoring-v1",
+    super::execution_permission_enrollment::READINESS,
+    super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
+    super::nyxbot_gateway_source::READINESS,
+    super::nyxbot_response_recovery::RELAY_READINESS,
 ];
 const MAX_AGE_SECS: i64 = 45;
 
@@ -108,6 +120,16 @@ pub async fn observe(
     config: &RolloutConfig,
     platform_policy_required: bool,
 ) -> AppResult<()> {
+    observe_with_capabilities(db, identity, config, platform_policy_required, CAPABILITIES).await
+}
+
+async fn observe_with_capabilities(
+    db: &Database,
+    identity: &ReplicaIdentity,
+    config: &RolloutConfig,
+    platform_policy_required: bool,
+    capabilities: &[&str],
+) -> AppResult<()> {
     if platform_policy_required {
         db.collection::<bson::Document>(ROLLOUTS)
             .update_one(
@@ -122,7 +144,7 @@ pub async fn observe(
         instance_name: identity.instance_name.clone(),
         generation_id: identity.generation_id.clone(),
         protocol: 1,
-        capabilities: CAPABILITIES.iter().map(|s| (*s).to_owned()).collect(),
+        capabilities: capabilities.iter().map(|s| (*s).to_owned()).collect(),
         expected_replicas: config.expected_replicas.clone(),
         drained: config.drained,
         platform_policy_required,
@@ -316,7 +338,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
     RUNTIME.get_or_init(|| local);
     let db = db.clone();
     let heartbeat = || async {
-        observe(
+        observe_with_capabilities(
             &db,
             &ReplicaIdentity {
                 instance_name: "test-backend".into(),
@@ -328,6 +350,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
                 drained: true,
             },
             false,
+            CAPABILITIES,
         )
         .await
         .expect("test replica observation");
@@ -336,7 +359,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            observe(
+            observe_with_capabilities(
                 &db,
                 &ReplicaIdentity {
                     instance_name: "test-backend".into(),
@@ -348,6 +371,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
                     drained: true,
                 },
                 false,
+                CAPABILITIES,
             )
             .await
             .expect("test replica heartbeat");

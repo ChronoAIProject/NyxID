@@ -131,21 +131,23 @@ function workspaceActiveView(view: WorkspaceView) {
 }
 
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
-  if (view === "plugins") return <PluginsView />;
-  if (view === "approvals") return <ApprovalsView />;
   return (
     <div
-      className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-10"
+      className="h-full overflow-y-auto shell-page-content"
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
       <Suspense
         fallback={
-          <p role="status" className="text-12 text-text-tertiary">
+          <p role="status" className="text-14 text-text-tertiary">
             Loading {workspaceTitles[view]}...
           </p>
         }
       >
-        {view === "automations" ? (
+        {view === "plugins" ? (
+          <PluginsView />
+        ) : view === "approvals" ? (
+          <ApprovalsView />
+        ) : view === "automations" ? (
           <AutomationsPage />
         ) : view === "machines" ? (
           <MachinesPage />
@@ -241,6 +243,7 @@ function AssistantWorkspacePage({
   return (
     <AssistantShell
       title={title}
+      contentTitle
       sidebar={sidebar}
       headerActions={<AssistantHeaderActions activeConversationId={null} />}
     >
@@ -261,6 +264,7 @@ function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   return (
     <AssistantShell
       title={workspaceTitles[view]}
+      contentTitle
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"

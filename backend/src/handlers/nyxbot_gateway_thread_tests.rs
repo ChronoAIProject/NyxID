@@ -709,6 +709,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 pages: None,
                 chat_delivery: None,
                 image_input: None,
+                image_input_reason: None,
                 image_inspection: None,
             });
         }
@@ -746,7 +747,10 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
             &row,
             &origin,
             "event result",
-            Some(&images::ImageSendPlan { attachments }),
+            Some(&images::ImageSendPlan {
+                delegated: Vec::new(),
+                attachments,
+            }),
         )
         .await;
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);

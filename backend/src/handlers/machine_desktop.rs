@@ -4,7 +4,7 @@ use crate::{
     AppState,
     errors::{AppError, AppResult},
     models::{machine_desktop::MachineDesktop, node::Node},
-    mw::auth::AuthUser,
+    mw::auth::{AuthMethod, AuthUser},
     services::{
         assistant_nyxagent as engine, audit_service, machine_desktop_service as desktop,
         node_service, org_service,
@@ -246,6 +246,69 @@ async fn stop(state: &AppState, row: &MachineDesktop) -> AppResult<()> {
     }
 }
 
+/// Desktop bearer admission uses verified extractor fields, never JWT peeks.
+/// Explicit credentials must be one nonempty Bearer AccessToken for a live
+/// first-party person session with unrestricted service/node/resource authority.
+/// Cookies cannot rescue malformed/invalid bearers. Only this non-ambient
+/// credential may omit Origin or use BASE_URL's origin (Android's default).
+/// Ambient cookie sessions retain the exact frontend-Origin requirement.
+fn admit(state: &AppState, auth: &AuthUser, headers: &HeaderMap) -> AppResult<()> {
+    super::login_client_context::require_first_party_human(auth)?;
+    let denied = || AppError::Forbidden("Desktop authentication or origin refused".into());
+    if auth.mfa_enabled.is_none() || auth.session_id.is_none() {
+        return Err(denied());
+    }
+    let mut authorization = headers.get_all("authorization").iter();
+    let bearer = if let Some(header) = authorization.next() {
+        if authorization.next().is_some()
+            || !header
+                .to_str()
+                .ok()
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .is_some_and(|token| {
+                    !token.is_empty() && !token.bytes().any(|b| b.is_ascii_whitespace())
+                })
+            || auth.auth_method != AuthMethod::AccessToken
+            || !auth.allow_all_services
+            || !auth.allow_all_nodes
+            || !auth.allowed_service_ids.is_empty()
+            || !auth.allowed_node_ids.is_empty()
+            || auth.resource_uris.is_some()
+        {
+            return Err(denied());
+        }
+        true
+    } else {
+        if auth.auth_method != AuthMethod::Session {
+            return Err(denied());
+        }
+        false
+    };
+    let mut origins = headers.get_all("origin").iter();
+    let origin = origins.next();
+    if origins.next().is_some() {
+        return Err(denied());
+    }
+    let Some(origin) = origin else {
+        return if bearer { Ok(()) } else { Err(denied()) };
+    };
+    let origin = origin.to_str().map_err(|_| denied())?;
+    if origin.is_empty() || origin == "null" {
+        return Err(denied());
+    }
+    let frontend = url::Url::parse(&state.config.frontend_url)
+        .map_err(|_| AppError::Internal("Frontend origin unavailable".into()))?;
+    let api = url::Url::parse(&state.config.base_url)
+        .map_err(|_| AppError::Internal("API origin unavailable".into()))?;
+    if origin == frontend.origin().ascii_serialization()
+        || (bearer && origin == api.origin().ascii_serialization())
+    {
+        Ok(())
+    } else {
+        Err(denied())
+    }
+}
+
 pub async fn upgrade(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -254,16 +317,7 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> AppResult<Response> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::Forbidden("Desktop requires a browser origin".into()))?;
-    let configured = url::Url::parse(&state.config.frontend_url)
-        .map_err(|_| AppError::Internal("Frontend origin unavailable".into()))?;
-    if origin != configured.origin().ascii_serialization() {
-        return Err(AppError::Forbidden("Desktop origin refused".into()));
-    }
+    admit(&state, &auth, &headers)?;
     let owner = auth.user_id.to_string();
     let node = authorized(&state, &owner, &node).await?;
     authorized_context(&state, &node, &owner, query.context_id.as_deref()).await?;
@@ -288,6 +342,9 @@ pub async fn upgrade(
     .await?;
     let secret =
         node_service::get_node_signing_secret(&state.db, &state.encryption_keys, &node.id).await?;
+    DesktopAuthority::new(&state, &owner, auth.session_id, &row)
+        .check()
+        .await?;
     Ok(ws
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
@@ -297,6 +354,7 @@ pub async fn upgrade(
                 node,
                 row,
                 owner,
+                auth.session_id,
                 zeroize::Zeroizing::new(secret.to_vec()),
                 socket,
             )
@@ -344,21 +402,171 @@ async fn send_json(socket: &mut WebSocket, value: Value) -> bool {
         .is_ok()
 }
 
+async fn live_session(state: &AppState, actor: &str, id: uuid::Uuid) -> AppResult<bool> {
+    use crate::models::{
+        session::{COLLECTION_NAME as SESSIONS, Session},
+        user::{COLLECTION_NAME as USERS, User, UserType},
+    };
+    use mongodb::bson::doc;
+    let Some(user) = state
+        .db
+        .collection::<User>(USERS)
+        .find_one(doc! {"_id": actor, "is_active": true})
+        .await?
+    else {
+        return Ok(false);
+    };
+    let Some(session) = state
+        .db
+        .collection::<Session>(SESSIONS)
+        .find_one(crate::services::session_authority::authenticated(doc! {
+            "_id": id.to_string(), "user_id": actor, "revoked": false,
+            "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}
+        }))
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(user.user_type == UserType::Person
+        && (!user.mfa_enabled || crate::services::session_authority::satisfies_mfa(&session)))
+}
+
+const AUTHORITY_INTERVAL: Duration = Duration::from_secs(10);
+const AUTHORITY_TIMEOUT: Duration = Duration::from_secs(3);
+
+struct DesktopAuthority<'a> {
+    state: &'a AppState,
+    actor: &'a str,
+    session: Option<uuid::Uuid>,
+    identity: MachineDesktop,
+    checked: tokio::sync::watch::Sender<Instant>,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+impl<'a> DesktopAuthority<'a> {
+    fn new(
+        state: &'a AppState,
+        actor: &'a str,
+        session: Option<uuid::Uuid>,
+        row: &MachineDesktop,
+    ) -> Self {
+        Self {
+            state,
+            actor,
+            session,
+            identity: row.clone(),
+            checked: tokio::sync::watch::channel(Instant::now()).0,
+            failed: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    async fn check(&self) -> AppResult<()> {
+        if self.failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AppError::MachineNotAllowed);
+        }
+        let result = tokio::time::timeout(AUTHORITY_TIMEOUT, async {
+            let id = self.session.ok_or(AppError::MachineNotAllowed)?;
+            if !live_session(self.state, self.actor, id).await? {
+                return Err(AppError::Unauthorized("Desktop session ended".into()));
+            }
+            let node = authorized(self.state, self.actor, &self.identity.node_id).await?;
+            authorized_context(
+                self.state,
+                &node,
+                self.actor,
+                self.identity.context_id.as_deref(),
+            )
+            .await?;
+            if self.identity.display == nyxid_machine::desktop::Display::Dev
+                && !node.machine.as_ref().is_some_and(|m| m.browser_tools)
+            {
+                return Err(AppError::MachineNotAllowed);
+            }
+            let current = desktop::get(&self.state.db, &self.identity.id)
+                .await?
+                .ok_or(AppError::MachineNotAllowed)?;
+            if current.session_id != self.identity.session_id
+                || current.user_id != self.identity.user_id
+                || current.node_id != self.identity.node_id
+                || current.context_id != self.identity.context_id
+                || current.display != self.identity.display
+            {
+                return Err(AppError::MachineNotAllowed);
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_or(Err(AppError::MachineNotAllowed));
+        if result.is_err() {
+            self.failed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.checked.send_replace(Instant::now());
+        }
+        result
+    }
+
+    async fn fresh(&self) -> AppResult<()> {
+        if self.failed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(AppError::MachineNotAllowed);
+        }
+        let stale = self.checked.borrow().elapsed() >= AUTHORITY_INTERVAL;
+        if stale {
+            self.check().await?;
+        }
+        Ok(())
+    }
+
+    async fn command(
+        &self,
+        operation: Operation,
+        parameters: Value,
+        secret: &[u8],
+    ) -> AppResult<()> {
+        self.fresh().await?;
+        command(
+            self.state,
+            &self.identity.node_id,
+            operation,
+            parameters,
+            secret,
+        )
+        .await
+    }
+}
+
 async fn relay(
     state: AppState,
     node: Node,
     mut row: MachineDesktop,
     requester: String,
+    session_id: Option<uuid::Uuid>,
     secret: zeroize::Zeroizing<Vec<u8>>,
     mut socket: WebSocket,
 ) {
     let viewer = uuid::Uuid::new_v4().to_string();
-    if authorized_context(&state, &node, &requester, row.context_id.as_deref())
-        .await
-        .is_err()
-    {
+    let mut started = false;
+    let authority = DesktopAuthority::new(&state, &requester, session_id, &row);
+    // Resource/session checks stay independent of every setup and I/O await.
+    let authority_ended = async {
+        let mut interval = tokio::time::interval(AUTHORITY_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if authority.check().await.is_err() {
+                return;
+            }
+        }
+    };
+    // No subscription or node effect may race the first successful check.
+    if authority.check().await.is_err() {
+        close_authority(&mut socket).await;
         return;
     }
+    let authority_failed = tokio::select! {
+        biased;
+        _ = authority_ended => true,
+        _ = async {
     let Ok(mut frames) = state
         .node_dispatch
         .open_machine_desktop(&node.id, &row.session_id, &viewer)
@@ -366,9 +574,7 @@ async fn relay(
     else {
         return;
     };
-    if command(
-        &state,
-        &node.id,
+    if authority.command(
         Operation::DesktopOpen,
         json!({"display":row.display,"session_id":row.session_id,"context_id":row.context_id,"refresh_frame":true}),
         &secret,
@@ -379,6 +585,7 @@ async fn relay(
         return;
     }
     audit(&state, &row, "session_start");
+    started = true;
     if !send_json(
         &mut socket,
         json!({
@@ -402,25 +609,8 @@ async fn relay(
     let mut quota = (Instant::now(), 0usize);
     loop {
         tokio::select! {
-            frame = frames.recv() => match frame {
-                Some(bytes) => {
-                    let sent = tokio::time::timeout(
-                        Duration::from_secs(3),
-                        socket.send(Message::Binary(bytes.as_ref().clone().into())),
-                    ).await;
-                    if !sent.is_ok_and(|result| result.is_ok()) {
-                        break;
-                    }
-                }
-                None => break,
-            },
             _ = heartbeat.tick() => {
-                let Ok(current_node) = authorized(&state, &requester, &node.id).await else {
-                    break;
-                };
-                if authorized_context(&state, &current_node, &requester, row.context_id.as_deref())
-                    .await
-                    .is_err() {
+                if authority.check().await.is_err() {
                     break;
                 }
                 let Ok(Some(current)) = desktop::get(&state.db, &row.id).await else {
@@ -437,9 +627,7 @@ async fn relay(
                 if controls && desktop::refresh(&state.db, &row, &viewer).await.is_err() {
                     break;
                 }
-                if command(
-                    &state,
-                    &node.id,
+                if authority.command(
                     Operation::DesktopOpen,
                     json!({"display":row.display,"session_id":row.session_id,"context_id":row.context_id}),
                     &secret,
@@ -462,6 +650,19 @@ async fn relay(
                 {
                     break;
                 }
+            },
+            frame = frames.recv() => match frame {
+                Some(bytes) => {
+                    if authority.fresh().await.is_err() { break; }
+                    let sent = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        socket.send(Message::Binary(bytes.as_ref().clone().into())),
+                    ).await;
+                    if !sent.is_ok_and(|result| result.is_ok()) {
+                        break;
+                    }
+                }
+                None => break,
             },
             incoming = socket.next() => {
                 let Some(Ok(message)) = incoming else {
@@ -501,6 +702,7 @@ async fn relay(
                         {
                             break;
                         }
+                        if authority.fresh().await.is_err() { break; }
                         parameters["display"] = json!(row.display);
                         parameters["session_id"] = json!(row.session_id);
                         parameters["context_id"] = json!(row.context_id);
@@ -541,12 +743,11 @@ async fn relay(
                                 &input,
                             )
                             .await?;
+                            authority.fresh().await?;
                             match input["type"].as_str() {
                                 Some("refresh_frame") => {
                                     if last_refresh.elapsed() >= Duration::from_secs(1) {
-                                        command(
-                                            &state,
-                                            &node.id,
+                                        authority.command(
                                             Operation::DesktopOpen,
                                             json!({
                                                 "display": row.display,
@@ -565,9 +766,7 @@ async fn relay(
                                     if let Some(id) = &row.conversation_id {
                                         engine::request_stop(&state.db, &row.user_id, id).await?;
                                     }
-                                    command(
-                                        &state,
-                                        &node.id,
+                                    authority.command(
                                         Operation::DesktopControl,
                                         json!({
                                             "display":row.display,"session_id":row.session_id,
@@ -598,9 +797,7 @@ async fn relay(
                                         input["note"].as_str().unwrap_or_default(),
                                     )
                                     .await?;
-                                    command(
-                                        &state,
-                                        &node.id,
+                                    authority.command(
                                         Operation::DesktopControl,
                                         json!({
                                             "display":row.display,"session_id":row.session_id,
@@ -655,7 +852,25 @@ async fn relay(
             }
         }
     }
-    audit(&state, &row, "session_end");
+        } => false,
+    };
+    if authority_failed || authority.failed.load(std::sync::atomic::Ordering::Relaxed) {
+        close_authority(&mut socket).await;
+    }
+    if started {
+        audit(&state, &row, "session_end");
+    }
+}
+
+async fn close_authority(socket: &mut WebSocket) {
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        socket.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+            code: 1008,
+            reason: "Desktop session ended".into(),
+        }))),
+    )
+    .await;
 }
 
 fn audit(state: &AppState, row: &MachineDesktop, outcome: &str) {
@@ -808,7 +1023,7 @@ mod tests {
     ) -> u16 {
         let app = Router::new()
             .route("/machines/{node}/desktop", get(endpoint))
-            .layer(Extension(crate::test_utils::test_auth_user(actor)))
+            .layer(Extension(human_auth(state, actor).await))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut request = format!(
@@ -841,6 +1056,14 @@ mod tests {
         };
         server.abort();
         status
+    }
+
+    async fn human_auth(state: &AppState, actor: &str) -> AuthUser {
+        let mut auth = crate::test_utils::test_auth_user(actor);
+        let (session, _) = super::auth_tests::session(state, actor).await;
+        auth.session_id = Some(Uuid::parse_str(&session).unwrap());
+        auth.mfa_enabled = Some(false);
+        auth
     }
 
     async fn enable_context_desktops(state: &AppState, node: &mut Node) {
@@ -982,30 +1205,20 @@ mod tests {
             .unwrap()
             .origin()
             .ascii_serialization();
-        let mut developer = crate::test_utils::test_auth_user(&f.owner);
+        let owner_auth = human_auth(&f.state, &f.owner).await;
+        let mut developer = owner_auth.clone();
         developer.auth_method = crate::mw::auth::AuthMethod::AccessToken;
         developer.oauth_client_id = Some("developer-app".into());
-        let mut first_party = crate::test_utils::test_auth_user(&f.owner);
-        first_party.auth_method = crate::mw::auth::AuthMethod::AccessToken;
         for (auth, request_origin, expected) in [
+            (owner_auth.clone(), origin.clone(), 101),
+            (owner_auth, "https://other.example".into(), 403),
             (
-                crate::test_utils::test_auth_user(&f.owner),
-                origin.clone(),
-                101,
-            ),
-            (
-                crate::test_utils::test_auth_user(&f.owner),
-                "https://other.example".into(),
-                403,
-            ),
-            (
-                crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string()),
+                human_auth(&f.state, &uuid::Uuid::new_v4().to_string()).await,
                 origin.clone(),
                 403,
             ),
             (f.auth.clone(), origin.clone(), 403),
             (developer, origin.clone(), 403),
-            (first_party, origin, 101),
         ] {
             let app = Router::new()
                 .route(
@@ -1431,3 +1644,7 @@ mod tests {
         f.state.db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "machine_desktop_auth_tests.rs"]
+mod auth_tests;

@@ -1,3 +1,7 @@
+import { GroupAgentAccessRequest } from "./group-agent-access";
+import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
+import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
+import { collaborationApi, useCollaborationRead } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -33,6 +37,7 @@ import { AgentDetailsSheet } from "@/components/assistant/nyxbot-agent-details";
 import { GroupSettingsDialog } from "@/components/assistant/nyxbot-group-forms";
 import { AccessModeSwitcher } from "@/components/assistant/nyxbot-access-controls";
 import { Button } from "@/components/ui/button";
+import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDecideApproval } from "@/hooks/use-approvals";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
@@ -46,9 +51,14 @@ import {
   withDisplayName,
   workingLabel,
 } from "@/lib/assistant/nyxbot-labels";
-import { mentionSegments } from "@/lib/assistant/nyxbot-mentions";
+import { groupMentionProjection, type InlineMention } from "@/lib/assistant/group-mentions";
+import { peopleMentions, personAlias, type MentionPerson } from "@/lib/assistant/collaboration-mentions";
+import { mentionSegments, mentionTokens } from "@/lib/assistant/nyxbot-mentions";
+import { SharedConsentCards } from "./shared-agent-controls";
 import {
   NO_RECIPIENT_EDITS,
+  memberMention,
+  mentionedIds,
   resolveRecipients,
   withAdded,
   withDraft,
@@ -72,6 +82,8 @@ import { useAuthStore } from "@/stores/auth-store";
 
 export const GROUP_COMPOSER_PLACEHOLDER =
   "Message the group — @mention an agent";
+export const COLLABORATION_COMPOSER_PLACEHOLDER =
+  "Message the group — @mention a person or agent";
 
 function WorkingDots() {
   return (
@@ -87,29 +99,19 @@ function WorkingDots() {
   );
 }
 
-function UserText({
-  text,
-  names,
-}: {
+function UserText({ text, names, mentions = [] }: {
   readonly text: string;
   readonly names: readonly string[];
+  readonly mentions?: readonly InlineMention[];
 }) {
-  return (
-    <>
-      {mentionSegments(text, names).map((segment, index) =>
-        segment.mention ? (
-          <span key={index} className="font-semibold">
-            {segment.text}
-          </span>
-        ) : (
-          <Fragment key={index}>{segment.text}</Fragment>
-        ),
-      )}
-    </>
-  );
+  return <>{mentionSegments(text, [...names, ...mentions.map((m) => m.handle)]).map((segment, index) => {
+    const mention = segment.mention ? mentions.find((m) => m.handle.toLowerCase() === segment.text.slice(1).toLowerCase()) : undefined;
+    return mention
+      ? <span key={index} data-group-mention title={`@${mention.handle}`} className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-13">@{mention.label}</span>
+      : segment.mention ? <span key={index} className="font-semibold">{segment.text}</span> : <Fragment key={index}>{segment.text}</Fragment>;
+  })}</>;
 }
 
-/** "to Luna, researcher": the agents a sent message was addressed to. */
 function recipientLine(
   ids: readonly string[],
   members: readonly AssistantGroupMember[],
@@ -127,12 +129,14 @@ export function GroupMessageRow({
   message,
   names,
   members = [],
+  participants = [],
   onOpenAgent,
 }: {
   readonly groupId: string;
   readonly message: AssistantGroupMessage;
   readonly names: readonly string[];
   readonly members?: readonly AssistantGroupMember[];
+  readonly participants?: readonly MentionPerson[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
   const feedback = useReplyFeedback({
@@ -140,16 +144,23 @@ export function GroupMessageRow({
     parentId: groupId,
     messageId: message.id,
     initialVote: message.feedback?.vote,
+    initialComment: message.feedback?.comment,
   });
+  const projection = groupMentionProjection(message.text, members, participants);
   if (message.role === "notice") {
     return (
       <div className="min-w-0 px-8">
         <p
           role="note"
           aria-label="Group notice"
-          className="text-center text-11 text-text-tertiary"
+          className="text-center text-13 text-text-tertiary"
         >
-          {message.text}
+          {/* Name the agent unless the notice already starts with it
+              ("<agent> could not reply (…)"). */}
+          {message.agent && !message.text.startsWith(message.agent.name)
+            ? `${agentTitle(message.agent)}: `
+            : ""}
+          <UserText text={projection.text} names={names} mentions={projection.mentions} />
         </p>
         {message.activities
           ?.filter((activity) => activity.machine)
@@ -162,14 +173,14 @@ export function GroupMessageRow({
   if (message.role === "user") {
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
-        <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
-          {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+        <UserMessageBubble className="max-w-[90%] text-16 [overflow-wrap:anywhere] sm:max-w-[78%]">
+          {message.author ? <p className="mb-1 type-secondary-emphasis">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
-            <p className="mb-1 text-11 text-muted-foreground">
+            <p className="mb-1 text-13">
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
-          <UserText text={message.text} names={names} />
+          <UserText text={projection.text} names={names} mentions={projection.mentions} />
           {message.attachments?.map((item) => (
             <ToolImage
               key={item.id}
@@ -179,13 +190,14 @@ export function GroupMessageRow({
                 contentType: item.content_type,
                 origin: item.origin || undefined,
                 imageInput: item.image_input ?? undefined,
+                imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}
             />
           ))}
-        </div>
-        <div className="flex items-center gap-1"><MessageCopyAction text={message.text} /><MessageTime value={message.created_at} reveal /></div>
+        </UserMessageBubble>
+        <div className="flex max-w-full flex-wrap items-center gap-1"><MessageCopyAction text={projection.copyText} /><MessageTime value={message.created_at} reveal /></div>
       </div>
     );
   }
@@ -212,14 +224,15 @@ export function GroupMessageRow({
       </button>
       <div className="min-w-0">
         <div className="mb-0.5 flex flex-wrap items-baseline gap-x-2">
-          <span className="text-12 font-medium text-foreground">{title}</span>
+          <span className="type-row-title text-foreground">{title}</span>
           {handle ? (
-            <span className="text-11 text-text-tertiary">{handle}</span>
+            <span className="text-13 text-text-tertiary">{handle}</span>
           ) : null}
           {agent.kind === "nyxbot" ? (
-            <span className="text-10 text-text-tertiary">Personal agent</span>
+            <span className="text-12 text-text-tertiary">Personal agent</span>
           ) : null}
           <MessageTime value={message.created_at} />
+          {message.requester_user_id ? <span className="text-13 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
         </div>
         <div className="px-px text-foreground">
           {message.activities
@@ -236,14 +249,15 @@ export function GroupMessageRow({
                 contentType: item.content_type,
                 origin: item.origin || undefined,
                 imageInput: item.image_input ?? undefined,
+                imageInputReason: item.image_input_reason ?? undefined,
                 expired: item.expired,
                 endpoint: `/assistant/nyxagent/groups/${groupId}/attachments/${item.id}`,
               }}
             />
           ))}
-          <TextBlock text={sanitizeAssistantMessageContent(message.text)} />
-          <div className="mt-2 flex items-center gap-1">
-            <MessageCopyAction text={sanitizeAssistantMessageContent(message.text)} />
+          <TextBlock text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} />
+          <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
+            <MessageCopyAction text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} format="markdown" />
             <ReplyFeedbackVotes feedback={feedback} />
           </div>
           <ReplyFeedbackFollowUp feedback={feedback} />
@@ -372,7 +386,7 @@ function GroupTranscript({
             </Button>
           ) : null}
           {!messages.length ? (
-            <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
+            <p className="flex flex-1 items-center justify-center px-6 text-center text-14 text-text-tertiary">
               Say hello. Mention an agent with @ to ask it directly.
             </p>
           ) : null}
@@ -383,6 +397,7 @@ function GroupTranscript({
               groupId={group.id}
               names={names}
               members={group.members}
+              participants={group.participants}
               onOpenAgent={onOpenAgent}
             />
           ))}
@@ -395,7 +410,7 @@ function GroupTranscript({
               <span className="flex w-6 justify-center">
                 <AgentAvatar agent={working[0]!} size="md" />
               </span>
-              <span className="flex items-center gap-2 text-11 text-muted-foreground">
+              <span className="flex items-center gap-2 text-13 text-muted-foreground">
                 <WorkingDots />
                 {workingLabel(working.map((member) => agentTitle(member)))}
               </span>
@@ -424,10 +439,10 @@ function MemberButton({
         <button
           type="button"
           onClick={onOpen}
-          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
+          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : member.unavailable ? " (unavailable)" : member.shared ? " (shared agent)" : ""} — agent details`}
           className={cn(
             "relative rounded-full transition-opacity hover:opacity-80",
-            member.destroyed && "opacity-50",
+            (member.destroyed || member.unavailable) && "opacity-50",
           )}
         >
           <AgentAvatar agent={member} size={size} />
@@ -439,9 +454,10 @@ function MemberButton({
           ) : null}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom" className="text-11">
+      <TooltipContent side="bottom" className="text-13">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
+        {member.unavailable ? <p>{groupAgentUnavailableReason(member)}</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -452,22 +468,22 @@ function GroupHeader({
   onOpenAgent,
   onOpenSettings,
 }: {
-  readonly group: AssistantGroup;
+  readonly group?: AssistantGroup;
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
-  const lead = group.members.find(
+  const lead = group?.members.find(
     (member) => member.id === group.lead_agent_id,
   );
-  const working = group.working_agent_ids.length;
+  const working = group?.working_agent_ids.length ?? 0;
   const compact = useContext(ChatHeaderCompactContext);
   return (
     <ThreadPanels>
       <div className="space-y-1.5">
         <HeaderBar>
-          <HeaderItem className="min-w-0">
-            <h2 className={cn("truncate font-semibold text-foreground", compact ? "text-11" : "text-13")}>
-              {group.name}
+          <HeaderItem className="flex h-7 min-w-0 items-center">
+            <h2 className={cn("truncate text-foreground", compact ? "type-secondary-strong" : "type-card-title")}>
+              {group?.name ?? "Loading group…"}
             </h2>
           </HeaderItem>
           <HeaderItem
@@ -476,7 +492,7 @@ function GroupHeader({
             className={cn("flex shrink-0 items-center", compact ? "gap-0.5" : "gap-1")}
           >
             <TooltipProvider delayDuration={200}>
-              {group.members.map((member) => (
+              {group?.members.map((member) => (
                 <MemberButton
                   key={member.id}
                   member={member}
@@ -487,7 +503,7 @@ function GroupHeader({
             </TooltipProvider>
           </HeaderItem>
           {working && !compact ? (
-            <HeaderItem className="flex shrink-0 items-center gap-1.5 text-11 text-muted-foreground">
+            <HeaderItem className="flex shrink-0 items-center gap-1.5 text-13 text-muted-foreground">
               <span
                 aria-hidden="true"
                 className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
@@ -495,11 +511,10 @@ function GroupHeader({
               {working} working
             </HeaderItem>
           ) : null}
-          <HeaderItem className="ml-auto">
+          {group ? <HeaderItem className="ml-auto">
             <Button
-              size="sm"
+              size={compact ? "icon" : "sm"}
               variant="ghost"
-              className={compact ? "h-7 w-7 px-0" : undefined}
               aria-label="Group settings"
               title="Group settings"
               onClick={onOpenSettings}
@@ -507,11 +522,11 @@ function GroupHeader({
               <Settings2 aria-hidden="true" />
               <span className={compact ? "sr-only" : undefined}>Settings</span>
             </Button>
-          </HeaderItem>
+          </HeaderItem> : null}
         </HeaderBar>
         {compact ? null : (
-          <p className="text-11 text-text-tertiary">
-            {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
+          <p className="text-13 text-text-tertiary">
+            {group?.collaboration ? "Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only." : group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
           </p>
         )}
       </div>
@@ -572,17 +587,17 @@ export function GroupPendingActions({
               aria-label={`Confirm: ${action.summary}`}
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
-              <p className="min-w-0 flex-1 text-12 text-foreground">
+              <p className="min-w-0 flex-1 text-14 text-foreground">
                 <span className="font-medium">{who}</span> wants to:{" "}
                 {action.summary}
               </p>
               {action.authored_skill ? (
                 action.acknowledgement_id && (!action.triggering_person || action.triggering_person.id === actorId) ? (
                   <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>Review draft</Link></Button>
-                ) : <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
+                ) : <span className="text-13 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
               ) : action.triggering_person ? (
                 <>
-                  <span className="text-11 text-muted-foreground">
+                  <span className="text-13 text-muted-foreground">
                     Awaiting {action.triggering_person.display_name}
                   </span>
                   {action.can_decide ? (
@@ -641,13 +656,15 @@ export function GroupRecipientPills({
   recipientIds,
   onRemove,
   onAdd,
+  group,
 }: {
+  readonly group?: AssistantGroup;
   readonly members: readonly AssistantGroupMember[];
   readonly recipientIds: readonly string[];
   readonly onRemove: (id: string) => void;
   readonly onAdd: (id: string) => void;
 }) {
-  const live = members.filter((member) => !member.destroyed);
+  const live = members.filter((member) => !member.destroyed && !member.unavailable);
   const others = live.filter((member) => !recipientIds.includes(member.id));
   return (
     <div
@@ -655,7 +672,7 @@ export function GroupRecipientPills({
       aria-label="Message recipients"
       className="mb-2 flex flex-wrap items-center gap-1.5"
     >
-      <span className="text-11 text-muted-foreground">To</span>
+      <span className="text-13 text-muted-foreground">To</span>
       {recipientIds.flatMap((id) => {
         const member = live.find((row) => row.id === id);
         return member
@@ -669,17 +686,17 @@ export function GroupRecipientPills({
                 aria-label={`Remove recipient ${agentTitle(member)}`}
                 onClick={() => onRemove(id)}
               >
-                {agentTitle(member)} ×
+                {agentTitle(member)}{member.shared ? ` · Shared agent${member.owner_name ? ` · ${member.owner_name}` : ""}` : ""} ×
               </Button>,
             ]
           : [];
       })}
       {recipientIds.length ? null : (
-        <span role="status" className="text-11 text-destructive">
-          Choose at least one recipient.
+        <span role="status" className="text-13 text-muted-foreground">
+          {group?.collaboration ? "Everyone in the group · no agent reply" : "Choose at least one recipient."}
         </span>
       )}
-      {others.length ? (
+      {others.length || (group?.collaboration && members.some((m) => m.unavailable || m.destroyed)) ? (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -695,9 +712,16 @@ export function GroupRecipientPills({
           <DropdownMenuContent align="start">
             {others.map((member) => (
               <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
-                {agentTitle(member)}
+                {agentTitle(member)}{member.shared ? " · Shared agent" : ""}
               </DropdownMenuItem>
             ))}
+            {group?.collaboration ? members.filter((m) => m.unavailable || m.destroyed).map((member) => (
+              <div key={member.id} className="max-w-sm space-y-2 p-2 text-14">
+                <p className="font-medium">{agentTitle(member)}{member.owner_name ? ` · ${member.owner_name}` : ""}</p>
+                <p className="text-muted-foreground">{groupAgentUnavailableReason(member)}</p>
+                <GroupAgentAccessRequest group={group} member={member} />
+              </div>
+            )) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       ) : null}
@@ -728,9 +752,10 @@ export function NyxAgentGroupPage({
   const [composerHeight, setComposerHeight] = useState(0);
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [draftText, setDraftText] = useState("");
   const [recipientSelection, setRecipientSelection] =
     useState<RecipientSelection>(NO_RECIPIENT_EDITS);
-  // Group payloads name agents by handle; their display names live on the agent list.
+  // Server names are authoritative; the inventory only fills older payloads.
   const group =
     transcript.data && !transcript.error
     ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
@@ -745,15 +770,20 @@ export function NyxAgentGroupPage({
         }
       : message,
   );
+  useCollaborationRead(groupId, messages.at(-1)?.seq ?? 0, Boolean(group?.collaboration));
+  const people = group?.collaboration ? (group.participants ?? []).filter((p) => p.handle) : [];
+  const draftPeople = peopleMentions(draftText, people, group?.members ?? [], Boolean(group?.collaboration));
   const recipients = resolveRecipients(
     recipientSelection,
-    group?.default_recipient_ids ?? [],
+    draftPeople.hasPeople ? [] : (group?.default_recipient_ids ?? []),
     group?.members ?? [],
   );
   const onComposerContentChange = (content: string) => {
+    setDraftText(content);
     if (!group) return;
+    const draft = peopleMentions(content, people, group.members, Boolean(group.collaboration));
     setRecipientSelection((current) =>
-      withDraft(current, content, group.members),
+      withDraft(current, draft.agentText, group.members),
     );
   };
 
@@ -776,19 +806,22 @@ export function NyxAgentGroupPage({
     );
   }
 
-  const mentions = (group?.members ?? [])
-    .filter((member) => !member.destroyed)
+  const mentions = [...(group?.members ?? [])
+    .filter((member) => !member.destroyed && !member.unavailable)
     .map((member) => ({
       id: member.id,
-      name: member.name,
+      name: member.mention_handle ?? (people.some((p) => personAlias(p) === member.name.toLowerCase() || p.handle === member.name.toLowerCase()) ? member.id : memberMention(member, group?.members ?? [])),
       kind: member.kind,
-      display_name: withDisplayName(member, agents.data?.agents).display_name,
-    }));
+      display_name: withDisplayName(member, agents.data?.agents).display_name || member.name,
+      shared: member.shared,
+      owner_name: member.owner_name,
+    })), ...people.map((person) => ({ id: person.id, name: person.handle!, display_name: person.display_name, kind: "person" as const }))];
 
   return (
     <AssistantShell
       resizableContent
       title={group?.name ?? "Group"}
+      contentTitle
       sidebar={
         <AssistantEngineSidebar
           engine="nyxagent"
@@ -802,13 +835,15 @@ export function NyxAgentGroupPage({
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
+        {group || !transcript.error ? (
+          <GroupHeader
+            group={group}
+            onOpenAgent={setDetailsAgentId}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        ) : null}
         {group ? (
           <>
-            <GroupHeader
-              group={group}
-              onOpenAgent={setDetailsAgentId}
-              onOpenSettings={() => setSettingsOpen(true)}
-            />
             <AssistantLinkModalHost>
               <GroupTranscript
                 group={group}
@@ -819,7 +854,7 @@ export function NyxAgentGroupPage({
                 bottomInset={composerHeight}
               />
             </AssistantLinkModalHost>
-            {settingsOpen ? (
+            {settingsOpen && group.collaboration ? <CollaborationSettings group={group} agents={agents.data?.agents ?? []} onClose={() => setSettingsOpen(false)} onLeft={() => {setSettingsOpen(false); goTo();}} /> : settingsOpen ? (
               <GroupSettingsDialog
                 group={group}
                 agents={agents.data?.agents ?? []}
@@ -839,7 +874,7 @@ export function NyxAgentGroupPage({
             </Button>
           </div>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
             Loading group...
           </div>
         )}
@@ -853,6 +888,14 @@ export function NyxAgentGroupPage({
           onDeleted={() => setDetailsAgentId(undefined)}
         />
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          {(group?.members ?? []).filter((member) => member.shared && !member.unavailable && member.conversation_id).map((member) => (
+            <SharedConsentCards key={member.id} agentId={member.id} conversationId={member.conversation_id!} />
+          ))}
+          {group?.collaboration ? <CollaborationCards group={group} decisions={transcript.data?.collaboration_decisions ?? []} /> : null}
+          {group?.collaboration?.your_request_ids.length ? <div className="mx-auto flex max-w-3xl justify-end px-4"><Button size="sm" onClick={async () => {
+            try {for (const request of group.collaboration!.your_request_ids) await collaborationApi.cancel(group.id, request); await transcript.refetch();}
+            catch (cause) {reportError(cause,"Could not stop your group work.");}
+          }}>Stop my work</Button></div> : null}
           <GroupPendingActions
             actions={
               transcript.error ? [] : (transcript.data?.pending_actions ?? [])
@@ -897,30 +940,47 @@ export function NyxAgentGroupPage({
             scope={{ kind: "groups", id: groupId }}
             active={false}
             sending={transcript.post.isPending}
-            // Read-only once every member is gone (destroyed or removed).
+            // Collaboration participants may chat even without agent authority.
             disabled={
-              Boolean(transcript.error) || Boolean(group && !mentions.length)
+              Boolean(transcript.error) || !group || Boolean(!group.collaboration && !mentions.length)
             }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
-            placeholder={GROUP_COMPOSER_PLACEHOLDER}
+            placeholder={group?.collaboration ? COLLABORATION_COMPOSER_PLACEHOLDER : GROUP_COMPOSER_PLACEHOLDER}
             mentions={mentions}
             onSend={async (text, uploads) => {
               setRequestError(undefined);
-              if (recipients.edited && !recipients.ids.length) {
+              if (!group?.collaboration && recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
                 toast.error(error.message);
                 throw error;
               }
               try {
+                const members = group?.members ?? [];
+                const personMentions = peopleMentions(text, people, members, Boolean(group?.collaboration));
+                if (personMentions.ambiguous) throw new Error("More than one group member has that name; choose an exact @handle from the mention picker.");
+                const tokens = mentionTokens(personMentions.agentText);
+                const ambiguous = tokens.some(({ name }) =>
+                  !members.some((member) => member.id.toLowerCase() === name.toLowerCase())
+                  && members.filter((member) => member.name.toLowerCase() === name.toLowerCase()).length > 1,
+                );
+                // Bind the displayed selection (including sticky defaults) to
+                // exact IDs. Preserve stale mentions for the server's refusal;
+                // never replace an unavailable target with the lead.
+                const exactRecipients = mentionedIds(personMentions.agentText, members.map((member) => ({
+                  ...member, destroyed: false, unavailable: false,
+                })));
                 await transcript.post.mutateAsync({
                   text,
                   attachmentIds: uploads?.attachmentIds ?? [],
                   ...(recipients.edited
                     ? { recipientAgentIds: recipients.ids }
-                    : {}),
+                    : !ambiguous
+                      ? { recipientAgentIds: exactRecipients.length ? exactRecipients : personMentions.hasPeople ? [] : recipients.ids }
+                      : {}),
                 });
                 setRecipientSelection(NO_RECIPIENT_EDITS);
+                setDraftText("");
               } catch (error) {
                 reportError(error, "The message was not delivered.");
                 throw error;
@@ -930,6 +990,7 @@ export function NyxAgentGroupPage({
             recipients={
               group ? (
                 <GroupRecipientPills
+                  group={group}
                   members={group.members}
                   recipientIds={recipients.ids}
                   onRemove={(id) =>

@@ -782,6 +782,7 @@ mod tests {
     fn usage_row(owner_id: &str, wallet_id: &str, lago_acked: bool) -> UsageMeterRow {
         let now = Utc::now();
         UsageMeterRow {
+            org_channel_guest: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: Uuid::new_v4().to_string(),

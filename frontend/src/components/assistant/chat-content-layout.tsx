@@ -45,11 +45,16 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     function scroll(event: Event) {
       if (event.target === transcript) updateHeader();
     }
-    const observer = new ResizeObserver(() => {
+    let measurementFrame = 0;
+    const measure = () => {
+      measurementFrame = 0;
       setAvailable(boundary.clientWidth);
       setScrollbar(transcript ? transcript.offsetWidth - transcript.clientWidth : 0);
       setComposerInset(composer ? Math.max(0, element.getBoundingClientRect().bottom - composer.getBoundingClientRect().top) : null);
       updateHeader();
+    };
+    const observer = new ResizeObserver(() => {
+      if (!measurementFrame) measurementFrame = requestAnimationFrame(measure);
     });
     function findTranscript() {
       // A dock holds the composer and anything stacked on it (a failure
@@ -86,6 +91,7 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     findTranscript();
     checkRail();
     return () => {
+      cancelAnimationFrame(measurementFrame);
       cancelAnimationFrame(railCheck);
       observer.disconnect();
       mutations.disconnect();
@@ -118,7 +124,7 @@ export function ChatContentLayout({ children }: { readonly children: ReactNode }
     "--chat-content-width": `${width}px`,
     "--assistant-scrollbar-width": `${scrollbar}px`,
     "--assistant-content-inset": "calc(var(--assistant-scrollbar-width) + var(--chat-index-width, 0px))",
-    ...(indexRail ? { "--chat-index-width": "calc(var(--spacing) * 7)" } : {}),
+    ...(indexRail ? { "--chat-index-width": "var(--chat-index-track-width)" } : {}),
   } as CSSProperties;
   const grips = (
     <div className="group/edge pointer-events-none absolute inset-0" style={layoutVars}>

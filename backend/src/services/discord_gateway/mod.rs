@@ -1,9 +1,10 @@
 //! Default-off Discord Gateway ingress. A renewable, database-time lease owns
 //! each socket; metadata admission and status/checkpoint writes contend on its
 //! exact fence. The socket is dropped before releasing ownership.
-mod facts;
+pub(crate) mod facts;
 pub(crate) use facts::snowflake as valid_message_id;
 mod protocol;
+pub(crate) mod roles;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transport;
@@ -107,6 +108,12 @@ impl Fence {
         super::transaction_service::run_db_only(db, &(db.clone(), self.clone()), |tx, (db, fence)| {
             Box::pin(async move {
                 if !fence.touch(db, tx).await? { return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into())); }
+                // A verified Gateway message proves ordinary chat is configured;
+                // it need not (and does not) prove an Interactions webhook exists.
+                let mut pending = fence.bot_filter();
+                pending.insert("status", "pending_webhook");
+                db.collection::<Document>(COLLECTION_NAME).update_one(pending,
+                    doc! {"$set":{"status":"active","updated_at":bson::DateTime::now()}}).session(&mut *tx).await?;
                 db.collection::<Document>(COLLECTION_NAME).update_one(fence.bot_filter(),
                     doc! {"$set":{"diagnostics.last_inbound_at":bson::DateTime::now(),"diagnostics.last_inbound_source":"discord_gateway"}}).session(tx).await?;
                 Ok(())
@@ -502,6 +509,7 @@ async fn session(state: &AppState, fence: &Fence) {
                         let token = &token;
                         let channels = &channels;
                         async move {
+                            roles::observe(&fence.bot, &event);
                             if event["t"].as_str().is_some_and(|name| name.starts_with("THREAD_") || name.starts_with("CHANNEL_") || name.starts_with("GUILD_")) {
                                 channels.0.lock().await.clear();
                             }
@@ -514,6 +522,7 @@ async fn session(state: &AppState, fence: &Fence) {
                                     && msg.get("webhook_id").is_none_or(Value::is_null) && matches!(msg["type"].as_u64(), Some(0 | 19)) {
                                     let chat = msg["channel_id"].as_str().filter(|id| facts::snowflake(id)).ok_or(Failure::Protocol)?;
                                     let channel = channels.get(&state.http_client, token, chat).await?;
+                                    roles::ensure(&fence.bot, token, msg).await;
                                     if let Some((inbound, facts)) = facts::normalize(&fence.bot, &event, &channel)? {
                                         let result = super::channel_inbound_service::process_discord_gateway_message(state, &fence.bot, adapter, &inbound, fence, &facts).await;
                                         if !matches!(result, Ok(true)) { return Err(Failure::Ingress); }

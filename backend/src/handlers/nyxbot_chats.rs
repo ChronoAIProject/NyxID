@@ -57,6 +57,15 @@ pub(super) async fn adopt_relay_chat(
         return Ok(());
     }
     let relay_partition = direct_partition(chat_id, sender_id, thread_id);
+    if row.org_specialist.is_some() {
+        return crate::services::org_channel_service::transcript::adopt_private_partition(
+            &state.db,
+            row,
+            &relay_partition,
+            partition,
+        )
+        .await;
+    }
     let threads = state.db.collection::<NyxbotThread>(THREADS);
     let Some(legacy) = threads
         .find_one(doc! {"channel_id": &row.id, "$or": [
@@ -174,8 +183,23 @@ pub(super) async fn note_owner_presence(
     sender_id: &str,
 ) -> AppResult<NyxbotThread> {
     let mut chat = chat.clone();
-    if is_group(&chat) && !chat.owner_seen && row.owner_sender_ids.iter().any(|id| id == sender_id)
-    {
+    let owner = if row.org_specialist.is_some() {
+        crate::services::org_channel_service::sender(
+            &state.db,
+            row,
+            sender_id,
+            true,
+            chat.agent_id
+                .as_deref()
+                .or(row.agent_id.as_deref())
+                .unwrap_or_default(),
+        )
+        .await?
+        .1
+    } else {
+        row.owner_sender_ids.iter().any(|id| id == sender_id)
+    };
+    if is_group(&chat) && !chat.owner_seen && owner {
         state
             .db
             .collection::<NyxbotThread>(THREADS)
@@ -348,8 +372,12 @@ pub(super) async fn record_chat_with_relay(
     threads
         .find_one_and_update(
             doc! {"channel_id": &row.id, "partition": partition},
-            doc! {"$setOnInsert": {"_id": Uuid::new_v4().to_string(), "user_id": &row.user_id,
-            "created_at": now}, "$set": set},
+            crate::services::nyxbot_chat_settings_service::record_update(
+                row,
+                facts.kind == "private" && facts.thread_id.is_none(),
+                set,
+                now,
+            ),
         )
         .upsert(true)
         .return_document(mongodb::options::ReturnDocument::After)
@@ -864,7 +892,7 @@ struct GatewayReconciliation<'a> {
 /// Compare only the provider fields that NyxID authored. Gateways may add
 /// harmless definition metadata, but identity, admission and route scope must
 /// echo exactly before NyxID enables bot delivery.
-fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
+pub(super) fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
     let Some(definition) = body.get("definition") else {
         return false;
     };
@@ -883,7 +911,15 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
     let Some(expected) = requested.pointer("/sources/0") else {
         return false;
     };
-    if actual.get("trust_normalized").and_then(Value::as_bool) == Some(true) {
+    if actual
+        .get("trust_normalized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        != expected
+            .get("trust_normalized")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
         return false;
     }
     [
@@ -894,6 +930,7 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
         "/route_ids",
         "/bot_id",
         "/bot_username",
+        "/intents",
         "/admission",
     ]
     .iter()
@@ -904,6 +941,16 @@ fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bool {
             == Some(0)
         && definition.pointer("/reply/thread_contract")
             == requested.pointer("/reply/thread_contract")
+        && (expected["type"] == "nyxid_relay"
+            || [
+                "/routing",
+                "/partition/version",
+                "/partition/key",
+                "/reply/auto_final",
+                "/reply/sinks",
+            ]
+            .iter()
+            .all(|pointer| definition.pointer(pointer) == requested.pointer(pointer)))
 }
 
 async fn persist_gateway_groups(
@@ -1036,6 +1083,7 @@ async fn reconcile_gateway_groups(
 
 #[derive(Serialize)]
 pub struct ChannelChatResponse {
+    guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     parent_chat_id: Option<String>,
     id: String,
     channel_agent_id: String,
@@ -1090,6 +1138,7 @@ impl ChannelChatResponse {
 
 fn chat_response(row: &NyxbotChannel, chat: &NyxbotThread) -> ChannelChatResponse {
     ChannelChatResponse {
+        guest_readiness: None,
         parent_chat_id: chat.follow.parent_chat_id.clone(),
         has_thread_history: chat.follow.has_thread_history,
         follow_guidance: None,
@@ -1190,38 +1239,78 @@ pub(crate) async fn list_chats(
     {
         return Err(AppError::NotFound(format!("Channel {id} not found")));
     }
+    let mut managed = Vec::new();
+    for row in channels {
+        if let Some(binding) = &row.org_specialist {
+            match crate::services::org_channel_service::require_admin(
+                &state.db,
+                owner,
+                &binding.org_id,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(AppError::Forbidden(_)) if channel_id.is_none() => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        managed.push(row);
+    }
+    let channels = managed;
     let ids: Vec<&str> = channels.iter().map(|row| row.id.as_str()).collect();
     let chats: Vec<NyxbotThread> = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .find(doc! {"user_id": owner, "channel_id": {"$in": ids}, "record_scope":{"$ne":"platform_thread"},
-        "$or": [{"kind": {"$ne": bson::Bson::Null}},
-            {"conversation_id": {"$ne": bson::Bson::Null}}]})
+        .find(
+            doc! {"channel_id": {"$in": ids}, "record_scope":{"$ne":"platform_thread"},
+            "$or": [{"kind": {"$ne": bson::Bson::Null}},
+                {"conversation_id": {"$ne": bson::Bson::Null}}]},
+        )
         .sort(doc! {"last_message_at": -1, "updated_at": -1})
         .limit(LIST_LIMIT)
         .await?
         .try_collect()
         .await?;
-    let on = super::thread_follow::enabled(state, owner).await?;
-    let counts = crate::services::channel_thread_follow_service::counts(
-        &state.db,
-        owner,
-        &chats.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),
-    )
-    .await?;
-    Ok(chats
-        .iter()
-        .filter_map(|chat| {
-            let row = channels.iter().find(|row| row.id == chat.channel_id)?;
-            Some(follow_response(
-                state,
-                row,
-                chat,
-                on,
-                *counts.get(&chat.id).unwrap_or(&0),
-            ))
-        })
-        .collect())
+    let mut responses = Vec::new();
+    let mut counts = std::collections::HashMap::new();
+    let mut owner_chats = std::collections::BTreeMap::<&str, Vec<String>>::new();
+    for row in &channels {
+        owner_chats.entry(&row.user_id).or_default().extend(
+            chats
+                .iter()
+                .filter(|c| c.channel_id == row.id)
+                .map(|c| c.id.clone()),
+        );
+    }
+    // Ordinary personal lists retain one batch; org management may include
+    // several linking admins, each with their own follow authority.
+    let mut follow_enabled = std::collections::HashMap::new();
+    for (transport_owner, chat_ids) in owner_chats {
+        counts.extend(
+            crate::services::channel_thread_follow_service::counts(
+                &state.db,
+                transport_owner,
+                &chat_ids,
+            )
+            .await?,
+        );
+        follow_enabled.insert(
+            transport_owner,
+            super::thread_follow::enabled(state, transport_owner).await?,
+        );
+    }
+    for chat in &chats {
+        let Some(row) = channels.iter().find(|r| r.id == chat.channel_id) else {
+            continue;
+        };
+        let on = follow_enabled
+            .get(row.user_id.as_str())
+            .copied()
+            .unwrap_or(false);
+        let dto = follow_response(state, row, chat, on, *counts.get(&chat.id).unwrap_or(&0));
+        responses.push(dto);
+    }
+    Ok(responses)
 }
 
 async fn load_chat(
@@ -1232,7 +1321,7 @@ async fn load_chat(
     let chat = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .find_one(doc! {"_id": chat_id, "user_id": owner,"record_scope":{"$ne":"platform_thread"}})
+        .find_one(doc! {"_id": chat_id,"record_scope":{"$ne":"platform_thread"}})
         .await?
         .ok_or_else(|| AppError::NotFound("Chat not found".into()))?;
     let row = load_channel(state, owner, &chat.channel_id).await?;
@@ -1337,7 +1426,19 @@ pub(crate) async fn update_chat(
             }
         } else {
             let agent = team::agent(&state.db, owner, agent).await?;
-            if agent.user_id != owner {
+            if let Some(binding) = &row.org_specialist {
+                crate::services::org_channel_service::require_admin(
+                    &state.db,
+                    owner,
+                    &binding.org_id,
+                )
+                .await?;
+                if agent.user_id != binding.org_id || agent.is_nyxbot() {
+                    return Err(AppError::ValidationError(
+                        "Choose a specialist owned by this organization".into(),
+                    ));
+                }
+            } else if agent.user_id != owner {
                 return Err(AppError::organization_agent_channel_unsupported());
             }
             if agent.destroyed_at.is_some() {
@@ -1361,8 +1462,9 @@ pub(crate) async fn update_chat(
     if agent_changed.is_some() {
         update.insert("$inc", doc! {"binding_generation":1});
     }
-    let updated = crate::services::channel_thread_follow_service::update_settings(
+    let updated = crate::services::channel_thread_follow_service::update_settings_as(
         &state.db,
+        &row.user_id,
         owner,
         &row.id,
         &chat.id,
@@ -1393,6 +1495,30 @@ pub(crate) async fn update_chat(
     )
     .await?;
     let mut result = json!({"chat": follow_response(state,&row,&updated,on,*counts.get(&updated.id).unwrap_or(&0))});
+    if row.org_specialist.is_none()
+        && ((group && members_may_talk(&updated))
+            || (!group && row.private_chats.as_deref() == Some("everyone")))
+    {
+        super::prepare_guest_model(
+            state,
+            owner,
+            updated.agent_id.as_deref().or(row.agent_id.as_deref()),
+            updated.conversation_id.as_deref(),
+        )
+        .await?;
+    }
+    if row.org_specialist.is_none() {
+        result["chat"]["guest_readiness"] = json!(
+            crate::services::assistant_service_execution::guest_readiness(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+                updated.agent_id.as_deref().or(row.agent_id.as_deref()),
+                updated.conversation_id.as_deref()
+            )
+            .await?
+        );
+    }
     if let Some(code) = gateway_error {
         result["warning"] = json!(format!(
             "Saved, but the gateway did not accept the change ({code}); the bot keeps \
@@ -1418,47 +1544,83 @@ pub(crate) async fn update_chat(
 }
 
 /// Who may talk to the agent in the bot's private chats.
+#[cfg(test)]
 pub(crate) async fn set_private_chats(
     state: &AppState,
     owner: &str,
     channel_id: &str,
     private_chats: &str,
 ) -> AppResult<Value> {
-    if !matches!(private_chats, "owner" | "everyone") {
-        return Err(AppError::ValidationError(
-            "private_chats must be owner or everyone".into(),
-        ));
-    }
+    update_access(
+        state,
+        owner,
+        channel_id,
+        &crate::services::nyxbot_chat_settings_service::AccessSettings {
+            private_chats: Some(private_chats.to_owned()),
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+pub(crate) async fn update_access(
+    state: &AppState,
+    owner: &str,
+    channel_id: &str,
+    settings: &crate::services::nyxbot_chat_settings_service::AccessSettings,
+) -> AppResult<Value> {
+    settings.validate()?;
     let row = load_channel(state, owner, channel_id).await?;
-    // Narrowing to the owner stays available on any channel; only widening is fenced.
-    let mut filter = doc! {"_id": &row.id, "user_id": owner};
-    if private_chats == "everyone" {
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !super::manages_bot_owner(state, owner, org).await?
+    {
+        return Err(AppError::Forbidden("org_access_lost".into()));
+    }
+    if settings.private_chats.as_deref() == Some("everyone")
+        || settings.private_chat_posts == Some(true)
+    {
         crate::services::platform_bot_authority::require_personal_routes(
             &state.db,
             &row.channel_bot_id,
         )
         .await?;
-        filter.insert("status", doc! {"$in": ["pending", "active"]});
     }
-    let updated = state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            filter,
-            doc! {"$set": {"private_chats": private_chats, "updated_at": bson::DateTime::now()}},
-        )
-        .await?;
-    if updated.matched_count != 1 {
-        return Err(AppError::Conflict("Channel authority changed".into()));
-    }
+    let applied =
+        crate::services::nyxbot_chat_settings_service::update_as(&state.db, &row, owner, settings)
+            .await?;
     audit(
         state,
         owner,
         "nyxbot_channel_access_updated",
-        json!({"channel_agent_id": &row.id, "private_chats": private_chats}),
+        json!({"channel_agent_id":&row.id,
+        "private_chats":settings.private_chats,"private_chat_posts":settings.private_chat_posts,
+        "apply_to_existing":settings.apply_to_existing,"applied_count":applied}),
     )
     .await;
-    Ok(json!({"channel_agent_id": row.id, "private_chats": private_chats}))
+    let mut result = json!({"channel_agent_id":row.id,
+        "private_chats":settings.private_chats.as_deref().or(row.private_chats.as_deref()).unwrap_or("owner"),
+        "private_chat_posts":settings.private_chat_posts.or(row.private_chat_posts).unwrap_or(false),"applied_count":applied});
+    if let Some(access) = settings
+        .private_chats
+        .as_deref()
+        .filter(|_| row.org_specialist.is_none())
+    {
+        if access == "everyone" {
+            super::prepare_guest_model(state, owner, row.agent_id.as_deref(), None).await?;
+        }
+        result["guest_readiness"] = serde_json::to_value(
+            crate::services::assistant_service_execution::guest_readiness(
+                &state.db,
+                &state.encryption_keys,
+                owner,
+                row.agent_id.as_deref(),
+                None,
+            )
+            .await?,
+        )
+        .map_err(|_| AppError::Internal("Invalid readiness".into()))?;
+    }
+    Ok(result)
 }
 
 /// Validate an automation destination with the same posting ACL as native tools.
@@ -1511,12 +1673,27 @@ pub(crate) async fn post(
 }
 
 /// This gate is unconditional, including when the general turn-gate flag is off.
-pub(super) async fn post_turn_is_live(
+pub(crate) async fn post_turn_is_live(
     state: &AppState,
     chat: &crate::services::assistant_acknowledgement_service::ChatAuthority,
 ) -> AppResult<bool> {
     if chat.guest || chat.turn_id.is_none() {
         return Ok(false);
+    }
+    if let Some(original) = chat.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+        let live = crate::services::shared_agent_service::require(
+            &state.db,
+            &chat.user_id,
+            original.agent(),
+        )
+        .await?;
+        if live.revision() != original.revision()
+            || crate::services::shared_agent_consent::behavior(&live)
+                != crate::services::shared_agent_consent::behavior(original)
+        {
+            return Ok(false);
+        }
     }
     let active_key = state
         .db
@@ -1547,6 +1724,8 @@ pub(super) async fn post_turn_is_live(
             && current.turn_id == chat.turn_id
             && current.report_to == chat.report_to
             && current.with_nyxbot == chat.with_nyxbot
+            && crate::services::assistant_service_execution::is_shared_chat(&current)
+                == crate::services::assistant_service_execution::is_shared_chat(chat)
     }))
 }
 
@@ -1571,13 +1750,40 @@ pub(crate) async fn post_current_turn(
     if !post_turn_is_live(state, chat).await? {
         return Err(AppError::AssistantTurnRequired);
     }
+    let transport_owner = if let Some(access) =
+        chat.org_agent_access.as_ref().and_then(|a| a.channel())
+    {
+        let target = state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"_id":chat_id,
+            "channel_id":&access.channel().id,"partition":&access.origin().partition})
+            .await?
+            .ok_or_else(crate::services::org_channel_service::denied)?;
+        if target.kind.as_deref() == Some("private") && access.execution().actor_id != chat.user_id
+        {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        access.channel().user_id.as_str()
+    } else {
+        chat.user_id.as_str()
+    };
     let target = prepare_post(
         state,
-        &chat.user_id,
+        transport_owner,
         chat_id,
-        (!chat.is_orchestrator()).then_some(chat.agent_id.as_str()),
+        (!chat.is_orchestrator()
+            && !crate::services::assistant_service_execution::is_shared_chat(chat))
+        .then_some(chat.agent_id.as_str()),
     )
     .await?;
+    if crate::services::assistant_service_execution::is_shared_chat(chat)
+        && target.bot.user_id != chat.user_id
+    {
+        return Err(AppError::Forbidden(
+            "Shared agents can post only to your own destinations".into(),
+        ));
+    }
     let mut report = super::images::ImageReport::default();
     if include_images {
         let turn_id = chat
@@ -1596,6 +1802,11 @@ pub(crate) async fn post_current_turn(
             .await?;
         if let Some(row) = row.filter(|row| engine::live_turn(row, Utc::now()).is_some()) {
             let plan = super::images::ImageSendPlan {
+                delegated: row
+                    .active_turn
+                    .as_ref()
+                    .map(|t| t.delegated_images.references.clone())
+                    .unwrap_or_default(),
                 attachments: row
                     .active_turn
                     .map(|turn| turn.attachments)
@@ -1674,18 +1885,14 @@ pub(crate) async fn post_current_turn(
                 "unattempted":row.parts.iter().filter(|p|p.state==TextPartState::Pending).count(),
                 "refused":row.parts.iter().filter(|p|p.state==TextPartState::Refused).count()})
         });
-    audit(
-        state,
-        &chat.user_id,
-        "nyxbot_channel_chat_posted",
-        json!({
-            "channel_agent_id": target.channel.id,
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text_status": status,
-        }),
-    )
-    .await;
+    let mut event = json!({
+        "channel_agent_id": target.channel.id,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text_status": status,
+    });
+    crate::services::shared_agent_transport::annotate_chat(&mut event, chat);
+    audit(state, &chat.user_id, "nyxbot_channel_chat_posted", event).await;
     Ok(json!({
         "status": if status == "sent" { "posted" } else { status },
         "text": status,
@@ -1716,6 +1923,7 @@ pub(crate) async fn post_automation(
     .await
 }
 
+#[derive(Clone)]
 pub(crate) struct PostTarget {
     pub agent_id: Option<String>,
     pub channel: NyxbotChannel,
@@ -2074,12 +2282,11 @@ fn send_post_one<'a>(
     Box::pin(send_post_one_impl(state, target, outbound, fence))
 }
 
-async fn send_post_one_impl(
+async fn revalidate_post_target(
     state: &AppState,
     target: &PostTarget,
-    mut outbound: crate::services::channel_platform::OutboundReply,
     fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
-) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+) -> AppResult<()> {
     validate_post(
         state,
         &target.channel.user_id,
@@ -2101,31 +2308,102 @@ async fn send_post_one_impl(
         return Err(AppError::Conflict("Post target changed".into()));
     }
     let bot = channel_bot_service::get_bot(&state.db, &target.bot.id).await?;
+    if bot.user_id != target.bot.user_id
+        || bot.platform != target.bot.platform
+        || bot.platform_bot_id != target.bot.platform_bot_id
+    {
+        return Err(AppError::Conflict("Post bot changed".into()));
+    }
     if !bot.is_active || bot.status == "suspended" {
         return Err(AppError::ChannelBotInactive(
             "Bot has been deactivated".into(),
         ));
     }
-    target.adapter.reply_context(
-        crate::services::channel_image_audience::chat_thread(&target.thread),
-        target.thread.created_at,
-        &mut outbound.metadata,
-    );
+    if let Some(chat) = fence
+        && crate::services::assistant_service_execution::is_shared_chat(chat)
+    {
+        if bot.user_id != chat.user_id || target.channel.user_id != chat.user_id {
+            return Err(AppError::Forbidden(
+                "Shared agents can post only to your own destinations".into(),
+            ));
+        }
+        // The internal route key is plumbing for this exact recipient-owned
+        // destination, never authority donated by the shared agent's owner.
+        super::route_key_auth(state, &channel).await?;
+    }
+    if let Some(access) = fence
+        .and_then(|c| c.org_agent_access.as_ref())
+        .and_then(|a| a.channel())
+    {
+        if access.execution().guest
+            || channel.id != access.channel().id
+            || thread.partition != access.origin().partition
+        {
+            return Err(crate::services::org_channel_service::denied());
+        }
+        crate::services::org_channel_service::validate(
+            &state.db,
+            access.origin(),
+            &access.execution().actor_id,
+            &access.execution().agent_id,
+        )
+        .await?;
+    }
     if let Some(chat) = fence
         && !post_turn_is_live(state, chat).await?
     {
         return Err(AppError::AssistantTurnRequired);
     }
-    crate::handlers::channel_relay::deliver_prepared_initiated_message(
+    Ok(())
+}
+
+async fn send_post_one_impl(
+    state: &AppState,
+    target: &PostTarget,
+    mut outbound: crate::services::channel_platform::OutboundReply,
+    fence: Option<&crate::services::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<crate::handlers::channel_relay::AsyncReplyResponse> {
+    revalidate_post_target(state, target, fence).await?;
+    target.adapter.reply_context(
+        crate::services::channel_image_audience::chat_thread(&target.thread),
+        target.thread.created_at,
+        &mut outbound.metadata,
+    );
+    let effect_guard: Option<crate::services::channel_platform::PostEffectGuard> = fence
+        .filter(|chat| {
+            crate::services::assistant_service_execution::is_shared_chat(chat)
+                || chat
+                    .org_agent_access
+                    .as_ref()
+                    .is_some_and(|a| a.channel().is_some())
+        })
+        .map(|chat| {
+            let state = state.clone();
+            let target = target.clone();
+            let chat = chat.clone();
+            std::sync::Arc::new(move || {
+                let state = state.clone();
+                let target = target.clone();
+                let chat = chat.clone();
+                Box::pin(async move { revalidate_post_target(&state, &target, Some(&chat)).await })
+                    as futures::future::BoxFuture<'static, AppResult<()>>
+            }) as crate::services::channel_platform::PostEffectGuard
+        });
+    let headers = HeaderMap::new();
+    let send = crate::handlers::channel_relay::deliver_prepared_initiated_message(
         state,
-        &HeaderMap::new(),
+        &headers,
         &target.auth,
         &target.conversation,
         &target.bot,
         outbound,
         target.adapter.as_ref(),
-    )
-    .await
+    );
+    if let Some(guard) = effect_guard {
+        crate::services::channel_platform::with_post_effect_guard(guard, send).await
+    } else {
+        send.await
+    }
 }
 
 async fn post_inner(
@@ -2365,6 +2643,7 @@ pub(crate) async fn post_automation_images(
                     fence: None,
                 },
                 &super::images::ImageSendPlan {
+                    delegated: Vec::new(),
                     attachments: vec![item.attachment.clone()],
                 },
                 stop,
@@ -2383,6 +2662,86 @@ pub(crate) async fn post_automation_images(
             {
                 stop = Some("billing");
             }
+            report.attempted += one.attempted;
+            report.sent += one.sent;
+            report.failed += one.failed;
+            report.unknown += one.unknown;
+            report.skipped += one.skipped;
+            report.unsupported |= one.unsupported;
+            report.outcomes.extend(one.outcomes);
+        }
+        for reference in run
+            .delegated_image_refs
+            .iter()
+            .rev()
+            .take(crate::services::trigger_run_images::MAX_RUN_IMAGES)
+        {
+            if !seen.insert(reference.attachment.id.as_str()) {
+                continue;
+            }
+            if budget == 0 {
+                omitted = omitted.saturating_add(1);
+                continue;
+            }
+            if run.thread_id.as_deref()
+                != Some(reference.assignment.recipient_conversation.as_str())
+            {
+                continue;
+            }
+            // Each reference can belong to a different receiving turn, so these
+            // one-image plans must share the run's Telegram group pacing.
+            if matches!(target.bot.platform.as_str(), "telegram" | "telegram-new")
+                && target.thread.kind.as_deref() != Some("private")
+                && let Some(last) = last_send
+            {
+                tokio::time::sleep(
+                    (last + std::time::Duration::from_secs(1))
+                        .saturating_duration_since(std::time::Instant::now()),
+                )
+                .await;
+            }
+            let one = super::images::report_or_failure_with_stop(
+                state,
+                super::images::ImageSendContext {
+                    owner: &run.user_id,
+                    conversation_id: &reference.assignment.recipient_conversation,
+                    turn_id: &reference.recipient_turn,
+                    channel: &target.channel,
+                    thread: &target.thread,
+                    anchor: super::images::ImageAnchor::Initiated {
+                        chat_id: chat_id.into(),
+                    },
+                    audience: super::images::ImageAudience {
+                        owner_private: false,
+                    },
+                    deadline: Some(deadline),
+                    initiated: Some(&target),
+                    fence: None,
+                },
+                &super::images::ImageSendPlan {
+                    attachments: Vec::new(),
+                    delegated: vec![reference.clone()],
+                },
+                stop,
+            )
+            .await;
+            if one.attempted > 0 {
+                last_send = Some(std::time::Instant::now());
+            }
+            if one.claimed > 0 || one.unknown > 0 {
+                budget -= 1;
+            }
+            if one.unknown > 0 {
+                stop = Some("after_unknown");
+            }
+            if one
+                .outcomes
+                .iter()
+                .any(|item| item.code.as_deref() == Some("billing"))
+            {
+                stop = Some("billing");
+            }
+            report.app_visible = false;
             report.attempted += one.attempted;
             report.sent += one.sent;
             report.failed += one.failed;
@@ -2637,9 +2996,7 @@ pub(super) fn foreign_bot(bot: &ChannelBot, own_open_id: Option<&str>, sender: &
 }
 
 pub(super) fn bot_guest_allowed(chat: &NyxbotThread, addressed: Option<bool>) -> bool {
-    matches!(chat.kind.as_deref(), Some("group"))
-        && addressed == Some(true)
-        && members_may_talk(chat)
+    crate::services::channel_turn_delivery::bot_guest_allowed(chat, addressed)
 }
 
 pub(super) async fn existing_bot_chat(
@@ -2751,4 +3108,35 @@ mod gateway_policy_tests {
             &requested,
         ));
     }
+}
+
+/// Fixed setup notices go only to a verified owner's private chat. They never
+/// inherit the visitor's group/reply destination.
+pub(super) async fn setup_notice(
+    state: &AppState,
+    owner: &str,
+    chat_id: &str,
+    text: &str,
+    notice: &str,
+) -> AppResult<()> {
+    let target = prepare_post(state, owner, chat_id, None).await?;
+    if !target.thread.owner_chat || target.thread.kind.as_deref() != Some("private") {
+        return Err(AppError::Forbidden("Owner chat required".into()));
+    }
+    send_post_planned(
+        state,
+        &target,
+        crate::services::channel_platform::OutboundReply {
+            text: Some(text.into()),
+            metadata: None,
+            attachments: Vec::new(),
+            reply_to_platform_message_id: None,
+        },
+        None,
+        notice,
+        None,
+        None,
+    )
+    .await?;
+    Ok(())
 }

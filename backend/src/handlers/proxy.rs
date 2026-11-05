@@ -46,6 +46,9 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
+#[path = "proxy_shared_connect.rs"]
+mod shared_connect;
+
 /// Map an `AppError` surfaced by the proxy handler to the `(status, error_code)`
 /// pair used by `TelemetryEvent::ProxyError`.
 ///
@@ -427,6 +430,27 @@ struct PreResolved {
     is_auto_connected: bool,
 }
 
+/// Return the persisted owner of an exact UserService for a shared turn.
+/// Shared discovery exposes both the owner's connection and the actor's own
+/// same-catalog connection; the execution preflight must scope later
+/// `get_user_service` and approval lookups to whichever row was selected.
+fn resolved_user_service_owner(
+    auth_user: &AuthUser,
+    actor_user_id: &str,
+    resolved: &proxy_service::UserServiceResolution,
+) -> String {
+    if let Some(shared) = auth_user.org_agent_access.as_ref().and_then(|a| a.shared())
+        && let Some(service) = shared.connections().get(&resolved.user_service_id)
+    {
+        return service.user_id.clone();
+    }
+    resolved
+        .org_routing
+        .as_ref()
+        .map(|routing| routing.org_user_id.clone())
+        .unwrap_or_else(|| actor_user_id.to_owned())
+}
+
 #[derive(Clone, Debug, Default)]
 struct ConnectionUsageStats {
     frames_in: i64,
@@ -766,7 +790,17 @@ pub async fn proxy_request(
     request
         .extensions_mut()
         .insert(ProxyExchangeStartedAt(started_at));
+    let generated_id = !request.headers().contains_key("x-request-id");
     let request_id = ensure_proxy_request_id(request.headers_mut());
+    if generated_id
+        && auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(crate::services::execution_permission_dispatch::proposals::supported_chat)
+        && let Some(context) = auth_user.execution_permission.as_ref()
+    {
+        context.bind_generated_correlation(&request_id);
+    }
     let mut resolved_slug = String::new();
     // Keep nested proxy dispatch off the handler frame (also called by
     // assistant operation-scope checks through the full router).
@@ -815,6 +849,12 @@ pub(crate) async fn proxy_request_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    shared_stream_preflight(
+        state,
+        auth_user,
+        request.method() == Method::CONNECT || is_ws_upgrade_request(&request),
+    )
+    .await?;
     validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
     auth_user
@@ -919,7 +959,9 @@ pub(crate) async fn proxy_request_inner(
             proxy_service::ProxyExecutionContext::new(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
-            ),
+            )
+            .with_assistant_access(auth_user.org_agent_access.as_deref())
+            .with_assistant_chat(auth_user.assistant_chat.as_deref()),
         ))
         .await?
         {
@@ -942,6 +984,8 @@ pub(crate) async fn proxy_request_inner(
                     resolved.pool_selection.as_ref(),
                 );
             }
+            let effective_owner_id =
+                resolved_user_service_owner(auth_user, &user_id_str, &resolved);
             return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
@@ -957,11 +1001,7 @@ pub(crate) async fn proxy_request_inner(
                     master_credential: resolved.master_credential,
                     require_identity_assertion: false,
                     credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                    effective_owner_id,
                     billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
@@ -1113,7 +1153,17 @@ pub async fn proxy_request_by_slug(
     request
         .extensions_mut()
         .insert(ProxyExchangeStartedAt(started_at));
+    let generated_id = !request.headers().contains_key("x-request-id");
     let request_id = ensure_proxy_request_id(request.headers_mut());
+    if generated_id
+        && auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(crate::services::execution_permission_dispatch::proposals::supported_chat)
+        && let Some(context) = auth_user.execution_permission.as_ref()
+    {
+        context.bind_generated_correlation(&request_id);
+    }
     let mut resolved_slug = String::new();
     let mut result = Box::pin(proxy_request_by_slug_inner(
         &state,
@@ -1595,7 +1645,7 @@ async fn proxy_request_through_pool(
         overall_deadline
             .checked_duration_since(std::time::Instant::now())
             .ok_or(AppError::ServicePoolDeadlineExceeded { attempts: vec![] })?,
-        Box::pin(service_pool_service::plan_candidates_with_allowlist(
+        Box::pin(service_pool_service::plan_candidates_with_access(
             &state.db,
             &state.encryption_keys,
             &actor_user_id,
@@ -1608,6 +1658,7 @@ async fn proxy_request_through_pool(
             Some(&body),
             allowed_services.as_ref(),
             allowed_nodes.as_ref(),
+            auth_user.org_agent_access.as_deref(),
         )),
     )
     .await
@@ -1638,6 +1689,13 @@ async fn proxy_request_through_pool(
     {
         plan.candidates
             .retain(|candidate| candidate.member.user_service_id == pinned);
+        plan.max_attempts = 1;
+    }
+    if auth_user
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
         plan.max_attempts = 1;
     }
     if plan.candidates.is_empty() {
@@ -2203,12 +2261,13 @@ async fn proxy_request_by_selected_member(
     let exact = request.extensions().get::<PoolExactMember>().cloned();
     let resolved = if exact.is_some() {
         box_proxy_future(|| {
-            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            proxy_service::read_proxy_authority_snapshot_with_access(
                 &state.db,
                 &state.encryption_keys,
                 &user_id_str,
                 us_id,
                 Some(slug),
+                auth_user.org_agent_access.as_deref(),
             )
         })
         .await?
@@ -2224,7 +2283,9 @@ async fn proxy_request_by_selected_member(
                 proxy_service::ProxyExecutionContext::new(
                     Some(&state.connection_expiry_notifier),
                     state.platform_user_rate_limit,
-                ),
+                )
+                .with_assistant_access(auth_user.org_agent_access.as_deref())
+                .with_assistant_chat(auth_user.assistant_chat.as_deref()),
             )
         })
         .await?
@@ -2279,6 +2340,7 @@ async fn proxy_request_by_selected_member(
                 resolved.pool_selection.as_ref(),
             );
         }
+        let effective_owner_id = resolved_user_service_owner(auth_user, &user_id_str, &resolved);
         return box_proxy_future(|| {
             execute_proxy_inner(
                 state,
@@ -2295,11 +2357,7 @@ async fn proxy_request_by_selected_member(
                     master_credential: resolved.master_credential,
                     require_identity_assertion: false,
                     credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                    effective_owner_id,
                     billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
@@ -2325,6 +2383,12 @@ pub(crate) async fn proxy_request_by_slug_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    shared_stream_preflight(
+        state,
+        auth_user,
+        request.method() == Method::CONNECT || is_ws_upgrade_request(&request),
+    )
+    .await?;
     validate_original_proxy_request_path(&request)?;
     if request.extensions().get::<PoolGatewayIngress>().is_some() {
         auth_user.ensure_llm_proxy_access()?;
@@ -2431,7 +2495,12 @@ pub(crate) async fn proxy_request_by_slug_inner(
         // Reserve legacy balancing exactly once before policy preflight. This
         // request carries the selected identity through every remaining gate.
         let (mut member, mut selection) = box_proxy_future(|| {
-            service_pool_service::resolve_member(&state.db, &pool.user_id, slug)
+            service_pool_service::resolve_member_with_access(
+                &state.db,
+                &pool.user_id,
+                slug,
+                auth_user.org_agent_access.as_deref(),
+            )
         })
         .await?
         .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
@@ -2561,7 +2630,8 @@ pub(crate) async fn proxy_request_by_slug_inner(
             proxy_service::ProxyExecutionContext::new(
                 Some(&state.connection_expiry_notifier),
                 state.platform_user_rate_limit,
-            ),
+            )
+            .with_assistant_chat(auth_user.assistant_chat.as_deref()),
         )
     })
     .await?
@@ -2585,6 +2655,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
                 resolved.pool_selection.as_ref(),
             );
         }
+        let effective_owner_id = resolved_user_service_owner(auth_user, &user_id_str, &resolved);
         return box_proxy_future(|| {
             execute_proxy_inner(
                 state,
@@ -2601,11 +2672,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
                     master_credential: resolved.master_credential,
                     require_identity_assertion: false,
                     credential_source: resolved.credential_source,
-                    effective_owner_id: resolved
-                        .org_routing
-                        .as_ref()
-                        .map(|r| r.org_user_id.clone())
-                        .unwrap_or_else(|| user_id_str.clone()),
+                    effective_owner_id,
                     billing_owner_id: None,
                     is_auto_connected: resolved.is_auto_connected,
                 }),
@@ -2999,6 +3066,7 @@ async fn preflight_proxy_deny_before_resolution(
                 user_service_id,
                 slug,
                 catalog_service_id,
+                auth_user.org_agent_access.as_ref().and_then(|a| a.shared()),
             ),
         )
         .await?
@@ -3272,6 +3340,10 @@ async fn resolve_proxy_execution_inner(
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
         .is_some()
+        || request
+            .extensions()
+            .get::<super::agent_skills::OrnnIdentityRead>()
+            .is_some()
         || pre_resolved
             .as_ref()
             .is_some_and(|target| target.require_identity_assertion);
@@ -3485,7 +3557,8 @@ async fn resolve_proxy_execution_inner(
         }
         // Per-agent credential override: if this request is via an API key and
         // the user has bound a different credential for this service, swap it in.
-        if !permission_bound
+        if !pre.target.credential_deferred
+            && !permission_bound
             && pool_authority.is_none()
             && auth_user
                 .assistant_agent_owner_id
@@ -3507,7 +3580,7 @@ async fn resolve_proxy_execution_inner(
             agent_override_applied = true;
         }
 
-        if pool_authority.is_some()
+        if (pool_authority.is_some() || pre.target.credential_deferred)
             && let (Some(key), Some(service)) = (&auth_user.api_key_id, &pre.user_service_id)
         {
             agent_override_applied = proxy_service::read_agent_credential_override_identity(
@@ -3961,10 +4034,14 @@ async fn execute_resolved_proxy_inner<'a>(
         }
     }
 
-    let assistant_projection =
+    let mut assistant_projection =
         crate::services::assistant_service_execution::HttpProjection::for_machine(
             machine_ingress.as_ref(),
         );
+    assistant_projection.skill_read = request
+        .extensions()
+        .get::<super::agent_skills::OrnnSkillRead>()
+        .is_some();
     if machine_git {
         let git = machine_ingress
             .as_ref()
@@ -3981,10 +4058,14 @@ async fn execute_resolved_proxy_inner<'a>(
 
     // Dedicated skill reads must retain the person's signed Ornn identity and
     // must never dispatch with a shared catalog credential, even after fallback.
-    if request
+    if (request
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
         .is_some()
+        || request
+            .extensions()
+            .get::<super::agent_skills::OrnnIdentityRead>()
+            .is_some())
         && (master_credential
             || proxy_service::uses_server_held_master(&target)
             || catalog_service_slug.as_deref() != Some("ornn-api")
@@ -4041,6 +4122,28 @@ async fn execute_resolved_proxy_inner<'a>(
             )
         })
         .await?;
+    }
+    if auth_user
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+        && crate::services::mcp_service::http_carries_method_override(
+            request.method().as_str(),
+            request.headers(),
+            request.uri().query(),
+            &[],
+        )
+    {
+        return Err(AppError::Forbidden(
+            "Shared calls cannot override HTTP methods".into(),
+        ));
+    }
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user)
+        && node_route.is_some()
+    {
+        return Err(AppError::Forbidden(
+            "Shared execution requires server transport".into(),
+        ));
     }
     let operation_target_id = target.service.id.clone();
     let (operation_scope_id, operation_catalog_id) =
@@ -4165,20 +4268,31 @@ async fn execute_resolved_proxy_inner<'a>(
         &billing_request_id,
         credential_class,
     );
+    request_audit.business_service(
+        auth_user.assistant_chat.as_deref(),
+        &target.service,
+        is_auto_connected_for_approval,
+    );
     let billing_owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_assistant_execution(
             &billing_resolution_user_id,
             billing_resource_owner_id,
             credential_class,
+            auth_user.org_agent_access.as_deref(),
         )
         .await
         .inspect_err(|error| request_audit.admission_error(error))?;
     let nyxagent_admission = request.extensions().get::<NyxAgentAdmission>().is_some()
         && target.service.slug == crate::services::assistant_nyxagent::SERVICE_SLUG;
     let is_ws_candidate = is_ws_upgrade_request(&request);
-    let platform_metric = platform_metric_for_target(&target, is_ws_candidate);
+    let shared_connect = request.method() == Method::CONNECT
+        && auth_user
+            .assistant_chat
+            .as_deref()
+            .is_some_and(crate::services::assistant_service_execution::is_shared_chat);
+    let platform_metric = platform_metric_for_target(&target, is_ws_candidate || shared_connect);
     let node_intent = match &node_route {
         Some(route) if !route.fallback_node_ids.is_empty() => {
             crate::services::billing::NodeIntent::NodeWithFallback
@@ -4332,7 +4446,11 @@ async fn execute_resolved_proxy_inner<'a>(
     let stream_upload = machine_ingress.is_some()
         && !is_ws
         && crate::services::machine_gateway_service::can_stream(&target, &all_headers, machine_git);
-    let (body_bytes, ws_request, mut streaming_body, upload_meter) = if is_ws {
+    let mut request = request;
+    let connect_upgrade = shared_connect.then(|| hyper::upgrade::on(&mut request));
+    let (body_bytes, ws_request, mut streaming_body, upload_meter) = if shared_connect {
+        (bytes::Bytes::new(), None, None, None)
+    } else if is_ws {
         (bytes::Bytes::new(), Some(request), None, None)
     } else if stream_upload {
         let limit = if machine_git {
@@ -4347,6 +4465,18 @@ async fn execute_resolved_proxy_inner<'a>(
         let bytes = read_proxy_request_body(request, state.config.proxy_max_body_size).await?;
         (bytes, None, None, None)
     };
+
+    // Only an authenticated, server-created setup thread gets this projection.
+    // The exact same bounded body reaches admission, billing and provider egress.
+    let body_bytes = crate::services::assistant_guest_model_setup::restrict_callback(
+        &state.db,
+        auth_user.assistant_chat.as_deref(),
+        &target,
+        &method_str,
+        path,
+        body_bytes,
+    )
+    .await?;
 
     // Guest and webhook limits classify by method, so neither may disguise it.
     let effect_limited_chat = auth_user
@@ -4409,6 +4539,20 @@ async fn execute_resolved_proxy_inner<'a>(
             crate::services::agent_operation_scope_service::GuestHttpContext {
                 query: query.as_deref(),
                 websocket: is_ws_candidate,
+                // The webhook floor runs before assistant selection/consent.
+                // Give it the same closed inference classification; a bare POST
+                // without a catalog endpoint row is otherwise treated as a write.
+                // This changes only that floor, never grants or guest authority.
+                stateless_model: auth_user.assistant_chat.as_deref().is_some_and(|chat| {
+                    chat.confirmation_policy.is_some() && !chat.guest && chat.turn_live
+                }) && !is_ws_candidate
+                    && method == Method::POST
+                    && target.service.inference.is_some()
+                    && serde_json::from_slice(&body_bytes).is_ok_and(|body| {
+                        crate::services::assistant_service_execution::stateless_inference(
+                            path, &body,
+                        )
+                    }),
             },
         )
     })
@@ -4494,6 +4638,65 @@ async fn execute_resolved_proxy_inner<'a>(
         );
     }
 
+    // Only enrolled callers can carry coverage; skip body/header preparation
+    // entirely for everyone else (admit_http would return immediately).
+    if let Some(execution_permission) = auth_user.execution_permission.as_ref()
+        && !is_ws_candidate
+        && !shared_connect
+        && streaming_body.is_none()
+    {
+        if machine_ingress.is_none()
+            && permission_ingress.is_none()
+            && !all_headers.contains_key(crate::services::assistant_service_execution::ACK_HEADER)
+        {
+            execution_permission.enable_authoring();
+        }
+        let mut permission_body = force_stream_usage_for_service(
+            &target.service.slug,
+            path,
+            (!body_bytes.is_empty()).then(|| body_bytes.clone()),
+        )
+        .unwrap_or_default();
+        let mut permission_path = path.to_owned();
+        let mut permission_method = method_str.as_str();
+        let mut permission_headers = all_headers.clone();
+        if target.service.slug == "llm-openai-codex"
+            && !is_pool_attempt
+            && target.target_id.is_none()
+            && is_codex_transport_path(path)
+            && !permission_body.is_empty()
+        {
+            use crate::services::llm_gateway_service::LlmTranslator;
+            let body = serde_json::from_slice(&permission_body)
+                .map_err(|_| AppError::BadRequest("Invalid model request".into()))?;
+            let translated =
+                chatgpt_translator::ChatgptTranslator.translate_request(path, &body)?;
+            permission_path = translated.path;
+            permission_method = "POST";
+            permission_body = serde_json::to_vec(&translated.body)
+                .map_err(|_| AppError::BadRequest("Invalid model request".into()))?
+                .into();
+            permission_headers = chatgpt_translator::execution_header_map();
+        }
+        crate::services::execution_permission_dispatch::admit_http(
+            state,
+            auth_user,
+            resolved_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &mut target,
+            permission_method,
+            &permission_path,
+            query.as_deref(),
+            &permission_body,
+            &permission_headers,
+            None,
+            &operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     let assistant_ack = all_headers
         .remove(crate::services::assistant_service_execution::ACK_HEADER)
         .and_then(|value| value.to_str().ok().map(str::to_owned));
@@ -4531,16 +4734,44 @@ async fn execute_resolved_proxy_inner<'a>(
                 &all_headers,
                 &assistant_projection,
             )
-            .await?
+            .await
+            .inspect_err(|error| {
+                if matches!(error, AppError::AssistantModelAuthorityChanged) {
+                    request_audit.denied(error.status_code().as_u16());
+                }
+            })?
         },
     );
     let assistant_decision = assistant_decision_slot
-        .as_ref()
+        .as_mut()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
-            (axum::http::StatusCode::CONFLICT, axum::Json(refusal)).into_response(),
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(crate::services::assistant_access_policy::with_frontend(
+                    refusal.clone(),
+                    &state.config.frontend_url,
+                )),
+            )
+                .into_response(),
         ));
+    }
+    if pool_authority.is_none() {
+        if let Some(admission) = assistant_decision.admission.as_mut() {
+            admission
+                .materialize_http(
+                    &state.db,
+                    &state.encryption_keys,
+                    &mut target,
+                    &method_str,
+                    path,
+                    &assistant_projection,
+                )
+                .await?;
+        }
+        target.require_credential_materialized()?;
     }
     if let (Some(chat), Some(id)) = (
         auth_user.assistant_chat.as_deref(),
@@ -4555,6 +4786,18 @@ async fn execute_resolved_proxy_inner<'a>(
         )
         .await?;
     }
+    if is_ws_candidate || shared_connect {
+        let guard = assistant_decision.admission.as_ref().map(|admission| {
+            admission.http_egress(
+                &state.db,
+                &state.encryption_keys,
+                &target,
+                &method_str,
+                path,
+            )
+        });
+        require_shared_stream_guard(auth_user, guard.as_ref())?;
+    }
     // Resolve approval policy with org-cascade. The "service owner" (the
     // user_id that owns the resolved UserService) determines whether an
     // org policy applies. For the legacy DownstreamService fallback path
@@ -4565,7 +4808,8 @@ async fn execute_resolved_proxy_inner<'a>(
         .unwrap_or(&approval_owner_user_id);
     let approval_requester_id = auth_user.approval_requester_id();
     let (approval_outcome, approval_auto) = box_proxy_future(|| {
-        approval_service::evaluate_for_chat(
+        crate::services::execution_permission_dispatch::approval(
+            auth_user.execution_permission.as_ref(),
             &state.db,
             &approval_owner_user_id,
             service_owner_for_approval,
@@ -4579,6 +4823,13 @@ async fn execute_resolved_proxy_inner<'a>(
         )
     })
     .await?;
+
+    let approval_outcome = crate::services::execution_permission_dispatch::approval_outcome(
+        auth_user.execution_permission.as_ref(),
+        service_owner_for_approval,
+        resolved_user_service_id.as_deref(),
+        approval_outcome,
+    );
 
     *assistant_approval_slot =
         crate::services::assistant_service_execution::HttpApprovalReceipt::new(
@@ -4728,12 +4979,13 @@ async fn execute_resolved_proxy_inner<'a>(
         let actor = auth_user.proxy_resolution_user_id();
         let service = &authority.scope.user_service_id;
         let snapshot = box_proxy_future(|| {
-            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            proxy_service::read_proxy_authority_snapshot_with_access(
                 &state.db,
                 &state.encryption_keys,
                 &actor,
                 service,
                 Some(&authority.member_slug),
+                auth_user.org_agent_access.as_deref(),
             )
         })
         .await?
@@ -4755,6 +5007,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Pool member authority changed during admission".into(),
             ));
         }
+        if let Some(admission) = assistant_decision.admission.as_ref() {
+            admission
+                .revalidate(&state.db, service, Some(&target))
+                .await?;
+        }
         let resolved = box_proxy_future(|| {
             proxy_service::resolve_proxy_target_by_user_service_id(
                 &state.db,
@@ -4766,7 +5023,8 @@ async fn execute_resolved_proxy_inner<'a>(
                 proxy_service::ProxyExecutionContext::new(
                     Some(&state.connection_expiry_notifier),
                     state.platform_user_rate_limit,
-                ),
+                )
+                .with_assistant_access(auth_user.org_agent_access.as_deref()),
             )
         })
         .await?
@@ -4788,7 +5046,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Pool member authority changed during credential resolution".into(),
             ));
         }
+        resolved.target.require_credential_materialized()?;
         target.credential = resolved.target.credential;
+        target.credential_deferred = false;
         if auth_user
             .assistant_agent_owner_id
             .as_deref()
@@ -4810,12 +5070,13 @@ async fn execute_resolved_proxy_inner<'a>(
             target.credential = credential;
         }
         let snapshot = box_proxy_future(|| {
-            proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            proxy_service::read_proxy_authority_snapshot_with_access(
                 &state.db,
                 &state.encryption_keys,
                 &actor,
                 service,
                 Some(&authority.member_slug),
+                auth_user.org_agent_access.as_deref(),
             )
         })
         .await?
@@ -4839,7 +5100,11 @@ async fn execute_resolved_proxy_inner<'a>(
                 "Pool member authority changed during credential resolution".into(),
             ));
         }
+        if let Some(admission) = assistant_decision.admission.as_mut() {
+            admission.bind_materialized_http(&state.db, &target).await?;
+        }
     }
+    target.require_credential_materialized()?;
 
     let body = if body_bytes.is_empty() {
         None
@@ -5081,7 +5346,7 @@ async fn execute_resolved_proxy_inner<'a>(
                     service_owner_for_approval,
                     auth_user.assistant_chat.as_deref(),
                 ),
-            );
+            )?;
         destination_audit.dispatch();
         let managed = crate::services::telnyx_platform_service::execute(
             &state.db,
@@ -5106,7 +5371,7 @@ async fn execute_resolved_proxy_inner<'a>(
             .map_err(|_| AppError::Internal("Could not construct managed response".into()))?;
         apply_agent_attribution_headers(&mut response, auth_user.api_key_id.as_deref(), None);
         destination_audit.complete(managed.status);
-        request_audit.response(managed.status);
+        request_audit.response(managed.status).await;
         return Ok(ProxyExecutionPhase::Complete(response));
     }
     // Billing and durable-grant admission carry their own database state.
@@ -5367,8 +5632,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             ws_egress.as_ref(),
                         )
                     })
-                    .await
-                    .inspect(|response| request_audit.response(response.status().as_u16()));
+                    .await;
+                    if let Ok(response) = &result {
+                        request_audit.response(response.status().as_u16()).await;
+                    }
                     return result;
                 }
 
@@ -5405,8 +5672,10 @@ async fn execute_resolved_proxy_inner<'a>(
                         ws_egress.as_ref(),
                     )
                 })
-                .await
-                .inspect(|response| request_audit.response(response.status().as_u16()));
+                .await;
+                if let Ok(response) = &result {
+                    request_audit.response(response.status().as_u16()).await;
+                }
                 return result;
             }
 
@@ -5616,8 +5885,10 @@ async fn execute_resolved_proxy_inner<'a>(
                             method.as_str(),
                             path,
                         )
+                        .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
                         .map(|guard| {
                             guard
+                                .observed(model_request.as_ref())
                                 .projected(&assistant_projection)
                                 .routed(Some(node_route))
                         })
@@ -5650,6 +5921,51 @@ async fn execute_resolved_proxy_inner<'a>(
                     let target_admission_ms = *first_dispatch_admission_ms
                         .get_or_insert_with(|| elapsed_ms(exchange_started_at));
                     let downstream_started_at = std::time::Instant::now();
+                    if let Some(context) = &target.execution_request
+                        && let Err(error) = context.check_drain().await
+                    {
+                        state
+                            .billing
+                            .reject_before_send(
+                                &metered,
+                                "execution_enrollment_changed",
+                                had_dispatched_failure,
+                            )
+                            .await?;
+                        return Err(error);
+                    }
+                    if let Some(permit) = &target.execution_permission {
+                        let validation = async {
+                            permit.validate_effect(
+                                &target,
+                                &method_str,
+                                path,
+                                query.as_deref(),
+                                body.as_deref().unwrap_or_default(),
+                                &all_headers,
+                            )?;
+                            permit.before_send(&target).await
+                        }
+                        .await;
+                        if let Err(error) = validation {
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                durable_operation_grant_service::mark_send_rejected(
+                                    &state.db,
+                                    reservation,
+                                )
+                                .await;
+                            }
+                            state
+                                .billing
+                                .reject_before_send(
+                                    &metered,
+                                    "execution_permission_changed",
+                                    had_dispatched_failure,
+                                )
+                                .await?;
+                            return Err(error);
+                        }
+                    }
                     let result = if let Some(upload) = streaming_body.take() {
                         let mut parameters =
                             serde_json::to_value(&attempt_request).map_err(|_| {
@@ -5701,6 +6017,9 @@ async fn execute_resolved_proxy_inner<'a>(
                             )
                             .await
                     };
+                    if let Some(permit) = &target.execution_permission {
+                        permit.complete(result.is_ok()).await?;
+                    }
                     // A streamed body can exceed its limit after provider dispatch.
                     // Keep it on the normal failure path so durable grants record the
                     // uncertain outcome and the upload is never retried on another node.
@@ -6050,7 +6369,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             }
 
                             destination_audit.complete(response.status().as_u16());
-                            request_audit.response(response.status().as_u16());
+                            request_audit.response(response.status().as_u16()).await;
                             return observe_model_response(model_request, path, response).await;
                         }
                         Err(NodeProxyFailure {
@@ -6315,6 +6634,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 Method::PATCH => reqwest::Method::PATCH,
                 Method::HEAD => reqwest::Method::HEAD,
                 Method::OPTIONS => reqwest::Method::OPTIONS,
+                Method::CONNECT if shared_connect => reqwest::Method::CONNECT,
                 _ => return Err(AppError::BadRequest("Unsupported HTTP method".to_string())),
             };
 
@@ -6465,8 +6785,10 @@ async fn execute_resolved_proxy_inner<'a>(
                         method.as_str(),
                         path,
                     )
-                    .map(|guard| {
+                    .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
+                        .map(|guard| {
                         guard
+                            .observed(model_request.as_ref())
                             .projected(&assistant_projection)
                             .routed(node_route.as_ref())
                     })
@@ -6509,6 +6831,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             }),
                             Some(usage_complete),
                             billing_egress_permit,
+                            Some(&target),
                         )
                     }),
                 )
@@ -6599,7 +6922,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 }
 
                 destination_audit.complete(response.status().as_u16());
-                request_audit.response(response.status().as_u16());
+                request_audit.response(response.status().as_u16()).await;
                 return observe_model_response(model_request, path, response).await;
             }
 
@@ -6723,11 +7046,16 @@ async fn execute_resolved_proxy_inner<'a>(
                     method.as_str(),
                     path,
                 )
-                .map(|guard| {
+                .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
+                        .map(|guard| {
                     guard
+                        .observed(model_request.as_ref())
                         .projected(&assistant_projection)
                         .routed(node_route.as_ref())
                 });
+            if shared_connect {
+                require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
+            }
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
@@ -6826,7 +7154,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
-                    if is_pool_attempt {
+                    if is_pool_attempt || nyxagent_admission {
                         return Err(encode_pool_attempt_error(error));
                     }
                     return Err(error.into_app_error());
@@ -6857,6 +7185,30 @@ async fn execute_resolved_proxy_inner<'a>(
                     return Err(proxy_client_disconnected(service_id));
                 }
             };
+
+            if let Some(upgrade) = connect_upgrade
+                && downstream_response.status().is_success()
+            {
+                let binding = egress_guard
+                    .as_ref()
+                    .map(|guard| guard.shared_stream())
+                    .transpose()?
+                    .flatten()
+                    .ok_or(AppError::AssistantTurnRequired)?;
+                request_audit
+                    .response(downstream_response.status().as_u16())
+                    .await;
+                destination_audit.complete(downstream_response.status().as_u16());
+                return shared_connect::start(
+                    state,
+                    upgrade,
+                    downstream_response,
+                    binding,
+                    metered,
+                    service_lease,
+                )
+                .await;
+            }
 
             // Convert reqwest Response back to axum Response
             let status = StatusCode::from_u16(downstream_response.status().as_u16())
@@ -7029,7 +7381,7 @@ async fn execute_resolved_proxy_inner<'a>(
             );
 
             destination_audit.complete(response.status().as_u16());
-            request_audit.response(response.status().as_u16());
+            request_audit.response(response.status().as_u16()).await;
             Ok(response)
         },
     )))
@@ -7777,6 +8129,7 @@ async fn bridge_websockets(
     ip_address: Option<String>,
     user_agent: Option<String>,
     slot_cancel: tokio_util::sync::CancellationToken,
+    shared: Option<crate::models::assistant_sharing::SharedExecution>,
 ) -> ConnectionUsageStats {
     let start = std::time::Instant::now();
     let mut stats = ConnectionUsageStats::default();
@@ -7796,8 +8149,14 @@ async fn bridge_websockets(
     ));
     tokio::pin!(idle_timeout);
 
+    let mut shared_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+    shared_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = shared_tick.tick(), if shared.is_some() => {
+                if let Some(binding) = &shared
+                    && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
+            }
             () = slot_cancel.cancelled() => {
                 tracing::warn!(service_id = %service_id, "WS passthrough capacity slot was lost");
                 break;
@@ -7819,6 +8178,8 @@ async fn bridge_websockets(
             msg = client_stream.next() => {
                 match msg {
                     Some(Ok(axum_msg)) => {
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         match &axum_msg {
                             axum::extract::ws::Message::Text(text) => {
                                 stats.frames_in += 1;
@@ -7881,6 +8242,8 @@ async fn bridge_websockets(
                             }
                         }
                         let is_close = matches!(axum_msg, axum::extract::ws::Message::Close(_));
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         let _ = downstream_sink.send(axum_msg_to_tungstenite(axum_msg)).await;
                         if is_close {
                             break;
@@ -7896,6 +8259,9 @@ async fn bridge_websockets(
             msg = downstream_stream.next() => {
                 match msg {
                     Some(Ok(tung_msg)) => {
+                        // A downstream auth challenge can trigger an upstream effect.
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         match &tung_msg {
                             tokio_tungstenite::tungstenite::Message::Text(text) => {
                                 stats.frames_out += 1;
@@ -7958,6 +8324,8 @@ async fn bridge_websockets(
                             }
                         }
                         let is_close = matches!(tung_msg, tokio_tungstenite::tungstenite::Message::Close(_));
+                        if let Some(binding) = &shared
+                            && crate::services::shared_agent_transport::revalidate(&db, binding).await.is_err() { break; }
                         let _ = client_sink.send(tungstenite_msg_to_axum(tung_msg)).await;
                         if is_close {
                             break;
@@ -7987,6 +8355,45 @@ const WS_PASSTHROUGH_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 /// Maximum time spent establishing the downstream WS connection.
 const WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS: u64 = 10;
 
+/// Shared stream routing may never rely on an absent chat/guard. UUID, slug,
+/// exact member and `_nyxid_via` all converge on the same admitted execution.
+async fn shared_stream_preflight(state: &AppState, auth: &AuthUser, stream: bool) -> AppResult<()> {
+    use crate::services::assistant_service_execution as execution;
+    if execution::is_shared_auth(auth) && stream {
+        execution::require_shared_context(auth)?;
+        crate::services::shared_agent_transport::require_ready(&state.db).await?;
+    }
+    Ok(())
+}
+
+fn require_shared_stream_guard(
+    auth: &AuthUser,
+    guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
+) -> AppResult<()> {
+    use crate::services::assistant_service_execution as execution;
+    if !execution::is_shared_auth(auth) {
+        return Ok(());
+    }
+    execution::require_shared_context(auth)?;
+    let binding = guard
+        .map(|guard| guard.shared_stream())
+        .transpose()?
+        .flatten()
+        .ok_or_else(|| AppError::Forbidden("Shared stream admission required".into()))?;
+    let chat = auth
+        .assistant_chat
+        .as_deref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    if binding.actor != chat.user_id
+        || binding.key != chat.api_key_id
+        || binding.conversation != chat.conversation_id
+        || Some(binding.turn.as_str()) != chat.turn_id.as_deref()
+    {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    Ok(())
+}
+
 /// Handle a WebSocket passthrough: connect to the downstream service,
 /// upgrade the client connection, and bridge frames bidirectionally.
 #[allow(clippy::too_many_arguments)]
@@ -8008,6 +8415,7 @@ async fn handle_ws_passthrough(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
     egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
+    require_shared_stream_guard(auth_user, egress_guard)?;
     crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
@@ -8056,15 +8464,18 @@ async fn handle_ws_passthrough(
     let req_ip = auth_user.ip_address.clone();
     let req_ua = auth_user.user_agent.clone();
 
+    let shared = egress_guard
+        .map(|guard| guard.shared_stream())
+        .transpose()?
+        .flatten();
+    let mut event = serde_json::json!({"service_id": service_id, "path": path,
+        "acting_client_id": &acting_client_id});
+    crate::services::shared_agent_transport::annotate(&mut event, shared.as_ref());
     audit_service::log_async(
         state.db.clone(),
         Some(user_id_str.clone()),
-        "proxy_ws_upgrade".to_string(),
-        Some(serde_json::json!({
-            "service_id": service_id,
-            "path": path,
-            "acting_client_id": &acting_client_id,
-        })),
+        "proxy_ws_upgrade".into(),
+        Some(event),
         req_ip.clone(),
         req_ua.clone(),
         ak_id.clone(),
@@ -8100,6 +8511,7 @@ async fn handle_ws_passthrough(
                 req_ip.clone(),
                 req_ua.clone(),
                 slot_cancel,
+                shared.clone(),
             )
             .await;
             drop(guard);
@@ -8120,6 +8532,10 @@ async fn handle_ws_passthrough(
                 "duration_secs": stats.duration.as_secs(),
                 "acting_client_id": &acting_client_id,
             });
+            crate::services::shared_agent_transport::annotate(
+                &mut disconnect_event,
+                shared.as_ref(),
+            );
             add_websocket_usage_provenance(&mut disconnect_event, &stats);
             audit_service::log_async(
                 db,
@@ -8159,6 +8575,11 @@ async fn handle_ws_passthrough_via_node(
     service_lease: Option<crate::services::service_concurrency_service::Lease>,
     egress_guard: Option<&crate::services::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> AppResult<Response> {
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user) {
+        return Err(AppError::Forbidden(
+            "Shared streams require server transport".into(),
+        ));
+    }
     crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
@@ -9649,6 +10070,7 @@ mod tests {
                 None,
                 None,
                 tokio_util::sync::CancellationToken::new(),
+                None,
             )
             .await;
         })
@@ -9747,6 +10169,9 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
+            credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
             base_url: base_url.to_string(),
@@ -11294,6 +11719,7 @@ mod tests {
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
     include!("proxy_concurrency_tests.rs");
+    include!("proxy_precondition_tests.rs");
     use super::{
         enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,
@@ -11820,6 +12246,8 @@ mod proxy_resolution_integration_tests {
 
     fn service_account_auth(service_account_id: &str, owner_user_id: &str) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -11855,6 +12283,8 @@ mod proxy_resolution_integration_tests {
 
     fn access_token_auth(user_id: &str) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -11901,6 +12331,7 @@ mod proxy_resolution_integration_tests {
             approval_timeout_secs: timeout_secs,
             grant_expiry_days: 30,
             approval_required: Some(false),
+            group_mentions_enabled: true,
             push_enabled: false,
             push_devices: vec![],
             created_at: now,
@@ -16034,3 +16465,7 @@ mod nyxbot_readiness_tests {
         db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "proxy_real_work_tests.rs"]
+mod real_work_tests;

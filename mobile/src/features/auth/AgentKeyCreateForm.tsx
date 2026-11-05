@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { Pressable, Switch, Text, TextInput, View } from "react-native";
-import { Check, Circle } from "lucide-react-native";
+import { Switch, Text, TextInput, View } from "react-native";
 import { PrimaryButton } from "../../components/PrimaryButton";
+import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
 import { useTheme } from "../../theme/ThemeContext";
 import {
   agentKeyScopes,
@@ -36,47 +36,6 @@ export function AgentKeyCreateForm({
   function update<K extends keyof NewAgentKey>(key: K, value: NewAgentKey[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
   }
-  function changeOwner(target_org_id: string | undefined) {
-    setExpiry("90");
-    setDraft((current) => ({
-      ...current, target_org_id,
-      expires_at: defaultNewAgentKey().expires_at, never_expires: undefined,
-      allowed_service_ids: [], allowed_node_ids: [],
-      allow_all_services: false, allow_auto_connected_services: false, allow_all_nodes: false,
-    }));
-  }
-  const check = (
-    label: string,
-    selected: boolean,
-    onPress: () => void,
-    radio = false,
-    implied = false,
-  ) => (
-    <Pressable
-      key={label}
-      accessibilityRole={radio ? "radio" : "checkbox"}
-      accessibilityLabel={label}
-      accessibilityState={{ checked: selected, disabled: disabled || implied }}
-      disabled={disabled || implied}
-      onPress={onPress}
-      style={[
-        styles.detailRow,
-        {
-          flexDirection: "row",
-          alignItems: "center",
-          gap: 12,
-          opacity: implied ? 0.5 : 1,
-        },
-      ]}
-    >
-      {selected ? (
-        <Check size={20} color={colors.primary} />
-      ) : (
-        <Circle size={20} color={colors.textMuted} />
-      )}
-      <Text style={[styles.detailValue, { flex: 1 }]}>{label}</Text>
-    </Pressable>
-  );
   return (
     <View style={styles.inputSection}>
       <Text style={styles.inputLabel}>Name</Text>
@@ -88,34 +47,48 @@ export function AgentKeyCreateForm({
         editable={!disabled}
         style={[styles.codeInput, { textAlign: "left" }]}
       />
-      <Text style={styles.inputLabel}>Owner</Text>
-      {check(
-        "Personal",
-        !draft.target_org_id,
-        () => changeOwner(undefined),
-        true,
-      )}
-      {options.orgs.map((org) =>
-        check(
-          org.name,
-          draft.target_org_id === org.id,
-          () => changeOwner(org.id),
-          true,
-        ),
-      )}
-      <Text style={styles.inputLabel}>Scopes</Text>
-      {agentKeyScopes.map((scope) =>
-        check(scope, draft.scopes.split(" ").includes(scope), () => {
-          const selected = draft.scopes.split(" ").filter(Boolean);
-          update(
-            "scopes",
-            (selected.includes(scope)
-              ? selected.filter((item) => item !== scope)
-              : [...selected, scope]
-            ).join(" "),
-          );
-        }),
-      )}
+      <WorkspaceSelectionField
+        label="Owner"
+        title="Choose key owner"
+        options={[
+          { value: "personal", label: "Personal" },
+          ...options.orgs.map((org) => ({
+            value: org.id,
+            label: org.name,
+            description: "Organization",
+            searchText: org.id,
+          })),
+        ]}
+        value={[draft.target_org_id ?? "personal"]}
+        disabled={disabled}
+        onChange={([owner]) => {
+          if (!owner || owner === (draft.target_org_id ?? "personal")) return;
+          setExpiry("90");
+          setDraft({
+            ...draft,
+            target_org_id: owner === "personal" ? undefined : owner,
+            expires_at: defaultNewAgentKey().expires_at,
+            never_expires: undefined,
+            allowed_service_ids: [],
+            allowed_node_ids: [],
+            allow_all_services: false,
+            allow_auto_connected_services: false,
+            allow_all_nodes: false,
+          });
+        }}
+      />
+      <WorkspaceSelectionField
+        label="Scopes"
+        title="Choose key scopes"
+        options={agentKeyScopes.map((scope) => ({
+          value: scope,
+          label: scope,
+        }))}
+        value={draft.scopes.split(/\s+/).filter(Boolean)}
+        multiple
+        disabled={disabled}
+        onChange={(scopes) => update("scopes", scopes.join(" "))}
+      />
       {(["services", "nodes"] as const).map((kind) => {
         const allField =
           kind === "services" ? "allow_all_services" : "allow_all_nodes";
@@ -147,64 +120,104 @@ export function AgentKeyCreateForm({
                 }
               />
             </View>
-            {!draft[allField] &&
-              resources
-                .filter((item) => kind !== "services" || !item.auto_connected)
-                .map((item) =>
-                  check(item.name, draft[idsField].includes(item.id), () =>
-                    update(
-                      idsField,
-                      draft[idsField].includes(item.id)
-                        ? draft[idsField].filter((id) => id !== item.id)
-                        : [...draft[idsField], item.id],
+            {!draft[allField] && (
+              <WorkspaceSelectionField
+                label={kind === "services" ? "Service access" : "Node access"}
+                title={kind === "services" ? "Choose services" : "Choose nodes"}
+                options={resources.map((item) => {
+                  const sameOwner =
+                    item.owner_id ===
+                    (draft.target_org_id || options.personal_owner_id);
+                  const implied =
+                    kind === "services" &&
+                    !!item.auto_connected &&
+                    draft.allow_auto_connected_services &&
+                    sameOwner;
+                  return {
+                    value: item.id,
+                    label: item.name,
+                    description: implied
+                      ? "Included by auto-connected platform access"
+                      : item.auto_connected
+                        ? sameOwner
+                          ? "Platform service"
+                          : "Organization platform service; select individually"
+                        : undefined,
+                    searchText: item.id,
+                    disabled: implied,
+                  };
+                })}
+                value={[
+                  ...draft[idsField],
+                  ...resources
+                    .filter(
+                      (item) =>
+                        kind === "services" &&
+                        item.auto_connected &&
+                        draft.allow_auto_connected_services &&
+                        item.owner_id ===
+                          (draft.target_org_id || options.personal_owner_id) &&
+                        !draft[idsField].includes(item.id),
+                    )
+                    .map((item) => item.id),
+                ]}
+                multiple
+                scopeKey={draft.target_org_id ?? "personal"}
+                disabled={disabled}
+                onChange={(ids) => {
+                  const impliedIds = new Set(
+                    resources
+                      .filter(
+                        (item) =>
+                          kind === "services" &&
+                          item.auto_connected &&
+                          draft.allow_auto_connected_services &&
+                          item.owner_id ===
+                            (draft.target_org_id || options.personal_owner_id),
+                      )
+                      .map((item) => item.id),
+                  );
+                  update(
+                    idsField,
+                    ids.filter(
+                      (id) =>
+                        !impliedIds.has(id) || draft[idsField].includes(id),
                     ),
-                  ),
-                )}
+                  );
+                }}
+              />
+            )}
             {kind === "services" &&
               !draft[allField] &&
               (draft.target_org_id &&
               !resources.some((item) => item.auto_connected) ? (
                 <Text style={styles.signInText}>
-                  This org-owned key cannot use platform services from your personal account.
+                  This org-owned key cannot use platform services from your
+                  personal account.
                 </Text>
               ) : (
-                <View>
-                  <Text style={styles.inputLabel}>
-                    Auto-connected platform services
+                <View
+                  style={[
+                    styles.detailRow,
+                    {
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: 12,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.detailValue, { flex: 1 }]}>
+                    Allow all auto-connected platform services (includes ones
+                    added later)
                   </Text>
-                  {check(
-                    "Allow all auto-connected platform services (includes ones added later)",
-                    draft.allow_auto_connected_services,
-                    () =>
-                      update(
-                        "allow_auto_connected_services",
-                        !draft.allow_auto_connected_services,
-                      ),
-                  )}
-                  {resources
-                    .filter((item) => item.auto_connected)
-                    .map((item) => {
-                      const sameOwner =
-                        item.owner_id ===
-                        (draft.target_org_id || options.personal_owner_id);
-                      const implied =
-                        draft.allow_auto_connected_services && sameOwner;
-                      return check(
-                        `${item.name}${sameOwner ? "" : " (Organization; select individually)"}`,
-                        implied || draft.allowed_service_ids.includes(item.id),
-                        () =>
-                          update(
-                            "allowed_service_ids",
-                            draft.allowed_service_ids.includes(item.id)
-                              ? draft.allowed_service_ids.filter(
-                                  (id) => id !== item.id,
-                                )
-                              : [...draft.allowed_service_ids, item.id],
-                          ),
-                        false,
-                        implied,
-                      );
-                    })}
+                  <Switch
+                    accessibilityLabel="Allow all auto-connected platform services (includes ones added later)"
+                    disabled={disabled}
+                    value={draft.allow_auto_connected_services}
+                    onValueChange={(value) =>
+                      update("allow_auto_connected_services", value)
+                    }
+                  />
                 </View>
               ))}
             {!draft[allField] && resources.length === 0 && (
@@ -213,32 +226,36 @@ export function AgentKeyCreateForm({
           </View>
         );
       })}
-      <Text style={styles.inputLabel}>Key expiry</Text>
-      {["7", "30", "90", "365", "custom", "none"].map((choice) =>
-        check(
-          choice === "none"
-            ? "No expiry"
-            : choice === "custom"
-              ? "Custom date"
-              : `${choice} days`,
-          expiry === choice,
-          () => {
-            setExpiry(choice);
-            update("never_expires", choice === "none");
-            update(
-              "expires_at",
-              choice === "none"
-                ? null
-                : choice === "custom"
-                  ? ""
-                  : new Date(
-                      Date.now() + Number(choice) * 86400000,
-                    ).toISOString(),
-            );
-          },
-          true,
-        ),
-      )}
+      <WorkspaceSelectionField
+        label="Key expiry"
+        title="Choose key expiry"
+        options={["7", "30", "90", "365", "custom", "none"].map((choice) => ({
+          value: choice,
+          label:
+            choice === "none"
+              ? "No expiry"
+              : choice === "custom"
+                ? "Custom date"
+                : `${choice} days`,
+        }))}
+        value={[expiry]}
+        disabled={disabled}
+        onChange={([choice]) => {
+          if (!choice || choice === expiry) return;
+          setExpiry(choice);
+          update("never_expires", choice === "none");
+          update(
+            "expires_at",
+            choice === "none"
+              ? null
+              : choice === "custom"
+                ? ""
+                : new Date(
+                    Date.now() + Number(choice) * 86400000,
+                  ).toISOString(),
+          );
+        }}
+      />
       {expiry === "custom" && (
         <TextInput
           accessibilityLabel="Custom key expiry"
@@ -275,23 +292,22 @@ export function AgentKeyCreateForm({
           />
         </View>
       ))}
-      <Text style={styles.inputLabel}>Platform</Text>
-      {(
-        [
-          ["generic", "Generic"],
-          ["claude-code", "Claude Code"],
-          ["cursor", "Cursor"],
-          ["codex", "Codex"],
-          ["openclaw", "OpenClaw"],
-        ] as const
-      ).map(([value, label]) =>
-        check(
-          label,
-          (draft.platform ?? "generic") === value,
-          () => update("platform", value),
-          true,
-        ),
-      )}
+      <WorkspaceSelectionField
+        label="Platform"
+        title="Choose client platform"
+        options={[
+          { value: "generic", label: "Generic" },
+          { value: "claude-code", label: "Claude Code" },
+          { value: "cursor", label: "Cursor" },
+          { value: "codex", label: "Codex" },
+          { value: "openclaw", label: "OpenClaw" },
+        ]}
+        value={[draft.platform ?? "generic"]}
+        disabled={disabled}
+        onChange={([platform]) => {
+          if (platform) update("platform", platform);
+        }}
+      />
       {error && (
         <Text accessibilityRole="alert" style={styles.fieldErrorText}>
           {error}

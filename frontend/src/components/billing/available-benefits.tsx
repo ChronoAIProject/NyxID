@@ -31,19 +31,22 @@ function grantState(g: CreditGrant) {
 
 export function AvailableBenefits({
   catalog = [],
+  ownerId,
 }: {
   catalog?: BillingCatalog;
+  ownerId?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [page, setPage] = useState(1);
-  const benefits = useBillingBenefits(page);
-  const wallet = useBillingWallet();
+  const benefits = useBillingBenefits(page, ownerId);
+  const wallet = useBillingWallet(ownerId);
   if (benefits.isLoading || wallet.isLoading)
     return (
       <Skeleton aria-label="Loading available credits" className="mt-6 h-36" />
     );
   const noWallet =
-    wallet.error instanceof ApiError && wallet.error.errorCode === 11301;
+    wallet.data === null ||
+    (wallet.error instanceof ApiError && wallet.error.errorCode === 11301);
   const denied = [benefits.error, wallet.error].some(
     (e) => e instanceof ApiError && e.status === 403,
   );

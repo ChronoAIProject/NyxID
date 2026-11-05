@@ -83,6 +83,7 @@ fn new_key(
     let now = Utc::now();
     let id = uuid::Uuid::new_v4().to_string();
     let key = ApiKey {
+        permission_policy_id: None,
         id: id.clone(),
         user_id: owner.into(),
         name: "Public NyxBot session".into(),

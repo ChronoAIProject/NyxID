@@ -204,25 +204,30 @@ pub async fn deliver(
     // The sender is untrusted mail input. The runtime receives only the normal
     // agent-scoped delegation, never the mailbox credential.
     let owner = bot.user_id.parse().map_err(|_| retry_later())?;
-    let scope = super::token_service::FIRST_PARTY_ACCESS_SCOPES;
-    let rbac = super::rbac_helpers::build_rbac_claim_data(db, &bot.user_id, scope)
-        .await
-        .ok();
-    let access = crate::crypto::jwt::generate_relay_access_token(
-        context.jwt_keys,
-        context.config,
-        &owner,
-        scope,
-        rbac.as_ref(),
-        &crate::crypto::jwt::RelayAgentScope {
-            api_key_id: api_key.id.clone(),
-            api_key_name: api_key.name.clone(),
-            allowed_service_ids: api_key.allowed_service_ids.clone(),
-            allowed_node_ids: api_key.allowed_node_ids.clone(),
-            allow_all_services: api_key.allow_all_services,
-            allow_all_nodes: api_key.allow_all_nodes,
-        },
-    )?;
+    let access =
+        if channel_relay_service::is_linked_org_nyxbot_route(db, &bot.id, &api_key.id).await? {
+            None
+        } else {
+            let scope = super::token_service::FIRST_PARTY_ACCESS_SCOPES;
+            let rbac = super::rbac_helpers::build_rbac_claim_data(db, &bot.user_id, scope)
+                .await
+                .ok();
+            Some(crate::crypto::jwt::generate_relay_access_token(
+                context.jwt_keys,
+                context.config,
+                &owner,
+                scope,
+                rbac.as_ref(),
+                &crate::crypto::jwt::RelayAgentScope {
+                    api_key_id: api_key.id.clone(),
+                    api_key_name: api_key.name.clone(),
+                    allowed_service_ids: api_key.allowed_service_ids.clone(),
+                    allowed_node_ids: api_key.allowed_node_ids.clone(),
+                    allow_all_services: api_key.allow_all_services,
+                    allow_all_nodes: api_key.allow_all_nodes,
+                },
+            )?)
+        };
     let mut config = context.config.clone();
     config.channel_relay_callback_timeout_secs = config.channel_relay_callback_timeout_secs.min(10);
     let result = channel_relay_service::forward_to_agent(
@@ -233,7 +238,7 @@ pub async fn deliver(
         payload,
         &api_key.id,
         &api_key.key_hash,
-        Some(&access),
+        access.as_deref(),
     )
     .await
     .result;

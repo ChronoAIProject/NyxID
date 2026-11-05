@@ -514,7 +514,7 @@ async fn direct_follow_uses_separate_native_children_and_owner_stop_without_mode
         .await
         .unwrap();
     assert!(
-        crate::services::channel_turn_delivery::enqueue(&state.db, OWNER, id, event)
+        crate::services::channel_turn_delivery::enqueue(&state.db, OWNER, id, event, None)
             .await
             .unwrap()
     );

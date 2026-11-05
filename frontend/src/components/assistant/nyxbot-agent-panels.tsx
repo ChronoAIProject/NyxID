@@ -83,6 +83,7 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
         layoutDependency={compact}
         role="group"
         aria-label="Conversation controls"
+        data-chat-header-controls=""
         data-compact={compact}
         style={{ borderRadius: 12 }}
         className={cn(
@@ -113,6 +114,7 @@ export function ThreadHeader({
   name,
   handle,
   kind,
+  loading = false,
   agentId,
   destroyed,
   channelPlatform,
@@ -122,7 +124,7 @@ export function ThreadHeader({
   titleKey,
   onRenameTitle,
 }: {
-  /** The thread's title, shown after the agent in the expanded header. */
+  /** The thread's title, shown above the agent in the expanded header. */
   readonly title?: string;
   /** Resets an open rename when another thread is shown. */
   readonly titleKey?: string;
@@ -133,6 +135,7 @@ export function ThreadHeader({
   /** "@handle", shown when a display name hides it. */
   readonly handle?: string;
   readonly kind: AssistantAgentKind;
+  readonly loading?: boolean;
   /** Picks the specialist's avatar tint. */
   readonly agentId?: string;
   readonly destroyed: boolean;
@@ -153,29 +156,33 @@ export function ThreadHeader({
           {onRenameTitle ? (
             <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
           ) : (
-            <h1 title={title} className="truncate text-15 font-semibold text-foreground">{title}</h1>
+            <h1 title={title} className="truncate type-card-title text-foreground">{title}</h1>
           )}
         </div>
       ) : null}
       <HeaderBar>
         <HeaderItem className="shrink-0">
-          <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+          {loading ? (
+            <span aria-hidden="true" className={cn("block rounded-full bg-overlay", compact ? "h-5 w-5" : "h-6 w-6")} />
+          ) : (
+            <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+          )}
         </HeaderItem>
         <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
           {compact ? (
-            <h2 className="truncate text-11 font-semibold text-foreground">{name}</h2>
+            <h2 className="truncate type-secondary-strong text-foreground">{name}</h2>
           ) : (
             // The name line is as tall as the controls so both share one top
             // line; the @handle sits under it.
             <div className="min-w-0">
-              <div className="flex h-7 min-w-0 items-center gap-2">
-                <h2 className="truncate text-13 font-semibold text-foreground">{name}</h2>
+              <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-2">
+                <h2 className="truncate type-card-title text-foreground">{name}</h2>
                 <span className="flex shrink-0 items-center gap-2 whitespace-nowrap">
-                  <AgentKindBadge kind={kind} />
+                  {loading ? null : <AgentKindBadge kind={kind} />}
                   {channelPlatform ? <ChannelBadge platform={channelPlatform} /> : null}
                 </span>
               </div>
-              {handle ? <p className="truncate text-11 leading-4 text-text-tertiary">{handle}</p> : null}
+              {handle ? <p className="max-w-full text-13 text-text-tertiary [overflow-wrap:anywhere]">{handle}</p> : null}
             </div>
           )}
         </HeaderItem>
@@ -187,11 +194,10 @@ export function ThreadHeader({
             {controls}
             {onOpenDetails ? (
               <Button
-                size="sm"
+                size={compact ? "icon" : "sm"}
                 variant="ghost"
                 aria-label="Agent details"
                 title="Agent details"
-                className={compact ? "h-7 w-7 px-0" : undefined}
                 onClick={onOpenDetails}
               >
                 <PanelRightOpen aria-hidden="true" />
@@ -204,7 +210,7 @@ export function ThreadHeader({
       {destroyed ? (
         <p
           role="status"
-          className="rounded-lg bg-overlay px-3 py-2 text-11 text-muted-foreground"
+          className="rounded-lg bg-overlay px-3 py-2 text-13 text-muted-foreground"
         >
           {name} was destroyed. Its access is revoked and this thread is read-only.
         </p>
@@ -234,24 +240,24 @@ export function WaitingNote({
     >
       {items.map((item) => (
         <div key={`${item.kind}:${item.since}:${item.title}`}>
-          <p className="flex items-center gap-2 text-12 text-foreground">
+          <p className="flex items-center gap-2 text-14 text-foreground">
             <span
               aria-hidden="true"
               className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
             />
             <span className="min-w-0 truncate">{item.title}</span>
             {item.expires_at ? (
-              <span className="ml-auto shrink-0 text-11 text-text-tertiary">
+              <span className="ml-auto shrink-0 text-13 text-text-tertiary">
                 expires {formatTimeDistance(item.expires_at)}
               </span>
             ) : null}
           </p>
           {item.detail ? (
-            <p className="pl-3.5 text-11 text-muted-foreground">{item.detail}</p>
+            <p className="pl-3.5 text-13 text-muted-foreground">{item.detail}</p>
           ) : null}
         </div>
       ))}
-      <p className="text-11 text-text-tertiary">
+      <p className="text-13 text-text-tertiary">
         {agentName} continues here by itself when this happens; no need to reply.
       </p>
     </div>
@@ -268,7 +274,7 @@ export function PendingEventsNote({
 }) {
   if (count <= 0) return null;
   return (
-    <p role="status" className="px-1 text-11 text-text-tertiary">
+    <p role="status" className="px-1 text-13 text-text-tertiary">
       {count} {count === 1 ? "update" : "updates"} waiting for {agentName}&apos;s next turn
     </p>
   );

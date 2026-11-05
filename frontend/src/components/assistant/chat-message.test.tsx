@@ -20,6 +20,7 @@ import {
 import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { messageTime } from "@/lib/assistant/message-time";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
+import { ReviewCardNavigation } from "./review-card-target";
 
 const BASE: ChatMessage = {
   id: "assistant-1",
@@ -296,7 +297,7 @@ describe("canonical chat presentation", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  it("exposes Retry for a failed reply", async () => {
+  it("keeps legacy failed replies unchanged without inventing an action outcome", async () => {
     const retry = vi.fn();
     render(
       <ChatMessageBubble
@@ -304,8 +305,47 @@ describe("canonical chat presentation", () => {
         onRetry={retry}
       />,
     );
+    expect(screen.queryByText("No actions were taken.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying may repeat/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows proven empty actions without a retry warning", () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Timed out",
+      actionOutcome: { summary: "No actions were taken.", complete: true, actions: [], retry_warning: null },
+    }} onRetry={retry} />);
+    expect(screen.getByText("No actions were taken.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows completed actions and requires confirmation before retry", () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, content: "", status: "error", error: "Timed out",
+      actionOutcome: { summary: "These actions completed before the reply failed.", complete: true,
+        actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+        retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+      },
+    }} onRetry={retry} />);
+    expect(screen.getByText("Created a scheduled automation")).toBeVisible();
+    expect(screen.getByText(/Retrying may repeat it/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry anyway" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("does not describe uncertain or missing evidence as no actions", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Timed out",
+      actionOutcome: { summary: "Some actions may have taken effect. Review their results before trying again.", complete: false,
+        actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "uncertain", summary: "Outcome uncertain: nyxid__create_schedule" }],
+        retry_warning: "Some actions may already have taken effect. Retrying may repeat them.",
+      },
+    }} />);
+    expect(screen.getByText("The action record may be incomplete.")).toBeVisible();
+    expect(screen.queryByText("No actions were taken.")).not.toBeInTheDocument();
   });
 
   it("shows a rejected retry beside its Retry button", async () => {
@@ -373,15 +413,28 @@ describe("canonical chat presentation", () => {
 
   it("explains a missing guest model route only in the owner's diagnostic details", () => {
     render(<ChatMessageBubble message={{ ...BASE, status: "error",
-      error: "This assistant isn't available to guests yet.",
+      error: "The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.",
       errorDetail: { stage: "stream", turnId: "turn-guest", continuations: 0, failureReason: {
         source: "nyxid", stage: "model_proxy", code: "guest_model_route_required",
         http_status: 403, nyxid_error_code: 9000,
       } },
     }} />);
-    expect(screen.getByText("This assistant isn't available to guests yet.")).toBeVisible();
+    expect(screen.getByText("The owner hasn't finished setting this assistant up for visitors and has been notified. Please try again later.")).toBeVisible();
     fireEvent.click(screen.getByText("Details"));
-    expect(screen.getByText("Send one message to this agent as its owner using its configured model to record the route for guest replies.")).toBeVisible();
+    expect(screen.getByText("Check this assistant's configured model and model connection. Visitor setup retries automatically.")).toBeVisible();
+    expect(screen.queryByText(/Send one message to this agent/)).not.toBeInTheDocument();
+  });
+
+  it("shows the actual visitor setup failure without requesting an owner warm-up", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error",
+      error: "Visitor setup could not finish. The owner has been notified. Please try again later.",
+      errorDetail: { stage: "guest_setup", turnId: "turn-guest", continuations: 0, failureReason: {
+        source: "nyxid", stage: "guest_setup", code: "credits_unavailable",
+        model_route: { reason: "credits_unavailable", unknown_fields: [] },
+      } },
+    }} />);
+    fireEvent.click(screen.getByText("Details"));
+    expect(screen.getByText("Add credits to the linking owner's account. Visitor setup retries automatically.")).toBeVisible();
   });
 
   it("shows thinking treatment only for a content-free streaming message", () => {
@@ -1015,6 +1068,30 @@ it("submits the chosen reasons ahead of the details, then thanks the reader", as
   }
 });
 
+it("reopens a saved feedback comment, edits and clears it without withdrawing the vote", async () => {
+  const put = vi.spyOn(api, "put").mockResolvedValue({});
+  const remove = vi.spyOn(api, "delete").mockResolvedValue(undefined);
+  try {
+    render(<ChatMessageBubble conversationId="conversation-1" message={{ ...BASE, feedback: { vote: "up", comment: "Original comment" } }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit feedback comment" }));
+    expect(screen.getByRole("textbox", { name: "Details (optional)" })).toHaveValue("Original comment");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Updated comment" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Submit" })));
+    expect(put).toHaveBeenLastCalledWith(expect.any(String), { vote: "up", comment: "Updated comment" });
+    fireEvent.click(screen.getByRole("button", { name: "Edit feedback comment" }));
+    expect(screen.getByRole("textbox")).toHaveValue("Updated comment");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Submit" })));
+    expect(put).toHaveBeenLastCalledWith(expect.any(String), { vote: "up", comment: "" });
+    expect(remove).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Helpful" })).toHaveAttribute("aria-pressed", "true");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Helpful" })));
+    expect(remove).toHaveBeenCalledOnce();
+  } finally {
+    put.mockRestore(); remove.mockRestore();
+  }
+});
+
 it("submits details with Cmd/Ctrl+Enter and keeps plain Enter for new lines", async () => {
   const put = vi.spyOn(api, "put").mockResolvedValue({});
   try {
@@ -1395,19 +1472,19 @@ it.each([
 
 
 describe("message body copy integration", () => {
-  it("copies sanitized assistant Markdown without thinking, activities or controls", async () => {
+  it("copies readable assistant text without thinking, activities or controls", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const markdown = "**回答**\n\n```rust\n    let n = 1;\n```";
     render(<ChatMessageBubble message={{ ...BASE, content: `${markdown}\n<function_calls><invoke>private-tool-input</invoke></function_calls>`, thinking: "private-thought" }} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
-    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("回答\n\n    let n = 1;\n");
     expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible();
   });
   it("copies the user's original body including literal markup and whitespace", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const original = "  <function_calls>example</function_calls>\n```js\n  x()\n```  ";
+    const original = "  **literal** <function_calls>example</function_calls>\n```js\n  x()\n```  ";
     render(<ChatMessageBubble message={{ ...BASE, role: "user", content: original }} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
     expect(writeText).toHaveBeenCalledExactlyOnceWith(original);
@@ -1443,6 +1520,114 @@ describe("turn summary", () => {
     decided_at: "2026-10-27T00:00:00Z",
     expires_at: "2026-10-27T00:00:00Z",
     ...fields,
+  });
+
+  it.each([true, false])("opens, scrolls and highlights a linked folded decision (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    const { container, rerender } = render(<NyxAgentAssistantEntry
+      conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()}
+      message={{ ...BASE, toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }], decisions: [decision("first"), decision("target", { activity_id: bound ? "act" : null })] }}
+    />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+    rerender(<NyxAgentAssistantEntry selectedDecisionId="target"
+      conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()}
+      message={{ ...BASE, toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }], decisions: [decision("first"), decision("target", { activity_id: bound ? "act" : null })] }}
+    />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    const highlighted = container.querySelector(".ring-input-focus");
+    expect(highlighted).toHaveTextContent("Full access");
+    expect(highlighted).toContainElement(bound ? container.querySelector("summary") : screen.getByText("×2"));
+    expect(scroll).toHaveBeenCalledWith({ block: "center", behavior: "instant" });
+    fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+    scroll.mockRestore();
+  });
+
+  it("opens a linked decision when a later history update folds it into the reply", async () => {
+    const props = { conversationId: "conversation", retry: vi.fn(), checkRecovery: vi.fn(), selectedDecisionId: "target" };
+    const message = { ...BASE, decisions: [decision("first")] };
+    const { container, rerender } = render(<NyxAgentAssistantEntry {...props} message={message} />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+    rerender(<NyxAgentAssistantEntry {...props} message={{ ...message, decisions: [...message.decisions, decision("target")] }} />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+    expect(container.querySelector(".ring-input-focus")).toHaveTextContent("Full access");
+    fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+    rerender(<NyxAgentAssistantEntry {...props} message={{ ...message, decisions: [...message.decisions, decision("target")] }} />);
+    expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it.each([true, false])("revisits the same row when a different folded decision is linked (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    try {
+      const props = { conversationId: "conversation", retry: vi.fn(), checkRecovery: vi.fn() };
+      const message: ChatMessage = { ...BASE,
+        toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1, result: "Result" }],
+        decisions: [decision("first", { activity_id: bound ? "act" : null }), decision("second", { activity_id: bound ? "act" : null })],
+      };
+      const { container, rerender } = render(<NyxAgentAssistantEntry {...props} selectedDecisionId="first" message={message} />);
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      const target = container.querySelector(".ring-input-focus")!;
+      expect(target).toHaveTextContent("Full access");
+      expect(scroll).toHaveBeenCalledTimes(1);
+      // The highlight expires without changing which row is selected.
+      target.classList.remove("ring-2", "ring-input-focus");
+      const details = container.querySelector("details")!;
+      details.open = true;
+      rerender(<NyxAgentAssistantEntry {...props} selectedDecisionId="second" message={message} />);
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(container.querySelector(".ring-input-focus")).toHaveTextContent("Full access");
+      expect(scroll).toHaveBeenCalledTimes(2);
+      expect(details).toBeInTheDocument();
+      expect(details.open).toBe(true);
+    } finally {
+      scroll.mockRestore();
+    }
+  });
+
+  it.each([true, false])("reveals a linked decision once across virtualized remounts (tool-bound: %s)", async (bound) => {
+    const scroll = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    const message: ChatMessage = { ...BASE,
+      toolCalls: [{ id: "act", name: "lookup", status: "done", startedAt: 1 }],
+      decisions: [decision("first", { activity_id: bound ? "act" : null }), decision("second", { activity_id: bound ? "act" : null })],
+    };
+    const tree = (show: boolean, card = "first") => <ReviewCardNavigation selectionKey={card}>
+      {show ? <NyxAgentAssistantEntry conversationId="conversation" retry={vi.fn()} checkRecovery={vi.fn()} selectedDecisionId={card} message={message} /> : null}
+    </ReviewCardNavigation>;
+    try {
+      const view = render(tree(true));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".ring-input-focus")).not.toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: /^Turn details/ }));
+      view.rerender(tree(false));
+      view.rerender(tree(true));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "false");
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(view.container.querySelector(".ring-input-focus")).toBeNull();
+      view.rerender(tree(true, "second"));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(screen.getByRole("button", { name: /^Turn details/ })).toHaveAttribute("aria-expanded", "true");
+      expect(scroll).toHaveBeenCalledTimes(2);
+      view.rerender(tree(true, "first"));
+      await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+      expect(scroll).toHaveBeenCalledTimes(3);
+    } finally { scroll.mockRestore(); }
+  });
+
+  it("keeps a manually expanded summary open when selection moves to another reply", () => {
+    const tree = (card?: string) => <>
+      {["first", "second"].map((id) => <ChatMessageBubble key={id} selectedDecisionId={card} message={{ ...BASE, id, decisions: [decision(id)] }} />)}
+    </>;
+    const view = render(tree());
+    fireEvent.click(screen.getAllByRole("button", { name: /^Turn details/ })[0]!);
+    view.rerender(tree("first"));
+    view.rerender(tree("second"));
+    for (const button of screen.getAllByRole("button", { name: /^Turn details/ })) expect(button).toHaveAttribute("aria-expanded", "true");
+    view.rerender(tree());
+    for (const button of screen.getAllByRole("button", { name: /^Turn details/ })) expect(button).toHaveAttribute("aria-expanded", "true");
   });
 
   it("folds permissions into one line: on their tool call, or grouped once with a count", () => {

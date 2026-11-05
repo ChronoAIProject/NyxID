@@ -8,6 +8,8 @@ pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
 pub mod assistant_resource;
+pub mod assistant_sharing;
+pub mod assistant_voice_announcement;
 pub mod assistant_wire_log;
 pub mod audit_log;
 pub mod auth_device_code;
@@ -33,6 +35,7 @@ pub mod channel_send_claim;
 pub mod channel_text_delivery;
 pub mod channel_thread;
 pub mod channel_thread_follow;
+pub mod channel_whatsapp_native;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
@@ -48,6 +51,10 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod execution_enrollment_job;
+pub mod execution_enrollment_repair;
+pub mod execution_permission;
+pub mod execution_proposal;
 pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
@@ -142,8 +149,10 @@ pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
 pub mod assistant_conversation;
 pub mod assistant_group;
+pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
+pub mod assistant_onboarding;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod assistant_skill_draft_attempt;
@@ -151,6 +160,8 @@ pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
+pub mod nyxbot_event_binding;
+pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
 pub mod service_change_event;
 pub mod usage_rollup_daily;
@@ -198,6 +209,9 @@ pub mod async_service_operation;
 pub mod catalog_icon;
 
 pub mod machine_runtime_billing;
+pub mod sandbox_billing;
+pub mod sandbox_billing_settings;
+pub mod sandbox_rate_card;
 
 pub mod machine_oauth_consent_request;
 
@@ -233,3 +247,9 @@ pub mod platform_help;
 pub mod nyxbot_gateway_release;
 
 pub mod discord_gateway;
+
+pub mod assistant_delegated_image;
+
+pub mod cma_session_origin;
+pub mod org_channel;
+pub mod voice_responses;

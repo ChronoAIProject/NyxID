@@ -1,3 +1,5 @@
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
+import { ServiceMonitoring } from "@/components/dashboard/service-monitoring";
 import { OwnershipTransferCard } from "@/components/shared/ownership-transfer-card";
 import { useOwnershipTransferAuthorization } from "@/hooks/use-ownership-transfers";
 import { ServiceHistory, ServiceAuthorshipFooter } from "@/components/dashboard/service-history";
@@ -149,13 +151,13 @@ function LarkPermissionSetupCard({
       <CardContent className="space-y-3">
         {scopes.length > 0 && (
           <div>
-            <p className="text-xs font-medium text-text-tertiary uppercase tracking-wide">
+            <p className="type-secondary-emphasis text-text-tertiary uppercase tracking-wide">
               Scopes pre-selected
             </p>
             <ul className="mt-2 flex flex-wrap gap-2">
               {scopes.map((scope) => (
                 <li key={scope}>
-                  <Badge variant="secondary" className="text-xs">
+                  <Badge variant="secondary" className="text-12">
                     {scope}
                   </Badge>
                 </li>
@@ -261,7 +263,7 @@ function GooglePermissionsSection({
       <CardContent className="space-y-3">
         <dl className="divide-y divide-border/50">
           {rows.map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between gap-3 py-2 text-12">
+            <div key={label} className="flex items-center justify-between gap-3 py-2 text-14">
               <dt>{label}</dt>
               <dd>
                 <Badge variant={value === "Not granted" ? "warning" : value === "Unknown" ? "secondary" : "success"}>
@@ -272,12 +274,12 @@ function GooglePermissionsSection({
           ))}
         </dl>
         {lastAuthorizedAt && (
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Last authorized {new Date(lastAuthorizedAt).toLocaleString()}
           </p>
         )}
         {granted && (
-          <details className="text-11 text-muted-foreground">
+          <details className="text-13 text-muted-foreground">
             <summary className="cursor-pointer">Reported OAuth scopes</summary>
             <ul className="mt-2 space-y-1 break-all font-mono">
               {grantedScopes?.map((scope) => <li key={scope}>{scope}</li>)}
@@ -351,7 +353,7 @@ function EndpointSection({
               value={url}
               onChange={(e) => setUrl(e.target.value)}
               placeholder="https://api.example.com/v1"
-              className="flex-1 text-12"
+              className="flex-1 text-14"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -381,7 +383,7 @@ function EndpointSection({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-14">
               {endpointUrl}
             </code>
             {!readOnly && (
@@ -472,7 +474,7 @@ function OpenApiSpecSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="https://api.example.com/openapi.json"
-              className="flex-1 text-12"
+              className="flex-1 text-14"
               type="url"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
@@ -489,7 +491,7 @@ function OpenApiSpecSection({
           </div>
         ) : specUrl ? (
           <div className="flex items-center justify-between gap-2">
-            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-12">
+            <code className="truncate rounded bg-muted px-2 py-1 font-mono text-14">
               {specUrl}
             </code>
             {!readOnly && (
@@ -597,7 +599,7 @@ function RecommendedSkillsSection({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder="nyxid-service-skill-authoring, my-service-skill"
-              className="flex-1 text-12"
+              className="flex-1 text-14"
             />
             <Button size="icon" variant="ghost" onClick={handleCancel}>
               <X className="h-4 w-4" />
@@ -618,7 +620,7 @@ function RecommendedSkillsSection({
                 <Badge
                   key={skill}
                   variant="secondary"
-                  className="font-mono text-11"
+                  className="font-mono text-12"
                 >
                   {skill}
                 </Badge>
@@ -735,43 +737,43 @@ function ApiKeySection({
           <Badge variant={credentialStatusMeta(status).variant}>
             {credentialStatusMeta(status).label}
           </Badge>
-          <span className="text-xs text-muted-foreground">
+          <span className="text-13 text-muted-foreground">
             Type: {credentialType}
           </span>
         </div>
 
         {errorMessage && (
-          <p className="text-xs text-destructive">{errorMessage}</p>
+          <p className="text-13 text-destructive">{errorMessage}</p>
         )}
 
         {expiresAt && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Expires: {new Date(expiresAt).toLocaleString()}
           </p>
         )}
 
         {lastUsedAt && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Last used: {new Date(lastUsedAt).toLocaleString()}
           </p>
         )}
 
         {readOnly ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This credential is shared from an org. Ask an admin of the owning
             org to rotate or replace it.
           </p>
         ) : credentialType === "node_managed" ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This credential is managed on the node agent. Update it on the node
             instead of storing it in NyxID.
           </p>
         ) : status === "pending_auth" ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Complete the required credential setup to activate this service.
           </p>
         ) : credentialType === "oauth2" ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This credential is managed through the provider connection flow.
           </p>
         ) : rotating ? (
@@ -961,14 +963,14 @@ function ServiceSection({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <code className="rounded bg-muted px-2 py-1 font-mono text-12">
+          <code className="rounded bg-muted px-2 py-1 font-mono text-14">
             /proxy/s/{slug}
           </code>
           <Badge variant={badgeVariant}>{badgeLabel}</Badge>
         </div>
 
         {credentialBlocked && (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             The service record is enabled, but its credential is{" "}
             <span className="font-medium text-foreground">
               {credentialStatus}
@@ -978,21 +980,21 @@ function ServiceSection({
         )}
 
         {credentialMissing && (
-          <p className="text-xs font-medium text-warning">
+          <p className="type-secondary-emphasis text-warning">
             Reconnect or delete this service before enabling it.
           </p>
         )}
 
         {nodeWarning && (
-          <p className="text-xs text-destructive font-medium">{nodeWarning}</p>
+          <p className="type-secondary-emphasis text-destructive">{nodeWarning}</p>
         )}
         {nodeHint && (
-          <p className="text-xs text-muted-foreground font-medium">
+          <p className="type-secondary-emphasis text-muted-foreground">
             {nodeHint}
           </p>
         )}
 
-        <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2">
+        <div className="grid gap-2 text-13 text-muted-foreground sm:grid-cols-2">
           <div>
             <span className="font-medium text-foreground">Auth method:</span>{" "}
             {authMethod}
@@ -1056,14 +1058,14 @@ function UserAgentOverrideSection({
       </CardHeader>
       <CardContent>
         <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">User-Agent</Label>
+          <Label className="text-muted-foreground">User-Agent</Label>
           {editingUa ? (
             <div className="flex items-center gap-2">
               <Input
                 value={uaDraft}
                 onChange={(e) => setUaDraft(e.target.value)}
                 placeholder="Passthrough (default)"
-                className="h-8 text-xs"
+                className="h-8 text-14"
                 maxLength={256}
               />
               <Button
@@ -1089,7 +1091,7 @@ function UserAgentOverrideSection({
             </div>
           ) : (
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs">
+              <span className="text-13">
                 {customUserAgent || (
                   <Badge variant="secondary">Passthrough (default)</Badge>
                 )}
@@ -1183,11 +1185,11 @@ function NodeSetupHelper({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        <p className="text-11 font-medium text-muted-foreground">
+        <p className="type-secondary-emphasis text-muted-foreground">
           Recommended (auto-detects requirements):
         </p>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14">
             {setupCommand}
           </pre>
           <Button
@@ -1199,9 +1201,9 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-11 font-medium text-muted-foreground">Manual:</p>
+        <p className="type-secondary-emphasis text-muted-foreground">Manual:</p>
         <div className="relative">
-          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-xs leading-relaxed">
+          <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 min-h-[44px] font-mono text-14">
             {manualCommand}
           </pre>
           <Button
@@ -1213,7 +1215,7 @@ function NodeSetupHelper({
             <Copy className="h-3.5 w-3.5" />
           </Button>
         </div>
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           The agent will prompt for the secret value securely. After adding, the
           credential will be encrypted and stored locally on the node.
         </p>
@@ -1254,9 +1256,9 @@ function SshConnectionSection({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid gap-4 text-12 sm:grid-cols-2">
+        <div className="grid gap-4 text-14 sm:grid-cols-2">
           <div>
-            <span className="text-xs font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               Host
             </span>
             <p>
@@ -1265,7 +1267,7 @@ function SshConnectionSection({
           </div>
           {certTtlMinutes !== null && (
             <div>
-              <span className="text-xs font-medium text-muted-foreground">
+              <span className="type-secondary-emphasis text-muted-foreground">
                 Certificate TTL
               </span>
               <p>{certTtlMinutes} minutes</p>
@@ -1275,12 +1277,12 @@ function SshConnectionSection({
 
         {principals && principals.length > 0 && (
           <div>
-            <span className="text-xs font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               Allowed Principals
             </span>
             <div className="mt-1 flex flex-wrap gap-1.5">
               {principals.map((p) => (
-                <Badge key={p} variant="secondary" className="text-xs">
+                <Badge key={p} variant="secondary" className="text-12">
                   {p}
                 </Badge>
               ))}
@@ -1290,11 +1292,11 @@ function SshConnectionSection({
 
         {caPublicKey && (
           <div>
-            <span className="text-xs font-medium text-muted-foreground">
+            <span className="type-secondary-emphasis text-muted-foreground">
               CA Public Key
             </span>
             <div className="relative mt-1">
-              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {caPublicKey}
               </pre>
               <Button
@@ -1310,8 +1312,8 @@ function SshConnectionSection({
         )}
 
         <div className="rounded-lg border border-border bg-muted/50 p-3 space-y-2">
-          <p className="text-xs font-medium">Target Machine Setup</p>
-          <ol className="list-decimal list-inside space-y-1 text-xs text-muted-foreground">
+          <p className="type-secondary-emphasis">Target Machine Setup</p>
+          <ol className="list-decimal list-inside space-y-1 text-13 text-muted-foreground">
             <li>
               Add the CA public key to{" "}
               <code className="rounded bg-background px-1">
@@ -1594,11 +1596,11 @@ function ApiUsageSection({
       </CardHeader>
       <CardContent className="min-w-0 space-y-4">
         <div>
-          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
+          <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">
             Base URL
           </p>
           <div className="relative">
-            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-12">
+            <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
               {proxyUrl}
             </pre>
             <Button
@@ -1610,7 +1612,7 @@ function ApiUsageSection({
               <Copy className="h-3.5 w-3.5" />
             </Button>
           </div>
-          <p className="mt-1.5 text-11 text-muted-foreground">
+          <p className="mt-1.5 text-13 text-muted-foreground">
             Append the downstream API path after this URL
             {examplePath ? (
               <>
@@ -1625,7 +1627,7 @@ function ApiUsageSection({
             . {authNote}
           </p>
           {showGenericEndpointExample && (
-            <p className="mt-1.5 text-11 text-muted-foreground">
+            <p className="mt-1.5 text-13 text-muted-foreground">
               Run{" "}
               <code className="rounded bg-background px-1">
                 nyxid catalog endpoints {catalogSlug}
@@ -1636,10 +1638,10 @@ function ApiUsageSection({
         </div>
 
         <div>
-          <p className="mb-1.5 text-11 font-medium text-muted-foreground">
+          <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">
             Authentication
           </p>
-          <div className="space-y-2 text-xs text-muted-foreground">
+          <div className="space-y-2 text-13 text-muted-foreground">
             <p>Authenticate with NyxID using one of these methods:</p>
             <ul className="list-disc list-inside space-y-1 pl-1">
               <li>
@@ -1672,18 +1674,18 @@ function ApiUsageSection({
 
         {apiKeyExample && (
           <div>
-            <p className="mb-1.5 text-11 font-medium text-muted-foreground">
+            <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">
               Example (with API key)
             </p>
             {modelExample.needsProviderModelNote && requestBody && (
-              <p className="mb-1.5 text-11 text-muted-foreground">
+              <p className="mb-1.5 text-13 text-muted-foreground">
                 Replace{" "}
                 <code className="rounded bg-background px-1">gpt-4o</code> with
                 your provider&apos;s model.
               </p>
             )}
             <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+              <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                 {apiKeyExample}
               </pre>
               <Button
@@ -1700,17 +1702,17 @@ function ApiUsageSection({
 
         {bearerTokenExample && (
           <details className="rounded-lg border border-border bg-muted/20 p-3">
-            <summary className="cursor-pointer text-xs font-medium text-muted-foreground">
+            <summary className="cursor-pointer type-secondary-emphasis text-muted-foreground">
               Advanced: Bearer token example
             </summary>
             <div className="mt-3 space-y-2">
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Bearer auth is intended for self-hosted deployments or
                 environments where you already have a NyxID access token. For
                 most users, prefer the API Key example above.
               </p>
               <div className="relative">
-                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+                <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
                   {bearerTokenExample}
                 </pre>
                 <Button
@@ -1848,7 +1850,7 @@ function LabelEditor({
   if (readOnly) {
     return (
       <h2
-        className="text-28 font-bold leading-none tracking-tight"
+        className="type-page-title tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -1890,7 +1892,7 @@ function LabelEditor({
         <Input
           value={label}
           onChange={(e) => setLabel(e.target.value)}
-          className="text-2xl font-normal tracking-tight md:text-4xl"
+          className="type-body tracking-tight md:type-body"
           autoFocus
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSave();
@@ -1915,7 +1917,7 @@ function LabelEditor({
   return (
     <div className="flex items-center gap-2">
       <h2
-        className="text-28 font-bold leading-none tracking-tight"
+        className="type-page-title tracking-tight"
         style={{ letterSpacing: "-0.03em" }}
       >
         {currentLabel}
@@ -2023,7 +2025,7 @@ function IconEditor({
                 aria-invalid={!valid}
               />
               {!valid && (
-                <p className="text-xs text-destructive">
+                <p className="text-13 text-destructive">
                   Enter an HTTP(S) image URL without credentials or a fragment.
                 </p>
               )}
@@ -2094,10 +2096,10 @@ function AccessPolicySection({
       <CardContent>
         <div className="flex items-center justify-between gap-4 rounded-lg border border-border/50 px-3 py-2">
           <div className="min-w-0">
-            <Label htmlFor="admin-only-policy" className="text-xs font-medium">
+            <Label htmlFor="admin-only-policy">
               Admin-only execution
             </Label>
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               When enabled, regular organization members cannot proxy this
               service. Organization admins retain access.
             </p>
@@ -2203,7 +2205,7 @@ function DefaultHeadersSection({
       <CardContent className="space-y-4">
         {catalogHeaders && catalogHeaders.length > 0 && (
           <div className="space-y-2">
-            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
               From catalog (admin-configured)
             </p>
             <DefaultHeadersEditor
@@ -2219,7 +2221,7 @@ function DefaultHeadersSection({
 
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+            <p className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">
               Your headers
             </p>
             {!readOnly && !editing && (
@@ -2246,7 +2248,7 @@ function DefaultHeadersSection({
                 errors={rowErrors}
               />
               {saveError && (
-                <p className="text-xs text-destructive">{saveError}</p>
+                <p className="text-13 text-destructive">{saveError}</p>
               )}
               <div className="flex justify-end items-center gap-2">
                 <Button
@@ -2352,10 +2354,10 @@ function WsFrameInjectionsSection({
     <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
         <div>
-          <h3 className="text-13 font-semibold text-foreground">
+          <h3 className="type-card-title text-foreground">
             WebSocket auth frames
           </h3>
-          <p className="text-11 text-muted-foreground mt-0.5">
+          <p className="text-13 text-muted-foreground mt-0.5">
             User-owned frame injection rules for post-upgrade auth.
           </p>
         </div>
@@ -2404,7 +2406,7 @@ function WsFrameInjectionsSection({
         <div className="px-5 py-4">
           <Badge variant="secondary">{rules.length}/4 rules</Badge>
           {rules.length === 0 && (
-            <p className="mt-2 text-12 text-muted-foreground">
+            <p className="mt-2 text-14 text-muted-foreground">
               No user-owned WebSocket auth-frame rules.
             </p>
           )}
@@ -2421,6 +2423,7 @@ export function KeyDetailPage() {
 }
 
 function KeyDetailView({ keyId }: { readonly keyId: string }) {
+  const monitoringEnabled = useAuthStore((state) => userHasFeature(state.user, FEATURE_FLAG.SERVICE_MONITORING));
   const navigate = useNavigate();
   const identity = useAuthStore((state) => state.user?.id);
   const search = useSearch({ strict: false }) as {
@@ -2588,12 +2591,12 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
         />
       )}
       {import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1" && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-13">
           <p>Local preview · full details from production. Account changes and execution are disabled.</p>
           <Link to="/keys" search={{ view: "routing" }} className="font-medium text-primary-text hover:underline">Back to services</Link>
         </div>
       )}
-      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex text-xs text-muted-foreground hover:text-foreground">
+      <Link to="/keys/services/$groupId" params={{ groupId: keyInfo.catalog_service_id ? `catalog:${keyInfo.catalog_service_id}` : `connection:${keyInfo.id}` }} className="inline-flex type-row-title text-muted-foreground hover:text-foreground">
         ← All {keyInfo.catalog_service_name ?? keyInfo.label} service details
       </Link>
       <div className="flex flex-col gap-2">
@@ -2609,7 +2612,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
             <div className="flex flex-col gap-2">
               {keyInfo.auto_connected ? (
                 <h2
-                  className="text-28 font-bold leading-none tracking-tight"
+                  className="type-page-title tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
                 >
                   {keyInfo.label}
@@ -2622,7 +2625,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                 />
               )}
               <div className="flex items-center gap-2">
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   {keyInfo.catalog_service_name
                     ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
                     : `/proxy/s/${keyInfo.slug}`}
@@ -2694,10 +2697,10 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <Shield className="h-4.5 w-4.5 text-success" />
             </div>
             <div>
-              <p className="text-13 font-semibold text-foreground">
+              <p className="type-card-title text-foreground">
                 Shared from {source.org_name}
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 You are a {source.role} of this organization and can
                 {source.allowed
                   ? " use this credential through the proxy, but only admins can modify it."
@@ -2710,10 +2713,10 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
           <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
             <div className="space-y-1">
-              <p className="text-13 font-semibold text-foreground">
+              <p className="type-card-title text-foreground">
                 Credential missing
               </p>
-              <p className="text-12 text-warning">
+              <p className="text-14 text-warning">
                 The stored credential no longer exists. Reconnect or delete this service.
               </p>
             </div>
@@ -2723,6 +2726,9 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
 
       {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
 
+      {monitoringEnabled && tab === "overview" && keyInfo.service_type === "http" && (source?.type !== "org" || source.allowed) && (
+        <ServiceMonitoring key={`${identity}:${keyInfo.id}`} serviceId={keyInfo.id} />
+      )}
       <ServiceAuthorshipFooter authorship={keyInfo.authorship} />
       {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
         <Tabs
@@ -2742,27 +2748,27 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               <CardDescription>{autoConnectedDescription}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
-              <div className="grid gap-4 text-12 sm:grid-cols-2">
+              <div className="grid gap-4 text-14 sm:grid-cols-2">
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Endpoint
                   </span>
-                  <p className="text-xs">Platform managed</p>
+                  <p className="text-13">Platform managed</p>
                 </div>
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Proxy Path
                   </span>
-                  <p className="text-xs">/proxy/s/{keyInfo.slug}</p>
+                  <p className="text-13">/proxy/s/{keyInfo.slug}</p>
                 </div>
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Auth Method
                   </span>
-                  <p className="text-xs">{autoConnectedAuthLabel}</p>
+                  <p className="text-13">{autoConnectedAuthLabel}</p>
                 </div>
                 <div>
-                  <span className="text-xs font-medium text-muted-foreground">
+                  <span className="type-secondary-emphasis text-muted-foreground">
                     Routing
                   </span>
                   {/*
@@ -2772,7 +2778,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
                     but the display now reflects reality if the key
                     happens to be node-routed.
                   */}
-                  <p className="text-xs">
+                  <p className="text-13">
                     {nodeName && keyInfo?.node_id ? (
                       <Link
                         to="/nodes/$nodeId"
@@ -2841,7 +2847,7 @@ function KeyDetailView({ keyId }: { readonly keyId: string }) {
               mechanics. */}
           {keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
             <details className="rounded-xl border border-border/50 bg-card p-4">
-              <summary className="cursor-pointer text-sm font-medium text-foreground">
+              <summary className="cursor-pointer type-row-title text-foreground">
                 Advanced: inherited request headers
               </summary>
               <div className="mt-4">

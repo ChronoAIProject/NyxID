@@ -1,4 +1,5 @@
 import { ApiError } from "@/lib/api-client";
+import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
 import {
   ChevronLeft,
@@ -33,12 +34,12 @@ function ReplyContext({
 }) {
   if (!context)
     return (
-      <span className="text-11 text-text-tertiary">
+      <span className="text-13 text-text-tertiary">
         Reply details unavailable
       </span>
     );
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-11 text-text-tertiary">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-13 text-text-tertiary">
       <span>
         {context.agent_kind === "nyxbot"
           ? "NyxBot"
@@ -98,13 +99,10 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
     <Card aria-labelledby="assistant-feedback-heading">
       <div className="space-y-4 border-b border-border/50 p-4">
         <div>
-          <h2
-            id="assistant-feedback-heading"
-            className="font-display text-15 font-semibold leading-none tracking-tight"
-          >
+          <h2 id="assistant-feedback-heading" className="font-display type-card-title tracking-tight">
             Recent feedback
           </h2>
-          <p className="mt-1 text-12 text-muted-foreground">
+          <p className="mt-1 text-14 text-muted-foreground">
             Read what users found helpful and what needs attention.
           </p>
         </div>
@@ -131,7 +129,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
           </div>
         )}
         <div className="flex flex-wrap items-end gap-3">
-          <label className="w-36 space-y-1 text-11 text-muted-foreground">
+          <Label className="w-36 space-y-1 text-muted-foreground">
             Vote
             <Select
               value={vote}
@@ -149,8 +147,8 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                 <SelectItem value="down">Not helpful</SelectItem>
               </SelectContent>
             </Select>
-          </label>
-          <label className="w-36 space-y-1 text-11 text-muted-foreground">
+          </Label>
+          <Label className="w-36 space-y-1 text-muted-foreground">
             Agent
             <Select
               value={agentKind}
@@ -168,7 +166,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                 <SelectItem value="specialist">Specialist</SelectItem>
               </SelectContent>
             </Select>
-          </label>
+          </Label>
           <form
             className="flex items-end gap-2"
             onSubmit={(event) => {
@@ -178,7 +176,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
               setModel(typeof value === "string" ? value.trim() : "");
             }}
           >
-            <label className="space-y-1 text-11 text-muted-foreground">
+            <Label className="space-y-1 text-muted-foreground">
               Model
               <Input
                 key={model}
@@ -187,7 +185,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                 defaultValue={model}
                 className="w-44"
               />
-            </label>
+            </Label>
             <Button type="submit" variant="outline">
               Apply
             </Button>
@@ -206,21 +204,21 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
             </Button>
           )}
         </div>
-        <p className="text-11 text-text-tertiary">
+        <p className="text-13 text-text-tertiary">
           These filters apply to the feedback list. Charts show all feedback in
           the selected period.
         </p>
       </div>
       <div aria-busy={query.isFetching}>
         {query.isFetching && !query.isPending && (
-          <p role="status" className="px-4 pt-3 text-11 text-muted-foreground">
+          <p role="status" className="px-4 pt-3 text-13 text-muted-foreground">
             Updating feedback…
           </p>
         )}
         {query.isError ? (
           <div
             role="alert"
-            className="flex items-center justify-between gap-3 p-4 text-12"
+            className="flex items-center justify-between gap-3 p-4 text-14"
           >
             <span>
               {data
@@ -254,13 +252,13 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                     </Badge>
                     <time
                       dateTime={row.created_at}
-                      className="font-mono text-11 text-text-tertiary"
+                      className="font-mono text-13 text-text-tertiary"
                     >
                       {new Date(row.created_at).toLocaleString()}
                     </time>
                   </div>
                   <p
-                    className={`my-3 whitespace-pre-wrap break-words text-13 ${row.comment ? "text-foreground" : "text-text-tertiary"}`}
+                    className={`my-3 whitespace-pre-wrap break-words text-15 ${row.comment ? "text-foreground" : "text-text-tertiary"}`}
                   >
                     {row.comment || "No comment provided"}
                   </p>
@@ -274,11 +272,11 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
                     />
                   )}
                   {!data.can_preview_threads && (
-                    <p className="mt-2 text-11 text-text-tertiary">
+                    <p className="mt-2 text-13 text-text-tertiary">
                       Thread previews require Admin or Operator access.
                     </p>
                   )}
-                  <details className="mt-2 text-11 text-text-tertiary">
+                  <details className="mt-2 text-13 text-text-tertiary">
                     <summary className="w-fit cursor-pointer">
                       Reply details
                     </summary>
@@ -315,12 +313,12 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
               className="mx-auto mb-3 size-5 text-text-tertiary"
               aria-hidden="true"
             />
-            <p className="text-13 font-medium">
+            <p className="type-card-title">
               {filtered
                 ? "No feedback matches these filters."
                 : "No feedback in this period."}
             </p>
-            <p className="mt-1 text-12 text-muted-foreground">
+            <p className="mt-1 text-14 text-muted-foreground">
               {filtered
                 ? "Try another vote, agent, or model."
                 : "Votes and comments appear here when users rate a reply."}
@@ -330,7 +328,7 @@ function FeedbackList({ range }: { range?: URLSearchParams }) {
       </div>
       {(page > 0 || data?.next_cursor) && (
         <div className="flex items-center justify-between border-t border-border/50 px-4 py-3">
-          <span className="text-11 text-text-tertiary">
+          <span className="text-13 text-text-tertiary">
             Page {page + 1} · up to 100 ratings per page
           </span>
           <div className="flex gap-2">

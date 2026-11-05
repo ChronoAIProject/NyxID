@@ -105,6 +105,7 @@ function images(
       label: attachment.label,
       origin: attachment.origin || undefined,
       ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
+      ...(attachment.image_input_reason ? { imageInputReason: attachment.image_input_reason } : {}),
     })),
   };
 }
@@ -114,7 +115,7 @@ function path(id: string): string {
   return `${ROOT}/conversations/${id}`;
 }
 
-export function storedError(code: string | null, capacityWaitMs?: number | null): string {
+export function storedError(code: string | null, capacityWaitMs?: number | null, modelRouteReason?: string): string {
   const billing = billingError(code);
   if (billing) return billing.message;
   if (code === "tool_budget_exhausted" || code === "turn_timeout") return "This task reached its automatic continuation limit. Its context is saved; resume to continue, or adjust the limit in NyxBot settings.";
@@ -140,7 +141,13 @@ export function storedError(code: string | null, capacityWaitMs?: number | null)
   if (code === "first_byte_timeout") return "The assistant did not start responding in time. Try again.";
   if (code === "invalid_stream") return "The assistant stream ended unexpectedly. Try again.";
   if (code === "output_too_large") return "The assistant reached its response limit.";
-  if (code === "guest_model_route_required") return "This assistant isn't available to guests yet.";
+  if (code === "guest_model_route_required") {
+    const setup = ["model_route_unavailable", "model_connection_unavailable", "credits_unavailable",
+      "setup_timeout", "setup_capacity"].includes(modelRouteReason ?? "");
+    return setup
+      ? "Visitor setup could not finish. The owner has been notified. Please try again later."
+      : "This assistant can't answer right now. Please try again later.";
+  }
   if (code === "nyxid_error") return "NyxID could not authorize the assistant operation.";
   if (code === "stale_response") return "The assistant context changed. Start a new turn.";
   if (code === "context_unavailable") return "The assistant context could not be restored. Try a new turn.";
@@ -397,6 +404,8 @@ export class NyxAgentTransport {
       this.requests.delete(controller);
     }
     const page = nyxAgentHistorySchema.parse(response);
+    // New servers keep `approvals` pending-only for older clients.
+    page.approvals = page.approval_history ?? page.approvals;
     this.current(generation);
     if (rowRevision !== this.rowRevisions.get(id) || card !== this.reviewCards.get(id)) {
       throw new DOMException("Conversation changed", "AbortError");
@@ -605,6 +614,7 @@ export class NyxAgentTransport {
       if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
+        actionOutcome: message.action_outcome,
         recovery: message.recovery,
         id: message.id,
         feedback: message.feedback ?? undefined,
@@ -613,7 +623,7 @@ export class NyxAgentTransport {
         timestamp: Date.parse(message.created_at),
         turnId: message.turn_id,
         status: failed ? "error" : message.error_code === "cancelled" ? "stopped" : "complete",
-        error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms) : undefined,
+        error: failed ? storedError(message.error_code, message.error_detail?.capacity_wait_ms, message.turn_metadata?.failure_reason?.model_route?.reason) : undefined,
         channelDelivery: message.turn_metadata?.channel_delivery,
         turnMetadata: message.turn_metadata ? { attempts: message.turn_metadata.attempts, capacityWaitMs: message.turn_metadata.capacity_wait_ms } : undefined,
         errorDetail: message.error_detail ? { failureReason: message.turn_metadata?.failure_reason, attempts: message.error_detail.attempts, capacityWaitMs: message.error_detail.capacity_wait_ms, upstreamCode: message.upstream_error_code, stage: message.error_detail.stage, httpStatus: message.error_detail.http_status, upstreamRequestId: message.error_detail.upstream_request_id, responseId: message.error_detail.response_id, continuations: message.error_detail.continuations, turnId: message.error_detail.turn_id, occurredAt: message.error_detail.occurred_at } : undefined,
@@ -649,7 +659,7 @@ export class NyxAgentTransport {
           live: Boolean(live),
           pendingApproval: Boolean(
             (history?.acknowledgements ?? []).some((row) => row.status === "pending")
-            || (history?.approvals ?? []).length,
+            || (history?.approvals ?? []).some((row) => !row.status || row.status === "pending"),
           ),
           retrying: Boolean(live?.retrying),
           interrupted: this.interrupted.has(id ?? "draft"),
@@ -668,6 +678,7 @@ export class NyxAgentTransport {
         const cached = streaming ? undefined : this.liveViews.get(message);
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
+          actionOutcome: settled?.action_outcome,
           recovery: settled?.recovery,
           id: message.id,
           role: settled?.role ?? message.role,
@@ -749,7 +760,7 @@ export class NyxAgentTransport {
     }
     // Build a linear, exact-turn join. A settled decision folds into its
     // reply's turn summary (beside the tool call that raised it); pending
-    // cards and authored-skill reviews keep their own virtual row and stable
+    // cards, expired requests and authored-skill reviews keep their own virtual row and stable
     // card ID, so deep links and offscreen focusing keep working.
     const replies = new Map(messages.filter((m) => m.role === "assistant" && m.turnId)
       .map((m) => [m.turnId!, m.id]));
@@ -762,7 +773,7 @@ export class NyxAgentTransport {
         role: "system", content: acknowledgement.summary, timestamp, status: "complete",
       };
       const reply = acknowledgement.creation_turn_id && replies.get(acknowledgement.creation_turn_id);
-      if (acknowledgement.status !== "pending" && reply && !acknowledgement.authored_skill) {
+      if (acknowledgement.status !== "pending" && acknowledgement.status !== "expired" && reply && !acknowledgement.authored_skill) {
         folded.set(reply, [...(folded.get(reply) ?? []), acknowledgement]);
       } else if (acknowledgement.status !== "pending" && reply) {
         const rows = footers.get(reply) ?? [];

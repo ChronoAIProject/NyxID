@@ -83,7 +83,8 @@ async fn complete_meter(
         return Ok(false);
     }
     if rows.iter().any(|row| {
-        row.billing_owner_id != ctx.billing_owner_id
+        row.org_channel_guest != ctx.org_channel_guest.as_ref().map(|g| g.usage())
+            || row.billing_owner_id != ctx.billing_owner_id
             || row.actor_user_id != ctx.actor_user_id
             || row.api_key_id != ctx.api_key_id
             || row.service_id.as_deref()
@@ -523,6 +524,27 @@ pub(super) async fn settle_voice_window(
     seconds: i64,
     initial_window: bool,
 ) -> AppResult<()> {
+    settle_voice_checkpoint(
+        db,
+        request_id,
+        PlatformUsage {
+            voice_seconds: seconds,
+            requests: i64::from(initial_window && seconds > 0),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+/// A durable voice checkpoint supplies observed units; the existing meter owns
+/// pricing, funding, finalization and idempotent settlement for every component.
+pub(crate) async fn settle_voice_checkpoint(
+    db: &mongodb::Database,
+    request_id: &str,
+    usage: PlatformUsage,
+    model: Option<String>,
+) -> AppResult<()> {
     reservation::release_unforwarded_rows(
         db,
         request_id,
@@ -536,23 +558,15 @@ pub(super) async fn settle_voice_window(
         .await?
         .try_collect()
         .await?;
-    let usage = PlatformUsage {
-        voice_seconds: seconds,
-        ..Default::default()
-    };
     let mut finalized = Vec::new();
     for row in rows {
         if let Some(saved) = finalize_matching(
             db,
             doc! {"_id":&row.id,"status":"forwarded"},
-            if row.metric == BillingMetric::Requests {
-                i64::from(initial_window && seconds > 0)
-            } else {
-                platform_quantity(row.metric, &usage)
-            },
-            None,
-            None,
-            None,
+            platform_quantity(row.metric, &usage),
+            model.clone(),
+            Some(&usage),
+            usage.reported_model.as_deref(),
             None,
             Utc::now(),
         )
@@ -712,6 +726,7 @@ pub(super) fn reserved_row(
         .then(|| ctx.operation.clone())
         .flatten();
     UsageMeterRow {
+        org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -991,6 +1006,9 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
         BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
+        BillingMetric::SandboxCpuMillisSeconds => "cma_sandbox_cpu_millis_seconds",
+        BillingMetric::SandboxMemoryMibSeconds => "cma_sandbox_memory_mib_seconds",
+        BillingMetric::SandboxDiskGibSeconds => "cma_sandbox_disk_gib_seconds",
     }
 }
 
@@ -1006,7 +1024,10 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Images => usage.images.max(0),
         BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
         // Machine runtime is measured by its evidence-bound interval path.
-        BillingMetric::MachineRunningSeconds => 0,
+        BillingMetric::MachineRunningSeconds
+        | BillingMetric::SandboxCpuMillisSeconds
+        | BillingMetric::SandboxMemoryMibSeconds
+        | BillingMetric::SandboxDiskGibSeconds => 0,
     }
 }
 

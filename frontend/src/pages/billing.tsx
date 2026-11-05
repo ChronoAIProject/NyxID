@@ -1,3 +1,8 @@
+import { useOrgs } from "@/hooks/use-orgs";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { rememberBillingCheckout } from "@/lib/billing-checkout-return";
+import { useAuthStore } from "@/stores/auth-store";
 import { BillingBill } from "@/components/billing/billing-bill";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import {
@@ -41,11 +46,44 @@ import {
 } from "@/schemas/billing";
 import "@/components/billing/billing-page.css";
 
-export function BillingPage({
-  presentation = "page",
-}: {
-  readonly presentation?: "page" | "panel";
-} = {}) {
+export function BillingPage({ presentation = "page" }: { readonly presentation?: "page" | "panel" } = {}) {
+  const account = useAccountPanel();
+  const locationSearch = useSearch({ strict: false });
+  const search = normalizeBillingSearch(presentation === "panel" ? billingPanelSearch(account.current) : locationSearch);
+  const orgs = useOrgs();
+  const navigate = useNavigate();
+  const admins = (orgs.data ?? []).filter((org) => org.your_role === "admin" || org.your_role === "owner");
+  const ownerId = search.ownerId;
+  const selected = admins.find((org) => org.id === ownerId);
+  const allowed = !ownerId || Boolean(selected);
+  function selectOwner(value: string) {
+    const next = value === "personal" ? undefined : value;
+    if (presentation === "panel") {
+      void account.update({ panelOwnerId: next, panelService: undefined, panelServices: undefined, panelAction: undefined }, "push");
+    } else {
+      void navigate({ to: "/billing", search: billingUrlSearch({ ...search, ownerId: next, services: [], action: undefined }) });
+    }
+  }
+  return <div className="billing-page space-y-6">
+    {presentation === "page" && <PageHeader title="Billing & Usage" description="Your balance, benefits, and usage in one place." />}
+    <div className="flex flex-wrap items-center gap-3">
+      <Label htmlFor="billing-owner">Billing owner</Label>
+      <Select value={ownerId ?? "personal"} onValueChange={selectOwner}>
+        <SelectTrigger id="billing-owner" className="w-full sm:w-64"><SelectValue placeholder="Organization" /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="personal">Personal</SelectItem>
+          {admins.map((org) => <SelectItem key={org.id} value={org.id}>{org.display_name ?? org.slug}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+    {orgs.isError && <ErrorBanner message="Organizations could not be loaded." onRetry={() => void orgs.refetch()} />}
+    {ownerId && orgs.isLoading ? <Skeleton className="h-40 w-full" /> : !allowed ?
+      <p role="alert" className="type-body text-muted-foreground">Organization billing is available only to its admins. Select Personal or an organization you administer.</p> :
+      <BillingContent key={ownerId ?? "personal"} presentation={presentation} ownerId={ownerId} />}
+  </div>;
+}
+
+function BillingContent({ presentation, ownerId }: { presentation: "page" | "panel"; ownerId?: string }) {
   const account = useAccountPanel();
   const locationSearch: Record<string, unknown> = useSearch({ strict: false });
   const rawSearch =
@@ -56,8 +94,9 @@ export function BillingPage({
   const navigate = useNavigate();
   const { tab, period } = search;
   const [topUpOpen, setTopUpOpen] = useState(false);
-  const walletQuery = useBillingWallet();
-  const usageQuery = useBillingUsage(period);
+  const walletQuery = useBillingWallet(ownerId);
+  const actorId = useAuthStore((state) => state.user?.id);
+  const usageQuery = useBillingUsage(period, undefined, ownerId);
   const catalogQuery = useCatalog({ includeAll: true });
   const provisionWallet = useProvisionBillingWallet();
   const topUpBilling = useTopUpBilling();
@@ -71,8 +110,9 @@ export function BillingPage({
         .filter((group) => selected.includes(group.key))
         .flatMap((group) => group.rows)
     : (usageQuery.data?.rows ?? []);
-  const walletUnavailable = isBillingNotConfigured(walletQuery.error);
-  const wallet = walletQuery.data;
+  const walletUnavailable = (Boolean(ownerId) && walletQuery.data === null) || isBillingNotConfigured(walletQuery.error);
+  const wallet = walletQuery.data ?? undefined;
+  const needsSubscription = Boolean(ownerId && wallet && !wallet.lago_subscription_id);
   const billingCapability = usageQuery.data?.billing;
   const billingReady = Boolean(
     billingCapability?.charging_enabled && billingCapability?.lago_configured,
@@ -127,16 +167,9 @@ export function BillingPage({
   );
   const selectionKey = JSON.stringify(selected);
   useEffect(() => {
-    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale)
-      pruneSelection();
-  }, [
-    usageQuery.isSuccess,
-    usageQuery.isFetching,
-    selectionStale,
-    selectionKey,
-    search.tab,
-  ]);
-  const topUpReady = Boolean(wallet) && billingReady;
+    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale) pruneSelection();
+  }, [usageQuery.isSuccess, usageQuery.isFetching, selectionStale, selectionKey, search.tab]);
+  const topUpReady = Boolean(wallet) && billingReady && !needsSubscription;
   const topUpSettled =
     !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
   // `action=topup` opens Add credits once the wallet can take a top-up (else
@@ -158,7 +191,7 @@ export function BillingPage({
   }, [wantsTopUp]);
   async function handleProvisionWallet() {
     try {
-      await provisionWallet.mutateAsync({});
+      await provisionWallet.mutateAsync(ownerId ? { owner_id: ownerId } : {});
       toast.success("Billing wallet provisioned");
     } catch (error) {
       toast.error(errorMessage(error, "Failed to provision billing wallet"));
@@ -168,9 +201,11 @@ export function BillingPage({
   async function handleTopUp(amountCredits: number) {
     try {
       const checkout = await topUpBilling.mutateAsync({
+        ...(ownerId ? { owner_id: ownerId } : {}),
         amount_credits: amountCredits,
         idempotency_key: crypto.randomUUID(),
       });
+      rememberBillingCheckout(actorId, ownerId, presentation);
       openExternal(checkout.checkout_url);
     } catch (error) {
       toast.error(errorMessage(error, "Failed to create top-up checkout"));
@@ -179,12 +214,6 @@ export function BillingPage({
 
   return (
     <div className="billing-page space-y-6">
-      {presentation === "page" && (
-        <PageHeader
-          title="Billing & Usage"
-          description="Your balance, benefits, and usage in one place."
-        />
-      )}
       <Tabs
         value={tab}
         onValueChange={(value) =>
@@ -196,9 +225,9 @@ export function BillingPage({
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
         </TabsList>
-        <AvailableBenefits catalog={catalog} />
+        <AvailableBenefits key={ownerId ?? "personal"} catalog={catalog} ownerId={ownerId} />
         {billingCapability && !billingReady && (
-          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-12 text-warning">
+          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-14 text-warning">
             Billing is not available on this deployment.
           </div>
         )}
@@ -235,17 +264,18 @@ export function BillingPage({
             onProvision={() => void handleProvisionWallet()}
             provisioning={provisionWallet.isPending}
             billingReady={billingReady}
+            needsSubscription={needsSubscription}
             onTopUp={handleTopUp}
             topUpPending={topUpBilling.isPending}
             topUpOpen={topUpOpen}
             onTopUpOpenChange={setTopUpOpen}
           />
-          <BillingMachines />
-          <BillingBill enabled={billingReady} />
-          <BillingTopUpHistory />
+          {!ownerId && <BillingMachines />}
+          <BillingBill enabled={billingReady && (!ownerId || Boolean(wallet?.lago_subscription_id))} ownerId={ownerId} />
+          <BillingTopUpHistory ownerId={ownerId} presentation={presentation} />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
-          <p className="text-12 text-text-tertiary">
+          <p className="text-14 text-text-tertiary">
             Credit usage includes voice calls, dictation, and assistant tasks.
             Explore a service below for its recorded usage and charges.
           </p>
@@ -270,7 +300,7 @@ export function BillingPage({
           ) : (
             <>
               <BillingUsageSummary rows={rows} />
-              <BillingActivity />
+              {!ownerId && <BillingActivity />}
               <BillingUsageExplorer
                 catalog={catalog}
                 rows={rows}
@@ -290,6 +320,7 @@ function billingUrlSearch(search: BillingSearch) {
     period: search.period,
     services: search.services.length ? search.services : undefined,
     action: search.action,
+    ownerId: search.ownerId,
   };
 }
 

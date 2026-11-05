@@ -13,7 +13,9 @@ pub fn negotiated(channel: &NyxbotChannel) -> bool {
         && matches!(channel.platform.as_str(), "lark" | "feishu")
 }
 pub fn supports(channel: &NyxbotChannel) -> bool {
-    channel.transport == "direct" || negotiated(channel)
+    channel.transport == "direct"
+        || negotiated(channel)
+        || (channel.platform == "discord" && crate::services::nyxbot_gateway_source::ready(channel))
 }
 
 /// Management-time projection keeps dormant and explicitly non-follow chats

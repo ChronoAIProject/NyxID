@@ -1,3 +1,5 @@
+import copy
+import fnmatch
 import unittest
 from pathlib import Path
 
@@ -10,6 +12,8 @@ from ci_gate_reuse import (
     decide_from_api,
     newest_completed_successful_run,
     strict_load_workflow,
+    _has_event_sensitive_steps,
+    _load_workflow_bundle,
 )
 
 
@@ -69,6 +73,152 @@ def decision_jobs():
 
 
 class GateReuseTests(unittest.TestCase):
+    def test_machine_pr_paths_include_backend_cli_and_ci_without_broad_docs_or_frontend(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        filter_step = next(step for step in workflow["jobs"]["changes"]["steps"]
+                           if step.get("id") == "filter")
+        filters = strict_load_workflow(filter_step["with"]["filters"])
+        condition = workflow["jobs"]["machine-container"]["if"]
+        self.assertEqual(condition.strip(),
+                         "!(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'machine-container')) && "
+                         "(inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.machine == 'true')")
+        cases = {
+            "backend/src/handlers/nyxbot.rs": True,
+            "backend/Cargo.toml": True,
+            "cli/src/commands/auth.rs": True,
+            "cli/Dockerfile.machine": True,
+            "cli/tests/machine_updater_e2e.sh": True,
+            "cli/resources/machine-container/seccomp.json": True,
+            "machine/src/main.rs": True,
+            "machine-updater/src/main.rs": True,
+            ".github/workflows/ci.yml": True,
+            ".github/actions/ci-rust-cache/action.yml": True,
+            ".github/scripts/ci_gate_reuse.py": True,
+            ".github/CODEOWNERS": True,
+            "Cargo.toml": True,
+            "Cargo.lock": True,
+            # Preserve the existing narrow machine integration triggers.
+            "frontend/scripts/machine-seccomp.ts": True,
+            "frontend/src/schemas/machines.ts": True,
+            "frontend/src/routes/index.tsx": False,
+            "frontend/package-lock.json": False,
+            "docs/AI_AGENT_PLAYBOOK.md": False,
+            "docs/ci/ACTIONS_CACHE_BUDGET.md": False,
+            "README.md": False,
+            "sdk/src/index.ts": False,
+            "cloud-auth/src/lib.rs": False,
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path):
+                # These filters contain only positive globs. The fixtures use
+                # literal paths and ** descendants, with no extglob semantics.
+                matches = any(fnmatch.fnmatchcase(path, pattern)
+                              for lane in ("machine", "ci") for pattern in filters[lane])
+                self.assertEqual(matches, expected)
+
+    def test_real_machine_success_is_reused_with_input_disabled_skipped_leaf(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        analysis = analyze_workflow(workflow, workflows)
+        self.assertEqual(analysis.reusable["machine-container"].exact_names,
+                         ("Machine Container E2E",))
+        self.assertFalse(_has_event_sensitive_steps(workflow["jobs"]["machine-container"]))
+        observed = [job(name) for spec in analysis.reusable.values() for name in spec.exact_names]
+        observed.append(job("Coverage (Backend) / Billing route coverage smoke", "skipped"))
+        for prefix in ("", CI_GATE_PREFIX):
+            with self.subTest(prefix=prefix):
+                prefixed = [{**item, "name": prefix + item["name"]} for item in observed]
+                decision = assess_tree_and_jobs(
+                    workflow=workflow, reusable_workflows=workflows,
+                    current_tree="tree", tested_tree="tree", jobs=prefixed,
+                    source="pull_request" if not prefix else "main_gate", prefix=prefix,
+                    run={"id": 7},
+                )
+                self.assertTrue(decision.reuse, decision.reason)
+                self.assertIn("machine-container", decision.jobs)
+                self.assertIn("coverage-backend", decision.jobs)
+                self.assertNotIn("claude-plugin-validate", decision.jobs)
+
+    def test_real_machine_skipped_failed_missing_or_different_tree_is_not_reused(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        for conclusion in ("success", "skipped", "failure", "cancelled", None, "missing"):
+            for same_tree in (True, False):
+                with self.subTest(conclusion=conclusion, same_tree=same_tree):
+                    observed = [] if conclusion == "missing" else [job("Machine Container E2E", conclusion)]
+                    decision = assess_tree_and_jobs(
+                        workflow=workflow, reusable_workflows=workflows,
+                        current_tree="tree", tested_tree="tree" if same_tree else "other",
+                        jobs=observed, source="pull_request", run={"id": 7},
+                    )
+                    self.assertEqual("machine-container" in decision.jobs,
+                                     same_tree and conclusion == "success")
+
+    def test_real_rust_jobs_have_event_insensitive_exact_identities(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        analysis = analyze_workflow(workflow, workflows)
+        expected = {
+            "rust-clippy": ("Rust Clippy",),
+            "rust-features": ("Rust Features (aws-kms)", "Rust Features (gcp-kms)",
+                              "Rust Features (aws-and-gcp-kms)"),
+            "cli-test": ("CLI Test",),
+            "permissions-test": ("Google Permissions",),
+            "coverage-cli": ("Coverage (CLI)",),
+        }
+        for job_id, names in expected.items():
+            with self.subTest(job=job_id):
+                self.assertFalse(_has_event_sensitive_steps(workflow["jobs"][job_id]))
+                self.assertEqual(analysis.reusable[job_id].exact_names, names)
+        self.assertEqual(len(analysis.leaf_names), len(set(analysis.leaf_names)))
+        self.assertNotIn("claude-plugin-validate", analysis.reusable)
+        self.assertTrue(_has_event_sensitive_steps(workflow["jobs"]["claude-plugin-validate"]))
+        for job_id in ("backend-image-smoke", "coverage-cli-base", "coverage-cli-summary"):
+            self.assertNotIn(job_id, analysis.candidates)
+
+    def test_real_feature_matrix_requires_every_exact_successful_variant(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        workflow = workflows[".github/workflows/ci.yml"]
+        names = analyze_workflow(workflow, workflows).reusable["rust-features"].exact_names
+        for conclusion in ("success", "failure", "skipped", "cancelled", None):
+            observed = [job(name) for name in names[:-1]] + [job(names[-1], conclusion)]
+            decision = assess_tree_and_jobs(
+                workflow=workflow, reusable_workflows=workflows,
+                current_tree="tree", tested_tree="tree", jobs=observed,
+                source="pull_request", run={"id": 7},
+            )
+            self.assertEqual("rust-features" in decision.jobs, conclusion == "success")
+        # A result under the old display name cannot stand in for the new one.
+        decision = assess_tree_and_jobs(
+            workflow=workflow, reusable_workflows=workflows,
+            current_tree="tree", tested_tree="tree",
+            jobs=[job(name) for name in names[:-1]] + [job("Rust Features (aws-kms,gcp-kms)")],
+            source="pull_request", run={"id": 7},
+        )
+        self.assertNotIn("rust-features", decision.jobs)
+
+    def test_real_rust_jobs_lose_reuse_if_event_sensitive_saves_return(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        for job_id in ("rust-clippy", "rust-features", "cli-test", "permissions-test"):
+            workflow = copy.deepcopy(workflows[".github/workflows/ci.yml"])
+            workflow["jobs"][job_id]["steps"].append({
+                "if": "github.ref == 'refs/heads/main' && success()",
+                "uses": "actions/cache/save@v4",
+            })
+            self.assertNotIn(job_id, analyze_workflow(workflow, workflows).reusable)
+
+    def test_real_nested_eight_shards_and_billing_leaf_stay_exact(self):
+        workflows, _ = _load_workflow_bundle(Path("."), ".github/workflows/ci.yml")
+        analysis = analyze_workflow(workflows[".github/workflows/ci.yml"], workflows)
+        for job_id, label in (("backend-test", "Backend Test"),
+                              ("coverage-backend", "Coverage (Backend)")):
+            names = analysis.reusable[job_id].exact_names
+            for shard in range(1, 9):
+                self.assertEqual(names.count(f"{label} / Test shard {shard}"), 1)
+        self.assertIn("Backend Test / Billing route coverage smoke",
+                      analysis.reusable["backend-test"].exact_names)
+
     def test_nested_input_condition_excludes_ordinary_only_coverage_leaf(self):
         analysis = analyze_workflow(WORKFLOW, WORKFLOWS)
         backend = analysis.reusable["backend-test"].exact_names
@@ -92,27 +242,34 @@ class GateReuseTests(unittest.TestCase):
 
     def test_input_disabled_leaf_that_actually_ran_fails_closed(self):
         for conclusion in ("success", "failure", "cancelled", None):
-            jobs = decision_jobs() + [
-                job("Coverage (Backend) / Billing route coverage smoke", conclusion=conclusion),
-            ]
-            decision = assess_tree_and_jobs(
-                workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
-                current_tree="tree", tested_tree="tree", jobs=jobs,
-                source="pull_request", run={"id": 7},
-            )
-            self.assertNotIn("coverage-backend", decision.jobs, conclusion)
-            self.assertFalse(decision.reuse and "coverage-backend" in decision.jobs)
+            for prefix in ("", CI_GATE_PREFIX):
+                with self.subTest(conclusion=conclusion, prefix=prefix):
+                    jobs = decision_jobs() + [
+                        job("Coverage (Backend) / Billing route coverage smoke", conclusion=conclusion),
+                    ]
+                    jobs = [{**item, "name": prefix + item["name"]} for item in jobs]
+                    decision = assess_tree_and_jobs(
+                        workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
+                        current_tree="tree", tested_tree="tree", jobs=jobs,
+                        source="pull_request", prefix=prefix, run={"id": 7},
+                    )
+                    self.assertFalse(decision.reuse)
+                    self.assertEqual(decision.reason, "api_unexpected_reusable_job")
 
     def test_unknown_skipped_leaf_under_prefix_still_fails_closed(self):
-        jobs = decision_jobs() + [
-            job("Coverage (Backend) / Something unexpected", conclusion="skipped"),
-        ]
-        decision = assess_tree_and_jobs(
-            workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
-            current_tree="tree", tested_tree="tree", jobs=jobs,
-            source="pull_request", run={"id": 7},
-        )
-        self.assertNotIn("coverage-backend", decision.jobs)
+        for prefix in ("", CI_GATE_PREFIX):
+            with self.subTest(prefix=prefix):
+                jobs = decision_jobs() + [
+                    job("Coverage (Backend) / Something unexpected", conclusion="skipped"),
+                ]
+                jobs = [{**item, "name": prefix + item["name"]} for item in jobs]
+                decision = assess_tree_and_jobs(
+                    workflow=WORKFLOW, reusable_workflows=WORKFLOWS,
+                    current_tree="tree", tested_tree="tree", jobs=jobs,
+                    source="pull_request", prefix=prefix, run={"id": 7},
+                )
+                self.assertFalse(decision.reuse)
+                self.assertEqual(decision.reason, "api_unexpected_reusable_job")
 
     def test_tree_match_reuses_complete_direct_and_nested_jobs(self):
         decision = assess_tree_and_jobs(

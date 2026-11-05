@@ -14,6 +14,8 @@ pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
+pub mod admin_sandbox_rates;
+pub mod admin_sandbox_settings;
 pub mod admin_service_accounts;
 pub mod admin_upload_retention;
 pub mod admin_usage;
@@ -32,6 +34,7 @@ pub mod assistant_actions;
 pub mod assistant_agent_learning;
 pub mod assistant_direct;
 pub mod assistant_readiness;
+pub mod assistant_sharing;
 pub mod auth;
 pub mod auth_agent_key;
 pub mod auth_device;
@@ -53,6 +56,7 @@ mod channel_managed_tests;
 pub mod channel_relay;
 pub mod channel_relay_request;
 pub mod channel_webhooks;
+pub mod channel_whatsapp_native;
 pub mod cli_pairings;
 pub mod codex_connection;
 pub mod connect_links;
@@ -108,6 +112,7 @@ pub mod proxy;
 pub mod public_mcp;
 pub mod public_proxy;
 pub mod runtime_config;
+pub mod sandbox_billing;
 pub mod service_account_key_reads;
 #[cfg(test)]
 mod service_account_key_reads_tests;
@@ -149,11 +154,13 @@ pub mod assistant_feedback;
 mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
+pub mod assistant_onboarding;
 pub mod assistant_team;
 pub mod channel_platforms;
 #[cfg(test)]
 mod curation_tests;
 pub mod nyxbot;
+pub mod nyxbot_event_bindings;
 pub mod options;
 pub(crate) mod org_group;
 
@@ -220,3 +227,9 @@ pub mod telegram_managers;
 pub mod nyxbot_gateway_releases;
 
 pub mod billing_benefits;
+pub mod monitoring;
+
+pub mod collaboration_group;
+
+pub mod cma_sessions;
+pub mod org_specialist_channels;

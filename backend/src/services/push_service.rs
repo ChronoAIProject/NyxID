@@ -573,24 +573,7 @@ async fn send_apns_notification_to(
     // Store-and-forward for up to 5 minutes (matches typical approval timeout)
     let apns_expiration = format!("{}", chrono::Utc::now().timestamp() + 300);
 
-    let mut payload = serde_json::json!({
-        "aps": {
-            "alert": {
-                "title": title,
-                "body": body,
-            },
-            "sound": "default",
-            "mutable-content": 1,
-            "category": "APPROVAL_REQUEST",
-        }
-    });
-
-    // Merge data fields into the top-level payload
-    if let Some(obj) = payload.as_object_mut() {
-        for (k, v) in data {
-            obj.insert(k.clone(), serde_json::Value::String(v.clone()));
-        }
-    }
+    let payload = apns_alert_payload(title, body, data);
 
     let resp = http_client
         .post(url)
@@ -725,6 +708,41 @@ pub async fn send_apns_silent(
             })
         }
     }
+}
+
+fn apns_alert_payload(
+    title: &str,
+    body: &str,
+    data: &HashMap<String, String>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "aps": {
+            "alert": {
+                "title": title,
+                "body": body,
+            },
+            "sound": "default",
+            "mutable-content": 1,
+            "category": "APPROVAL_REQUEST",
+        }
+    });
+
+    // Group mentions are informational; never show approval action buttons.
+    if data.get("type").is_some_and(|kind| kind == "group_mention") {
+        payload["aps"]
+            .as_object_mut()
+            .expect("alert object")
+            .remove("category");
+    }
+
+    // Merge data fields into the top-level payload
+    if let Some(obj) = payload.as_object_mut() {
+        for (k, v) in data {
+            obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+        }
+    }
+
+    payload
 }
 
 #[cfg(test)]
@@ -1046,5 +1064,25 @@ mod tests {
         let sa: FcmServiceAccount = serde_json::from_str(json).expect("deserialize");
         assert_eq!(sa.client_email, "test@project.iam.gserviceaccount.com");
         assert!(sa.private_key.contains("RSA PRIVATE KEY"));
+    }
+}
+
+#[cfg(test)]
+mod group_mention_payload_tests {
+    use super::*;
+    #[test]
+    fn group_mentions_have_no_approval_actions_and_other_notifications_keep_their_category() {
+        let mentions = HashMap::from([("type".into(), "group_mention".into())]);
+        let payload = apns_alert_payload("Group", "Sender mentioned you", &mentions);
+        assert!(payload["aps"].get("category").is_none());
+        assert_eq!(payload["type"], "group_mention");
+        assert_eq!(
+            apns_alert_payload(
+                "Approval",
+                "A service is requesting access",
+                &HashMap::new()
+            )["aps"]["category"],
+            "APPROVAL_REQUEST"
+        );
     }
 }

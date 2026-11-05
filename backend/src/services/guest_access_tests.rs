@@ -69,6 +69,7 @@ async fn raw(
         scopes::GuestHttpContext {
             websocket: ws,
             query: None,
+            ..Default::default()
         },
     )
     .await

@@ -9,6 +9,7 @@ import {
   Settings,
   Settings2,
   SlidersHorizontal,
+  Sparkles,
   WalletCards,
 } from "lucide-react";
 import {
@@ -21,6 +22,7 @@ import {
 import { useAssistantDrawerDismiss } from "@/components/assistant/assistant-drawer-context";
 import { useLogout } from "@/hooks/use-auth";
 import { useFeature } from "@/hooks/use-feature-flag";
+import { useIntroReplay } from "@/hooks/use-assistant-onboarding";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { isBillingAvailable } from "@/types/api";
@@ -30,6 +32,7 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
   const billingAvailable = isBillingAvailable(user);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const dismissDrawer = useAssistantDrawerDismiss();
+  const replayIntro = useIntroReplay((state) => state.replay);
   const logout = useLogout();
   const navigate = useNavigate();
 
@@ -54,11 +57,11 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
 
   return (
     <>
-      <div className="px-3 py-1.5">
-        <p className="truncate text-12 font-medium text-foreground">
+      <div className="shell-account-heading">
+        <p className="truncate shell-user-name">
           {user?.display_name ?? "User"}
         </p>
-        <p className="truncate text-11 text-text-tertiary">
+        <p className="truncate shell-user-email">
           {user?.email ?? ""}
         </p>
       </div>
@@ -76,17 +79,29 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
       <DropdownMenuItem asChild>
         <Link to="/approvals/settings" onClick={activateLink}>
           <Bell aria-hidden="true" />
-          <span className="flex-1">Notification settings</span>
-          <span aria-hidden="true" className="text-10 text-text-tertiary">
-            Studio
+          <span className="min-w-0 flex-1">
+            Notification settings
+            <span aria-hidden="true" className="block text-12 text-text-tertiary">Studio</span>
           </span>
           <span className="sr-only"> (opens in Studio)</span>
         </Link>
       </DropdownMenuItem>
       {nyxagentEnabled ? (
-        <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
-          <Settings2 aria-hidden="true" />NyxBot settings
-        </DropdownMenuItem>
+        <>
+          <DropdownMenuItem onSelect={() => onPanel("nyxbot")}>
+            <Settings2 aria-hidden="true" />NyxBot settings
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            onSelect={() => {
+              dismissDrawer();
+              replayIntro();
+              // The intro opens over the NyxBot home.
+              void navigate({ to: "/assistant" });
+            }}
+          >
+            <Sparkles aria-hidden="true" />Replay intro
+          </DropdownMenuItem>
+        </>
       ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem asChild>
@@ -123,7 +138,7 @@ export function AssistantAccountMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild ref={triggerRef}>{children}</DropdownMenuTrigger>
-      <DropdownMenuContent align={align} side={side} className="w-56 p-2"
+      <DropdownMenuContent align={align} side={side} className="w-max min-w-0 max-w-[calc(100vw-1rem)] max-h-[var(--radix-dropdown-menu-content-available-height)] overflow-y-auto p-2"
         onCloseAutoFocus={() => {
           const request = pending.current;
           pending.current = null;

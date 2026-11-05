@@ -70,6 +70,7 @@ const fixture = vi.hoisted(() => ({
   retryPending: false,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   Link: ({
     to,
     params,
@@ -333,8 +334,9 @@ it("requires reviewed irreversible data loss acknowledgement before deletion", a
   );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
   const dialog = within(screen.getByRole("dialog"));
-  const submit = screen.getByRole("button", { name: "Delete permanently" });
-  expect(submit).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "Delete permanently" }),
+  ).toBeDisabled();
   expect(
     dialog.getByText(/permanently removes the workspace/),
   ).toBeInTheDocument();
@@ -353,8 +355,10 @@ it("requires reviewed irreversible data loss acknowledgement before deletion", a
   expect(
     dialog.getByText(/temporary runtime data.*HOME.*\/tmp/),
   ).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
-  await userEvent.click(submit);
+  await userEvent.click(screen.getByRole("switch", { name: /I understand/ }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Delete permanently" }),
+  );
   await waitFor(() => expect(fixture.action).toHaveBeenCalled());
   expect(fixture.action.mock.calls[0]?.[0]).toMatchObject({
     machineId: fixture.machine.node_id,
@@ -406,7 +410,7 @@ it("retries an unknown result with the identical reviewed body and idempotency k
     screen.getByRole("tab", { name: "Settings and rules" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
-  await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+  await userEvent.click(screen.getByRole("switch", { name: /I understand/ }));
   await userEvent.click(
     screen.getByRole("button", { name: "Delete permanently" }),
   );
@@ -435,7 +439,7 @@ it("a revision conflict requires reload and review instead of an automatic new a
     screen.getByRole("tab", { name: "Settings and rules" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Delete machine" }));
-  await userEvent.click(screen.getByRole("checkbox", { name: /I understand/ }));
+  await userEvent.click(screen.getByRole("switch", { name: /I understand/ }));
   await userEvent.click(
     screen.getByRole("button", { name: "Delete permanently" }),
   );
@@ -937,7 +941,7 @@ it("resumes a current free Machine with explicit saved policy acceptance", async
     machine_id: fixture.machine.node_id,
     profile_version: fixture.machine.profile.profile_version,
   });
-  await userEvent.click(dialog.getByRole("checkbox"));
+  await userEvent.click(dialog.getByRole("switch"));
   await userEvent.click(dialog.getByRole("button", { name: "Resume machine" }));
   await waitFor(() => expect(fixture.action).toHaveBeenCalledTimes(1));
   expect(fixture.action.mock.calls[0]![0].body).toMatchObject({

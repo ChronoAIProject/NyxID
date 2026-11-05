@@ -8,6 +8,7 @@ export async function guardedJsonTransport<T>(options: {
   failure: (payload: unknown, status: number) => Error;
   requiresAuth: boolean;
   retry: boolean;
+  invalidateOnAuthFailure?: boolean;
 }): Promise<T> {
   const receive = async () => {
     options.guard();
@@ -26,7 +27,7 @@ export async function guardedJsonTransport<T>(options: {
   }
   options.guard();
   if (!response.ok) {
-    if (response.status === 401 && options.requiresAuth) {
+    if (response.status === 401 && options.requiresAuth && (options.invalidateOnAuthFailure ?? true)) {
       options.guard();
       await options.invalidate();
       options.guard();

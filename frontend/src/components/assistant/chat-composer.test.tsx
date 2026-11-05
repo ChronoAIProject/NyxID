@@ -770,7 +770,8 @@ describe("ChatComposer measured layout", () => {
     });
 
     expect(parts.composer).toHaveClass("flex-col", "items-stretch");
-    expect(parts.controls).toHaveClass("self-end");
+    expect(parts.controls).toHaveClass("items-center");
+    expect(parts.controls).not.toHaveClass("self-end");
   });
 
   it("returns inline when text falls below the threshold", () => {
@@ -885,6 +886,29 @@ describe("ChatComposer @mentions (group chats)", () => {
   it("uses the given placeholder", () => {
     render(<ChatComposer {...baseProps} draftKey="conv:one" placeholder="Message NyxBot" />);
     expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", "Message NyxBot");
+  });
+
+  it("labels a shared agent and inserts its exact collision-safe handle", async () => {
+    const id = "12345678-1234-4123-8123-1234567890ab";
+    render(<ChatComposer {...baseProps} draftKey="shared-crew" mentions={[{ id, name: id, display_name: "researcher", kind: "specialist", shared: true, owner_name: "Publisher" }]} />);
+    const input = screen.getByRole("combobox") as HTMLTextAreaElement;
+    type(input, "@researcher");
+    expect(screen.getByRole("option")).toHaveTextContent("Shared agent · Publisher");
+    await act(async () => { fireEvent.keyDown(input, { key: "Enter" }); });
+    expect(input).toHaveValue(`@${id} `);
+  });
+
+  it("offers people alongside agents and inserts the exact person handle", async () => {
+    render(<ChatComposer {...baseProps} draftKey="people-mentions" mentions={[
+      { id: "person", name: "person-0123456789abcdef", display_name: "Shining", kind: "person" },
+      { id: "agent", name: "office", display_name: "Office Agent", kind: "specialist" },
+    ]} />);
+    const input = screen.getByRole("combobox") as HTMLTextAreaElement;
+    type(input, "@");
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("option", { name: /Shining/ })).toHaveTextContent("Person");
+    await act(async () => { fireEvent.keyDown(input, { key: "Enter" }); });
+    expect(input).toHaveValue("@person-0123456789abcdef ");
   });
 
   it("lists matching members after @ and inserts the chosen one with Enter", async () => {

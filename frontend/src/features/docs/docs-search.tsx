@@ -125,7 +125,7 @@ export function DocsSearch({
             aria-activedescendant={
               results.length > 0 ? `docs-search-opt-${activeIndex}` : undefined
             }
-            className="h-12 flex-1 bg-transparent text-sm text-foreground placeholder:text-text-tertiary focus:outline-none"
+            className="h-12 flex-1 bg-transparent text-14 text-foreground placeholder:text-text-tertiary focus:outline-none"
           />
           <button type="button" aria-label="Close search" onClick={onClose}>
             <X className="h-4 w-4 text-text-tertiary transition-colors hover:text-foreground" />
@@ -133,11 +133,11 @@ export function DocsSearch({
         </div>
         <div className="max-h-[60vh] overflow-y-auto p-2">
           {query.trim() === "" ? (
-            <p className="px-3 py-6 text-center text-sm text-text-tertiary">
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">
               Type to search across CLI, Web, AI-assisted, and Concepts.
             </p>
           ) : results.length === 0 ? (
-            <p className="px-3 py-6 text-center text-sm text-text-tertiary">No results for “{query}”.</p>
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">No results for “{query}”.</p>
           ) : (
             <ul className="space-y-0.5" id="docs-search-results" role="listbox" ref={listRef}>
               {results.map((e, i) => {
@@ -155,13 +155,13 @@ export function DocsSearch({
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className="font-mono text-10 tracking-wider text-nyx-secondary-400 uppercase">
+                        <span className="font-mono text-12 tracking-wider text-nyx-secondary-400 uppercase">
                           {TAB_LABEL[docTabForSlug(slug)] ?? ""}
                         </span>
-                        <span className="text-sm font-medium text-foreground">{e.title}</span>
+                        <span className="type-row-title text-foreground">{e.title}</span>
                       </div>
                       {e.description && (
-                        <p className="mt-0.5 line-clamp-1 text-xs text-text-tertiary">{e.description}</p>
+                        <p className="mt-0.5 line-clamp-1 text-13 text-text-tertiary">{e.description}</p>
                       )}
                     </Link>
                   </li>
@@ -170,7 +170,7 @@ export function DocsSearch({
             </ul>
           )}
         </div>
-        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-11 text-text-tertiary">
+        <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-13 text-text-tertiary">
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-border px-1 font-mono">↑</kbd>
             <kbd className="rounded border border-border px-1 font-mono">↓</kbd>

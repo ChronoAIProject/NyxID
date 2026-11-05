@@ -78,6 +78,22 @@ pub struct RequestResponse {
     pub channel_bot_id: Option<String>,
     pub auto_connect: bool,
     pub connection_error: Option<String>,
+    pub prompt_delivery: Option<PromptDeliveryResponse>,
+    pub can_open_creation_form: bool,
+}
+
+#[derive(Serialize)]
+pub struct PromptDeliveryResponse {
+    pub attempt_id: String,
+    pub phase: crate::models::telegram_bot_request::PromptPhase,
+    pub outcome: crate::models::telegram_bot_request::PromptOutcome,
+    pub attempted_at: String,
+    pub completed_at: Option<String>,
+    pub failure: Option<crate::models::telegram_bot_request::TelegramFailure>,
+    pub reason: Option<crate::models::telegram_bot_request::TelegramReason>,
+    pub http_status: Option<u16>,
+    pub error_code: Option<i32>,
+    pub retry_after: Option<u32>,
 }
 
 impl From<TelegramBotRequest> for RequestResponse {
@@ -86,7 +102,38 @@ impl From<TelegramBotRequest> for RequestResponse {
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
         );
+        // Live hosted context cannot be established by a request-only conversion.
+        // HTTP responses opt in through projected_request below.
+        let can_open_creation_form = false;
+        let prompt_delivery = request.prompt_delivery.map(|prompt| {
+            use crate::models::telegram_bot_request::PromptOutcome;
+            let outcome = if prompt.outcome == PromptOutcome::Sending
+                && prompt.attempted_at
+                    + chrono::Duration::seconds(
+                        crate::services::telegram_new_service::PROMPT_HORIZON_SECS,
+                    )
+                    <= chrono::Utc::now()
+            {
+                PromptOutcome::Unknown
+            } else {
+                prompt.outcome
+            };
+            PromptDeliveryResponse {
+                attempt_id: prompt.attempt_id,
+                phase: prompt.phase,
+                outcome,
+                attempted_at: prompt.attempted_at.to_rfc3339(),
+                completed_at: prompt.completed_at.map(|time| time.to_rfc3339()),
+                failure: prompt.diagnostic.as_ref().map(|d| d.failure),
+                reason: prompt.diagnostic.as_ref().map(|d| d.reason),
+                http_status: prompt.diagnostic.as_ref().and_then(|d| d.http_status),
+                error_code: prompt.diagnostic.as_ref().and_then(|d| d.error_code),
+                retry_after: prompt.diagnostic.as_ref().and_then(|d| d.retry_after),
+            }
+        });
         Self {
+            prompt_delivery,
+            can_open_creation_form,
             auto_connect: request.auto_connect,
             connection_error: request.connection_error,
             channel_bot_id: matches!(
@@ -107,6 +154,16 @@ impl From<TelegramBotRequest> for RequestResponse {
             bot_username: request.bot_username.filter(|_| approved),
         }
     }
+}
+
+pub(crate) async fn projected_request(
+    state: &AppState,
+    request: TelegramBotRequest,
+) -> AppResult<RequestResponse> {
+    let eligible = service(state).can_open_creation_form(&request).await?;
+    let mut response = RequestResponse::from(request);
+    response.can_open_creation_form = eligible;
+    Ok(response)
 }
 
 #[derive(Serialize)]
@@ -196,7 +253,7 @@ pub async fn redeem_claim(
     Ok((
         StatusCode::ACCEPTED,
         private_headers(),
-        Json(request.into()),
+        Json(projected_request(&state, request).await?),
     ))
 }
 
@@ -224,7 +281,10 @@ pub async fn configuration(
         Json(ConfigurationResponse {
             available,
             manager_username: row.and_then(|row| row.fields.get("manager_username").cloned()),
-            request: request.map(Into::into),
+            request: match request {
+                Some(request) => Some(projected_request(&state, request).await?),
+                None => None,
+            },
         }),
     ))
 }
@@ -251,7 +311,7 @@ pub async fn begin(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: request.into(),
+            request: projected_request(&state, request).await?,
             launch_url,
         }),
     ))
@@ -265,7 +325,7 @@ pub async fn get(
     let actor = human(&auth)?;
     Ok((
         private_headers(),
-        Json(service(&state).get(&actor, &id).await?.into()),
+        Json(projected_request(&state, service(&state).get(&actor, &id).await?).await?),
     ))
 }
 
@@ -280,8 +340,37 @@ pub async fn launch(
     Ok((
         private_headers(),
         Json(LaunchResponse {
-            request: service(&state).get(&actor, &id).await?.into(),
+            request: projected_request(&state, service(&state).get(&actor, &id).await?).await?,
             launch_url,
+        }),
+    ))
+}
+
+#[derive(Serialize)]
+pub struct CreationLinkResponse {
+    pub request: RequestResponse,
+    pub creation_url: String,
+}
+
+pub async fn creation_link(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<CreationLinkResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let (request, creation_url) = service(&state).creation_link(&actor, &id).await?;
+    Ok((
+        private_headers(),
+        Json(CreationLinkResponse {
+            request: projected_request(&state, request).await?,
+            creation_url,
         }),
     ))
 }
@@ -323,7 +412,10 @@ pub async fn connect(
             ),
         );
     }
-    Ok((private_headers(), Json(request.into())))
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
+    ))
 }
 
 pub async fn webhook(

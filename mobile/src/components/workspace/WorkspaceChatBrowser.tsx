@@ -1,0 +1,458 @@
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  ActivityIndicator,
+  FlatList,
+  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { ChevronLeft, RefreshCw, Search, SquarePen, X } from "lucide-react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { SkeletonRows } from "../Skeleton";
+import { fonts } from "../../theme/designTokens";
+import { useTheme } from "../../theme/ThemeContext";
+import { searchDrawerItems } from "./workspaceChatListModel";
+
+// Header controls are 44pt targets; both sides reserve the same width so the
+// title stays centred whichever controls are present.
+const HEADER_CONTROL = 44;
+
+export function WorkspaceChatBrowser<T extends { id: string }>({
+  title,
+  titleIcon,
+  scopeKey,
+  description,
+  items,
+  searchText,
+  renderItem,
+  onClose,
+  onBack,
+  primaryAction,
+  visible = true,
+  onDismiss,
+  onRefresh,
+  refreshing = false,
+  refreshDisabled = false,
+  refreshLabel = `Refresh ${title.toLowerCase()}`,
+  footer,
+  emptyText = "Nothing here yet.",
+  loadingLabel,
+}: {
+  title: string;
+  /** Shown before the centred title, e.g. the agent's avatar. */
+  titleIcon?: ReactNode;
+  scopeKey: string;
+  description?: string;
+  items: readonly T[];
+  searchText: (item: T) => string;
+  renderItem: (item: T) => ReactNode;
+  onClose: () => void;
+  onBack?: () => void;
+  visible?: boolean;
+  onDismiss?: () => void;
+  onRefresh?: () => void;
+  refreshing?: boolean;
+  refreshDisabled?: boolean;
+  refreshLabel?: string;
+  primaryAction?: {
+    label: string;
+    accessibilityLabel: string;
+    onPress: () => void;
+  };
+  footer?: ReactNode;
+  emptyText?: string;
+  /** Set while the list's first load is pending: shows a skeleton, not emptyText. */
+  loadingLabel?: string;
+}) {
+  const { colors } = useTheme();
+  const reducedMotion = useReducedMotion();
+  const [query, setQuery] = useState("");
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const onDismissRef = useRef(onDismiss);
+  onDismissRef.current = onDismiss;
+  const mountedRef = useRef(true);
+  const refreshRef = useRef({
+    onRefresh,
+    refreshing,
+    refreshDisabled,
+    visible,
+  });
+  refreshRef.current = { onRefresh, refreshing, refreshDisabled, visible };
+  const dismissalPending = useRef(false);
+  const previousVisibleRef = useRef(visible);
+  if (previousVisibleRef.current !== visible) {
+    dismissalPending.current = !visible;
+    previousVisibleRef.current = visible;
+  }
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const notifyDismissed = useCallback(() => {
+    if (!mountedRef.current || visibleRef.current || !dismissalPending.current)
+      return;
+    dismissalPending.current = false;
+    onDismissRef.current?.();
+  }, []);
+  useEffect(() => {
+    // Android removes its native Modal in this commit and has no onDismiss.
+    if (!visible && Platform.OS !== "ios") notifyDismissed();
+  }, [visible, notifyDismissed]);
+  // Switching between agent/group lists and chat history starts a fresh search.
+  useEffect(() => setQuery(""), [scopeKey]);
+  const filtered = searchDrawerItems(items, query, searchText);
+  const searching = !!query.trim();
+  const close = () => {
+    Keyboard.dismiss();
+    onClose();
+  };
+  const refreshBlocked = refreshing || refreshDisabled || !visible;
+  const sideWidth =
+    HEADER_CONTROL * Math.max(onBack ? 1 : 0, onRefresh ? 2 : 1);
+  const refresh = () => {
+    const current = refreshRef.current;
+    if (
+      !mountedRef.current ||
+      !current.onRefresh ||
+      !current.visible ||
+      current.refreshing ||
+      current.refreshDisabled
+    )
+      return;
+    Keyboard.dismiss();
+    current.onRefresh();
+  };
+
+  return (
+    <Modal
+      visible={visible}
+      animationType={reducedMotion ? "none" : "slide"}
+      presentationStyle="pageSheet"
+      onRequestClose={close}
+      onDismiss={Platform.OS === "ios" ? notifyDismissed : undefined}
+    >
+      <SafeAreaProvider style={styles.fill}>
+        <SafeAreaView style={[styles.fill, { backgroundColor: colors.bg }]}>
+          <KeyboardAvoidingView
+            style={styles.fill}
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          >
+            <View accessible={false} style={styles.handleWrap}>
+              <View
+                style={[styles.handle, { backgroundColor: colors.border }]}
+              />
+            </View>
+            <View style={[styles.header, { borderColor: colors.border }]}>
+              <View style={[styles.side, { width: sideWidth }]}>
+                {onBack ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Back to previous list"
+                    onPress={() => {
+                      Keyboard.dismiss();
+                      onBack();
+                    }}
+                    style={styles.iconButton}
+                  >
+                    <ChevronLeft size={22} color={colors.textSecondary} />
+                  </Pressable>
+                ) : null}
+              </View>
+              <View style={styles.titleWrap}>
+                {titleIcon}
+                <Text
+                  accessibilityRole="header"
+                  numberOfLines={2}
+                  style={[styles.heading, { color: colors.textPrimary }]}
+                >
+                  {title}
+                </Text>
+              </View>
+              <View style={[styles.side, styles.sideEnd, { width: sideWidth }]}>
+                {onRefresh ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={refreshLabel}
+                    accessibilityState={{
+                      disabled: refreshBlocked,
+                      busy: refreshing,
+                    }}
+                    disabled={refreshBlocked}
+                    onPress={refresh}
+                    style={[
+                      styles.iconButton,
+                      { opacity: refreshBlocked ? 0.4 : 1 },
+                    ]}
+                  >
+                    {refreshing ? (
+                      <ActivityIndicator size="small" color={colors.primary} />
+                    ) : (
+                      <RefreshCw size={20} color={colors.textSecondary} />
+                    )}
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Close ${title}`}
+                  onPress={close}
+                  style={styles.iconButton}
+                >
+                  <X size={22} color={colors.textSecondary} />
+                </Pressable>
+              </View>
+            </View>
+            <View style={styles.toolbar}>
+              {description ? (
+                <Text
+                  style={[styles.description, { color: colors.textSecondary }]}
+                >
+                  {description}
+                </Text>
+              ) : null}
+              {primaryAction || items.length > 0 || searching ? (
+                <View style={styles.actionRow}>
+                  {items.length > 0 || searching ? (
+                    <View
+                      style={[
+                        styles.searchBox,
+                        { backgroundColor: colors.segmentTrack },
+                      ]}
+                    >
+                      <Search
+                        size={17}
+                        color={colors.textMuted}
+                        accessible={false}
+                      />
+                      <TextInput
+                        accessibilityLabel={`Search ${title}`}
+                        placeholder={`Search ${title.toLowerCase()}`}
+                        placeholderTextColor={colors.textMuted}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        value={query}
+                        onChangeText={setQuery}
+                        returnKeyType="search"
+                        selectionColor={colors.primary}
+                        onSubmitEditing={Keyboard.dismiss}
+                        style={[
+                          styles.searchInput,
+                          { color: colors.textPrimary },
+                        ]}
+                      />
+                      {query ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`Clear ${title} search`}
+                          onPress={() => setQuery("")}
+                          style={styles.iconButton}
+                        >
+                          <X size={18} color={colors.textMuted} />
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  ) : null}
+                  {primaryAction ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={primaryAction.accessibilityLabel}
+                      onPress={() => {
+                        Keyboard.dismiss();
+                        primaryAction.onPress();
+                      }}
+                      // A neutral filled control beside the search field, as on
+                      // Plugins, with the drawer's compose icon.
+                      style={({ pressed }) => [
+                        styles.primaryAction,
+                        !(items.length > 0 || searching) &&
+                          styles.primaryActionFull,
+                        {
+                          backgroundColor: colors.segmentTrack,
+                          opacity: pressed ? 0.7 : 1,
+                        },
+                      ]}
+                    >
+                      <SquarePen size={17} color={colors.textPrimary} />
+                      <Text
+                        style={[
+                          styles.primaryActionLabel,
+                          { color: colors.textPrimary },
+                        ]}
+                      >
+                        {primaryAction.label}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ) : null}
+              {items.length > 0 || searching ? (
+                <Text
+                  accessibilityLiveRegion="polite"
+                  style={[styles.count, { color: colors.textMuted }]}
+                >
+                  {filtered.length}{" "}
+                  {filtered.length === 1 ? "result" : "results"}
+                </Text>
+              ) : null}
+            </View>
+            <FlatList
+              key={scopeKey}
+              style={styles.fill}
+              data={filtered}
+              keyExtractor={(item) => item.id}
+              renderItem={({ item }) => <View>{renderItem(item)}</View>}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              contentContainerStyle={styles.list}
+              alwaysBounceVertical={onRefresh ? true : undefined}
+              refreshControl={
+                onRefresh ? (
+                  <RefreshControl
+                    accessibilityLabel={refreshLabel}
+                    enabled={!refreshBlocked}
+                    refreshing={refreshing}
+                    onRefresh={refresh}
+                    tintColor={colors.primary}
+                    colors={[colors.primary]}
+                    progressBackgroundColor={colors.card}
+                  />
+                ) : undefined
+              }
+              ListEmptyComponent={
+                loadingLabel && !searching ? (
+                  <SkeletonRows rows={5} accessibilityLabel={loadingLabel} />
+                ) : (
+                  <View style={styles.empty}>
+                    <Text
+                      style={[styles.emptyTitle, { color: colors.textPrimary }]}
+                    >
+                      {searching ? "No matches" : emptyText}
+                    </Text>
+                    {searching ? (
+                      <Text
+                        style={[
+                          styles.description,
+                          { color: colors.textSecondary },
+                        ]}
+                      >
+                        Try another search.
+                      </Text>
+                    ) : null}
+                  </View>
+                )
+              }
+              ListFooterComponent={
+                footer ? <View style={styles.footer}>{footer}</View> : null
+              }
+            />
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+
+const styles = StyleSheet.create({
+  fill: { flex: 1 },
+  handleWrap: { alignItems: "center", paddingTop: 8, paddingBottom: 2 },
+  handle: { width: 36, height: 4, borderRadius: 2 },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    minHeight: 56,
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+  },
+  side: { flexDirection: "row", alignItems: "center" },
+  sideEnd: { justifyContent: "flex-end" },
+  titleWrap: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  heading: {
+    flexShrink: 1,
+    fontFamily: fonts.bodySemi,
+    fontSize: 17,
+    lineHeight: 24,
+    textAlign: "center",
+  },
+  iconButton: {
+    width: 44,
+    height: 44,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  toolbar: { paddingHorizontal: 20, paddingTop: 16, gap: 12 },
+  actionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+  },
+  primaryAction: {
+    minHeight: 44,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+  },
+  primaryActionFull: { flexGrow: 1 },
+  primaryActionLabel: {
+    fontFamily: fonts.bodySemi,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  description: {
+    fontFamily: fonts.bodyRegular,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  searchBox: {
+    flexGrow: 1,
+    flexBasis: 180,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingLeft: 12,
+    paddingRight: 4,
+    borderRadius: 10,
+    minHeight: 44,
+  },
+  searchInput: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 44,
+    paddingVertical: 10,
+    fontFamily: fonts.bodyRegular,
+    fontSize: 16,
+  },
+  count: { fontFamily: fonts.body, fontSize: 12, lineHeight: 18 },
+  list: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 24, gap: 4 },
+  empty: { paddingHorizontal: 12, paddingVertical: 32, gap: 8 },
+  emptyTitle: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 22 },
+  footer: { paddingHorizontal: 4, paddingTop: 12 },
+});

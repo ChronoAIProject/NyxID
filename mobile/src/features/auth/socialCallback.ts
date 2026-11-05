@@ -1,6 +1,6 @@
 import { isMfaChallengeToken } from "../../lib/auth/mfaChallenge";
-type SocialProvider = "google" | "github" | "apple";
-const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
+export type SocialProvider = "google" | "github" | "apple";
+export const SOCIAL_CALLBACK_URL = "nyxid://auth/social/callback";
 type SocialCallback = {
   status: "success" | "error" | "mfa_required";
   accessToken?: string;
@@ -18,7 +18,7 @@ export function parseSocialCallback(url: string): SocialCallback | null {
 
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== "nyxid:" || parsed.host !== "auth" || parsed.pathname !== "/social/callback") return null;
+    if (parsed.protocol !== "nyxid:" || parsed.host !== "auth" || parsed.pathname !== "/social/callback" || parsed.username || parsed.password) return null;
     // MFA challenges are returned in the fragment so the raw token is not
     // sent as a query parameter or Referer. It remains in memory only.
     const fragmentParams = new URLSearchParams(parsed.hash.replace(/^#/, ""));

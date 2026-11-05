@@ -254,12 +254,118 @@ ElevenLabs and Twilio both publish JSON specifications that currently fit under 
 
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
 
+The `nyx-panel` overlay is an instance-mounted device contract, without a
+seeded catalog connection. Panels register its hosted URL on their daily
+`UserEndpoint.openapi_spec_url`; each connection retains its own node route
+and service grants. It exposes on-demand camera JPEGs, display images/captions and
+voice controls, audio output, input mode, screen brightness and persistent fallback
+images. Bot selection, credentials, network and system management remain on the
+separate management service. Daily parameter endpoints reject unknown or combined
+fields; they cannot change the selected Bot. Daily preferences and persistent
+fallback operations require panel firmware v0.6.15 or later. Tool-returned
+images use the ordinary NyxAgent image pipeline; voice tasks use the selected
+Bot's existing service grants. No camera transport or device-specific executor
+is added to Voice.
+With panel firmware v0.6.14 or later, the default camera tool calls
+`POST /camera/capture`: the panel displays the
+same JPEG returned to the model for two minutes, then restores its fallback.
+`GET /camera/snapshot.jpg` remains available for captures that leave the display
+unchanged. Display source metadata is available in `/status` for verification.
+Existing panels can attach the contract through `PUT /keys/{slug}` with
+`openapi_spec_url` pointing to this deployment's
+`/api/v1/catalog-specs/nyx-panel/openapi.json`; no grant or key change is needed.
+
 The Telnyx overlay covers core AI inference, assistants, conversations, speech,
 messaging, and calling. Its full upstream spec exceeds the fetch limit. See
 [Telnyx integration](TELNYX_INTEGRATION.md) for connection setup and platform
 credential provisioning.
 
 ---
+
+## Lark/Feishu message text and image uploads
+
+The compiled `lark` and `lark-bot` overlays cover `api-lark`, `api-lark-bot`,
+`api-feishu` and `api-feishu-bot`. Hosted MCP offers additive typed input for
+`im_message_create` and `im_message_reply`:
+
+```json
+{
+  "receive_id_type": "chat_id",
+  "receive_id": "oc_example",
+  "msg_type": "text",
+  "text": "第一行\n第二行 🎉"
+}
+```
+
+Choose exactly one of `text` (only for `msg_type=text`) or `content`. `content`
+accepts a JSON object, including structured `post`/`interactive` content, or a
+JSON-encoded object string. NyxID parses raw strings locally and preserves their
+bytes, including whitespace and escapes; objects and typed text are serialized
+once. It never guesses that a literal backslash-n meant a newline. Text raw
+objects must contain a string `text`; other message types retain provider schema
+validation. Invalid or double-encoded JSON returns `lark_message_content_invalid`
+before dispatch. Use the same typed mode independently for each split message;
+NyxID does not split, resend or invent idempotency keys. Existing `uuid` passes
+through unchanged. A Lark 230001 response becomes an MCP error with only
+`msg_type`, `mode` (`typed`/`raw`), `local_json_parsed`, `request_sent` and the
+provider error code. Logs contain the same metadata, never message content.
+
+`im_image_create` accepts exactly one of `image_url` or `image_base64`, with
+optional `filename` and `mime_type`. NyxID uploads multipart `image_type=message`
+to `POST /open-apis/im/v1/images` using the selected connection's normal user or
+tenant credential, and returns only `{ "image_key": "img_..." }`. Use that key
+in an ordinary image, post or interactive message. The tenant must grant
+`im:resource`; adding the catalog operation does not provision provider scopes
+or approve a tenant's application.
+
+Only verified PNG, JPEG, GIF and WebP images are accepted, up to 10 MiB of actual
+bytes. Downloads require HTTPS and a public address, use the existing DNS-pinned,
+credential-free media client, follow zero redirects, and have a 30-second total
+deadline. URL responses must supply a matching image Content-Type; optional
+`mime_type` must also match. Base64 is standard padded base64 without a data-URL
+prefix. NyxID checks magic bytes and decodes the raster with the existing pixel
+and allocation limits. Neither fetch errors nor upload failures expose source
+URLs, base64, image bytes, credentials or provider error prose.
+
+These adapters are derived only from an exact published SYSTEM catalog contract,
+using compiled NyxID markers. Mounted/remote or edited specifications cannot grant
+image materialization. Ordinary MCP service grants, operation selections, guest
+levels and confirmation gates still apply before fetching; live authority and
+contract checks remain at execution. Image upload is a POST change, not a read,
+and does not modify existing data. It is independently selectable in operation
+scopes; existing closed selections do not acquire it. Unscoped service grants
+retain their existing all-operation semantics. No special default agent grant is
+created. This upload accepts caller-supplied public images, not private conversation
+attachment IDs, so the Base attachment-write flag is not required.
+
+The legacy `/mcp/config` HTTP bridge keeps the existing raw-string message schema
+and omits the managed image operation. Typed messages and JSON-to-multipart image
+uploads require hosted NyxID MCP. Raw HTTP proxy requests retain the provider's
+native contract. Image upload is excluded from exact-operation descriptors and
+refuses exact/background async execution. Sync updates the existing message rows
+and adds one image row per overlay family without renaming other operations or
+editing Aevatar markers. The image adapter has only a NyxID-owned marker; it does
+not advertise Aevatar workflow authority. The schema admission guard checks the
+legacy bridge's projected raw-message schemas against Aevatar's unchanged subset,
+while hosted MCP uses the richer mutually exclusive input schemas.
+Deploy all replicas before using the new input modes;
+older replicas continue handling legacy raw messages but cannot materialize the
+new JSON image input. Rollback callers to raw messages before rolling back servers.
+
+Two related requests remain separate follow-ups:
+
+- TriggerRun completion currently reflects the turn error and NyxID-managed result
+  delivery (`handlers/trigger_scheduler.rs`), not whether a tool action was required
+  by the automation. This change makes provider application errors visible as MCP
+  errors, but an agent can still finish its turn successfully after a failed send.
+  A reliable “completed with errors” outcome needs explicit required-effect and
+  recovery tracking across retries/continuations, additive stored outcome detail,
+  and corresponding UI. Do not infer it from operation names or message text.
+- Unattended `llm-openai__images_generate` grants scoped to specific automations,
+  with a daily image quota, expiry and revocation, need an explicit authority and
+  quota contract. No such grant is added here; existing service and confirmation
+  policies continue to apply. A pre-generated public image URL works without
+  changing image-generation authority.
 
 ## Managed Lark Base writes
 
@@ -663,6 +769,8 @@ connection named CMA does not activate these adapters.
 | --- | --- | --- |
 | `POST /api/v1/agents` | `GET /api/v1/agent-lifecycle/{id}` | `succeeded`: agent ready |
 | `POST /api/v1/responses` | `GET /api/v1/responses/{response_id}` | `completed`: response complete |
+| `POST /api/v2/responses` | `GET /api/v2/responses/{response_id}` | `completed`: response complete |
+| `POST /api/v2/agents/{agent_id}/responses` | `GET /api/v2/responses/{response_id}` | `completed`: response complete |
 | `POST /api/v1/agents/{id}/input` | `GET /api/v1/agents/{id}` | agent status, then ready after observed activity |
 | `POST /api/v1/agui/run` | `GET /api/v1/agents/{id}` | agent status, then ready after observed activity |
 
@@ -675,12 +783,94 @@ completion cannot be confirmed from that status endpoint; the watch can time
 out rather than inventing a completed response. Prefer Responses operations
 when per-request completion is required.
 
+V2 Responses identify the agent through `conversation.id`, including in SSE
+`response.created` and `response.completed` frames. The response ID identifies
+the work being tracked; it is never used as the agent's browser destination.
+The lifecycle receipt returns an operation ID; only a subsequent lifecycle
+observation's `agent_id` identifies the agent. CMA supplies the browser
+destination separately as optional `callback_url` on the receipt/status/response
+object (inside `response` for SSE). NyxID stores a validated HTTP(S) URL and
+projects it as `cma_url` in history. Missing fields preserve the last valid
+callback; explicit null or invalid values clear it. History never constructs a
+link from an agent ID or catalog homepage. Old producers and old stored rows
+without a callback show status without a link. Rendering history reads only
+stored metadata, without credentials, catalog lookups, or calls to CMA.
+
+The callback is a browser link, not a webhook or polling target. It must be at
+most 2,048 UTF-8 bytes and contain no userinfo, query, fragment, literal
+whitespace, controls, or backslash. Relative URLs and cloud metadata hosts are
+rejected. Valid URLs preserve CMA's configured hostname, port, and route.
+See the [CMA producer handoff](plans/2026-10-27-cma-callback-url-contract.md)
+for required CMA response surfaces and `CHRONO_SERVER_PUBLIC_URL` configuration.
+
+The read-only `GET /api/v1/assistant/nyxagent/cma-sessions` projects verified
+personal origin receipts: `service_id`, CMA `agent_id`, NyxID `conversation_id`,
+`turn_id`, `specialist_id`, validated nullable `cma_url`, and safe
+`connection_name` / `connection_slug`. It never emits credentials or result
+bodies. `conversation` and up to 50 comma-separated `pins`
+(`<connection UUID>:<agt_id>`) select scope; `agents` optionally intersects up to
+50 exact candidates. `after` advances a 50-row page using `next_cursor`.
+`discover=true` returns eligible personal `connections` (id/name/slug/connected/
+requires_connection) with the same cursor envelope. Every read rechecks live
+personal connection identity, owner/history access, and erasure admission.
+Inventory cannot author an origin. Origin rows retain the earliest verified
+invocation independently of watch expiry, with transactional source deletion and
+personal erasure cleanup. See [CMA session status cards](chat/12-cma-sessions.md)
+for pin persistence, bounded status-filtered discovery (15-second discovery and
+five-second active-detail polling), independent pin receipt queries, and
+per-connection observer recovery. Retryable connection failures retain only
+previously authorized observations in the same account/source scope; a denied
+connection does not suppress healthy peers.
+
 These adapters use the existing authenticated async-watch executor, two-hour
 deadline, quotas, billing and live authority checks. They add no user-controlled
 polling URL or new cancellation API. Guest calls retain their ordinary tool
 response without registering a CMA watch. Card metadata allows only bounded
-identifiers and known status/phase values, and history excludes encrypted
-results. CMA watch metadata has a 30-day TTL; result encryption and the four-hour
-payload deadline remain the same as other watches. The
+identifiers, validated browser links, and known status/phase values; history
+excludes encrypted results. CMA watch metadata has a 30-day TTL; result encryption
+and the four-hour payload deadline remain the same as other watches. The
 [frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
 placement and refresh behavior.
+
+
+## Assistant connection setup
+
+For eligible personal-credential catalogs, NyxBot's `nyx__connect_service`
+returns a hosted link immediately, even when personal or organization
+connections already exist.
+The chat result also includes bounded `existing_connections` metadata and
+`existing_connections_truncated`; each fact names ownership, connection label,
+and enabled state while leaving the provider account identity unknown. The
+assistant gives the link immediately and mentions those facts in one short
+line, without asking whether to proceed, offering reuse instead, or replacing
+the link with a settings page.
+
+Explicit platform-key requests create unified connections in one step. Other
+non-hosted chat requests retain the legacy connector, including no-auth and
+internal master-credential services. Repeating an active legacy connection
+returns successful `status: already_connected` with catalog ID/slug and existing
+facts: there is no separate account to add. It creates no duplicate connection.
+A catalog without `provider_config_id` returns `connect_unavailable` with
+`reason: provider_requirement_only` only when a `required: true` provider
+requirement is its only credential path (`requires_user_credential=false`).
+Optional requirements do not block setup, and `requires_user_credential=true`
+keeps the hosted API-key form. Admin-only OAuth and device-code providers must
+have their platform client credentials configured before a chat can mint a link; a
+device-code public client requires only a client ID. Specialists cannot create
+links and see only facts within their effective connection grants; completing
+setup never grants them access automatically. Unified inventory uses the shared
+service visibility resolver with one membership load, excludes Viewer/scope-denied
+rows and deleted tombstones, and retains disabled connections. Unscoped NyxBot
+also includes the actor's own active legacy `user_service_connections` row for
+the catalog, marked `source: "legacy_connection"`, using only ID, label, active
+state and creation time. Both sources share the ten-row bound and ordering;
+`migration_connection` / `source_id` lineage suppresses a legacy row already
+represented by a retained unified row. Specialist inventories contain only unified
+rows within their grants. Org-agent thread
+keys belong to the acting member; their effective connection IDs are restricted
+to the agent organization's own rows. A platform catalog grant in a personal
+key's effective scope does not grant inventory of that catalog's connections:
+selection matches exact `UserService` IDs.
+External MCP clients keep the legacy connection response contract. See
+[the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
+for bounds, owner checks, failures, and readiness-gated personal intent locks.

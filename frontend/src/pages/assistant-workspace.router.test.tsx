@@ -80,6 +80,7 @@ vi.mock("@/hooks/use-billing-credits", () => ({
 }));
 vi.mock("@/hooks/use-keys", () => ({
   useCatalog: () => query(billingCatalog),
+  useKeys: () => query([]),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (flag: FeatureFlag) =>

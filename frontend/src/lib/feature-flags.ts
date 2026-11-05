@@ -21,12 +21,18 @@ export const FEATURE_FLAG = {
   // Off permits mobile social first-factor holders to sign in without MFA.
   MOBILE_MFA: "auth:mobile-mfa",
   INVITATION_CODE: "auth:invitation-code",
+  // Global only: mobile builds with both domain sets read it at launch.
+  MOBILE_NEW_DOMAINS: "mobile:new-domains",
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
+  CMA_SANDBOX_BILLING: "experimental:cma-sandbox-billing",
+  CMA_SANDBOX_RATE_SYNC: "experimental:cma-sandbox-rate-sync",
+  SERVICE_MONITORING: "services:monitoring",
   REMOTE_MACHINES: "experimental:remote-machines",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
   ASSISTANT_VOICE: "assistant:voice",
+  VOICE_AGENT_KEY: "assistant:voice-agent-key",
   VOICE_GROK: "assistant:voice-grok",
   VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
   VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",
@@ -34,8 +40,13 @@ export const FEATURE_FLAG = {
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
   ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
+  ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
   ORG_AGENTS: "assistant:org-agents",
+  SHARED_AGENTS: "assistant:shared-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
+  ORG_INSTRUCTION: "assistant:org-instruction-v1",
+  EXECUTION_PERMISSIONS: "permissions:execution-v1",
+  HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
   MACHINE_CONTEXTS: "assistant:machine-contexts",
   AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
   GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
@@ -45,6 +56,7 @@ export const FEATURE_FLAG = {
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
+  NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
   DISCORD_GATEWAY: "channel:discord-gateway",
   NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
   NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
@@ -70,6 +82,24 @@ export function userHasFeature(
   flag: FeatureFlag,
 ): boolean {
   return user?.capabilities?.enabled_features?.includes(flag) ?? false;
+}
+
+/** Resolved without a user or organization; only a global override applies. */
+const GLOBAL_ONLY_FLAGS: readonly string[] = [
+  FEATURE_FLAG.INVITATION_CODE,
+  FEATURE_FLAG.MOBILE_NEW_DOMAINS,
+  FEATURE_FLAG.CMA_SANDBOX_RATE_SYNC,
+];
+
+export function isGlobalOnlyFlag(key: string): boolean {
+  return GLOBAL_ONLY_FLAGS.includes(key);
+}
+
+/** Enabled per person only; the backend refuses global and organization enables. */
+const USER_ONLY_FLAGS: readonly string[] = [FEATURE_FLAG.EXECUTION_PERMISSIONS];
+
+export function isUserOnlyFlag(key: string): boolean {
+  return USER_ONLY_FLAGS.includes(key);
 }
 
 /** All flag keys as an array (iteration, validation, tests). */

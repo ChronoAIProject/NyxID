@@ -96,7 +96,10 @@ pub async fn in_progress(
         .collection::<bson::Document>(CONVERSATIONS)
         .find(
             doc! {"user_id": owner, "agent_id": agent_id, "_id": {"$ne": exclude},
-            "group_id": bson::Bson::Null, "active_turn.started_at": {"$gt": fresh}},
+            "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+            "channel": bson::Bson::Null,
+            "$or": [{"guest_turn": false}, {"guest_turn": {"$exists": false}}],
+            "active_turn.started_at": {"$gt": fresh}},
         )
         .projection(doc! {"title": 1, "active_turn.turn_id": 1, "active_turn.question": 1, "active_turn.question_key": 1})
         .limit(5)
@@ -128,6 +131,8 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        execution_task: None,
+        delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,
         media_sent_at: None,
@@ -212,6 +217,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         created_by: "user".into(),
         model: routing::model_for(db, RouteRole::Orchestrator, engine::DEFAULT_MODEL).await,
         owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -250,12 +256,27 @@ pub async fn agent(db: &Database, owner: &str, id: &str) -> AppResult<AssistantA
         .find_one(doc! {"_id": id})
         .await?
         .ok_or_else(not_found)?;
-    if !super::org_agent_service::access(db, owner, &agent.user_id)
-        .await?
-        .can_read()
-        || (owner != agent.user_id && agent.is_nyxbot())
-    {
-        return Err(not_found());
+    if owner != agent.user_id {
+        if agent.is_nyxbot() {
+            return Err(not_found());
+        }
+        let acl = super::org_agent_service::access(db, owner, &agent.user_id).await?;
+        if !acl.can_read() {
+            // Organization agents are visible only through the organization's
+            // live read ACL.  Do not run the personal sharing evaluator for an
+            // organization owner: besides doing unnecessary sharing reads, it
+            // changes the established not-found contract for outsiders to the
+            // personal "Shared agent not found" error.
+            let owner_is_org = db
+                .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .find_one(doc! {"_id": &agent.user_id, "user_type": "org"})
+                .await?
+                .is_some();
+            if owner_is_org {
+                return Err(not_found());
+            }
+            super::shared_agent_service::require(db, owner, &agent).await?;
+        }
     }
     Ok(agent)
 }
@@ -319,8 +340,11 @@ pub async fn delegable_specialist(
     match specialist(db, actor, selector).await {
         Ok(agent) => {
             if agent.user_id != actor {
-                super::org_agent_service::require_creation_enabled(db, actor).await?;
-                super::org_agent_service::require_use(db, actor, &agent).await?;
+                let access =
+                    super::org_agent_service::resolve_agent_access(db, actor, &agent).await?;
+                if access.as_ref().is_none_or(|a| a.shared().is_none()) {
+                    super::org_agent_service::require_creation_enabled(db, actor).await?;
+                }
             }
             return Ok(agent);
         }
@@ -330,6 +354,17 @@ pub async fn delegable_specialist(
 
     let mut usable =
         admitted_organization_specialists(db, actor, selector, OrgAgentAdmission::Use).await?;
+    let shared = super::shared_agent_service::load(db, actor, None).await?;
+    usable.extend(
+        shared
+            .agents
+            .into_values()
+            .filter(|a| {
+                selector == a.agent().name
+                    || selector == format!("{}/{}", a.owner(), a.agent().name)
+            })
+            .map(|a| a.agent().clone()),
+    );
     match usable.len() {
         0 => Err(not_found()),
         1 => Ok(usable.pop().expect("one candidate")),
@@ -496,10 +531,54 @@ pub async fn agent_for_conversation(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<AssistantAgent> {
+    if let Some(access) = super::org_channel_service::conversation_access(db, row).await? {
+        let mut agent = access
+            .channel()
+            .ok_or_else(super::org_channel_service::denied)?
+            .agent()
+            .clone();
+        if row.guest_turn {
+            agent.memory.clear();
+            agent.machine_node_ids.clear();
+            agent.saved_login_ids.clear();
+            agent.machine_access = None;
+            agent.home_conversation_id = None;
+            agent.grants.account_read = false;
+        }
+        return Ok(agent);
+    }
+
+    if row.collaboration.is_some() {
+        return Box::pin(super::collaboration_group_service::runtime::agent_for_thread(db, row))
+            .await;
+    }
     match row.agent_id.as_deref() {
         Some(id) => {
-            let agent = agent(db, &row.user_id, id).await?;
-            super::org_agent_service::require_use(db, &row.user_id, &agent).await?;
+            let mut agent = agent(db, &row.user_id, id).await?;
+            let access =
+                super::org_agent_service::resolve_agent_access(db, &row.user_id, &agent).await?;
+            if let Some(shared) = access.as_ref().and_then(|a| a.shared()) {
+                super::assistant_group_service::check_shared_surface(row)?;
+                if row.group_id.is_some() {
+                    super::org_group_service::check_thread_participation(
+                        db,
+                        row,
+                        access.as_ref().expect("shared access"),
+                    )
+                    .await?;
+                }
+                agent.memory = shared.team_memory().to_vec();
+                agent.memory.extend(
+                    super::shared_agent_service::private_notes(db, &row.user_id, id).await?,
+                );
+                agent.machine_node_ids.clear();
+                agent.machine_access = None;
+                agent.saved_login_ids.clear();
+                agent.guest_access.clear();
+                agent.grants.account_read = false;
+                agent.home_conversation_id = None;
+                agent.access_mode_override = None;
+            }
             if agent.user_id != row.user_id && (row.guest_turn || row.channel.is_some()) {
                 return Err(AppError::Forbidden(
                     "Organization agents require a private member thread".into(),
@@ -515,13 +594,13 @@ pub async fn agent_for_conversation(
 /// the agent's, and never listed as threads.
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
-        doc! {"user_id": actor, "group_id": bson::Bson::Null,
-            "voice_parent_conversation_id": bson::Bson::Null, "$or": [
+        doc! {"user_id": actor, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+            "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
-        doc! {"user_id": actor, "agent_id": &agent.id, "group_id": bson::Bson::Null,
-        "voice_parent_conversation_id": bson::Bson::Null}
+        doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
+        "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null}
     }
 }
 
@@ -598,6 +677,7 @@ pub(crate) async fn create_thread_for_with_access(
         session,
         snapshot,
         learning_epoch,
+        None,
     ))
     .await
 }
@@ -610,7 +690,33 @@ pub(crate) async fn create_automation_thread(
     title: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    create_thread_with_kind(db, keys, actor, agent, title, true, session, None, None).await
+    create_thread_with_kind(
+        db, keys, actor, agent, title, true, session, None, None, None,
+    )
+    .await
+}
+
+pub(crate) async fn create_collaboration_thread(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    binding: crate::models::assistant_group_collaboration::ExecutionBinding,
+    session: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    Box::pin(create_thread_with_kind(
+        db,
+        keys,
+        actor,
+        agent,
+        "Group execution",
+        false,
+        session,
+        None,
+        None,
+        Some(binding),
+    ))
+    .await
 }
 
 /// Create a private voice execution context linked to its visible call thread.
@@ -623,7 +729,16 @@ pub(crate) async fn create_voice_task_thread(
     parent_conversation_id: &str,
     session: &mut ClientSession,
 ) -> AppResult<AssistantConversation> {
-    let mut row = create_automation_thread(db, keys, actor, agent, title, session).await?;
+    let access = super::org_agent_service::resolve_agent_access(db, actor, agent).await?;
+    // A shared voice task is a private child, never automation authority. The
+    // parent marker hides it from ordinary lists; no group admission is changed.
+    let mut row = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
+        super::shared_agent_transport::require_ready(db).await?;
+        create_thread_for_with_access(db, keys, actor, agent, title, session, access.as_ref())
+            .await?
+    } else {
+        create_automation_thread(db, keys, actor, agent, title, session).await?
+    };
     db.collection::<AssistantConversation>(CONVERSATIONS)
         .update_one(
             doc! {"_id": &row.id, "user_id": actor},
@@ -646,10 +761,12 @@ async fn create_thread_with_kind(
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
     learning_epoch: Option<i64>,
+    collaboration: Option<crate::models::assistant_group_collaboration::ExecutionBinding>,
 ) -> AppResult<AssistantConversation> {
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        collaboration: collaboration.clone(),
         owner_model_route: None,
         invocation_controlled: false,
         credential_invocation_id: None,
@@ -685,6 +802,8 @@ async fn create_thread_with_kind(
         agent_id: Some(agent.id.clone()),
         automation_thread,
         voice_parent_conversation_id: None,
+        guest_model_setup: false,
+        shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
         report_to: None,
@@ -694,16 +813,24 @@ async fn create_thread_with_kind(
         group_id: None,
         group_request_id: None,
         group_seen_seq: 0,
-        guest_turn: false,
+        guest_turn: collaboration.as_ref().is_some_and(|b| {
+            b.authority.lane == crate::models::assistant_group_collaboration::Lane::Guest
+        }),
         reply_channel: None,
         deliver_also: Vec::new(),
     };
     let collection = db.collection::<AssistantConversation>(CONVERSATIONS);
     collection.insert_one(&row).session(&mut *session).await?;
+    if let Some(binding) = &row.collaboration {
+        super::collaboration_group_service::runtime::attach_slot(db, binding, &row.id, session)
+            .await?;
+    }
     let authority = Box::pin(credentials::authority_with_access(
         db, &row, session, snapshot,
     ))
     .await?;
+    row.shared_agent_thread = authority.is_shared();
+
     let credential = credentials::load_or_provision_in_session(
         db,
         keys,
@@ -714,14 +841,21 @@ async fn create_thread_with_kind(
     )
     .await?;
     row.credential_api_key_id = credential.api_key_id.clone();
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::bind_key(db, &row, session).await?;
+    }
     collection
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id}},
+            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id, "shared_agent_thread": row.shared_agent_thread}},
         )
         .session(&mut *session)
         .await?;
-    if !automation_thread && row.platform_thread.is_none() && actor == agent.user_id {
+    if row.collaboration.is_none()
+        && !automation_thread
+        && row.platform_thread.is_none()
+        && actor == agent.user_id
+    {
         db.collection::<AssistantAgent>(AGENTS)
             .update_one(
                 doc! {"_id": &agent.id, "home_conversation_id": bson::Bson::Null},
@@ -823,6 +957,7 @@ pub async fn home_thread_for(
                 session,
                 None,
                 learning_epoch,
+                None,
             )
             .await;
             transactions::transaction_result(operation)
@@ -1188,6 +1323,7 @@ async fn create_specialist_inner(
         created_by: request.created_by.into(),
         model,
         owner_model_route: None,
+        guest_model_notices: Default::default(),
         access_mode_override: None,
         home_conversation_id: None,
         memory: Vec::new(),
@@ -1275,6 +1411,7 @@ async fn create_specialist_inner(
                     session,
                     None,
                     None,
+                    None,
                 )
                 .await?;
                 let mut agent = agent;
@@ -1346,7 +1483,21 @@ pub async fn update_agent(
     description: Option<&str>,
     style: AgentStyle<'_>,
 ) -> AppResult<AssistantAgent> {
-    let current = maintained_agent(db, owner, id).await?;
+    let current = agent(db, owner, id).await?;
+    let manager = if super::org_agent_service::require_maintain(db, owner, &current)
+        .await
+        .is_err()
+    {
+        let access = super::shared_agent_service::require(db, owner, &current).await?;
+        if access.role() != crate::models::assistant_sharing::ShareRole::Manager || name.is_some() {
+            return Err(AppError::Forbidden(
+                "Only the owner can change this agent setting".into(),
+            ));
+        }
+        Some(access)
+    } else {
+        None
+    };
     let actor = owner;
     let owner = current.user_id.as_str();
     if current.destroyed_at.is_some() {
@@ -1415,13 +1566,36 @@ pub async fn update_agent(
     if !unset.is_empty() {
         update.insert("$unset", unset);
     }
-    let updated = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(not_found)?;
-    super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    let shared_manager = manager.is_some();
+    let updated = if let Some(manager) = manager {
+        let mut session = db.client().start_session().await?;
+        session.start_transaction().await?;
+        super::shared_agent_service::fence(db, &manager, &mut session).await?;
+        let updated = db
+            .collection::<AssistantAgent>(AGENTS)
+            .find_one_and_update(
+                doc! {"_id": id, "user_id": owner, "destroyed_at": null,
+                "updated_at": bson::DateTime::from_chrono(current.updated_at)},
+                update,
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut session)
+            .await?
+            .ok_or_else(not_found)?;
+        session.commit_transaction().await?;
+        super::shared_agent_service::audit(db, actor, &updated, "profile").await;
+        updated
+    } else {
+        db.collection::<AssistantAgent>(AGENTS)
+            .find_one_and_update(doc! {"_id": id, "user_id": owner}, update)
+            .return_document(ReturnDocument::After)
+            .await?
+            .ok_or_else(not_found)?
+    };
+    if !shared_manager {
+        super::assistant_guest_model_setup::backoff::reset(db, actor, id, None).await?;
+        super::org_agent_service::audit_change(db, actor, &updated, "profile").await;
+    }
     Ok(updated)
 }
 
@@ -1521,6 +1695,7 @@ pub async fn set_agent_policy(
         updated.access_mode_override,
     )
     .await;
+    super::assistant_guest_model_setup::backoff::reset(db, &actor.user_id, id, None).await?;
     super::org_agent_service::audit_change(db, &actor.user_id, &updated, "policy").await;
     if current.access_mode_override != updated.access_mode_override {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(
@@ -1573,6 +1748,21 @@ pub enum MachineGrantMode {
 }
 
 impl GrantChange {
+    fn changes_guest_policy(&self, current: &AssistantAgent) -> bool {
+        match self {
+            Self::GuestOperations { base, selections } => {
+                !selections.is_empty() || base.changes_guest_policy(current)
+            }
+            Self::Machine { base, .. } => base.changes_guest_policy(current),
+            Self::Replace { guests, .. } | Self::Guests(guests) => {
+                guests.iter().any(|(id, level)| {
+                    current.guest_access.get(id).copied().unwrap_or_default() != *level
+                })
+            }
+            Self::Add(_) | Self::Remove(_) => false,
+        }
+    }
+
     /// The grants and guest access levels after this change.
     pub fn apply(
         &self,
@@ -1677,8 +1867,73 @@ pub(crate) async fn sync_thread_authority(
     rows: &[AssistantConversation],
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    let authority = KeyAuthority::for_agent(agent);
+    let policy = super::shared_agent_service::policy(db, agent).await?;
     for row in rows {
+        let authority = if row.guest_model_setup {
+            KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if let Some(origin) = super::org_channel_service::origin(row)
+            && origin.org_execution.as_ref().is_some_and(|e| e.guest)
+        {
+            // Grant maintenance must not expand a guest key to the specialist's
+            // full service/node authority. A retired binding yields no grants.
+            let execution = origin.org_execution.as_ref().expect("guest execution");
+            let channel = db
+                .collection::<crate::models::nyxbot_channel::NyxbotChannel>("nyxbot_channels")
+                .find_one(doc! {"_id":&origin.nyxbot_channel_id,"status":"active",
+                "org_specialist.revision":&execution.revision,
+                "org_specialist.guests.revision":&execution.guest_revision,
+                "org_specialist.guests.enabled":true})
+                .session(&mut *session)
+                .await?;
+            let policy = channel
+                .as_ref()
+                .and_then(|c| c.org_specialist.as_ref())
+                .map(|b| &b.guests);
+            let grants = AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| {
+                        policy.is_some_and(|p| {
+                            p.service_ids.contains(id)
+                                && p.service_authority.get(*id).is_some_and(|digest| {
+                                    *digest
+                                        == super::org_channel_service::management::service_digest(
+                                            agent, id,
+                                        )
+                                })
+                        })
+                    })
+                    .cloned()
+                    .collect(),
+                ..Default::default()
+            };
+            KeyAuthority::OrgChannelGuest(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
+        } else if row.shared_agent_thread {
+            let grants = crate::models::assistant_agent::AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| policy.shared_access.contains_key(*id))
+                    .cloned()
+                    .collect(),
+                platform_service_ids: Vec::new(),
+                account_read: false,
+            };
+            KeyAuthority::Shared(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
+        } else {
+            KeyAuthority::for_agent(agent)
+        };
         for key in thread_key_ids(db, &row.user_id, std::slice::from_ref(row), session).await? {
             match credentials::apply_authority(db, &row.user_id, &key, &authority, session).await {
                 Ok(()) | Err(AppError::NotFound(_)) => {}
@@ -1708,6 +1963,9 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if change.changes_guest_policy(&agent) {
+        super::org_agent_service::authorize_guest_change(db, owner, &agent, session).await?;
+    }
     let previous_machines = agent.machine_node_ids.clone();
     let previous_logins = agent.saved_login_ids.clone();
     if let GrantChange::Machine {
@@ -1763,6 +2021,7 @@ pub async fn apply_grants_in_session(
         .cloned()
         .collect();
     let lost_account = agent.grants.account_read && !grants.account_read;
+    super::shared_agent_service::remove_grants_in_session(db, &agent.id, &removed, session).await?;
     agent.grants = grants;
     agent.guest_access = guest_access;
     if let GrantChange::GuestOperations { selections, .. } = change {
@@ -2041,7 +2300,7 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
     Ok(agent)
 }
 
-/// Permanently delete a destroyed specialist and all of its threads.
+/// Delete a destroyed specialist while preserving recipients' private history.
 pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> {
     let agent = maintained_agent(db, owner, agent_id).await?;
     if agent.destroyed_at.is_none() {
@@ -2052,14 +2311,17 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     // Remove membership from every person's private groups without reading their transcripts.
     let group_owners = db
         .collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME)
-        .distinct("user_id", doc! {"member_agent_ids": &agent.id})
+        .distinct(
+            "user_id",
+            doc! {"member_agent_ids": &agent.id, "collaboration":null},
+        )
         .await?;
     for person in group_owners.iter().filter_map(bson::Bson::as_str) {
         super::assistant_group_service::remove_agent(db, person, &agent.id).await?;
     }
     let rows: Vec<AssistantConversation> = db
         .collection(CONVERSATIONS)
-        .find(doc! {"agent_id": &agent.id})
+        .find(doc! {"agent_id": &agent.id, "shared_agent_thread": {"$ne": true}, "collaboration":null})
         .await?
         .try_collect()
         .await?;
@@ -2076,6 +2338,19 @@ pub async fn purge(db: &Database, owner: &str, agent_id: &str) -> AppResult<()> 
     )
     .delete_many(doc! {"agent_id": &agent.id})
     .await?;
+    // Recipients retain their own transcripts and private notes. Publication
+    // policy and unusable connection consents are owned by the deleted agent.
+    for collection in [
+        crate::models::assistant_sharing::SHARES_COLLECTION_NAME,
+        crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME,
+    ] {
+        db.collection::<bson::Document>(collection)
+            .delete_many(doc! {"agent_id": &agent.id})
+            .await?;
+    }
+    db.collection::<bson::Document>(crate::models::assistant_sharing::COLLECTION_NAME)
+        .delete_one(doc! {"_id": &agent.id})
+        .await?;
     db.collection::<AssistantAgent>(AGENTS)
         .delete_one(doc! {"_id": &agent.id, "user_id": &agent.user_id})
         .await?;
@@ -2214,6 +2489,53 @@ pub async fn forget(db: &Database, owner: &str, agent_id: &str, note_id: &str) -
     Ok(())
 }
 
+/// Write, replace or (with `None`) remove one NyxID-authored note on the
+/// owner's NyxBot, under a fixed ID. The owner sees and can delete it like any
+/// note. A memory that is full without it keeps its notes and skips the write.
+pub async fn set_nyxbot_fixed_note(
+    db: &Database,
+    owner: &str,
+    note_id: &str,
+    text: Option<&str>,
+) -> AppResult<()> {
+    let nyxbot = ensure_nyxbot(db, owner).await?;
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let filter = doc! {"_id": &nyxbot.id, "user_id": owner};
+    // Remove any current copy. A replacement is pushed to the end: instructions
+    // keep the newest notes within their budget, so a fresh answer must not
+    // age out first.
+    let mut pull = filter.clone();
+    pull.insert("memory.id", note_id);
+    collection
+        .update_one(pull, doc! {"$pull": {"memory": {"id": note_id}}})
+        .await?;
+    let Some(text) = text else {
+        return Ok(());
+    };
+    let now = Utc::now();
+    let note = MemoryNote {
+        id: note_id.into(),
+        text: text.into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut push = filter;
+    push.insert("destroyed_at", bson::Bson::Null);
+    push.insert("memory.id", doc! {"$ne": note_id});
+    push.insert(
+        format!("memory.{}", MAX_MEMORY_NOTES - 1),
+        doc! {"$exists": false},
+    );
+    collection
+        .update_one(
+            push,
+            doc! {"$push": {"memory": bson::to_bson(&note)
+            .map_err(|_| AppError::Internal("Memory encoding failed".into()))?}},
+        )
+        .await?;
+    Ok(())
+}
+
 /// The agent's memory as an instructions note, newest kept within a budget.
 pub fn memory_note(agent: &AssistantAgent) -> String {
     if agent.memory.is_empty() {
@@ -2255,6 +2577,7 @@ pub struct ReplySummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AgentSummary {
+    pub share_role: Option<crate::models::assistant_sharing::ShareRole>,
     pub owner_id: String,
     pub owner_name: Option<String>,
     pub owner_slug: Option<String>,
@@ -2295,7 +2618,7 @@ pub struct AgentSummary {
 
 impl AgentSummary {
     pub fn delegation_name(&self) -> String {
-        if self.owner_kind == "org" {
+        if self.owner_kind == "org" || self.share_role.is_some() {
             format!(
                 "{}/{}",
                 self.owner_slug.as_deref().unwrap_or(&self.owner_id),
@@ -2309,6 +2632,9 @@ impl AgentSummary {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RequestSummary {
+    pub status: String,
+    pub code: String,
+    pub review_path: String,
     pub request_id: String,
     pub agent: String,
     pub agent_id: Option<String>,
@@ -2326,7 +2652,21 @@ pub fn request_summary(
     row: &AssistantAcknowledgement,
     agent: Option<&AssistantAgent>,
 ) -> RequestSummary {
+    let presentation = super::assistant_acknowledgement_service::refusal(row);
     RequestSummary {
+        status: presentation["status"]
+            .as_str()
+            .unwrap_or("unavailable")
+            .into(),
+        code: presentation["code"]
+            .as_str()
+            .unwrap_or("acknowledgement_unavailable")
+            .into(),
+        review_path: super::assistant_links::AssistantPage::ReviewCard {
+            conversation: &row.conversation_id,
+            card: &row.id,
+        }
+        .path(),
         request_id: row.id.clone(),
         agent: agent.map(|agent| agent.name.clone()).unwrap_or_default(),
         agent_id: agent.map(|agent| agent.id.clone()),
@@ -2461,7 +2801,7 @@ async fn last_reply(
 pub async fn running_agents(db: &Database, owner: &str) -> AppResult<HashSet<String>> {
     let rows: Vec<AssistantConversation> = db
         .collection::<AssistantConversation>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "active_turn.turn_id": {"$exists": true}})
+        .find(doc! {"collaboration": null, "user_id": owner, "active_turn.turn_id": {"$exists": true}})
         .limit(200)
         .await?
         .try_collect()
@@ -2525,7 +2865,7 @@ pub async fn summaries(
             db.collection::<AssistantConversation>(CONVERSATIONS)
                 .find_one(
                     doc! {"user_id": owner, "agent_id": &agent.id, "channel": bson::Bson::Null,
-                    "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
+                    "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null, "automation_thread": {"$ne": true}},
                 )
                 .sort(doc! {"created_at": 1})
                 .await?
@@ -2545,6 +2885,7 @@ pub async fn summaries(
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
         out.push(AgentSummary {
+            share_role: None,
             owner_id: agent.user_id.clone(),
             owner_name,
             owner_slug,
@@ -2629,7 +2970,7 @@ pub async fn read(
     } else {
         db.collection::<AssistantConversation>(CONVERSATIONS)
             .find_one(
-                doc! {"user_id": owner, "agent_id": &agent.id, "group_id": bson::Bson::Null,
+                doc! {"user_id": owner, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "group_id": bson::Bson::Null,
                 "channel": bson::Bson::Null, "automation_thread": {"$ne": true}},
             )
             .sort(doc! {"created_at": 1})
@@ -2682,7 +3023,7 @@ pub async fn direct_chats_note(
     let ids: Vec<&str> = names.keys().copied().collect();
     let threads: Vec<bson::Document> = db
         .collection::<bson::Document>(CONVERSATIONS)
-        .find(doc! {"user_id": owner, "agent_id": {"$in": &ids}})
+        .find(doc! {"collaboration": null, "user_id": owner, "agent_id": {"$in": &ids}})
         .projection(doc! {"agent_id": 1})
         .limit(500)
         .await?
@@ -2802,26 +3143,27 @@ pub async fn delegation_summaries(
         .collect())
 }
 
-/// Remove settled-report events for the given agents from a NyxBot thread's
-/// queue once `wait_for_subagents` has delivered them in-turn.
-pub async fn consume_settled_events(
+/// Explicit discovery/wait tools include shared specialists. Keep this out of
+/// ordinary turn roster construction so unshared turn paths add no reads.
+pub async fn tool_delegation_summaries(
     db: &Database,
-    owner: &str,
-    conversation_id: &str,
-    agent_ids: &[String],
-) -> AppResult<()> {
-    if agent_ids.is_empty() {
-        return Ok(());
+    actor: &str,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
+    let mut rows = delegation_summaries(db, actor, include_destroyed, reply_chars).await?;
+    for mut shared in super::shared_agent_service::summaries(db, actor).await? {
+        if !shared.can_use {
+            continue;
+        }
+        if reply_chars > 0
+            && let Some(home) = shared.home_conversation_id.as_deref()
+        {
+            shared.last_reply = last_reply(db, actor, home, reply_chars).await?;
+        }
+        rows.push(shared);
     }
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": conversation_id, "user_id": owner},
-            doc! {"$pull": {"pending_events": {
-                "kind": "subagent_settled", "agent_id": {"$in": agent_ids},
-            }}},
-        )
-        .await?;
-    Ok(())
+    Ok(rows)
 }
 
 /// Idle threads with queued events whose wake-up was deferred (full pool or
@@ -2830,6 +3172,7 @@ pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<Assista
     // NyxBot threads parked at the streak cap wait for a user message; they
     // never crowd out threads that can still wake.
     let mut filter = doc! {
+        "collaboration": null,
         "pending_events.created_at": {"$exists": true},
         "$or": [
             {"role": "subagent"},

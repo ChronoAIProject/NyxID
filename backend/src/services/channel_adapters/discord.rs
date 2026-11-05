@@ -32,6 +32,12 @@ use crate::services::channel_platform::{
 };
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+const REJECTED_BOT_TOKEN: &str = "Discord rejected the bot token. Copy it from Developer Portal > Bot > Reset Token; paste only the token, without the 'Bot ' prefix.";
+
+fn normalized_bot_token(token: &str) -> &str {
+    let token = token.trim();
+    token.strip_prefix("Bot ").unwrap_or(token).trim()
+}
 
 /// Discord Interaction types.
 const INTERACTION_PING: u64 = 1;
@@ -450,8 +456,8 @@ impl PlatformAdapter for DiscordAdapter {
             ),
             required_suffix: " for Discord",
             setup_instructions: &[
-                "For interactions, paste the Callback URL into Discord Developer Portal > General Information > Interactions Endpoint URL. Do not use the Webhooks / Event Webhooks page: Event Webhooks do not deliver ordinary bot chat messages.",
-                "For ordinary chat, ask your NyxID administrator to enable channel:discord-gateway. In Discord Developer Portal > Bot > Privileged Gateway Intents, enable Message Content Intent (approval is required for verified apps). NyxID requests Guilds, Guild Messages, Direct Messages and Message Content.",
+                "The Interactions Endpoint URL is optional and only needed for slash commands/components. For interactions, paste the Callback URL into Discord Developer Portal > General Information > Interactions Endpoint URL. Do not use the Webhooks / Event Webhooks page: Event Webhooks do not deliver ordinary bot chat messages.",
+                "When linked to NyxBot or a specialist, ordinary chat runs through NyxBot's Discord gateway when it is enabled for your account. Other relay bots need channel:discord-gateway enabled by your NyxID administrator. In Discord Developer Portal > Bot > Privileged Gateway Intents, enable Message Content Intent (approval is required for verified apps). NyxID requests Guilds, Guild Messages, Direct Messages and Message Content.",
                 "Install the app with the bot scope; add applications.commands only if you use interactions. Grant View Channels, Send Messages, Send Messages in Threads and Read Message History; grant Attach Files only for media replies. Private threads require bot membership. NyxID does not create slash commands.",
                 "Assign an agent in NyxID, then send a DM or @mention the bot in a server channel or thread. Group chats default to mentions; followed threads also need NyxID thread follow enabled. Check Health for Gateway connection or intent/token errors.",
             ],
@@ -472,6 +478,25 @@ impl PlatformAdapter for DiscordAdapter {
             ],
             ..RegistrationDescriptor::default()
         }
+    }
+
+    fn registration_token(
+        &self,
+        fields: &crate::services::channel_platform::RegistrationValues<'_>,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        Ok(zeroize::Zeroizing::new(
+            normalized_bot_token(fields.get("bot_token").unwrap_or_default()).to_owned(),
+        ))
+    }
+
+    fn updated_token(
+        &self,
+        _current: &str,
+        fields: &crate::services::channel_platform::RegistrationValues<'_>,
+    ) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+        Ok(fields
+            .get("bot_token")
+            .map(|token| zeroize::Zeroizing::new(normalized_bot_token(token).to_owned())))
     }
 
     fn webhook_policy(&self, body: &[u8]) -> super::super::channel_platform::WebhookPolicy {
@@ -670,6 +695,7 @@ impl PlatformAdapter for DiscordAdapter {
                 .map(|id| Some(id.to_string()))
                 .ok_or_else(media::upload_failed);
         }
+        crate::services::channel_platform::revalidate_post_effect().await?;
         let resp: serde_json::Value = request
             .send()
             .await
@@ -716,6 +742,7 @@ impl PlatformAdapter for DiscordAdapter {
     ) -> AppResult<()> {
         let (url, body) =
             build_edit_message_request(&self.base_url, conversation_id, platform_message_id, edit);
+        crate::services::channel_platform::revalidate_post_effect().await?;
         let resp: serde_json::Value = http
             .patch(&url)
             .header("Authorization", format!("Bot {}", credentials.token))
@@ -765,23 +792,23 @@ impl PlatformAdapter for DiscordAdapter {
         http: &reqwest::Client,
         credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        // Registration/update normalize exactly once, before both verification
+        // and storage. Verify the same token that subsequent requests will use.
         let bot_token = credentials.token;
         let url = format!("{}/users/@me", self.base_url);
-        let resp: serde_json::Value = http
+        crate::services::channel_platform::revalidate_post_effect().await?;
+        let response = http
             .get(&url)
             .header("Authorization", format!("Bot {bot_token}"))
             .send()
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!("Discord users/@me request failed: {e}"))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Discord users/@me response parse failed: {e}"
-                ))
             })?;
+        super::check_token_verification_status(&response, "Discord users/@me", REJECTED_BOT_TOKEN)?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!("Discord users/@me response parse failed: {e}"))
+        })?;
 
         let bot_id = resp.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
             AppError::ChannelPlatformError("Discord users/@me response missing id".to_string())
@@ -819,6 +846,178 @@ impl PlatformAdapter for DiscordAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn token_verification_classifies_http_rejections_before_json() {
+        let server = wiremock::MockServer::start().await;
+        let adapter = DiscordAdapter {
+            base_url: server.uri(),
+        };
+        super::super::assert_token_verification_statuses(
+            &adapter,
+            &server,
+            "private-token",
+            "Discord users/@me",
+        )
+        .await;
+        server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(
+                wiremock::ResponseTemplate::new(401)
+                    .set_body_json(serde_json::json!({"message":"401: Unauthorized","code":0})),
+            )
+            .mount(&server)
+            .await;
+        let error = adapter
+            .verify_bot_token(
+                &reqwest::Client::new(),
+                &crate::services::channel_platform::BotCredentials::from("private-token"),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(error, AppError::ValidationError(message) if message == REJECTED_BOT_TOKEN)
+        );
+    }
+
+    #[test]
+    fn registration_normalizes_one_case_sensitive_prefix_and_describes_both_transports() {
+        use crate::services::channel_platform::RegistrationValues;
+        let adapter = DiscordAdapter::default();
+        for (input, expected) in [
+            ("  Bot abc.def\n", "abc.def"),
+            ("\tabc.def\r\n", "abc.def"),
+            ("Bot Bot abc.def", "Bot abc.def"),
+            ("bot abc.def", "bot abc.def"),
+        ] {
+            let fields =
+                RegistrationValues(std::collections::BTreeMap::from([("bot_token", input)]));
+            assert_eq!(
+                adapter.registration_token(&fields).unwrap().as_str(),
+                expected
+            );
+            assert_eq!(
+                adapter
+                    .updated_token("old", &fields)
+                    .unwrap()
+                    .unwrap()
+                    .as_str(),
+                expected
+            );
+        }
+        let instructions = adapter.registration().setup_instructions.join(" ");
+        for required in [
+            "optional and only needed for slash commands/components",
+            "NyxBot or a specialist",
+            "enabled for your account",
+            "Other relay bots need channel:discord-gateway",
+            "Message Content Intent",
+        ] {
+            assert!(instructions.contains(required));
+        }
+    }
+
+    #[tokio::test]
+    async fn registration_verifies_and_stores_the_normalized_token_with_unchanged_identity() {
+        use crate::{
+            services::{
+                channel_bot_service,
+                channel_platform::{BotCredentials, RegistrationValues},
+            },
+            test_utils::{connect_transaction_test_database, test_app_state},
+        };
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .and(header("authorization", "Bot private-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"id":"123", "username":"TestBot", "global_name":"Ignored"}),
+            ))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let adapter = DiscordAdapter {
+            base_url: server.uri(),
+        };
+        let identity = adapter
+            .verify_bot_token(
+                &reqwest::Client::new(),
+                &BotCredentials::from("private-token"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(identity.platform_bot_id, "123");
+        assert_eq!(identity.platform_bot_username, "TestBot");
+        assert!(identity.display_name.is_none());
+        let db = connect_transaction_test_database("discord_normalized_registration").await;
+        let state = test_app_state(db);
+        let owner = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let public_key = "a".repeat(64);
+        let fields = RegistrationValues(std::collections::BTreeMap::from([
+            ("bot_token", " \nBot private-token\t"),
+            ("public_key", public_key.as_str()),
+        ]));
+        let created = channel_bot_service::create_bot(
+            &state.db,
+            &state.config,
+            &state.encryption_keys,
+            &reqwest::Client::new(),
+            &adapter,
+            &owner,
+            Some("Test"),
+            &fields,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            channel_bot_service::decrypt_bot_token(&state.encryption_keys, &created.bot)
+                .await
+                .unwrap(),
+            "private-token"
+        );
+        // Two prefixes are not silently normalized twice: verification must use
+        // exactly the token that would be stored, or registration could succeed
+        // while subsequent sends fail.
+        Mock::given(header("authorization", "Bot Bot private-token"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let fields = RegistrationValues(std::collections::BTreeMap::from([
+            ("bot_token", "Bot Bot private-token"),
+            ("public_key", public_key.as_str()),
+        ]));
+        assert!(matches!(
+            channel_bot_service::create_bot(
+                &state.db,
+                &state.config,
+                &state.encryption_keys,
+                &reqwest::Client::new(),
+                &adapter,
+                &owner,
+                Some("Test"),
+                &fields,
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+        server.verify().await;
+        state.db.drop().await.unwrap();
+    }
 
     #[test]
     fn edit_message_request_uses_channel_endpoint_and_content_only() {

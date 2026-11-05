@@ -31,7 +31,7 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ g: "" })).toEqual({});
   });
 
-  it("keeps a linked agent details section only for the two sheet sections", () => {
+  it("keeps a linked agent details section for supported sheet tabs", () => {
     expect(parseAssistantSearch({ agent: "a1", details: "grants" })).toEqual({
       agent: "a1",
       details: "grants",
@@ -40,7 +40,10 @@ describe("parseAssistantSearch", () => {
       c: "conv-1",
       details: "skills",
     });
-    for (const invalid of ["", "memory", "GRANTS", 1, true, ["grants"]]) {
+    for (const details of ["overview", "memory", "channels"]) {
+      expect(parseAssistantSearch({ agent: "a1", details })).toEqual({ agent: "a1", details });
+    }
+    for (const invalid of ["", "unknown", "GRANTS", 1, true, ["grants"]]) {
       expect(parseAssistantSearch({ agent: "a1", details: invalid })).toEqual({ agent: "a1" });
     }
   });

@@ -928,3 +928,8 @@ export function machineMigrationCommand(
   validateUpdate(name, version);
   return `docker run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --cap-drop=ALL --security-opt=no-new-privileges --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock --mount ${shellQuote(`type=volume,src=${name}-nyxid-update,dst=/var/lib/nyxid-machine-update`)} ${verifiedUpdaterImage(image)} bootstrap ${shellQuote(name)} ${shellQuote(version)}`;
 }
+
+export const machineSettingsFormSchema = z.object({
+  confirm: z.enum(["none", "changes", "all"]),
+  allow: z.boolean(),
+});

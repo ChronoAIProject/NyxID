@@ -33,6 +33,8 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            execution_task: None,
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -73,6 +75,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -86,7 +89,9 @@ mod fixtures {
 
     pub fn group_message(id: &str, group_id: &str, user_id: &str) -> GroupMessage {
         GroupMessage {
+            collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -107,6 +112,7 @@ mod fixtures {
 
     pub fn group(id: &str, owner: &str) -> AssistantGroup {
         AssistantGroup {
+            collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: Default::default(),
             id: id.into(),
@@ -138,6 +144,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -191,6 +198,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -374,6 +382,7 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -446,6 +455,7 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -502,6 +512,7 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -651,6 +662,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -733,6 +745,7 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                execution_task: None,
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -803,6 +816,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
             id: group_id.into(),
@@ -828,7 +842,9 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -902,6 +918,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            collaboration: None,
             last_recipient_ids: Vec::new(),
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
             id: org_group_id.into(),
@@ -927,7 +944,9 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: true,
             author_user_id: None,
@@ -998,6 +1017,7 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1095,6 +1115,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1219,6 +1240,7 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1437,6 +1459,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1453,6 +1476,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1677,6 +1701,7 @@ async fn feedback_group_vote_persists_group_context() {
         .db
         .collection::<GroupMessage>(GROUP_MESSAGES)
         .insert_one(GroupMessage {
+            collaboration: None,
             seq: 4,
             text: "group reply".into(),
             activities: vec![
@@ -2415,4 +2440,152 @@ async fn feedback_thread_preview_pages_anchor_and_redact_personal_and_group_cont
         .0,
         StatusCode::FORBIDDEN
     );
+}
+
+#[tokio::test]
+async fn real_work_internal_owner_list_allows_operator_writes_but_usage_viewer_reads_only() {
+    let f = fixture("real-work-roles", false).await;
+    let path = "/api/v1/admin/assistant/analytics/internal-owners";
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/analytics?threshold=0",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, report) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/analytics?threshold=5",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["real_work"]["threshold"], 5);
+
+    let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .unwrap();
+    for role in [&roles.admin, &roles.operator] {
+        f.state
+            .db
+            .collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id":&f.owner},
+                doc! {"$set":{"is_admin":false,"role_ids":[role]}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"owner_ids":[&f.owner]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["owner_ids"], json!([&f.owner]));
+    }
+    let viewer = f
+        .state
+        .db
+        .collection::<Document>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! {"slug":"usage_viewer"})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"role_ids":[viewer.get_str("_id").unwrap()]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", path, &f.human_token, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"owner_ids":[]}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id":&f.owner}, doc! {"$set":{"role_ids":[]}})
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", path, &f.human_token, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_work_failure_preserves_existing_analytics_and_recovers() {
+    let f = fixture("real-work-degraded", false).await;
+    let at = bson::DateTime::from_chrono(Utc::now() - Duration::minutes(1));
+    f.state.db.collection::<Document>(ASSISTANT_MESSAGES).insert_many([
+        doc! {"_id":"input","conversation_id":"thread","seq":1,"user_id":&f.owner,"turn_id":"turn","role":"user","created_at":at},
+        doc! {"_id":"reply","conversation_id":"thread","seq":2,"user_id":&f.owner,"turn_id":"turn","role":"assistant","status":"completed","created_at":at},
+    ]).await.unwrap();
+    let path = "/api/v1/admin/assistant/analytics";
+    let (status, baseline) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(baseline["active_sessions"], 1);
+    assert_eq!(baseline["outcomes"]["completed"], 1);
+    assert!(baseline["real_work"].is_object());
+    assert_eq!(baseline["real_work_unavailable"], false);
+    // A corrupt optional-report setting fails the real aggregation only. Never
+    // expose the underlying database error or stored material in the response.
+    let settings = f
+        .state
+        .db
+        .collection::<Document>("assistant_analytics_settings");
+    settings
+        .insert_one(doc! {"_id":"internal_owners","owner_ids":"PRIVATE_SENTINEL"})
+        .await
+        .unwrap();
+    let (status, degraded) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK, "{degraded}");
+    assert_eq!(degraded["real_work"], Value::Null);
+    assert_eq!(degraded["real_work_unavailable"], true);
+    for field in [
+        "active_sessions",
+        "active_accounts",
+        "running_now",
+        "outcomes",
+        "daily_sessions",
+        "daily_turns",
+    ] {
+        assert_eq!(degraded[field], baseline[field], "{field}");
+    }
+    assert!(!degraded.to_string().contains("PRIVATE_SENTINEL"));
+    settings
+        .delete_one(doc! {"_id":"internal_owners"})
+        .await
+        .unwrap();
+    let (status, restored) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(restored["real_work"].is_object());
+    assert_eq!(restored["real_work_unavailable"], false);
+    f.state.db.drop().await.unwrap();
 }

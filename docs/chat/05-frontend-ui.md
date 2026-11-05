@@ -187,7 +187,11 @@ These attributes are part of the testing contract. They can move with equivalent
 ## Message composition
 
 Each canonical `ChatMessage` renders one identity row. User content is a compact
-bubble. An assistant row composes, in order:
+bubble with three 18px corners and a tighter 4px bottom-right corner. Its
+background and text use the dedicated `chat-bubble` and
+`chat-bubble-foreground` theme colors, editable per theme in Settings → Display
+with a live chat preview and a 4.5:1 text contrast check. Light mode defaults to
+a stronger neutral gray fill. An assistant row composes, in order:
 
 - a collapsible thinking/reasoning disclosure;
 - a collapsible step and tool-call activity disclosure;
@@ -218,9 +222,20 @@ reply when an owner chat key actually invokes a supported CMA operation. The
 card comes from the durable MCP watch, never assistant text or a promised task
 plan. It shows the CMA identity, operation and agent IDs when available, a safe
 idempotency key, the invoking assistant's name, and the last observed status.
-Provisioning success is **Agent ready**; only a completed Responses operation is
-**Completed**. Progress stages describe submission, provisioning or activity,
+Agent status labels follow CMA's own vocabulary: **Starting**, **Ready**,
+**Working**, **Needs approval**, **Paused**, **Stopped**, **Deleted**, and
+**Needs attention**. Provisioning success is **Ready**; only a completed
+Responses operation is **Completed**. Progress stages describe submission, provisioning or activity,
 and readiness; they do not infer implementation or deployment milestones.
+
+A full-width primary **View in CMA** link opens the exact agent in a new tab
+only when CMA supplies a valid `callback_url`, projected as `cma_url` in
+history. No destination is inferred from agent IDs or catalog configuration.
+An omitted callback preserves the last supplied link; explicit null or an
+invalid callback removes it. This gives users
+the CMA conversation and work details while keeping the status card compact.
+The checked timestamp includes the date and time so old observations are
+identifiable after the tracking window ends.
 
 History returns an owner/thread-scoped `cma_operations` metadata snapshot,
 including settled operations whose initiating turn is on an older message page.
@@ -410,6 +425,37 @@ status. Dismissing setup while its request is pending cannot open a later
 orphan window. Device-code and token entry keep their existing setup behavior.
 
 ## Sidebar and history
+
+Verified CMA sessions appear automatically only in their source NyxID chat,
+with a CMA activity indicator beside the existing machine control. Each card
+links to that original conversation/specialist and optionally to CMA's validated
+supplied callback. Pinning makes a card available across chats and every page;
+unpinning restores source-only visibility. Account-bound pin/minimise preferences
+survive reload and clear on account changes. One app-level provider owns streams.
+
+Cards align left within their container and fill the available width up to
+500px. They reuse the shared resizable preview column alongside machine cards;
+on narrow screens they sit above chat while retaining composer space. Other pages
+show pinned cards in a bounded floating stack. Automatic discovery uses only
+server-verified personal connection receipts, never account inventory or the
+current route as origin evidence. Status-filtered active inventory is joined to
+exact receipts before the card limit; pins use a separate exact query. The
+compact card combines glyph/title and controls in its header, task/stream state
+on one line, and three recent actions with expandable history. Header icon
+controls have hover/focus tooltips, and the card has no internal horizontal
+dividers. Connection,
+session ID, and timestamp stay behind Session details. The root floating
+surface uses matched shell-route ownership, including global monitoring on
+standalone desktop and not-found pages. Retryable refresh outages retain the
+last valid observation for the same connection/account/source; one denied or
+unavailable connection cannot suppress healthy peers. Authorization and terminal
+detail clear the affected observation. Explicitly pinning a visible authorized
+session keeps its card and stream through navigation, including an older
+empty/error pin cache, while the pin receipt refresh is pending or retryably
+unavailable. A successful withdrawal or denial clears the promoted observation. The fixed header and internal scrolling recovery/activity
+body keep Reconnect accessible at short keyboard heights, even when minimised.
+See [CMA session status cards](12-cma-sessions.md)
+for attribution boundaries, scoped polling, preferences, and recovery.
 
 The sidebar has a primary New chat command, workspace destinations, and a Chats navigation list. The chat list is a semantic `nav`. Each conversation title is a button whose accessible name is the title.
 

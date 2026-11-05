@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -20,7 +21,7 @@ const TooltipContent = React.forwardRef<
       ref={ref}
       sideOffset={sideOffset}
       className={cn(
-        "z-[100] overflow-hidden rounded-[6px] bg-muted px-3 py-1.5 text-xs text-foreground shadow-lg shadow-primary/5",
+        `z-[100] overflow-hidden rounded-[6px] bg-muted px-3 py-1.5 ${TEXT_STYLES.tooltip} text-foreground shadow-lg shadow-primary/5 unthemed:text-xs`,
           "data-[state=delayed-open]:animate-in data-[state=instant-open]:animate-in",
           "data-[state=closed]:animate-out",
           "data-[state=delayed-open]:fade-in-0 data-[state=instant-open]:fade-in-0",

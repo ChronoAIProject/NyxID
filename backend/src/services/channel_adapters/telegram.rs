@@ -452,6 +452,34 @@ impl TelegramAdapter {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for TelegramAdapter {
+    async fn send_typing(
+        &self,
+        http: &reqwest::Client,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
+        conversation_id: &str,
+        thread_id: Option<&str>,
+    ) -> AppResult<bool> {
+        let mut body = serde_json::json!({"chat_id": conversation_id, "action":"typing"});
+        if let Some(thread) = thread_id {
+            let thread = thread
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| AppError::ValidationError("Invalid Telegram topic".into()))?;
+            body["message_thread_id"] = serde_json::json!(thread);
+        }
+        let response = media::response_json(
+            http.post(format!(
+                "{}{}/sendChatAction",
+                self.base_url, credentials.token
+            ))
+            .timeout(std::time::Duration::from_secs(3))
+            .json(&body),
+        )
+        .await?;
+        Ok(response["ok"] == true && response["result"] == true)
+    }
+
     async fn resolve_thread(
         &self,
         _http: &reqwest::Client,
@@ -893,24 +921,23 @@ impl PlatformAdapter for TelegramAdapter {
     ) -> AppResult<BotIdentity> {
         let bot_token = credentials.token;
         let url = format!("{}{bot_token}/getMe", self.base_url);
-        let resp: serde_json::Value = http
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram getMe request failed: {}",
-                    e.without_url()
-                ))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Telegram getMe response parse failed: {}",
-                    e.without_url()
-                ))
-            })?;
+        let response = http.get(&url).send().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!(
+                "Telegram getMe request failed: {}",
+                e.without_url()
+            ))
+        })?;
+        super::check_token_verification_status(
+            &response,
+            "Telegram getMe",
+            "Telegram rejected the bot token. Copy the token from BotFather and try again.",
+        )?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!(
+                "Telegram getMe response parse failed: {}",
+                e.without_url()
+            ))
+        })?;
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let description = resp
@@ -1124,6 +1151,19 @@ fn photo_document_fallback(description: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn token_verification_classifies_http_rejections_before_json() {
+        let server = wiremock::MockServer::start().await;
+        let adapter = TelegramAdapter::for_api_base(&server.uri());
+        super::super::assert_token_verification_statuses(
+            &adapter,
+            &server,
+            "private-token",
+            "Telegram getMe",
+        )
+        .await;
+    }
 
     // -- parse_inbound -------------------------------------------------------
 
@@ -2145,5 +2185,53 @@ mod tests {
             .as_deref(),
             Some("")
         );
+    }
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+    #[tokio::test]
+    async fn typing_uses_exact_chat_topic_and_never_sends_a_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/bottest/sendChatAction"))
+            .and(body_json(
+                serde_json::json!({"chat_id":"-100","message_thread_id":42,"action":"typing"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok":true,"result":true})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let adapter = TelegramAdapter {
+            base_url: format!("{}/bot", server.uri()),
+            file_base_url: String::new(),
+        };
+        let credentials = crate::services::channel_platform::BotCredentials {
+            token: "test",
+            platform_bot_id: None,
+            platform_secrets: None,
+            billing: None,
+        };
+        assert!(
+            adapter
+                .send_typing(&reqwest::Client::new(), &credentials, "-100", Some("42"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            adapter
+                .send_typing(&reqwest::Client::new(), &credentials, "-100", Some("bad"))
+                .await
+                .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
 }

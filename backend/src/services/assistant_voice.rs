@@ -58,6 +58,10 @@ pub fn validate_preferences(p: &VoicePreferences) -> AppResult<()> {
 pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantConversation> {
     let row = super::assistant_nyxagent::get(db, user, id).await?;
     private_thread(&row)?;
+    if row.shared_agent_thread {
+        super::shared_agent_transport::require_ready(db).await?;
+        crate::mw::auth::api_key_auth_user_for_voice(db, &row).await?;
+    }
     Ok(row)
 }
 
@@ -127,6 +131,10 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        execution_enrolled: false,
+        model_task: None,
+        progress: None,
+        timing: Default::default(),
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,
@@ -235,13 +243,15 @@ pub(crate) async fn enqueue_in_session(
         db.collection::<AssistantMessage>(MESSAGES)
             .update_one(
                 doc! {"_id":&request.message_id},
-                doc! {"$set":{"turn_id":&request.turn_id,"voice.request_id":&request.id}},
+                doc! {"$set":{"turn_id":&request.turn_id,"voice.request_id":&request.id,"origin":"user"}},
             )
             .session(&mut *session)
             .await?;
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                execution_task: None,
+                delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -367,6 +377,23 @@ pub(crate) async fn publish_result(
                     }
                 } else { source };
                 let source = settled_result(&current, source);
+                // Timing survives audio closure and fast turns that settle
+                // between coordinator ticks. IDs and timestamps only.
+                if let Some(call) = db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
+                    .find_one(doc!{"_id":&current.session_id,"user_id":&current.user_id})
+                    .projection(doc!{"created_at":1}).session(&mut *session).await?
+                    && let Ok(start)=call.get_datetime("created_at") {
+                    let offset=|at:chrono::DateTime<Utc>|(at-start.to_chrono()).num_milliseconds().max(0);
+                    let mut marks=doc!{"timing.result_ms":offset(source.created_at)};
+                    if let Some(first)=source.activities.iter().map(|a|a.started_at).min() {
+                        marks.insert("timing.first_activity_ms",offset(first));
+                        marks.insert("timing.tool_started_ms",offset(first));
+                    }
+                    if let Some(end)=source.activities.iter().filter_map(|a|a.ended_at).min() {
+                        marks.insert("timing.first_tool_finished_ms",offset(end));
+                    }
+                    requests.update_one(doc!{"_id":&current.id},doc!{"$min":marks}).session(&mut *session).await?;
+                }
                 // Older replicas executed in the visible thread. Adopt their
                 // existing settled reply rather than copying it into that thread twice.
                 if source.conversation_id == current.conversation_id
@@ -397,9 +424,11 @@ pub(crate) async fn publish_result(
                     .await?
                     .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
                 let id = Uuid::new_v4().to_string();
-                let text: String = source.text.chars().take(12_000).collect();
+                let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        execution_task: None,
+                        delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
                         media_queue_notice_id: None,
         media_pending: None,
@@ -409,9 +438,9 @@ pub(crate) async fn publish_result(
         platform_origin: None,
         report_to: None,
         continuation_of: None,
-        retry_of: None,
+        retry_of: source.retry_of.clone(),
                         retry_claimed_by: None,
-                        activity_count: None,
+                        activity_count: source.activity_count,
                         specialist_id: None,
                         steering: None,
                         author: None,
@@ -486,7 +515,10 @@ pub(crate) async fn claim(
     private_thread(&visible)?;
     if row.id != visible.id
         && (request.task_conversation_id.as_deref() != Some(&row.id)
-            || !row.automation_thread
+            || !(row.automation_thread
+                || row.shared_agent_thread
+                    && visible.shared_agent_thread
+                    && row.voice_parent_conversation_id.as_deref() == Some(visible.id.as_str()))
             || row.agent_id != visible.agent_id
             || row.agent_owner_id != visible.agent_owner_id)
     {
@@ -647,6 +679,8 @@ pub(crate) async fn result_message(
         return Ok(None);
     }
     Ok(Some(AssistantMessage {
+        execution_task: None,
+        delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
         media_pending: None,
@@ -671,9 +705,8 @@ pub(crate) async fn result_message(
         seq: 0,
         turn_id: request.turn_id.clone(),
         role: "assistant".into(),
-        text:
-            "The voice request ended without a recorded result. Check its status before retrying."
-                .into(),
+        text: super::voice::progress::terminal_detail(request.terminal_error_code.as_deref())
+            .into(),
         status: "failed".into(),
         error_code: Some(
             request
@@ -858,7 +891,7 @@ async fn settle_lost_in_session(
     requests
         .update_one(
             doc! {"_id": &row.id, "state": {"$in": ["claimed", "awaiting_confirmation"]}},
-            doc! {"$set": {"state": "cancelled", "pending_acknowledgement_ids": []}},
+            doc! {"$set": {"state": "cancelled", "terminal_error_code":"turn_lost", "pending_acknowledgement_ids": []}},
         )
         .session(&mut *session)
         .await?;
@@ -887,6 +920,8 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            execution_task: None,
+            delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1034,7 +1069,8 @@ pub async fn recover(db: &Database) -> AppResult<()> {
                             .update_one(
                                 doc! {"_id":&row.id},
                                 doc! {"$set":{
-                                    "state":"cancelled","pending_acknowledgement_ids":[]
+                                    "state":"cancelled","pending_acknowledgement_ids":[],
+                                    "terminal_error_code":if row.state == RequestState::AwaitingConfirmation {"confirmation_expired"} else {"voice_request_expired"}
                                 }},
                             )
                             .session(&mut *session)
@@ -1112,6 +1148,10 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            execution_enrolled: parent.execution_enrolled,
+            model_task: None,
+            progress: None,
+            timing: Default::default(),
             started_at: None,
             terminal_error_code: None,
             async_operation_pending: false,
@@ -1200,14 +1240,28 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                 {
                     return Ok(());
                 }
+                if request.execution_enrolled {
+                    let original = requests.find_one(doc! {"_id":root,"user_id":&user})
+                        .session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Voice task unavailable".into()))?;
+                    db.collection::<bson::Document>(MESSAGES).update_one(
+                        doc! {"_id":&original.message_id,"user_id":&user,"execution_task.version":1,"execution_task.cancelled":false},
+                        doc! {"$set":{"execution_task.cancelled":true},"$inc":{"execution_task.epoch":1_i64}})
+                        .session(&mut *session).await?;
+                }
                 // The original task is the cancellation fence even after its first
                 // turn settled. Every later continuation checks this same root.
                 requests
-                    .update_one(doc! {"_id":root}, doc! {"$set":{"state":"cancelled"}})
+                    .update_one(
+                        doc! {"_id":root},
+                        doc! {"$set":{"state":"cancelled","terminal_error_code":"cancelled"}},
+                    )
                     .session(&mut *session)
                     .await?;
                 requests
-                    .update_many(family, doc! {"$set":{"state":"cancelled"}})
+                    .update_many(
+                        family,
+                        doc! {"$set":{"state":"cancelled","terminal_error_code":"cancelled"}},
+                    )
                     .session(&mut *session)
                     .await?;
                 super::async_service_operation::cancel_voice_in_session(&db, &user, root, session)
@@ -1268,6 +1322,7 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
 
 #[derive(serde::Serialize)]
 pub struct VoiceOption {
+    announcements: bool,
     service_id: String,
     connection_id: Option<String>,
     key_source: &'static str,
@@ -1433,6 +1488,9 @@ async fn audio_options(
             }
             own_connections.push(connection);
         }
+        let conversation_unavailable = (!dictation)
+            .then(|| super::inference_voice::conversation_unavailable_reason(voice))
+            .flatten();
         let billing = service.billing.as_ref();
         let platform_priced =
             super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing).is_ok();
@@ -1451,6 +1509,10 @@ async fn audio_options(
         {
             if platform_authorized {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: None,
                     key_source: "platform",
@@ -1462,17 +1524,19 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: platform_enabled && platform_priced,
-                    unavailable_reason: if !platform_enabled {
+                    available: platform_enabled
+                        && platform_priced
+                        && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if !platform_enabled {
                         Some("provider_rollout_pending")
                     } else if !platform_priced {
                         Some("duration_tariff_unavailable")
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.platform_key.pricing.clone()
                     } else {
                         None
@@ -1483,6 +1547,10 @@ async fn audio_options(
             }
             for connection in &own_connections {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: Some(connection.service.id.clone()),
                     key_source: "own",
@@ -1494,15 +1562,15 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: own_billing.is_ok(),
-                    unavailable_reason: if own_billing.is_err() {
+                    available: own_billing.is_ok() && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if own_billing.is_err() {
                         Some("duration_tariff_unavailable")
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.byok_pricing.clone()
                     } else {
                         None
@@ -1522,4 +1590,20 @@ async fn audio_options(
         }
     }
     Ok(options)
+}
+
+/// Additive outcome over the legacy terminal bucket: old replicas still parse
+/// cancelled, while new clients distinguish a failed task from an explicit Stop.
+pub(crate) fn request_outcome(request: &VoiceRequest) -> Option<&'static str> {
+    (request.state == RequestState::Cancelled).then(|| {
+        if request
+            .terminal_error_code
+            .as_deref()
+            .is_some_and(|code| code != "cancelled")
+        {
+            "failed"
+        } else {
+            "cancelled"
+        }
+    })
 }

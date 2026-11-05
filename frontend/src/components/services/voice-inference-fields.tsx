@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +18,7 @@ export function VoiceInferenceFields({
   const validation = value ? voiceMetadataSchema.safeParse(value) : null;
   return (
     <div className="space-y-3 rounded-lg border p-3">
-      <label className="block text-xs">
+      <Label className="block">
         Voice protocol
         <select
           aria-label="Voice protocol"
@@ -32,6 +33,10 @@ export function VoiceInferenceFields({
                 ? null
                 : {
                     protocol,
+                    delegation_model:
+                      protocol === "openai_live"
+                        ? value?.delegation_model
+                        : null,
                     models: value?.models ?? [],
                     voices: value?.voices ?? [],
                     usage_source:
@@ -49,14 +54,32 @@ export function VoiceInferenceFields({
           <option value="openai_live">OpenAI Live</option>
           <option value="xai_realtime">xAI Realtime</option>
         </select>
-      </label>
+      </Label>
       {value && (
         <>
+          {value.protocol === "openai_live" && (
+            <Label className="block">
+              Responses delegation model
+              <Input
+                aria-label="Responses delegation model"
+                value={value.delegation_model ?? ""}
+                maxLength={128}
+                placeholder="Provider model ID"
+                onChange={(e) =>
+                  onChange({
+                    ...value,
+                    delegation_model: e.target.value || null,
+                  })
+                }
+              />
+              <span className="text-muted-foreground">Required for live conversation. Leave empty to offer dictation only.</span>
+            </Label>
+          )}
           {(["models", "voices"] as const).map((field) => (
             <fieldset key={field} className="space-y-2">
-              <legend className="text-xs font-medium">
+              <Label asChild><legend className="">
                 {field === "models" ? "Voice models" : "Provider voices"}
-              </legend>
+              </legend></Label>
               {value[field].map((item, index) => (
                 <div key={index} className="flex flex-wrap items-center gap-2">
                   <Input
@@ -90,7 +113,7 @@ export function VoiceInferenceFields({
                     }
                   />
                   {field === "models" && (
-                    <label className="text-xs">
+                    <Label>
                       <input
                         type="radio"
                         name="default-voice-model"
@@ -107,7 +130,7 @@ export function VoiceInferenceFields({
                         }
                       />{" "}
                       Default
-                    </label>
+                    </Label>
                   )}
                   <Button
                     type="button"
@@ -147,7 +170,7 @@ export function VoiceInferenceFields({
               </Button>
             </fieldset>
           ))}
-          <label className="block text-xs">
+          <Label className="block">
             Usage source
             <select
               aria-label="Voice usage source"
@@ -165,11 +188,11 @@ export function VoiceInferenceFields({
               </option>
               <option value="server_measured">Server measured (xAI)</option>
             </select>
-          </label>
-          <fieldset className="flex flex-wrap gap-3 text-xs">
-            <legend>Reported billing units</legend>
+          </Label>
+          <fieldset className="flex flex-wrap gap-3 text-13">
+            <Label asChild><legend>Reported billing units</legend></Label>
             {VOICE_BILLING_METRICS.map((metric) => (
-              <label key={metric}>
+              <Label key={metric}>
                 <input
                   type="checkbox"
                   checked={value.billing_metrics.includes(metric)}
@@ -184,15 +207,15 @@ export function VoiceInferenceFields({
                   }
                 />{" "}
                 {metricLabel(metric)}
-              </label>
+              </Label>
             ))}
           </fieldset>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Models and voices must be available at the provider. Prices are
             configured separately below.
           </p>
           {validation && !validation.success && (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               {validation.error.issues[0]?.message}
             </p>
           )}

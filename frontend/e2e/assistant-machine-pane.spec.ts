@@ -16,7 +16,7 @@ async function withDesktop(page: Page) {
 test("an open desktop docks beside the chat behind a draggable divider", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 860 });
   await withDesktop(page);
-  const column = page.getByRole("complementary", { name: "Machine" });
+  const column = page.getByRole("complementary", { name: "Preview" });
   await expect(column).toBeVisible();
   await expect(column.getByRole("region", { name: "Live machine desktop" })).toBeVisible();
   // One machine: no machine row, just the view controls on a single line.
@@ -30,7 +30,7 @@ test("an open desktop docks beside the chat behind a draggable divider", async (
   expect((await column.boundingBox())!.width).toBeCloseTo(main.width * 0.5, -1);
   // Two resizers stand at the top: the chat width grips and the split divider.
   await expect(page.getByRole("separator", { name: "Resize chat content from right" })).toBeAttached();
-  const divider = page.getByRole("separator", { name: "Resize machine column" });
+  const divider = page.getByRole("separator", { name: "Resize preview column" });
   await expect(divider).toHaveAttribute("aria-valuenow", "50");
   const grip = (await divider.boundingBox())!;
   await page.mouse.move(grip.x + grip.width / 2, grip.y + 10);
@@ -63,17 +63,17 @@ test("an open desktop docks beside the chat behind a draggable divider", async (
   await expect(column).toHaveCount(0);
   await page.reload();
   await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
-  await expect(page.getByRole("complementary", { name: "Machine" })).toHaveCount(0);
+  await expect(page.getByRole("complementary", { name: "Preview" })).toHaveCount(0);
   await page.getByRole("button", { name: "Show machine" }).click();
-  await expect(page.getByRole("complementary", { name: "Machine" })).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "Preview" })).toBeVisible();
   // The width choice persisted too.
-  await expect.poll(async () => Math.round((await page.getByRole("complementary", { name: "Machine" }).boundingBox())!.width)).toBe(Math.round(main.width * 0.65));
+  await expect.poll(async () => Math.round((await page.getByRole("complementary", { name: "Preview" }).boundingBox())!.width)).toBe(Math.round(main.width * 0.65));
 });
 
 test("narrow screens keep the desktop inline above the transcript", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 860 });
   await withDesktop(page);
-  await expect(page.getByRole("complementary", { name: "Machine" })).toHaveCount(0);
+  await expect(page.getByRole("complementary", { name: "Preview" })).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Live machine desktop" })).toBeVisible();
   await page.getByRole("button", { name: "Hide machine" }).click();
   await expect(page.getByRole("region", { name: "Live machine desktop" })).toHaveCount(0);
@@ -86,7 +86,7 @@ test("threads without a desktop show no machine button", async ({ page }) => {
   await sendMessage(page, "Use GitHub");
   await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
   await expect(page.getByRole("button", { name: /(Show|Hide) machine/ })).toHaveCount(0);
-  await expect(page.getByRole("complementary", { name: "Machine" })).toHaveCount(0);
+  await expect(page.getByRole("complementary", { name: "Preview" })).toHaveCount(0);
 });
 
 test("several machines share the column as tabs, one streaming at a time", async ({ page }) => {
@@ -105,7 +105,7 @@ test("several machines share the column as tabs, one streaming at a time", async
   await sendMessage(page, "Use GitHub");
   await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
 
-  const column = page.getByRole("complementary", { name: "Machine" });
+  const column = page.getByRole("complementary", { name: "Preview" });
   const tabs = column.getByRole("tablist", { name: "Machines" });
   await expect(tabs.getByRole("tab")).toHaveText(["prod-us-east", "staging-eu"]);
   await expect(tabs.getByRole("tab", { name: /staging-eu/ }).getByRole("img", { name: "Needs you" })).toBeVisible();

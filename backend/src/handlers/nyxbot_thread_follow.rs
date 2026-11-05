@@ -86,7 +86,38 @@ pub(super) async fn gateway_inbound(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn inbound_impl(
+pub(super) async fn inbound_impl(
+    state: &AppState,
+    row: &NyxbotChannel,
+    payload: &Value,
+    message: &str,
+    text: &str,
+    event_key: &str,
+    gateway: bool,
+) -> AppResult<Option<Inbound>> {
+    let result = Box::pin(inbound_impl_inner(
+        state, row, payload, message, text, event_key, gateway,
+    ))
+    .await;
+    if payload["conversation"]["type"] != "private" {
+        match &result {
+            Ok(Some(outcome)) => {
+                admission_diagnostics::outcome(state, row, message, Ok(outcome)).await?
+            }
+            Err(_) => admission_diagnostics::outcome(state, row, message, Err(())).await?,
+            Ok(None) => {
+                crate::services::nyxbot_admission_service::selection(
+                    &state.db, row, message, "legacy", None,
+                )
+                .await?
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn inbound_impl_inner(
     state: &AppState,
     row: &NyxbotChannel,
     payload: &Value,
@@ -148,7 +179,7 @@ async fn inbound_impl(
         ThreadSenderKind::Human | ThreadSenderKind::Bot
     ) || sender_id.is_empty()
     {
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_sender")));
     }
 
     if text.trim().is_empty()
@@ -158,7 +189,7 @@ async fn inbound_impl(
         .await?
         .0 == 0
     {
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_empty_content")));
     }
     let sender = Sender {
         media: crate::services::telegram_input::stored_attachments(&source.attachments),
@@ -171,7 +202,7 @@ async fn inbound_impl(
     };
     let stop_requested = sender.kind == ThreadSenderKind::Human && text.trim() == "stop following";
     if stop_requested && !sender.original_message {
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_control_provenance")));
     }
     if sender.kind == ThreadSenderKind::Human
         && let Some(linked) = link_owner(state, row, &sender, text, false).await?
@@ -182,7 +213,7 @@ async fn inbound_impl(
         if let Inbound::Reply(reply) = linked {
             direct_reply(state, row, message, &reply, None).await?;
         }
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("owner_control")));
     }
     if sender.kind == ThreadSenderKind::Bot {
         let own = if gateway {
@@ -191,7 +222,7 @@ async fn inbound_impl(
             own_user_id(state, &bot).await
         };
         if !chats::foreign_bot(&bot, own.as_deref(), sender_id) {
-            return Ok(Some(Inbound::Silent));
+            return Ok(Some(Inbound::Silent("refused_self_bot")));
         }
     }
     // Only this signed callback can improve address evidence. Never convert
@@ -223,7 +254,7 @@ async fn inbound_impl(
         {
             facts = proven;
         } else if sender.kind == ThreadSenderKind::Bot {
-            return Ok(Some(Inbound::Silent));
+            return Ok(Some(Inbound::Silent("refused_address_evidence")));
         }
     }
     if facts.address != ThreadAddress::Mention
@@ -241,9 +272,19 @@ async fn inbound_impl(
             ThreadAddress::ReplyToBot
         };
     }
+    let mut updated_facts =
+        doc! {"thread_context": bson::to_bson(&facts).map_err(|_| follow::not_found())?};
+    if source.nyxbot_admission.is_some() {
+        // Retained reply evidence can improve the initial address. Diagnostics
+        // must expose the normalized address actually used by the selector.
+        updated_facts.insert(
+            "nyxbot_admission.address",
+            bson::to_bson(&facts.address).map_err(|_| follow::not_found())?,
+        );
+    }
     state.db.collection::<ChannelMessage>(MESSAGES).update_one(doc! {"_id": message,
         "thread_context": bson::to_bson(&source.thread_context).map_err(|_| follow::not_found())?},
-        doc! {"$set": {"thread_context": bson::to_bson(&facts).map_err(|_| follow::not_found())?}}).await?;
+        doc! {"$set": updated_facts}).await?;
     let token = crate::services::channel_credentials::resolve_bot_token(
         &state.db,
         &state.encryption_keys,
@@ -346,7 +387,7 @@ async fn inbound_impl(
     if facts.kind == ThreadKind::Email
         && follow::eligible_for_facts(row, &parent, facts, sender_id).is_none()
     {
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_members")));
     }
     let settings = if facts.kind == ThreadKind::Email {
         match email_settings(
@@ -379,7 +420,7 @@ async fn inbound_impl(
                     &reply,
                 )
                 .await?;
-                return Ok(Some(Inbound::Silent));
+                return Ok(Some(Inbound::Silent("refused_thread_policy_conflict")));
             }
             Err(error) => return Err(error),
         }
@@ -401,7 +442,19 @@ async fn inbound_impl(
     {
         return Ok(None);
     }
-    let Some(_guest) = follow::eligible_for_facts(row, &settings, facts, sender_id) else {
+    let (projected, _) = crate::services::org_channel_service::project_sender(
+        &state.db,
+        row,
+        sender_id,
+        sender.kind == ThreadSenderKind::Human,
+        settings
+            .agent_id
+            .as_deref()
+            .or(row.agent_id.as_deref())
+            .unwrap_or_default(),
+    )
+    .await?;
+    let Some(_guest) = follow::eligible_for_facts(&projected, &settings, facts, sender_id) else {
         if sender.kind == ThreadSenderKind::Human
             && facts.kind != ThreadKind::Email
             && addressed
@@ -427,7 +480,7 @@ async fn inbound_impl(
             )
             .await?;
         }
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_members")));
     };
     let agent_id = match settings.agent_id.clone().or_else(|| row.agent_id.clone()) {
         Some(id) => id,
@@ -454,11 +507,19 @@ async fn inbound_impl(
     .await;
     let (child, binding, stopped) = match selection {
         Ok(follow::Selection::Legacy) => return Ok(None),
-        Ok(follow::Selection::Quiet) => return Ok(Some(Inbound::Silent)),
+        Ok(follow::Selection::Quiet(reason)) => {
+            if !private {
+                crate::services::nyxbot_admission_service::selection(
+                    &state.db, row, message, "quiet", None,
+                )
+                .await?;
+            }
+            return Ok(Some(Inbound::Silent(reason)));
+        }
         Ok(follow::Selection::Child(c, b)) => (c, b, false),
         Ok(follow::Selection::Stopped(c, b)) => (c, b, true),
         Err(AppError::Conflict(_)) if sender.kind == ThreadSenderKind::Bot => {
-            return Ok(Some(Inbound::Silent));
+            return Ok(Some(Inbound::Silent("refused_thread_capacity")));
         }
         Err(AppError::Conflict(_)) => {
             let reply = OutboundReply {
@@ -481,10 +542,20 @@ async fn inbound_impl(
                 &reply,
             )
             .await?;
-            return Ok(Some(Inbound::Silent));
+            return Ok(Some(Inbound::Silent("refused_thread_capacity")));
         }
         Err(e) => return Err(e),
     };
+    if !private {
+        crate::services::nyxbot_admission_service::selection(
+            &state.db,
+            row,
+            message,
+            if stopped { "stopped" } else { "child" },
+            Some(&child.id),
+        )
+        .await?;
+    }
     if !stopped
         && !crate::services::channel_bot_turn_service::admit_with_owner_reset(
             &state.db,
@@ -496,9 +567,11 @@ async fn inbound_impl(
         )
         .await?
     {
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_bot_budget")));
     }
     let origin = ChannelOrigin {
+        org_execution: None,
+        native_event_id: None,
         nyxbot_channel_id: row.id.clone(),
         partition: child.partition.clone(),
         platform: row.platform.clone(),
@@ -512,7 +585,11 @@ async fn inbound_impl(
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .update_one(
-            doc! {"channel_id":&row.id,"event_id":message},
+            if row.gateway_source.is_some() {
+                doc! {"channel_id":&row.id,"_id":event_key}
+            } else {
+                doc! {"channel_id":&row.id,"event_id":message}
+            },
             doc! {"$set":{"resolved_thread_id":&child.id,"resolved_conversation_id":conversation}},
         )
         .await?;
@@ -525,7 +602,7 @@ async fn inbound_impl(
         )
         .await;
     }
-    if gateway {
+    if gateway && row.gateway_source.is_none() {
         // Reconcile admission before starting work, so a failed management
         // request cannot discard an already-started turn receiver.
         let _ = chats::sync_gateway_groups(state, row, true).await?;
@@ -550,11 +627,15 @@ async fn inbound_impl(
     };
     let result = result.map(|result| {
         if sender.kind == ThreadSenderKind::Bot && matches!(result, Inbound::Busy) {
-            Inbound::Silent
+            Inbound::Silent("refused_busy")
         } else {
             result
         }
     });
+    if !private {
+        admission_diagnostics::outcome(state, row, message, result.as_ref().map_err(|_| ()))
+            .await?;
+    }
     if gateway {
         return Ok(Some(match result {
             Ok(Inbound::Busy) => {
@@ -570,7 +651,7 @@ async fn inbound_impl(
             late_delivery::process(state, event_key).await;
             None
         }
-        Ok(Inbound::Silent) => None,
+        Ok(Inbound::Silent(_)) => None,
         Ok(Inbound::Busy) => Some("I'm busy right now. Please try again in a moment.".into()),
         Ok(Inbound::Turn(receiver)) => {
             let _ = final_reply(receiver).await;
@@ -584,7 +665,7 @@ async fn inbound_impl(
     }
     // Opening reservations expire under the revision-fenced sweep. Another
     // simultaneous event may still be claiming this shared reservation.
-    Ok(Some(Inbound::Silent))
+    Ok(Some(Inbound::Silent("handled")))
 }
 
 async fn email_settings(
@@ -649,6 +730,9 @@ pub(crate) async fn send(
     images: Option<super::images::ImageTurn<'_>>,
 ) -> AppResult<()> {
     let channel = follow::access(&state.db, owner, &origin.nyxbot_channel_id).await?;
+    if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
+        return Err(follow::not_found());
+    }
     let mut text = bounded_reply(text);
     if let Some(images) = images {
         let child = follow::validate_delivery(&state.db, owner, origin, conversation).await?;
@@ -682,6 +766,13 @@ pub(crate) async fn send(
     }
     if text.trim().is_empty() {
         return Ok(());
+    }
+    // A rejected native activation retains its verified source identity. The
+    // committed transport, not that identity alone, selects the reply path.
+    if channel.transport == "gateway" && channel.gateway_source.is_some() {
+        follow::validate_delivery(&state.db, owner, origin, conversation).await?;
+        return super::native_responses::send_update(state, &channel, origin, conversation, &text)
+            .await;
     }
     if threads::gateway::negotiated(&channel) {
         follow::validate_delivery(&state.db, owner, origin, conversation).await?;
@@ -788,6 +879,11 @@ pub(super) async fn send_bound_reply(
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
+        if (channel.transport == "gateway" && channel.gateway_source.is_some())
+            || origin.native_event_id.is_some()
+        {
+            return Err(AppError::ChannelPlatformSendUnsupported);
+        }
         let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
         let adapter = adapter(state, &bot)?;
         let token = crate::services::channel_credentials::resolve_bot_token(
@@ -866,12 +962,22 @@ pub(crate) async fn prelude(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(threads::HISTORY_SECONDS);
     let prepare = async {
         let child = follow::validate_delivery(&state.db, &row.user_id, origin, &row.id).await?;
-        let channel = follow::access(&state.db, &row.user_id, &origin.nyxbot_channel_id).await?;
+        let channel = if let Some(access) =
+            crate::services::org_channel_service::conversation_access(&state.db, row).await?
+        {
+            access
+                .channel()
+                .ok_or_else(follow::not_found)?
+                .channel()
+                .clone()
+        } else {
+            follow::access(&state.db, &row.user_id, &origin.nyxbot_channel_id).await?
+        };
         let settings = state
             .db
             .collection::<NyxbotThread>(THREADS)
             .find_one(doc! {"_id": &child.follow.settings_chat_id,
-            "channel_id": &channel.id, "user_id": &row.user_id})
+            "channel_id": &channel.id, "user_id": &channel.user_id})
             .await?
             .ok_or_else(follow::not_found)?;
         let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;

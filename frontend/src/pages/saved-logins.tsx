@@ -56,19 +56,19 @@ export function SavedLoginsPage() {
       <div className="max-w-xs">
         <OrgScopeSelect value={owner} onChange={setOwner} />
       </div>
-      <p className="rounded-lg border border-border p-4 text-12 text-muted-foreground">
+      <p className="rounded-lg border border-border p-4 text-14 text-muted-foreground">
         {SAVED_LOGIN_RESIDUAL}
       </p>
       {logins.isLoading ? (
-        <p className="text-12">Loading saved logins…</p>
+        <p className="text-14">Loading saved logins…</p>
       ) : null}
       {logins.error || remove.error ? (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {(logins.error ?? remove.error)?.message}
         </p>
       ) : null}
       {!logins.isLoading && !logins.data?.length ? (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           No saved logins in this account.
         </p>
       ) : null}
@@ -137,11 +137,11 @@ function SavedLoginCard({
 }) {
   return (
     <article className="space-y-3 rounded-xl border border-border bg-card p-4">
-      <h2 className="font-display text-15 font-medium">{login.label}</h2>
-      <p className="break-all text-12 text-muted-foreground">
+      <h2 className="font-display type-card-title">{login.label}</h2>
+      <p className="break-all text-14 text-muted-foreground">
         {login.allowed_origins.join(", ")}
       </p>
-      <p className="text-12">Username {login.username_hint}</p>
+      <p className="text-14">Username {login.username_hint}</p>
       <div className="flex flex-wrap gap-2">
         {login.has_password ? (
           <Badge variant="secondary">Password set</Badge>
@@ -271,7 +271,7 @@ function LoginEditor({
                       <p
                         key={index}
                         role="alert"
-                        className="text-12 text-destructive"
+                        className="text-14 text-destructive"
                       >
                         Line {index + 1}: {message}
                       </p>
@@ -325,7 +325,7 @@ function LoginEditor({
               )}
             />
             {error ? (
-              <p role="alert" className="text-12 text-destructive">
+              <p role="alert" className="text-14 text-destructive">
                 {error}
               </p>
             ) : null}

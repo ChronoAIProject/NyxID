@@ -153,6 +153,11 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+
+    #[error("Service monitoring is unavailable")]
+    MonitoringUnavailable,
+    #[error("Service monitoring is not configured")]
+    MonitoringNotConfigured,
     #[error("Tool operation is not published")]
     ToolOperationNotPublished,
     /// Adds safe startup context while preserving the underlying numeric code/status.
@@ -167,6 +172,11 @@ pub enum AppError {
     /// A NyxBot model selection names a model NyxAgent does not offer.
     #[error("The selected model is not available. Choose another model in the model selector.")]
     AssistantModelUnavailable,
+
+    #[error(
+        "Your access settings or model connection changed during this task; review the completed actions and try again"
+    )]
+    AssistantModelAuthorityChanged,
 
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
@@ -874,15 +884,18 @@ impl AppError {
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
-            Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::VoiceProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::VoiceProviderUnavailable | Self::MonitoringUnavailable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
+            Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1109,12 +1122,15 @@ impl AppError {
             Self::VoiceQueueFull => 12500,
             Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
+            Self::MonitoringUnavailable => 13300,
+            Self::MonitoringNotConfigured => 13301,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
             // 12101 is already the public upload-retention code.
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
+            Self::AssistantModelAuthorityChanged => 12104,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
@@ -1389,9 +1405,12 @@ impl AppError {
             Self::VoiceQueueFull => "voice_queue_full",
             Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
+            Self::MonitoringUnavailable => "monitoring_unavailable",
+            Self::MonitoringNotConfigured => "monitoring_not_configured",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
+            Self::AssistantModelAuthorityChanged => "model_authority_changed",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -1703,7 +1722,7 @@ impl AppError {
                     approve_url,
                     ..
                 } => {
-                    format!("Approval failed: {reason}. Review pending approvals at {approve_url}")
+                    format!("Approval failed: {reason}. Review the approval request and its history at {approve_url}")
                 }
                 AppError::SkillDraftValidation(diagnostic)
                     if diagnostic.rule == "ornn_format_rejected" && diagnostic.ornn_rules.is_empty() =>
@@ -2261,11 +2280,14 @@ mod tests {
     #[test]
     fn error_codes_unique() {
         let codes = vec![
+            AppError::MonitoringUnavailable.error_code(),
+            AppError::MonitoringNotConfigured.error_code(),
             AppError::ManagedExecutionPending("".into()).error_code(),
             AppError::ErasurePreparing.error_code(),
             AppError::AssistantTurnActive.error_code(),
             AppError::AssistantTurnRequired.error_code(),
             AppError::AssistantModelUnavailable.error_code(),
+            AppError::AssistantModelAuthorityChanged.error_code(),
             AppError::AdminUsageQueryTimeout.error_code(),
             AppError::WorkspaceDestinationsNotActivated.error_code(),
             AppError::NodeHttpSignatureUnsupported.error_code(),
@@ -3339,7 +3361,7 @@ mod tests {
         assert_eq!(json["approve_url"], "https://app.example.com/approvals");
         assert_eq!(
             json["message"],
-            "Approval failed: rejected. Review pending approvals at https://app.example.com/approvals"
+            "Approval failed: rejected. Review the approval request and its history at https://app.example.com/approvals"
         );
     }
 

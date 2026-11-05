@@ -36,7 +36,7 @@ fn unresolved_release(bot: &str) -> Document {
     ]}
 }
 
-pub(super) async fn relay_allowed(db: &Database, bot: &str) -> AppResult<bool> {
+pub(crate) async fn relay_allowed(db: &Database, bot: &str) -> AppResult<bool> {
     let channel = db
         .collection::<Document>(CHANNELS)
         .find_one(channel_filter(bot))
@@ -47,10 +47,30 @@ pub(super) async fn relay_allowed(db: &Database, bot: &str) -> AppResult<bool> {
     {
         return Ok(false);
     }
+    gateway_released(db, bot).await
+}
+
+/// Also gate a new native enrollment: a prior unresolved native connection
+/// must finish its deletion and drain before another remote session can start.
+pub(crate) async fn gateway_released(db: &Database, bot: &str) -> AppResult<bool> {
     Ok(db
         .collection::<Document>(RELEASES)
         .find_one(unresolved_release(bot))
         .projection(doc! {"_id":1})
+        .await?
+        .is_none())
+}
+
+pub(crate) async fn gateway_released_in_session(
+    db: &Database,
+    bot: &str,
+    tx: &mut ClientSession,
+) -> AppResult<bool> {
+    Ok(db
+        .collection::<Document>(RELEASES)
+        .find_one(unresolved_release(bot))
+        .projection(doc! {"_id":1})
+        .session(tx)
         .await?
         .is_none())
 }

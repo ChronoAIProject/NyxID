@@ -33,6 +33,36 @@ retention policy below to existing and new files. Conversation/group deletion
 and owner purge remove all payload chunks, extracted text and expiry markers.
 Removing an unsent attachment deletes it.
 
+## Collaboration request images
+
+Authenticated collaboration participants may post uploads to a group. Pending
+uploads stay private; accepted message uploads are public to current participants.
+A collaboration guest execution (an authenticated NyxID participant using the
+agent owner's guest opt-in) may receive only the image attachments on the exact
+request it answers. It uses the same per-model modality gate and ordinary
+`image_plan` capability/size/type checks as owner turns; known text-only models
+receive the `model_text_only` notice without an image URL. It uses
+the same canonical `/api/v1/assistant-attachments/{id}/content` URL fetched with
+its bound thread key. The guest's model usage continues to bill the agent owner.
+
+Every preparation/download checks the exact group, request, trigger message,
+original uploader, membership revision, live turn/key, retention and current
+owner guest opt-in. Downloads recheck after decryption. Another request's images,
+other people's uploads, earlier history, pending drafts and owner uploads are
+not available. Guest discovery lists only this request's images; document reads,
+upload authoring and managed attachment egress stay denied. Channel/platform
+guests keep their existing media refusal.
+
+Never silently drop a request attachment: absent capabilities, unsupported image
+types and size/count limits produce `IMAGE_FALLBACK`; expiry and missing data
+produce explicit availability notices. Non-image files in guest requests are
+explicitly described as withheld. No notice implies that pixels or document
+contents were seen. Machine suggestions apply only where machine authority
+exists; collaboration guests have none. Retention belongs to the original
+uploader even when a guest turn runs on the agent owner's key. The delete-after-
+turn policy recognizes that requester's collaboration execution and still
+expires images at settlement.
+
 ## Inbound channel media
 
 The per-person `assistant:channel-media` flag defaults off. When enabled, verified
@@ -41,7 +71,7 @@ NyxBot or specialist through NyxID's relay or the Agent Event Gateway, including
 admitted followed threads. Telegram owner files use the same flag and shared
 byte budget; their preparation before turn admission and per-file fallback are
 described in [Telegram forwarding](../TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
-Other adapters and Lark audio/video retain their existing behavior. Guests never download media or
+Other adapters and Lark audio/video retain their existing behavior. Platform/channel guests never download media or
 create uploads; their admitted turn receives the fixed note
 `attachments from guests are not shared with the assistant`. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.
@@ -327,6 +357,8 @@ NyxAgent restricts remote images to its configured NyxID origin and the attachme
 content path, forbids redirects and credentials in URLs, uses the request's own
 key, and validates size and raster type before handing image input to Codex.
 Sessions and responses use the same validation. No arbitrary remote image fetches.
+Operators must keep NyxAgent's `NYXID_BASE_URL` aligned with NyxID's canonical
+`BASE_URL`; NyxID does not bypass or relax this origin check.
 An absent/older capability gives an explicit user and agent notice: the image was
 received but this agent version cannot view it. Offer
 `nyx__machine_save_attachment`; never silently omit an image or claim it was seen.
@@ -360,6 +392,35 @@ paste stays ordinary text. Attachments do not survive leaving the composer, so a
 saved draft never keeps a handle: pasted text returns inline (bounded like the
 textbox) and other files become their description. File names never add an
 `@mention`. Images show above the text of the message they belong to.
+
+### Per-model image support
+
+Model discovery requests `GET /v1/models?include_capabilities=true`. NyxID returns
+optional `input_modalities` with each model, retaining the bounded 60-second
+per-owner success/failure cache and ordinary-private credential selection. A
+missing or malformed field is unknown and preserves existing image behavior.
+The model picker labels known text-only models, and the composer warns when an
+image is attached without blocking Send.
+
+For owner image turns, the existing account-metadata adapter reads that same
+cache, with at most a five-second lookup on a miss. Text-only turns make no
+additional metadata request. Failure or an unknown model leaves the deployment
+capability check and ordinary image plan unchanged. All owner transports reuse the same cached metadata. Transports without account
+model discovery retain unknown support on a miss. Known text-only models omit image URLs
+and receive a fixed notice in the turn context; the owner sees the matching
+transcript notice, without a machine-save suggestion. Tool-image continuations
+also honor known text-only support and preserve the completed answer.
+
+Delivery keeps the existing `image_input: sent|unavailable` values. The optional
+`image_input_reason` distinguishes `model_text_only`, `agent_unsupported`, and
+NyxAgent's `image_input_unsupported` notice. Only the recognized bounded
+machine code is consumed from response `nyxagent_notices`; unknown codes and
+all notice prose are ignored. The parser accepts only `[a-z0-9_]{1,64}`, inspects
+at most 32 notices, and stores no provider text. A recognized unsupported-image
+notice marks the delivered images unavailable and prevents further image
+URLs in that turn. The existing `image_input_unavailable` stream event
+refreshes the transcript. Old readers can ignore the additive reason and keep
+displaying the ordinary fallback.
 
 Acceptance coverage includes spoofing, oversize, ZIP expansion, encrypted/malformed
 PDF, timeout, owner/guest/thread/specialist ACLs, atomic message binding, expiry,

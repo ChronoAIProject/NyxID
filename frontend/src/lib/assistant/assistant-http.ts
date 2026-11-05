@@ -302,7 +302,11 @@ export async function assistantHttp(
     ...errorBody,
     message: withAssistantTrace(
       (response.status === 402 ? billingError(errorBody.error)?.message : undefined)
-        ?? assistantRequestErrorMessage(response.status, errorBody.message),
+        ?? assistantRequestErrorMessage(
+          response.status,
+          errorBody.message,
+          errorBody.error,
+        ),
       response.headers.get("X-NyxID-Trace-Id"),
     ),
   });

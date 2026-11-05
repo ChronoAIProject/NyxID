@@ -38,6 +38,7 @@ export interface ConnectCardContentBlock {
 }
 
 export interface ApprovalCardContentBlock {
+  readonly execution_proposal?: import("@/schemas/execution-proposal").ExecutionProposal | null;
   readonly type: "approval_card";
   readonly block_id: string;
   readonly approval_request_id: string;

@@ -15,7 +15,7 @@ export function Breadcrumb({ items }: BreadcrumbProps) {
   const parentTo = items.length > 1 ? items[0]?.to : undefined;
 
   return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm">
+    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-14">
       {parentTo && (
         <Link
           to={parentTo}

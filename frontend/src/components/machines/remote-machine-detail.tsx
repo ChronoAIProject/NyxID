@@ -1,4 +1,16 @@
 import {
+  GroupedDialog,
+  GroupedDialogContent,
+} from "@/components/ui/grouped-dialog";
+import { GroupedField, GroupedMessage } from "@/components/ui/grouped-fields";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
+import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
+import {
   assertRemoteMachineAdmission,
   useRemoteMachineAdmission,
 } from "@/hooks/use-remote-machine-admission";
@@ -10,12 +22,10 @@ import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
-  AlertTriangle,
   Copy,
   Pause,
   Play,
   RefreshCw,
-  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -56,14 +66,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { MachineGrantList } from "@/components/shared/machine-grant-list";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -76,9 +79,7 @@ import {
   Form,
   FormControl,
   FormField,
-  FormItem,
   FormLabel,
-  FormMessage,
   useAppForm,
 } from "@/components/ui/form";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -164,6 +165,7 @@ function RemoteMachineDetailView({
   confirmationId,
   accessPanel,
 }: RemoteMachineDetailProps) {
+  const draftGuard = useGroupedDraftGuard();
   const userId = useAuthStore((state) => state.user?.id);
   const remoteAdmission = useRemoteMachineAdmission();
   const query = useRemoteMachine(machineId);
@@ -369,7 +371,7 @@ function RemoteMachineDetailView({
             : "An accepted request is awaiting a confirmed resource result.";
 
   return (
-    <div className="min-h-0 min-w-0 space-y-6 p-4 sm:p-5 [&_h2]:break-words [&>div:first-child>div:last-child]:max-w-full max-sm:[&_div.flex.text-12]:flex-col max-sm:[&_div.flex.text-12]:items-start max-sm:[&_div.flex.text-12]:gap-1 max-sm:[&_div.flex.text-12>div]:max-w-full max-sm:[&_.text-right]:text-left">
+    <div className="min-h-0 min-w-0 space-y-6 p-4 sm:p-5 [&_h2]:break-words [&>div:first-child>div:last-child]:max-w-full max-sm:[&_div.flex.text-14]:flex-col max-sm:[&_div.flex.text-14]:items-start max-sm:[&_div.flex.text-14]:gap-1 max-sm:[&_div.flex.text-14>div]:max-w-full max-sm:[&_.text-right]:text-left">
       <PageHeader
         title={machine.name ?? node?.name ?? "Remote Nyx Machine"}
         description={`${machine.profile.cpu_millis / 1000} vCPU · ${machine.profile.memory_mib / 1024} GiB RAM · ${machine.profile.workspace_gib} GiB workspace`}
@@ -440,12 +442,12 @@ function RemoteMachineDetailView({
         >
           {title && (
             <div className="space-y-1">
-              <h3 className="text-13 font-semibold">{title}</h3>
-              <p className="text-12 text-muted-foreground">{attention}</p>
+              <h3 className="type-card-title">{title}</h3>
+              <p className="text-14 text-muted-foreground">{attention}</p>
             </div>
           )}
           {notice && (
-            <div className="space-y-1 text-12">
+            <div className="space-y-1 text-14">
               <p>{notice.message}</p>
               <a
                 className="break-all text-primary-text underline"
@@ -456,7 +458,7 @@ function RemoteMachineDetailView({
             </div>
           )}
           {acceptancePending && acceptedAction && (
-            <p role="status" className="text-12">
+            <p role="status" className="text-14">
               {readable(acceptedAction)} request accepted. Waiting for the
               resource and runtime result.
             </p>
@@ -489,7 +491,13 @@ function RemoteMachineDetailView({
           void query.refetch();
         }}
       />
-      <Tabs value={tab} onValueChange={setTab} className="min-w-0">
+      <Tabs
+        value={tab}
+        onValueChange={async (value) => {
+          if (!draftGuard || (await draftGuard.confirmDiscard())) setTab(value);
+        }}
+        className="min-w-0"
+      >
         <TabsList
           className="w-full justify-start"
           aria-label="Machine detail sections"
@@ -508,20 +516,20 @@ function RemoteMachineDetailView({
             className="grid min-w-0 gap-4 sm:grid-cols-3"
           >
             <div className="min-w-0 space-y-1">
-              <p className="text-11 text-muted-foreground">Execution</p>
-              <p className="text-13 font-semibold">
+              <p className="text-13 text-muted-foreground">Execution</p>
+              <p className="type-card-title">
                 {machine.authorization_state === "active" && canPause
                   ? "Runtime authorized"
                   : "Execution unavailable"}
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Agent and external grants are checked separately.
               </p>
             </div>
             <div className="min-w-0 space-y-1">
-              <p className="text-11 text-muted-foreground">Runtime billing</p>
-              <p className="text-13 font-semibold">{accounting.label}</p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">Runtime billing</p>
+              <p className="type-card-title">{accounting.label}</p>
+              <p className="text-13 text-muted-foreground">
                 {accounting.detail}
               </p>
               <Button variant="link" onClick={() => setTab("billing")}>
@@ -529,15 +537,15 @@ function RemoteMachineDetailView({
               </Button>
             </div>
             <div className="min-w-0 space-y-1">
-              <p className="text-11 text-muted-foreground">Node connection</p>
-              <p className="text-13 font-semibold">
+              <p className="text-13 text-muted-foreground">Node connection</p>
+              <p className="type-card-title">
                 {node
                   ? node.is_connected
                     ? "WSS connected"
                     : "WSS disconnected"
                   : "WSS status unknown"}
               </p>
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Last heartbeat: {time(machine.last_heartbeat_at)}
               </p>
             </div>
@@ -552,7 +560,7 @@ function RemoteMachineDetailView({
               value="No fixed capacity declared"
             />
             <RemoteMachineUsage machineId={machineId} />
-            <details className="text-12">
+            <details className="text-14">
               <summary className="cursor-pointer px-4 py-3 font-medium">
                 Storage and recovery rules
               </summary>
@@ -572,7 +580,7 @@ function RemoteMachineDetailView({
             </details>
           </DetailSection>
           <DetailSection title="Using this machine">
-            <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
+            <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
               <p className="font-medium text-foreground">
                 {machine.specialist_assignment_state
                   ? {
@@ -660,27 +668,18 @@ function RemoteMachineDetailView({
           <RemoteMachinePolicyPanel machine={machine} policy={policy} />
           <RemoteMachineClientSetup />
           {!closed && (
-            <Card className="border-destructive/40">
-              <CardHeader>
-                <CardTitle className="text-destructive">
-                  Delete machine
-                </CardTitle>
-                <CardDescription>
-                  Permanent workspace deletion. Review pending work and
-                  accounting before continuing.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex justify-end">
-                <Button
-                  variant="destructive"
+            <GroupedList footer="Permanent workspace deletion. Review pending work and accounting before continuing.">
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  className="text-destructive"
                   onClick={() => setReviewAction("delete")}
                   disabled={machine.resource_state === "deleting"}
                 >
-                  <Trash2 className="size-3" />
                   Delete machine
-                </Button>
-              </CardContent>
-            </Card>
+                </button>
+              </GroupedRow>
+            </GroupedList>
           )}
         </TabsContent>
       </Tabs>
@@ -745,7 +744,7 @@ function RemoteMachineTechnicalDetails({
   readonly machine: RemoteMachine;
 }) {
   return (
-    <details className="rounded-xl border border-border/50 bg-card text-12">
+    <details className="rounded-xl border border-border/50 bg-card text-14">
       <summary className="cursor-pointer px-4 py-3 font-medium">
         Technical information and resource binding
       </summary>
@@ -870,6 +869,7 @@ function LifecycleActionDialog({
   const [error, setError] = useState<string | null>(review.error);
   const [conflict, setConflict] = useState(false);
   const form = useAppForm<z.infer<typeof actionReviewSchema>>({
+    mode: "onChange",
     resolver: zodResolver(actionReviewSchema),
     defaultValues: { acknowledged: false },
   });
@@ -926,13 +926,13 @@ function LifecycleActionDialog({
     }
   }
   return (
-    <Dialog
+    <GroupedDialog
       open
       onOpenChange={(open) => {
         if (!open && !mutation.isPending) onClose();
       }}
     >
-      <DialogContent>
+      <GroupedDialogContent>
         <DialogHeader>
           <DialogTitle>{label}</DialogTitle>
           <DialogDescription>
@@ -941,181 +941,186 @@ function LifecycleActionDialog({
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
-            <div className="space-y-3 text-12 text-muted-foreground">
-              {action === "resume" && <FreeResumePreflight machine={machine} />}
-              {action === "delete" ? (
-                <>
-                  <p>
-                    This permanently removes the workspace and temporary runtime
-                    data, including HOME, /tmp and other temporary runtime
-                    files. There are no snapshots or recovery. Running work will
-                    be stopped, and resource cleanup remains pending until
-                    current Kubernetes observations confirm the original
-                    Sandbox, Pod and workspace PVC are absent after cascade
-                    cleanup. Underlying storage is handled by its reclaim
-                    policy. Accounting progress is tracked separately.
+          <form onSubmit={form.handleSubmit(submit)} className="space-y-6">
+            <GroupedList title="Review action">
+              <GroupedFooter>
+                <div className="space-y-2">
+                  {action === "resume" && (
+                    <FreeResumePreflight machine={machine} />
+                  )}
+                  {action === "delete" ? (
+                    <>
+                      <p>
+                        This permanently removes the workspace and temporary runtime
+                        data, including HOME, /tmp and other temporary runtime
+                        files. There are no snapshots or recovery. Running work will
+                        be stopped, and resource cleanup remains pending until
+                        current Kubernetes observations confirm the original
+                        Sandbox, Pod and workspace PVC are absent after cascade
+                        cleanup. Underlying storage is handled by its reclaim
+                        policy. Accounting progress is tracked separately.
+                      </p>
+                      <p>
+                        The cleanup target is{" "}
+                        {policy
+                          ? `${policy.cleanup_target_hours} hours`
+                          : "not reported"}
+                        , not a guaranteed erasure deadline. Submitting deletion
+                        does not mean all data has been physically erased. A durable
+                        tombstone and necessary evidence remain. A free slot is not
+                        released until finalization.
+                      </p>
+                      <p>
+                        Deletion immediately denies further output reads. Output is
+                        never archived and may disappear before its one-hour maximum
+                        after completion. Terminal job metadata remains for{" "}
+                        {policy
+                          ? `${policy.job_history_days} days`
+                          : "the published retention period"}
+                        , and terminal operation history for{" "}
+                        {policy
+                          ? `${policy.operation_history_days} days`
+                          : "the published retention period"}
+                        . Required audit and financial evidence is retained
+                        separately.
+                      </p>
+                    </>
+                  ) : action === "pause" ? (
+                    <>
+                      <p>
+                        Pause stops the compute Pod and retains the same workspace
+                        and Machine identity. Completion is confirmed only after
+                        current Sandbox and Pod observations. Paused storage is free
+                        and remains until you choose deletion.
+                      </p>
+                      <p>
+                        Resume starts a new runtime using the retained workspace; it
+                        does not restore processes, memory or old jobs. An uncertain
+                        stop remains pending for retry or operator review. A later
+                        top-up never resumes the machine automatically.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p>
+                        Resume this free machine only after live eligibility and
+                        current Kubernetes lifecycle checks. A new runtime uses the
+                        retained workspace without restoring old processes or jobs.
+                        It will never silently switch to paid.
+                      </p>
+                      <p>
+                        Retained profile: {machine.profile.profile_version}.
+                        Policy: {machine.policy_version}. Data policy:{" "}
+                        {machine.data_policy_version}. Resume preserves the
+                        saved specification and workspace.
+                      </p>
+                      <p>
+                        Temporary storage has no fixed capacity commitment.{" "}
+                        Temporary data may be lost after pause or Pod recreation.
+                        All granted clients share the OS user and workspace. File
+                        roots do not isolate shell commands.
+                      </p>
+                    </>
+                  )}
+                </div>
+              </GroupedFooter>
+              <FormField
+                control={form.control}
+                name="acknowledged"
+                render={({ field }) => (
+                  <GroupedField inline>
+                    <div className="flex w-full items-start gap-3">
+                      <FormControl>
+                        <Switch
+                          className="order-last shrink-0"
+                          checked={field.value}
+                          onCheckedChange={(checked) =>
+                            field.onChange(checked === true)
+                          }
+                        />
+                      </FormControl>
+                      <FormLabel className="min-w-0 flex-1">
+                        I understand{" "}
+                        {action === "delete"
+                          ? "the irreversible data loss and cleanup policy"
+                          : action === "pause"
+                            ? "that work stops and the workspace is retained"
+                            : "the current policies and shared environment risk"}
+                        .
+                      </FormLabel>
+                    </div>
+                    <GroupedMessage />
+                  </GroupedField>
+                )}
+              />
+              <GroupedFooter>
+                {review.intent && (
+                  <p className="text-14 text-muted-foreground">
+                    A previous request is awaiting a confirmed result. Retrying uses
+                    its original body and idempotency key.
                   </p>
-                  <p>
-                    The cleanup target is{" "}
-                    {policy
-                      ? `${policy.cleanup_target_hours} hours`
-                      : "not reported"}
-                    , not a guaranteed erasure deadline. Submitting deletion
-                    does not mean all data has been physically erased. A durable
-                    tombstone and necessary evidence remain. A free slot is not
-                    released until finalization.
-                  </p>
-                  <p>
-                    Deletion immediately denies further output reads. Output is
-                    never archived and may disappear before its one-hour maximum
-                    after completion. Terminal job metadata remains for{" "}
-                    {policy
-                      ? `${policy.job_history_days} days`
-                      : "the published retention period"}
-                    , and terminal operation history for{" "}
-                    {policy
-                      ? `${policy.operation_history_days} days`
-                      : "the published retention period"}
-                    . Required audit and financial evidence is retained
-                    separately.
-                  </p>
-                </>
-              ) : action === "pause" ? (
-                <>
-                  <p>
-                    Pause stops the compute Pod and retains the same workspace
-                    and Machine identity. Completion is confirmed only after
-                    current Sandbox and Pod observations. Paused storage is free
-                    and remains until you choose deletion.
-                  </p>
-                  <p>
-                    Resume starts a new runtime using the retained workspace; it
-                    does not restore processes, memory or old jobs. An uncertain
-                    stop remains pending for retry or operator review. A later
-                    top-up never resumes the machine automatically.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <p>
-                    Resume this free machine only after live eligibility and
-                    current Kubernetes lifecycle checks. A new runtime uses the
-                    retained workspace without restoring old processes or jobs.
-                    It will never silently switch to paid.
-                  </p>
-                  <p>
-                    Retained profile: {machine.profile.profile_version}. Policy:{" "}
-                    {machine.policy_version}. Data policy:{" "}
-                    {machine.data_policy_version}. Resume preserves the saved
-                    specification and workspace.
-                  </p>
-                  <p>
-                    Temporary storage has no fixed capacity commitment.{" "}
-                    Temporary data may be lost after pause or Pod recreation.
-                    All granted clients share the OS user and workspace. File
-                    roots do not isolate shell commands.
-                  </p>
-                </>
-              )}
-            </div>
-            <FormField
-              control={form.control}
-              name="acknowledged"
-              render={({ field }) => (
-                <FormItem>
-                  <div className="flex items-start gap-2">
-                    <FormControl>
-                      <Checkbox
-                        checked={field.value}
-                        onCheckedChange={(checked) =>
-                          field.onChange(checked === true)
-                        }
-                      />
-                    </FormControl>
-                    <FormLabel className="text-12">
-                      I understand{" "}
-                      {action === "delete"
-                        ? "the irreversible data loss and cleanup policy"
-                        : action === "pause"
-                          ? "that work stops and the workspace is retained"
-                          : "the current policies and shared environment risk"}
-                      .
-                    </FormLabel>
+                )}
+                {error && (
+                  <div role="alert">
+                    <ErrorBanner message={error} />
                   </div>
-                  <FormMessage />
-                </FormItem>
+                )}
+              </GroupedFooter>
+              {review.error && (
+                <>
+                  <GroupedFooter>
+                    <p>
+                      Review the current machine and operation state before
+                      discarding an unreadable request. Its previous outcome may be
+                      unknown.
+                    </p>
+                  </GroupedFooter>
+                  <GroupedRow asChild interactive>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearRemoteMachineIntent(ownerId, scope);
+                        onReload();
+                        onClose();
+                      }}
+                    >
+                      Reset unreadable saved action and review
+                    </button>
+                  </GroupedRow>
+                </>
               )}
+              {conflict && (
+                <GroupedRow asChild interactive>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearRemoteMachineIntent(ownerId, scope);
+                      onReload();
+                      onClose();
+                    }}
+                  >
+                    Reload and review a new action
+                  </button>
+                </GroupedRow>
+              )}
+            </GroupedList>
+            <GroupedDialogActions
+              intent="create"
+              label="machine lifecycle acceptance"
+              dirty={form.formState.isDirty}
+              pending={mutation.isPending}
+              disabled={
+                !form.formState.isValid || !form.watch("acknowledged") || conflict || Boolean(review.error)
+              }
+              save={form.handleSubmit(submit)}
+              discard={() => form.reset()}
+              saveLabel={label}
+              saveVariant={action === "delete" ? "destructive" : "primary"}
             />
-            {review.intent && (
-              <p className="text-12 text-muted-foreground">
-                A previous request is awaiting a confirmed result. Retrying uses
-                its original body and idempotency key.
-              </p>
-            )}
-            {error && (
-              <div role="alert">
-                <ErrorBanner message={error} />
-              </div>
-            )}
-            {review.error && (
-              <div className="space-y-2 text-12 text-muted-foreground">
-                <p>
-                  Review the current machine and operation state before
-                  discarding an unreadable request. Its previous outcome may be
-                  unknown.
-                </p>
-                <Button
-                  type="button"
-                  onClick={() => {
-                    clearRemoteMachineIntent(ownerId, scope);
-                    onReload();
-                    onClose();
-                  }}
-                >
-                  Reset unreadable saved action and review
-                </Button>
-              </div>
-            )}
-            {conflict && (
-              <Button
-                type="button"
-                onClick={() => {
-                  clearRemoteMachineIntent(ownerId, scope);
-                  onReload();
-                  onClose();
-                }}
-              >
-                Reload and review a new action
-              </Button>
-            )}
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={onClose}
-                disabled={mutation.isPending}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                variant={action === "delete" ? "destructive" : "primary"}
-                disabled={
-                  mutation.isPending ||
-                  !form.watch("acknowledged") ||
-                  conflict ||
-                  Boolean(review.error)
-                }
-                isLoading={mutation.isPending}
-              >
-                {label}
-              </Button>
-            </DialogFooter>
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+      </GroupedDialogContent>
+    </GroupedDialog>
   );
 }
 
@@ -1139,10 +1144,10 @@ function FreeResumePreflight({ machine }: { readonly machine: RemoteMachine }) {
           saved accepted request can still recover its result.
         </p>
       )}
-      <RemoteMachinePlatformReadiness
+      <RemoteMachinePlatformReadiness grouped
         platform={!quote.error ? quote.data?.platform : undefined}
       />
-      <RemoteMachineQuota
+      <RemoteMachineQuota grouped
         quota={!quote.error ? quote.data?.quota : undefined}
       />
     </section>
@@ -1175,14 +1180,14 @@ function RemoteMachineTimeline({
   );
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Safe lifecycle events only. This timeline contains no commands,
         environment values, file contents or job output. Terminal projections
         remain for 90 days; required active work, cleanup, idempotency and
         billing evidence are retained separately.
       </p>
       {query.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading operation timeline…
         </p>
       )}
@@ -1193,7 +1198,7 @@ function RemoteMachineTimeline({
         />
       )}
       {!query.isPending && !query.error && !uniqueEvents.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
           No lifecycle events are available on this page.
         </p>
       )}
@@ -1204,19 +1209,19 @@ function RemoteMachineTimeline({
             className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
           >
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-13 font-semibold">
+              <span className="type-card-title">
                 {readable(event.kind)}
               </span>
               <time
-                className="text-11 text-text-tertiary"
+                className="text-13 text-text-tertiary"
                 dateTime={event.created_at}
               >
                 {time(event.created_at)}
               </time>
             </div>
-            <p className="text-12 text-muted-foreground">{event.message}</p>
+            <p className="text-14 text-muted-foreground">{event.message}</p>
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-11 text-text-tertiary">
+              <span className="text-13 text-text-tertiary">
                 Responsibility: {event.responsibility}
               </span>
               <Button
@@ -1229,7 +1234,7 @@ function RemoteMachineTimeline({
           </li>
         ))}
       </ol>
-      <div className="space-y-2 text-12 text-muted-foreground">
+      <div className="space-y-2 text-14 text-muted-foreground">
         <p>
           Loaded {uniqueEvents.length}{" "}
           {uniqueEvents.length === 1 ? "event" : "events"} on this page
@@ -1331,17 +1336,19 @@ function RemoteMachinePolicyPanel({
       ? nodeQuery.data
       : undefined;
   return (
-    <div className="space-y-8">
-      <DetailSection title="Confirmation policy">
+    <div className="space-y-6">
+      <GroupedList title="Confirmation policy">
         {nodeQuery.error ? (
-          <ErrorBanner
-            message={`Confirmation policy unavailable. ${nodeQuery.error.message}`}
-            onRetry={() => void nodeQuery.refetch()}
-          />
+          <GroupedFooter>
+            <ErrorBanner
+              message={`Confirmation policy unavailable. ${nodeQuery.error.message}`}
+              onRetry={() => void nodeQuery.refetch()}
+            />
+          </GroupedFooter>
         ) : (
-          <DetailRow
-            label="Node confirmation policy"
-            value={
+          <GroupedRow
+            title="Node confirmation policy"
+            accessory={
               node?.machine_confirm
                 ? {
                     none: "No machine confirmation",
@@ -1354,141 +1361,147 @@ function RemoteMachinePolicyPanel({
             }
           />
         )}
-        <p className="px-4 py-3 text-12 text-muted-foreground">
-          Read-only settings from the Node detail. Agent access mode and source
-          policies may require additional confirmation; a single setting does
-          not authorize execution.
-        </p>
-      </DetailSection>
-      <DetailSection title="Fixed profile and limits">
-        <DetailRow
-          label="CPU"
-          value={`${machine.profile.cpu_millis / 1000} vCPU`}
+        <GroupedFooter>
+          <p>
+            Read-only settings from the Node detail. Agent access mode and
+            source policies may require additional confirmation; a single
+            setting does not authorize execution.
+          </p>
+        </GroupedFooter>
+      </GroupedList>
+      <GroupedList title="Fixed profile and limits">
+        <GroupedRow
+          title="CPU"
+          accessory={`${machine.profile.cpu_millis / 1000} vCPU`}
         />
-        <DetailRow
-          label="Memory"
-          value={`${machine.profile.memory_mib / 1024} GiB`}
+        <GroupedRow
+          title="Memory"
+          accessory={`${machine.profile.memory_mib / 1024} GiB`}
         />
-        <DetailRow
-          label="Persistent workspace"
-          value={`${machine.profile.workspace_gib} GiB`}
+        <GroupedRow
+          title="Persistent workspace"
+          accessory={`${machine.profile.workspace_gib} GiB`}
         />
-        <DetailRow
-          label="Temporary storage"
-          value="No fixed capacity declared"
+        <GroupedRow
+          title="Temporary storage"
+          accessory="No fixed capacity declared"
         />
-        <DetailRow
-          label="Concurrent commands"
-          value={policy ? String(policy.concurrent_jobs) : "Not reported"}
+        <GroupedRow
+          title="Concurrent commands"
+          accessory={policy ? String(policy.concurrent_jobs) : "Not reported"}
         />
-        <DetailRow
-          label="Command timeout"
-          value={
+        <GroupedRow
+          title="Command timeout"
+          accessory={
             policy
               ? `${policy.default_command_timeout_seconds}s default · ${policy.maximum_command_timeout_seconds}s maximum`
               : "Not reported"
           }
         />
-        <DetailRow
-          label="Output limits"
-          value={
+        <GroupedRow
+          title="Output limits"
+          accessory={
             policy
               ? `${policy.job_output_bytes.toLocaleString()} bytes per job · ${policy.machine_output_cache_bytes.toLocaleString()} bytes machine cache`
               : "Not reported"
           }
         />
-        <DetailRow
-          label="Command input"
-          value="32 KiB command · 64 KiB stdin"
+        <GroupedRow
+          title="Command input"
+          accessory="32 KiB command · 64 KiB stdin"
         />
-        <p className="px-4 py-3 text-12 text-muted-foreground">
-          All subjects and child credentials share the command slots. There is
-          no persistent queue; capacity rejection does not mean work is queued.
-          File reads are paged at up to 4 KiB. Exact edits handle at most 16 MiB
-          for both the original and result; this is not a universal file-size or
-          write-request limit. Smaller gateway and protocol limits still apply.
-          A command can stop before its requested timeout when authentication,
-          grant, execution lease, funding or runtime authority expires.
-        </p>
-      </DetailSection>
-      <DetailSection title="Network, environment and sharing">
-        <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
+        <GroupedFooter>
           <p>
-            Full Machine image includes Chromium, desktop and computer tooling.
-            Only the selected capabilities are enabled; agent grants and live
-            runtime readiness determine use. Only the human owner can watch or
-            take over the desktop. Treat visible browser and desktop content as
-            sensitive. External OAuth and Agent Key tools remain limited to
-            authorized Commands and Files.
+            All subjects and child credentials share the command slots. There is
+            no persistent queue; capacity rejection does not mean work is
+            queued. File reads are paged at up to 4 KiB. Exact edits handle at
+            most 16 MiB for both the original and result; this is not a
+            universal file-size or write-request limit. Smaller gateway and
+            protocol limits still apply. A command can stop before its requested
+            timeout when authentication, grant, execution lease, funding or
+            runtime authority expires.
           </p>
-          <p>
-            This profile has no PTY, inbound ports, public IP or port mapping.
-            It does not offer custom images, upgrades, autoscaling, exports or
-            snapshots. This personal-account profile cannot be transferred to an
-            organization or charged to an organization wallet.
-          </p>
-          <p>
-            All authorized clients share the Machine and workspace. Commands and
-            file tools use the shared command OS user. Authorized agents also
-            share browser sessions in the existing shared mode. File roots
-            constrain file tools and working directories; they do not isolate
-            shell authority or secrets between clients.
-          </p>
-          <p>
-            Only /workspace persists; HOME, /tmp, browser profiles and downloads
-            are temporary unless safely saved in the workspace. Temporary
-            storage is managed by the deployment environment; new Machines have
-            no fixed temporary capacity commitment. Temporary data may be lost
-            after pause or Pod recreation. A new runtime does not restore
-            browser sessions or running processes.
-          </p>
-          <p>
-            There is no persistent environment editor or secret manager. Job
-            environment values are temporary. Downstream credentials stay in
-            NyxID; each job must declare its services and remains bounded by its
-            principal’s live service access and Machine service ceiling.
-          </p>
-        </div>
-      </DetailSection>
-      <DetailSection title="Retention and charging policy">
-        <DetailRow label="Policy version" value={machine.policy_version} mono />
-        <DetailRow
-          label="Data policy version"
-          value={machine.data_policy_version}
-          mono
+        </GroupedFooter>
+      </GroupedList>
+      <GroupedList title="Network, environment and sharing" footer={
+          <div className="space-y-2">
+            <p>
+              Full Machine image includes Chromium, desktop and computer tooling.
+              Only the selected capabilities are enabled; agent grants and live
+              runtime readiness determine use. Only the human owner can watch or
+              take over the desktop. Treat visible browser and desktop content as
+              sensitive. External OAuth and Agent Key tools remain limited to
+              authorized Commands and Files.
+            </p>
+            <p>
+              This profile has no PTY, inbound ports, public IP or port mapping.
+              It does not offer custom images, upgrades, autoscaling, exports or
+              snapshots. This personal-account profile cannot be transferred to an
+              organization or charged to an organization wallet.
+            </p>
+            <p>
+              All authorized clients share the Machine and workspace. Commands and
+              file tools use the shared command OS user. Authorized agents also
+              share browser sessions in the existing shared mode. File roots
+              constrain file tools and working directories; they do not isolate
+              shell authority or secrets between clients.
+            </p>
+            <p>
+              Only /workspace persists; HOME, /tmp, browser profiles and downloads
+              are temporary unless safely saved in the workspace. Temporary
+              storage is managed by the deployment environment; new Machines have
+              no fixed temporary capacity commitment. Temporary data may be lost
+              after pause or Pod recreation. A new runtime does not restore
+              browser sessions or running processes.
+            </p>
+            <p>
+              There is no persistent environment editor or secret manager. Job
+              environment values are temporary. Downstream credentials stay in
+              NyxID; each job must declare its services and remains bounded by its
+              principal’s live service access and Machine service ceiling.
+            </p>
+          </div>
+      } />
+      <GroupedList title="Retention and charging policy">
+        <GroupedRow title="Policy version" accessory={machine.policy_version} />
+        <GroupedRow
+          title="Data policy version"
+          accessory={machine.data_policy_version}
         />
-        <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
-          <p>
-            Job metadata retention:{" "}
-            {policy ? `${policy.job_history_days} days` : "not reported"};
-            terminal operation retention:{" "}
-            {policy ? `${policy.operation_history_days} days` : "not reported"}.
-            Output is read only from the currently authorized live node,
-            retained at most one hour after a job finishes, and can disappear
-            earlier after cache eviction or runtime loss.
-          </p>
-          <p>
-            Deletion confirms Sandbox and related namespace object cleanup,
-            terminal creation responsibilities and accounting. Underlying
-            storage follows its reclaim policy; physical storage release or
-            erasure is not verified. Cleanup target:{" "}
-            {policy ? `${policy.cleanup_target_hours} hours` : "not reported"}.
-            A target is not a completion guarantee.
-          </p>
-          <p>
-            Paused workspaces have no automatic expiry and no storage fee. A
-            free machine never implies free downstream services. Runtime and
-            gateway service charges are separate.
-          </p>
-          <p>
-            Paid runs require an accepted rate and account-balance funding, with
-            no per-instance cap. Account funds and runtime estimates are shared
-            with other Machines and services, and do not promise a duration.
-            Manual resume requires a new accepted quote after earlier liability
-            is closed.
-          </p>
-        </div>
-      </DetailSection>
+        <GroupedFooter>
+          <div className="space-y-2">
+            <p>
+              Job metadata retention:{" "}
+              {policy ? `${policy.job_history_days} days` : "not reported"};
+              terminal operation retention:{" "}
+              {policy ? `${policy.operation_history_days} days` : "not reported"}.
+              Output is read only from the currently authorized live node,
+              retained at most one hour after a job finishes, and can disappear
+              earlier after cache eviction or runtime loss.
+            </p>
+            <p>
+              Deletion confirms Sandbox and related namespace object cleanup,
+              terminal creation responsibilities and accounting. Underlying
+              storage follows its reclaim policy; physical storage release or
+              erasure is not verified. Cleanup target:{" "}
+              {policy ? `${policy.cleanup_target_hours} hours` : "not reported"}.
+              A target is not a completion guarantee.
+            </p>
+            <p>
+              Paused workspaces have no automatic expiry and no storage fee. A
+              free machine never implies free downstream services. Runtime and
+              gateway service charges are separate.
+            </p>
+            <p>
+              Paid runs require an accepted rate and account-balance funding, with
+              no per-instance cap. Account funds and runtime estimates are shared
+              with other Machines and services, and do not promise a duration.
+              Manual resume requires a new accepted quote after earlier liability
+              is closed.
+            </p>
+          </div>
+        </GroupedFooter>
+      </GroupedList>
     </div>
   );
 }
@@ -1497,67 +1510,49 @@ function RemoteMachineClientSetup() {
   const config = usePublicConfig();
   const url = config.data?.mcp_url;
   return (
-    <DetailSection title="Connect existing clients">
-      <div className="space-y-4 px-4 py-3 text-12 text-muted-foreground">
-        <p>
-          Use the same NyxID HTTP MCP endpoint as your existing services. Sign
-          in using the existing OAuth flow, then review the Machine selection.
-          For an Agent Key, manage Machine access on its parent Key detail page;
-          child login credentials inherit that shared grant. No separate
-          principal registration is required.
-        </p>
-        {!url ? (
-          <p role="status">
-            The server MCP URL is unavailable. Open Settings → MCP when
-            configuration is available.
-          </p>
-        ) : (
-          <>
-            {(
-              [
-                ["Claude Code", ".mcp.json", buildClaudeCodeConfig(url)],
-                ["Codex", "~/.codex/config.toml", buildCodexConfig(url)],
-              ] as const
-            ).map(([name, path, value]) => (
-              <div key={name} className="space-y-2">
-                <p className="font-medium text-foreground">
-                  {name} · {path}
-                </p>
-                <div className="relative">
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3 pr-12 font-mono text-11 leading-relaxed">
-                    {value}
-                  </pre>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    className="absolute right-2 top-2"
-                    aria-label={`Copy ${name} HTTP MCP config`}
-                    onClick={() =>
-                      void copyToClipboard(value).then(
-                        () => toast.success(`${name} config copied`),
-                        () => toast.error("Could not copy config"),
-                      )
-                    }
-                  >
-                    <Copy className="size-3" />
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </>
-        )}
-        <p>
-          Authenticate, discover tools, and use <code>nyx__machine_list</code>{" "}
-          to inspect granted machines before execution. Tool availability still
-          depends on the server’s external authority protocol; configuration
-          alone does not grant access.
-        </p>
-        <p className="flex gap-2">
-          <AlertTriangle className="size-4 shrink-0 text-warning" />
-          Do not paste tokens, credentials or job environment values into these
-          configuration examples or chat.
-        </p>
-      </div>
-    </DetailSection>
+    <GroupedList title="Connect existing clients" footer={<>
+      <p>
+        Use the same NyxID HTTP MCP endpoint as your existing services. Sign
+        in using the existing OAuth flow, then review the Machine selection.
+        For an Agent Key, manage Machine access on its parent Key detail page;
+        child login credentials inherit that shared grant. No separate
+        principal registration is required.
+      </p>
+      <p>
+        Authenticate, discover tools, and use <code>nyx__machine_list</code>{" "}
+        to inspect granted machines before execution. Tool availability still
+        depends on the server’s external authority protocol; configuration
+        alone does not grant access.
+      </p>
+      <p className="text-warning">
+        Do not paste tokens, credentials or job environment values into these
+        configuration examples or chat.
+      </p>
+    </>}>
+      {!url ? (
+        <GroupedRow role="status" title="The server MCP URL is unavailable. Open Settings → MCP when configuration is available." />
+      ) : (
+        ([
+          ["Claude Code", ".mcp.json", buildClaudeCodeConfig(url)],
+          ["Codex", "~/.codex/config.toml", buildCodexConfig(url)],
+        ] as const).map(([name, path, value]) => (
+          <GroupedRow key={name} className="block space-y-1">
+            <p className="type-secondary text-text-tertiary">{name} · {path}</p>
+            <div className="relative">
+              <pre className="overflow-x-auto whitespace-pre-wrap break-all pr-12 font-mono type-body">{value}</pre>
+              <Button size="icon" variant="ghost" className="absolute right-0 top-0"
+                aria-label={`Copy ${name} HTTP MCP config`}
+                onClick={() =>
+                  void copyToClipboard(value).then(
+                    () => toast.success(`${name} config copied`),
+                    () => toast.error("Could not copy config"),
+                  )}>
+                <Copy className="size-[1.125em]" />
+              </Button>
+            </div>
+          </GroupedRow>
+        ))
+      )}
+    </GroupedList>
   );
 }

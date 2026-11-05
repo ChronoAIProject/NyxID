@@ -29,31 +29,40 @@ use super::assistant_team::{Pool, Started, start_server_turn, team_pool_limit};
 
 #[derive(Serialize)]
 pub struct GroupMemberResponse {
-    id: String,
-    name: String,
-    display_name: Option<String>,
-    kind: AgentKind,
-    destroyed: bool,
-    working: bool,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mention_handle: Option<String>,
+    pub(crate) display_name: Option<String>,
+    pub(crate) kind: AgentKind,
+    pub(crate) destroyed: bool,
+    pub(crate) unavailable: bool,
+    pub(crate) unavailable_reason: Option<&'static str>,
+    pub(crate) shared: bool,
+    pub(crate) owner_name: Option<String>,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) working: bool,
 }
 
 #[derive(Serialize)]
 pub struct GroupResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
-    owner: Option<Value>,
+    pub(crate) collaboration: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    participants: Option<Vec<crate::services::org_group_service::Participant>>,
+    pub(crate) owner: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    your_role: Option<String>,
-    id: String,
-    name: String,
-    members: Vec<GroupMemberResponse>,
-    lead_agent_id: String,
-    default_recipient_ids: Vec<String>,
-    working_agent_ids: Vec<String>,
-    message_count: i64,
-    last_message_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
+    pub(crate) participants: Option<Vec<crate::services::org_group_service::Participant>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) your_role: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) members: Vec<GroupMemberResponse>,
+    pub(crate) lead_agent_id: String,
+    pub(crate) default_recipient_ids: Vec<String>,
+    pub(crate) working_agent_ids: Vec<String>,
+    pub(crate) message_count: i64,
+    pub(crate) last_message_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: DateTime<Utc>,
 }
 
 #[derive(Serialize)]
@@ -66,21 +75,29 @@ pub struct GroupAgentRef {
 
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requester_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_mode: Option<crate::models::assistant_group_collaboration::Lane>,
     pub feedback: Option<super::assistant_feedback::FeedbackResponse>,
     activities: Vec<super::assistant_nyxagent::ActivityResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<Value>,
     attachments: Vec<super::assistant_nyxagent::AttachmentResponse>,
-    id: String,
+    pub(crate) id: String,
     seq: i64,
     role: String,
     agent: Option<GroupAgentRef>,
     text: String,
     recipient_agent_ids: Vec<String>,
+    mentioned_participant_ids: Vec<String>,
     created_at: DateTime<Utc>,
 }
 
-fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessageResponse {
+pub(crate) fn message_response(
+    row: GroupMessage,
+    agents: &[AssistantAgent],
+) -> GroupMessageResponse {
     let agent = row.agent_id.as_deref().map(|id| {
         let known = agents.iter().find(|agent| agent.id == id);
         GroupAgentRef {
@@ -94,6 +111,8 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         }
     });
     GroupMessageResponse {
+        requester_user_id:row.collaboration.as_ref().and_then(|b|b.original_requester_id.clone()),
+        execution_mode:row.collaboration.as_ref().and_then(|b|b.execution.as_ref().map(|a|a.lane)),
         feedback: None,
         activities: row.activities.into_iter().map(Into::into).collect(),
         author: row.author_user_id.map(|id| json!({"id": id,"display_name":row.author_display_name.unwrap_or_else(||"Member".into())})),
@@ -104,14 +123,15 @@ fn message_response(row: GroupMessage, agents: &[AssistantAgent]) -> GroupMessag
         agent,
         text: row.text,
         recipient_agent_ids: row.recipient_agent_ids,
+        mentioned_participant_ids: row.mentioned_participant_ids,
         created_at: row.created_at,
     }
 }
 
-fn live_member_ids(members: &[AssistantAgent]) -> Vec<String> {
+fn live_member_ids(members: &[groups::Member]) -> Vec<String> {
     members
         .iter()
-        .filter(|member| member.destroyed_at.is_none())
+        .filter(|member| member.available)
         .map(|member| member.id.clone())
         .collect()
 }
@@ -120,18 +140,34 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
     let owner = group.user_id.clone();
     let members = groups::members(&state.db, &owner, &group).await?;
     let working = groups::working(&state.db, &owner, &group.id).await?;
+    let threads = groups::member_threads(&state.db, &owner, &group.id).await?;
     Ok(GroupResponse {
+        collaboration: None,
         owner: None,
         participants: None,
         your_role: None,
         members: members
             .iter()
             .map(|agent| GroupMemberResponse {
+                mention_handle: None,
+                unavailable_reason: None,
                 id: agent.id.clone(),
                 name: agent.name.clone(),
                 display_name: agent.display_name.clone(),
                 kind: agent.kind,
                 destroyed: agent.destroyed_at.is_some(),
+                unavailable: !agent.available,
+                shared: agent.shared,
+                owner_name: agent.owner_name.clone(),
+                conversation_id: agent
+                    .shared
+                    .then(|| {
+                        threads
+                            .iter()
+                            .find(|t| t.agent_id.as_deref() == Some(agent.id.as_str()))
+                            .map(|t| t.id.clone())
+                    })
+                    .flatten(),
                 working: working.contains(&agent.id),
             })
             .collect(),
@@ -187,7 +223,7 @@ async fn group_response_for(
     let live_ids: Vec<String> = response
         .members
         .iter()
-        .filter(|member| !member.destroyed)
+        .filter(|member| !member.destroyed && !member.unavailable)
         .map(|member| member.id.clone())
         .collect();
     response.default_recipient_ids = groups::default_recipients(&sticky, &live_ids, &lead);
@@ -199,6 +235,7 @@ async fn group_response_for(
 pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
+        crate::services::assistant_group_kind::require_legacy(&group)?;
         if crate::services::org_group_service::is_org(&group) {
             Box::pin(super::org_group::advance(state, &group)).await;
             return Ok(());
@@ -219,7 +256,10 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
                 Ok(()) => {}
                 // Gone or refused: the member is not retried.
                 Err(
-                    AppError::NotFound(_) | AppError::Conflict(_) | AppError::ValidationError(_),
+                    AppError::NotFound(_)
+                    | AppError::Conflict(_)
+                    | AppError::ValidationError(_)
+                    | AppError::Forbidden(_),
                 ) => {}
                 // Transient (storage, a concurrent first turn): try again later.
                 Err(error) => {
@@ -289,9 +329,24 @@ async fn run_member(
     group: &AssistantGroup,
     agent_id: &str,
 ) -> AppResult<()> {
-    let agent = team::agent(&state.db, owner, agent_id).await?;
-    if agent.destroyed_at.is_some() || !group.member_agent_ids.iter().any(|id| id == agent_id) {
+    if !group.member_agent_ids.iter().any(|id| id == agent_id) {
         return Ok(());
+    }
+    let agent = match team::agent(&state.db, owner, agent_id).await {
+        Ok(agent) if agent.destroyed_at.is_none() => agent,
+        Ok(_) | Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+            return refuse_member(state, owner, group, agent_id).await;
+        }
+        Err(error) => return Err(error),
+    };
+    // Refuse an unshared member before it waits for a pool slot or a busy
+    // thread, so the requester learns at once rather than after a retry.
+    if groups::members(&state.db, owner, group)
+        .await?
+        .iter()
+        .any(|m| m.id == agent_id && m.shared && !m.available)
+    {
+        return refuse_member(state, owner, group, agent_id).await;
     }
     let thread = groups::member_thread(&state.db, owner, &group.id, agent_id).await?;
     let since = thread.as_ref().map_or(0, |row| row.group_seen_seq);
@@ -300,6 +355,9 @@ async fn run_member(
         return Ok(());
     }
     let start = TurnStart {
+        execution_enrollment: false,
+        execution_parent: None,
+        owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
         invocation_id: None,
@@ -340,7 +398,13 @@ async fn run_member(
         reply_channel: None,
     };
     let limit = team_pool_limit(state, owner).await + 1;
-    match start_server_turn(state, owner, start, Pool::Team { owner, limit }).await? {
+    let started = match start_server_turn(state, owner, start, Pool::Team { owner, limit }).await {
+        Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
+            return refuse_member(state, owner, group, agent_id).await;
+        }
+        result => result?,
+    };
+    match started {
         Started::Turn { conversation, .. } => {
             groups::set_seen(&state.db, owner, &conversation.id, newest).await?;
         }
@@ -349,6 +413,34 @@ async fn run_member(
             groups::address(&state.db, owner, &group.id, std::slice::from_ref(&agent.id)).await?;
         }
     }
+    Ok(())
+}
+
+async fn refuse_member(
+    state: &AppState,
+    owner: &str,
+    group: &AssistantGroup,
+    agent_id: &str,
+) -> AppResult<()> {
+    let Some(member) = groups::members(&state.db, owner, group)
+        .await?
+        .into_iter()
+        .find(|m| m.id == agent_id && m.shared && !m.available)
+    else {
+        // Destroyed own/org members are retired, not unshared. In particular,
+        // a member queued before destruction must not produce a share notice.
+        return Ok(());
+    };
+    groups::append(
+        &state.db,
+        owner,
+        &group.id,
+        "notice",
+        Some(&member.agent),
+        "Ask this agent's owner to share it with you.",
+        Vec::new(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -379,6 +471,18 @@ pub(crate) async fn member_settled(
     }
     let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
+        // A completed worker may race roster removal and even re-addition.
+        // Only the current member thread may publish or hand off its result.
+        let Some(agent_id) = row.agent_id.as_deref() else {
+            return Ok(());
+        };
+        if !group.member_agent_ids.iter().any(|id| id == agent_id)
+            || groups::member_thread(&state.db, owner, group_id, agent_id)
+                .await?
+                .is_none_or(|current| current.id != row.id)
+        {
+            return Ok(());
+        }
         let agent = team::agent_for_conversation(&state.db, row).await?;
         match error_code {
             None if !text.trim().is_empty() => {
@@ -389,37 +493,35 @@ pub(crate) async fn member_settled(
                     }
                     None => Vec::new(),
                 };
-                let message = groups::append(
-                    &state.db,
-                    owner,
-                    group_id,
-                    "agent",
-                    Some(&agent),
-                    text,
-                    attachments,
-                )
-                .await?;
+                let message =
+                    groups::append_member_reply(&state.db, row, "agent", &agent, text, attachments)
+                        .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
                     &state.db, row, &message,
                 ))
                 .await?;
                 let members = groups::members(&state.db, owner, &group).await?;
-                let live: Vec<AssistantAgent> = members
+                let roster: Vec<AssistantAgent> =
+                    members.iter().map(|member| member.agent.clone()).collect();
+                let mentioned = groups::mentions(text, &roster)
                     .into_iter()
-                    .filter(|member| member.destroyed_at.is_none() && member.id != agent.id)
+                    .filter(|id| {
+                        id != &agent.id
+                            && members.iter().any(|member| {
+                                &member.id == id && (member.available || member.shared)
+                            })
+                    })
                     .collect();
-                let mentioned = groups::mentions(text, &live);
                 let handed = spend_handoffs(state, owner, group_id, mentioned).await?;
                 groups::address(&state.db, owner, group_id, &handed).await?;
             }
             None => {}
             Some("cancelled") => {
-                let message = groups::append(
+                let message = groups::append_member_reply(
                     &state.db,
-                    owner,
-                    group_id,
+                    row,
                     "notice",
-                    Some(&agent),
+                    &agent,
                     &format!("{} stopped.", identifier(&agent.name)),
                     Vec::new(),
                 )
@@ -430,12 +532,11 @@ pub(crate) async fn member_settled(
                 .await?;
             }
             Some(code) => {
-                let message = groups::append(
+                let message = groups::append_member_reply(
                     &state.db,
-                    owner,
-                    group_id,
+                    row,
                     "notice",
-                    Some(&agent),
+                    &agent,
                     &format!("{} could not reply ({code}).", identifier(&agent.name)),
                     Vec::new(),
                 )
@@ -568,16 +669,35 @@ async fn post_with_uploads(
     }
     let group = access.group;
     let members = groups::members(&state.db, owner, &group).await?;
+    let available_ids = live_member_ids(&members);
+    let roster: Vec<AssistantAgent> = members.iter().map(|member| member.agent.clone()).collect();
     let live: Vec<AssistantAgent> = members
-        .into_iter()
-        .filter(|member| {
-            member.destroyed_at.is_none() && author.is_none_or(|author| author.id != member.id)
-        })
+        .iter()
+        .filter(|member| member.available || member.shared)
+        .map(|member| member.agent.clone())
         .collect();
     // Refuse a stale or forged selection before anything is decided.
     let explicit = explicit_recipients
-        .map(|selected| groups::explicit_recipients(selected, &live))
+        .map(|selected| {
+            validate_addressed_members(selected, &members)?;
+            groups::explicit_recipients(selected, &live)
+        })
         .transpose()?;
+    if explicit.is_none() && groups::ambiguous_mention(text, &roster) {
+        return Err(AppError::ValidationError(
+            "Ambiguous agent name; choose a recipient or mention its exact agent ID".into(),
+        ));
+    }
+    // Resolve identity before availability. An unavailable namesake or UUID
+    // must never redirect a mention to another agent (including a fallback).
+    let mentioned = groups::mentions(text, &roster);
+    if explicit.is_none() && !mentioned.is_empty() && author.is_none() {
+        validate_addressed_members(&mentioned, &members)?;
+    }
+    let mentioned: Vec<String> = mentioned
+        .into_iter()
+        .filter(|id| live.iter().any(|member| &member.id == id))
+        .collect();
     // The owner answering a member's confirmation in words decides that card
     // and sends the member back to it.
     let confirmed = match author {
@@ -586,15 +706,13 @@ async fn post_with_uploads(
     };
     let mut addressed = match (&confirmed, explicit) {
         // A confirmation answers one card: its member plus anyone it names.
-        (Some(_), _) => groups::mentions(text, &live),
+        (Some(_), _) => mentioned,
         (None, Some(selected)) => selected,
         (None, None) => {
-            let mentioned = groups::mentions(text, &live);
             if !mentioned.is_empty() || author.is_some() {
                 mentioned
             } else {
-                let live_ids: Vec<String> = live.iter().map(|member| member.id.clone()).collect();
-                groups::default_recipients(&group.last_recipient_ids, &live_ids, "")
+                groups::default_recipients(&group.last_recipient_ids, &available_ids, "")
             }
         }
     };
@@ -602,10 +720,12 @@ async fn post_with_uploads(
         addressed.retain(|id| id != member);
         addressed.insert(0, member.clone());
     }
-    if addressed.is_empty()
-        && author.is_none()
-        && live.iter().any(|member| member.id == group.lead_agent_id)
-    {
+    // Resolve against the whole roster first, so removing the author cannot
+    // turn an ambiguous handle into a different agent's identity.
+    if let Some(author) = author {
+        addressed.retain(|id| id != &author.id);
+    }
+    if addressed.is_empty() && author.is_none() && available_ids.contains(&group.lead_agent_id) {
         addressed.push(group.lead_agent_id.clone());
     }
     let message = match follower.filter(|_| !addressed.is_empty()) {
@@ -652,6 +772,26 @@ async fn post_with_uploads(
     groups::address(&state.db, owner, group_id, &addressed).await?;
     advance(state, owner, group_id).await;
     Ok((message, addressed))
+}
+
+/// Explain known unavailable targets without resolving or exposing anyone
+/// outside this roster. Lost personal shares retain their fixed member notice.
+fn validate_addressed_members(ids: &[String], members: &[groups::Member]) -> AppResult<()> {
+    for id in ids {
+        if let Some(member) = members
+            .iter()
+            .find(|member| &member.id == id && !member.available && !member.shared)
+        {
+            let name = identifier(&member.name);
+            let reason = if member.destroyed_at.is_some() {
+                "was destroyed and can't be messaged"
+            } else {
+                "is no longer available to you"
+            };
+            return Err(AppError::ValidationError(format!("{name} {reason}")));
+        }
+    }
+    Ok(())
 }
 
 /// Decide a member's pending action card from the owner's group reply and
@@ -836,12 +976,17 @@ pub async fn list_groups(State(state): State<AppState>, auth: AuthUser) -> AppRe
     for access in crate::services::org_group_service::list(&state.db, &owner).await? {
         rows.push(group_response_for(&state, access).await?);
     }
+    for group in crate::services::collaboration_group_service::list(&state.db, &owner).await? {
+        rows.push(super::collaboration_group::response(&state, &owner, group).await?);
+    }
     Ok(Json(json!({"groups": rows})))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateGroupRequest {
+    #[serde(default)]
+    collaboration: bool,
     #[serde(default)]
     org: Option<String>,
     #[serde(default)]
@@ -858,6 +1003,24 @@ pub async fn create_group(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if body.collaboration {
+        if body.org.is_some() || !body.participant_user_ids.is_empty() {
+            return Err(AppError::ValidationError(
+                "Invite participants after creating a collaboration group".into(),
+            ));
+        }
+        let group = crate::services::collaboration_group_service::membership::create(
+            &state.db,
+            &owner,
+            &body.name,
+            &body.member_agent_ids,
+        )
+        .await?;
+        return Ok((
+            StatusCode::CREATED,
+            Json(super::collaboration_group::response(&state, &owner, group).await?),
+        ));
+    }
     if let Some(org) = body.org.as_deref() {
         let access = crate::services::org_group_service::create(
             &state.db,
@@ -901,6 +1064,16 @@ pub async fn get_group(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        return Ok(Json(
+            super::collaboration_group::response(
+                &state,
+                &owner,
+                crate::services::collaboration_group_service::get(&state.db, &owner, &id).await?,
+            )
+            .await?,
+        ));
+    }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     Ok(Json(group_response_for(&state, access).await?))
 }
@@ -929,6 +1102,12 @@ pub async fn update_group(
     crate::handlers::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        crate::services::collaboration_group_service::get(&state.db, &owner, &id).await?;
+        return Err(AppError::ValidationError(
+            "Use the revision-fenced collaboration membership endpoint".into(),
+        ));
+    }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     if access.org.is_some() {
         let access = crate::services::org_group_service::update(
@@ -967,6 +1146,24 @@ pub async fn delete_group(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        let group =
+            crate::services::collaboration_group_service::get(&state.db, &owner, &id).await?;
+        crate::services::collaboration_group_service::membership::apply(
+            &state.db,
+            &owner,
+            &id,
+            group
+                .collaboration
+                .as_ref()
+                .expect("validated")
+                .membership_revision,
+            crate::services::collaboration_group_service::membership::Change::Delete,
+            true,
+        )
+        .await?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     stop_group_threads(&state, &access).await?;
     if access.org.is_some() {
@@ -1017,6 +1214,11 @@ pub async fn list_messages(
     let limit = query.limit.unwrap_or(50);
     if !(1..=200).contains(&limit) || query.before_seq.is_some_and(|seq| seq <= 0) {
         return Err(AppError::BadRequest("Invalid page".into()));
+    }
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        return super::collaboration_group::messages(&state, &owner, &id, query.before_seq)
+            .await
+            .map(Json);
     }
     let access = crate::services::org_group_service::get(&state.db, &owner, &id, None).await?;
     let group_owner = access.group.user_id.clone();
@@ -1105,6 +1307,23 @@ pub async fn post_message(
     engine::require_enabled(&state.db, &owner).await?;
     if !body.attachment_ids.is_empty() {
         super::login_client_context::require_first_party_human(&auth)?;
+    }
+    if crate::services::collaboration_group_service::marked(&state.db, &id).await? {
+        super::login_client_context::require_first_party_human(&auth)?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(
+                super::collaboration_group::post(
+                    &state,
+                    &owner,
+                    &id,
+                    &body.text,
+                    body.recipient_agent_ids.as_deref(),
+                    &body.attachment_ids,
+                )
+                .await?,
+            ),
+        ));
     }
     let (message, addressed) = post_with_uploads(
         &state,

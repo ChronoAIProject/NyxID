@@ -1,5 +1,6 @@
 import { useMfaStepUp } from "./useMfaStepUp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -11,7 +12,6 @@ import {
   TextInput,
   View,
 } from "react-native";
-import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import {
   ChevronDown,
@@ -22,11 +22,13 @@ import {
   X,
 } from "lucide-react-native";
 
-import type { RootStackParamList } from "../../app/AppNavigator";
+import type { SheetScreenProps } from "../../app/navigationTypes";
+import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { MagicKeyIllustration } from "../../components/icons/empty-state/MagicKeyIllustration";
 import { RoadBarrierIllustration } from "../../components/icons/empty-state/RoadBarrierIllustration";
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import { resolveAuthDeviceErrorMessage } from "../../lib/api/errorMessages";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
@@ -48,7 +50,7 @@ import {
 } from "./deviceUserCode";
 import { useAuthSession } from "./AuthSessionContext";
 
-type Props = NativeStackScreenProps<RootStackParamList, "DeviceLogin">;
+type Props = SheetScreenProps<"DeviceLogin">;
 type TerminalState = "approved" | "denied" | null;
 
 const ACTION_THROTTLE_MS = 750;
@@ -218,6 +220,7 @@ function ManualCodeModal({
 }) {
   const inputRef = useRef<TextInput>(null);
   const insets = useSafeAreaInsets();
+  const reducedMotion = useReducedMotion();
   const normalizedCode = normalizeAuthDeviceUserCode(value);
 
   useEffect(() => {
@@ -230,7 +233,7 @@ function ManualCodeModal({
     <Modal
       visible={visible}
       transparent
-      animationType="slide"
+      animationType={reducedMotion ? "none" : "slide"}
       statusBarTranslucent
       onRequestClose={onDismiss}
     >
@@ -317,6 +320,7 @@ function ManualCodeModal({
 }
 
 export function DeviceLoginScreen({ navigation, route }: Props) {
+  const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
   const { isAuthenticated } = useAuthSession();
@@ -326,7 +330,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [confirmedCode, setConfirmedCode] = useState<string | null>(null);
   const [preview, setPreview] = useState<AuthDevicePreview | null>(null);
   const [terminal, setTerminal] = useState<TerminalState>(null);
-  const stepUp = useMfaStepUp(`${confirmedCode}:${isAuthenticated}:${terminal}`);
+  const stepUp = useMfaStepUp(
+    `${confirmedCode}:${isAuthenticated}:${terminal}`,
+  );
   const [isScanning, setIsScanning] = useState(
     () => route.params?.start_scanner === true && !route.params?.user_code,
   );
@@ -340,6 +346,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
   const [rawUserAgentExpanded, setRawUserAgentExpanded] = useState(false);
   const lastActionAt = useRef(0);
+  useWorkspaceBack({
+    active: inWorkspaceSheet && isScanning,
+    defaultRole: "back",
+    disabled: isPreviewing || !!decisionPending || stepUp.busy,
+    options: { headerShown: inWorkspaceSheet },
+    onBack: () => setIsScanning(false),
+  });
   const localTimezone = useMemo(() => {
     try {
       return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
@@ -434,7 +447,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     [claimAction],
   );
 
-  const handleScannedCode = (normalized: string, kind: "device" | "agent-key") => {
+  const handleScannedCode = (
+    normalized: string,
+    kind: "device" | "agent-key",
+  ) => {
     if (kind === "agent-key") {
       setIsScanning(false);
       navigation.navigate("AgentKeyLogin", { user_code: normalized });
@@ -454,7 +470,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setIsScanning(false);
   };
 
-  const handleDecision = async (decision: "approve" | "deny", verifiedRetry = false) => {
+  const handleDecision = async (
+    decision: "approve" | "deny",
+    verifiedRetry = false,
+  ) => {
     if (!confirmedCode || !preview) return;
     if (!verifiedRetry && !claimAction()) {
       setErrorMessage("Please wait a moment before trying again.");
@@ -477,7 +496,8 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         setTerminal("denied");
       }
     } catch (error) {
-      if (await stepUp.handle(error, () => handleDecision(decision, true))) return;
+      if (await stepUp.handle(error, () => handleDecision(decision, true)))
+        return;
       setErrorMessage(resolveAuthDeviceErrorMessage(error));
     } finally {
       setDecisionPending(null);
@@ -487,8 +507,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const handleBack = () => {
     if (navigation.canGoBack()) {
       navigation.goBack();
+    } else if (isAuthenticated) {
+      navigation.dispatch(workspaceNavigateAction("Activity"));
     } else {
-      navigation.navigate(isAuthenticated ? "Activity" : "Auth");
+      navigation.navigate("Auth");
     }
   };
 
@@ -496,6 +518,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     return (
       <>
         <DeviceCodeScanner
+          showHeader={!inWorkspaceSheet}
           paused={manualEntryVisible || isPreviewing}
           onCancel={handleBack}
           onCode={handleScannedCode}
@@ -583,7 +606,21 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   }
 
   if (stepUp.prompt) {
-    return <ScreenContainer><ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">{stepUp.prompt}</ScrollView></ScreenContainer>;
+    return (
+      <ScreenContainer>
+        <KeyboardAvoidingView
+          style={styles.fill}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <ScrollView
+            contentContainerStyle={styles.content}
+            keyboardShouldPersistTaps="handled"
+          >
+            {stepUp.prompt}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </ScreenContainer>
+    );
   }
   return (
     <ScreenContainer>
@@ -595,23 +632,31 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={styles.screenHeader}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Back"
-              hitSlop={4}
-              onPress={handleBack}
-              style={({ pressed }) => [
-                styles.headerBackButton,
-                pressed && styles.pressed,
-              ]}
-            >
-              <ChevronLeft size={24} color={colors.textPrimary} />
-            </Pressable>
-            <Text style={styles.title}>Approve device login</Text>
-          </View>
+          {!inWorkspaceSheet && (
+            <View style={styles.screenHeader}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Back"
+                hitSlop={4}
+                onPress={handleBack}
+                style={({ pressed }) => [
+                  styles.headerBackButton,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <ChevronLeft size={24} color={colors.textPrimary} />
+              </Pressable>
+              <Text style={styles.title}>Approve device login</Text>
+            </View>
+          )}
           <Text style={styles.subtitle}>Review the request details.</Text>
-          {!preview && <PrimaryButton label="Agent Key login" kind="ghost" onPress={() => navigation.navigate("AgentKeyLogin")} />}
+          {!preview && (
+            <PrimaryButton
+              label="Agent Key login"
+              kind="ghost"
+              onPress={() => navigation.navigate("AgentKeyLogin")}
+            />
+          )}
 
           {!preview ? (
             <View style={styles.inputSection}>
@@ -824,7 +869,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 />
                 <Text style={styles.cautionText}>
                   {"Only approve if you started this sign-in. "}
-                  {"Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "}
+                  {
+                    "Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "
+                  }
                   <Text style={styles.cautionDanger}>
                     If anything looks unfamiliar, reject it.
                   </Text>
@@ -833,15 +880,24 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
               {isAuthenticated ? (
                 <View style={{ gap: spacing.md }}>
-                  {preview.supports_grant_choice && <PrimaryButton label="Restricted Agent Key" kind="ghost"
-                    disabled={isPending || isExpired}
-                    onPress={() => navigation.navigate("AgentKeyLogin", {
-                      user_code: confirmedCode ?? userCode, flow: "device",
-                    })} />}
+                  {preview.supports_grant_choice && (
+                    <PrimaryButton
+                      label="Restricted Agent Key"
+                      kind="ghost"
+                      disabled={isPending || isExpired}
+                      onPress={() =>
+                        navigation.navigate("AgentKeyLogin", {
+                          user_code: confirmedCode ?? userCode,
+                          flow: "device",
+                        })
+                      }
+                    />
+                  )}
                   <Text style={styles.cautionText}>
-                    A full account session grants this machine your account, service,
-                    credential, and organization access. A restricted Agent Key grants
-                    only the permissions and resources you confirm next.
+                    A full account session grants this machine your account,
+                    service, credential, and organization access. A restricted
+                    Agent Key grants only the permissions and resources you
+                    confirm next.
                   </Text>
                   <View style={styles.decisionButton}>
                     <PrimaryButton

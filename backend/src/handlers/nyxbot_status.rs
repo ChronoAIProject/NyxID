@@ -588,6 +588,9 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
     if !super::org_access_holds(state, row).await? {
         return super::release_org_channel(state, row).await;
     }
+    if row.transport == "gateway" && row.gateway_source.is_some() {
+        return crate::services::nyxbot_gateway_source::check_status(state, row).await;
+    }
     let Some(route_id) = row.route_id.as_deref() else {
         return Ok(());
     };

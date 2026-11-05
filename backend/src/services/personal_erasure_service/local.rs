@@ -43,6 +43,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::channel_delivery::COLLECTION_NAME, doc! {"user_id":owner}),
         (
+            m::channel_whatsapp_native::COLLECTION_NAME,
+            doc! {"owner_id":owner},
+        ),
+        (
             m::service_account_key_read_grant::COLLECTION_NAME,
             doc! {"$or":[{"_id":owner},{"owner_id":owner}]},
         ),
@@ -140,6 +144,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::cma_session_origin::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::async_service_operation::QUOTAS_COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
@@ -234,11 +242,40 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::nyxbot_event_binding::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::nyxbot_channel::WATCHES_COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::nyxbot_gateway_response::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_voice_announcement::COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
         (m::assistant_voice::REQUESTS, doc! {"user_id":owner}),
         (m::assistant_settings::COLLECTION_NAME, doc! {"_id":owner}),
+        (m::assistant_onboarding::COLLECTION_NAME, doc! {"_id":owner}),
+        (
+            m::assistant_sharing::COLLECTION_NAME,
+            doc! {"owner_id": owner},
+        ),
+        (
+            m::assistant_sharing::SHARES_COLLECTION_NAME,
+            doc! {"$or": [{"owner_id": owner}, {"subject_id": owner, "subject_kind": "person"}]},
+        ),
+        (
+            m::assistant_sharing::NOTES_COLLECTION_NAME,
+            doc! {"actor_user_id": owner},
+        ),
+        (
+            m::assistant_sharing::CONSENTS_COLLECTION_NAME,
+            doc! {"$or": [{"actor_user_id": owner}, {"owner_id": owner}]},
+        ),
         (
             m::assistant_skill_draft_attempt::COLLECTION_NAME,
             doc! {"user_id":owner},
@@ -302,6 +339,14 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::assistant_group_collaboration::READ_STATES,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_group_collaboration::MENTION_NOTIFICATIONS,
+            doc! {"user_id":owner},
+        ),
+        (
             m::node_registration_token::COLLECTION_NAME,
             doc! {"$or":[{"user_id":owner},{"issuer_user_id":owner}]},
         ),
@@ -319,6 +364,18 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         (
             m::assistant_group::MESSAGES_COLLECTION_NAME,
             doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_group_collaboration::INVITES,
+            doc! {"$or":[{"issuer_user_id":owner},{"accepted_by_user_id":owner},{"intended_user_id":owner}]},
+        ),
+        (
+            m::assistant_group_collaboration::PROPOSALS,
+            doc! {"proposed_by":owner},
+        ),
+        (
+            m::assistant_group_collaboration::SLOTS,
+            doc! {"original_requester_id":owner,"conversation_id":null},
         ),
         (m::assistant_group::COLLECTION_NAME, doc! {"user_id":owner}),
         (
@@ -606,6 +663,19 @@ async fn retain_settled_evidence(db: &Database, job: &PersonalErasureJob) -> App
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(&state.db);
+    if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
+        return Ok(false);
+    }
+    super::super::collaboration_group_service::cleanup::sweep(&db).await?;
+    if db
+        .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"collaboration.original_requester_id":&job.user_id})
+        .await?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
     if !super::learning::clear(&db, &job.user_id).await? {
         return Err(AppError::Conflict(
             "Interrupted skill publication requires reconciliation before local erasure".into(),
@@ -632,6 +702,7 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
             .await?;
         return Ok(false);
     }
+    super::super::org_channel_service::lifecycle::erase_person(&db, &job.user_id).await?;
     // Preserve org routes: release only the person's existing NyxBot links via
     // the routing/key lifecycle before deleting their local link record.
     if let Some(link) = db
@@ -639,6 +710,39 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         .find_one(doc! {"user_id":&job.user_id})
         .await?
     {
+        if link.get_document("org_specialist").is_ok() {
+            let id = link
+                .get_str("_id")
+                .map_err(|_| AppError::Internal("Invalid org channel identity".into()))?;
+            let context = (db.clone(), id.to_owned());
+            super::super::transaction_service::run_db_only(&db, &context, |tx, (db, id)| {
+                Box::pin(async move {
+                    super::super::org_channel_service::lifecycle::retire_in_session(
+                        db, tx, id, None,
+                    )
+                    .await
+                })
+            })
+            .await?;
+            if !super::super::org_channel_service::lifecycle::erase_hidden(
+                &db,
+                doc! {"channel.nyxbot_channel_id":id,"channel.org_execution":{"$type":"object"}},
+            )
+            .await?
+            {
+                return Ok(false);
+            }
+            for collection in [
+                crate::models::org_channel::LINKS,
+                crate::models::org_channel::CHALLENGES,
+                crate::models::org_channel::LANES,
+                crate::models::org_channel::MESSAGES,
+            ] {
+                db.collection::<Document>(collection)
+                    .delete_many(doc! {"channel_id":id})
+                    .await?;
+            }
+        }
         if let Ok(org) = link.get_str("bot_owner_id") {
             if let Ok(route) = link.get_str("route_id") {
                 match super::super::channel_routing_service::delete_conversation(&db, route, org)

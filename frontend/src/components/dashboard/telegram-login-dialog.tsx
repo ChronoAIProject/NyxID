@@ -147,7 +147,7 @@ export function TelegramLoginDialog({
         {step === "loading" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Loading Telegram login widget...
             </p>
           </div>
@@ -157,7 +157,7 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-4 py-4">
               <div ref={widgetContainerRef} className="flex justify-center" />
-              <p className="text-xs text-muted-foreground text-center">
+              <p className="text-13 text-muted-foreground text-center">
                 A Telegram popup will open. Sign in and confirm to connect your
                 account.
               </p>
@@ -173,7 +173,7 @@ export function TelegramLoginDialog({
         {step === "submitting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Verifying your Telegram identity...
             </p>
           </div>
@@ -183,7 +183,7 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-success" />
-              <p className="text-12 text-muted-foreground text-center">
+              <p className="text-14 text-muted-foreground text-center">
                 Your Telegram account has been connected successfully.
               </p>
             </div>
@@ -199,7 +199,7 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <AlertCircle className="h-8 w-8 text-destructive" />
-              <p className="text-12 text-destructive text-center">
+              <p className="text-14 text-destructive text-center">
                 {errorMessage}
               </p>
             </div>

@@ -97,7 +97,21 @@ export const ADMIN_AUDIT_LOG_SEARCH_FIELDS = [
   { key: "user_agent", label: "User agent" },
 ] as const satisfies readonly AdminAuditLogSearchField[];
 
-const SEARCH_FIELD_KEYS = ADMIN_AUDIT_LOG_SEARCH_FIELDS.map(({ key }) => key);
+const SEARCH_FIELD_KEYS: readonly AdminAuditLogSearchFieldKey[] =
+  ADMIN_AUDIT_LOG_SEARCH_FIELDS.map(({ key }) => key);
+
+const EXACT_SEARCH_FIELDS = [
+  { key: "user_id_exact", label: "User ID (exact)" },
+  { key: "api_key_id_exact", label: "API key ID (exact)" },
+] as const satisfies readonly AdminAuditLogSearchField[];
+
+export function adminAuditLogExactFieldParam(
+  field: AdminAuditLogSearchFieldKey,
+): "user_id" | "api_key_id" | undefined {
+  if (field === "user_id_exact") return "user_id";
+  if (field === "api_key_id_exact") return "api_key_id";
+  return undefined;
+}
 
 const STATUS_LABELS: Record<AdminAuditLogStatusFilter, string> = {
   "2xx": "2xx Success",
@@ -131,7 +145,9 @@ function fallbackFilterFields(): readonly AdminAuditLogFilterField[] {
       value_type: "enum",
       operator: "is",
       multiple: true,
-      options: STATUS_FILTERS.map((value) => option(value, STATUS_LABELS[value])),
+      options: STATUS_FILTERS.map((value) =>
+        option(value, STATUS_LABELS[value]),
+      ),
     },
     {
       key: "actor",
@@ -256,21 +272,16 @@ function isSearchFieldKey(
 }
 
 /**
- * Returns server-advertised search fields in stable table order. Scoped search
- * stays hidden for older backends that do not advertise support.
+ * Exact IDs use the legacy API parameters; substring fields require server support.
  */
 export function getAdminAuditLogSearchFields(
   filterOptions?: AdminAuditLogFilterOptions,
 ): readonly AdminAuditLogSearchField[] {
-  if (filterOptions?.search_fields === undefined) {
-    return [];
-  }
-
   const fieldsByKey = new Map<
     AdminAuditLogSearchFieldKey,
     AdminAuditLogSearchField
   >();
-  for (const field of filterOptions.search_fields) {
+  for (const field of filterOptions?.search_fields ?? []) {
     if (
       isSearchFieldKey(field.key) &&
       typeof field.label === "string" &&
@@ -281,10 +292,13 @@ export function getAdminAuditLogSearchFields(
     }
   }
 
-  return SEARCH_FIELD_KEYS.flatMap((key) => {
-    const field = fieldsByKey.get(key);
-    return field ? [field] : [];
-  });
+  return [
+    ...EXACT_SEARCH_FIELDS,
+    ...SEARCH_FIELD_KEYS.flatMap((key) => {
+      const field = fieldsByKey.get(key);
+      return field ? [field] : [];
+    }),
+  ];
 }
 
 function normalizeSearchValues(value: unknown): readonly string[] | undefined {
@@ -385,7 +399,19 @@ export function encodeAdminAuditLogSearchFilters(
 export function getAdminAuditLogSearchFilters(
   search: AdminAuditLogSearchState,
 ): readonly AdminAuditLogSearchFilter[] {
-  return parseAdminAuditLogSearchFilters(search.search_filters) ?? [];
+  const exact: AdminAuditLogSearchFilter[] = EXACT_SEARCH_FIELDS.flatMap(
+    ({ key }) => {
+      const param = adminAuditLogExactFieldParam(key)!;
+      const value = search[param];
+      return value
+        ? [{ field: key, values: [value], operator: "is" as const }]
+        : [];
+    },
+  );
+  return [
+    ...exact,
+    ...(parseAdminAuditLogSearchFilters(search.search_filters) ?? []),
+  ];
 }
 
 /** Upserts or removes one field group and returns canonical URL state. */
@@ -423,7 +449,9 @@ export type AdminAuditLogCustomFilters = Partial<
   Record<AdminAuditLogFilterKey, readonly string[]>
 >;
 
-function isCustomTextFilterKey(value: unknown): value is AdminAuditLogFilterKey {
+function isCustomTextFilterKey(
+  value: unknown,
+): value is AdminAuditLogFilterKey {
   return (ADMIN_AUDIT_LOG_CUSTOM_TEXT_FILTERS as readonly string[]).includes(
     value as string,
   );
@@ -869,8 +897,17 @@ export function normalizeAdminAuditLogSearch(
     createdTo === undefined ||
     createdFrom <= createdTo;
   const sort = oneOf<AdminAuditLogSort>(raw.sort, SORTS);
+  const exactIds = Object.fromEntries(
+    ["user_id", "api_key_id"].flatMap((key) => {
+      const value = typeof raw[key] === "string" ? raw[key].trim() : "";
+      return value && [...value].length <= MAX_SEARCH_VALUE_LENGTH
+        ? [[key, value]]
+        : [];
+    }),
+  );
 
   return {
+    ...exactIds,
     ...(page !== undefined && page > 1 ? { page } : {}),
     ...(perPage !== undefined &&
     perPage !== ADMIN_AUDIT_LOG_DEFAULT_PER_PAGE &&

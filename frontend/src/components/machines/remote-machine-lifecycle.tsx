@@ -104,7 +104,7 @@ export function RemoteMachineOperationCard({
   return (
     <DetailSection
       title={`${readable(operation.action)} operation`}
-      className="text-12 max-sm:[&_div.flex.text-12]:flex-col max-sm:[&_div.flex.text-12]:items-start max-sm:[&_div.flex.text-12]:gap-1 max-sm:[&_div.flex.text-12>div]:max-w-full max-sm:[&_.text-right]:text-left"
+      className="text-14 max-sm:[&_div.flex.text-14]:flex-col max-sm:[&_div.flex.text-14]:items-start max-sm:[&_div.flex.text-14]:gap-1 max-sm:[&_div.flex.text-14>div]:max-w-full max-sm:[&_.text-right]:text-left"
       action={
         <Badge
           variant={
@@ -120,13 +120,13 @@ export function RemoteMachineOperationCard({
       }
     >
       {overdue && (
-        <p role="status" className="px-4 py-3 text-12 text-warning">
+        <p role="status" className="px-4 py-3 text-14 text-warning">
           Cleanup target exceeded. Deletion remains pending; this time target
           does not identify the cause or guarantee completion.
         </p>
       )}
       {operation.action === "delete" && (
-        <div className="space-y-2 px-4 py-3 text-12">
+        <div className="space-y-2 px-4 py-3 text-14">
           {stopped ? (
             <p role="status">
               Automatic deletion attempts stopped. The current round’s server
@@ -156,7 +156,7 @@ export function RemoteMachineOperationCard({
       <dl className="grid gap-3 px-4 py-3 sm:grid-cols-3">
         {operation.action === "delete" && (
           <div className="min-w-0 space-y-1">
-            <dt className="text-11 text-muted-foreground">
+            <dt className="text-13 text-muted-foreground">
               Attempts this round
             </dt>
             <dd className="font-medium tabular-nums">
@@ -166,7 +166,7 @@ export function RemoteMachineOperationCard({
           </div>
         )}
         <div className="min-w-0 space-y-1">
-          <dt className="text-11 text-muted-foreground">
+          <dt className="text-13 text-muted-foreground">
             {operation.action === "delete"
               ? "Total deletion attempts"
               : "Attempts after retry"}
@@ -175,7 +175,7 @@ export function RemoteMachineOperationCard({
         </div>
         {operation.action === "delete" && (
           <div className="min-w-0 space-y-1">
-            <dt className="text-11 text-muted-foreground">
+            <dt className="text-13 text-muted-foreground">
               Next platform attempt
             </dt>
             <dd className="break-words font-medium">
@@ -204,7 +204,7 @@ export function RemoteMachineOperationCard({
           does not guarantee this access problem will be resolved.
         </p>
       )}
-      <details className="text-12">
+      <details className="text-14">
         <summary className="cursor-pointer px-4 py-3 font-medium">
           View operation progress
         </summary>

@@ -15,6 +15,7 @@ export const connectMethodSchema = z.enum([
 ]);
 
 export const connectLinkPreviewSchema = z.object({
+  assistant_intent_locked: z.boolean().default(false),
   use_platform_key: z.boolean().nullish(),
   scopes: z.array(z.string()).default([]),
   service_name: z.string().min(1),
@@ -26,6 +27,16 @@ export const connectLinkPreviewSchema = z.object({
   status: connectLinkStatusSchema,
   connect_method: connectMethodSchema,
   auth_key_name: z.string(),
+  token_exchange_credential_fields: z
+    .array(
+      z.object({
+        name: z.string(),
+        label: z.string(),
+        placeholder: z.string().optional(),
+        secret: z.boolean(),
+      }),
+    )
+    .nullish(),
   endpoint_url: z.string().url().nullable().optional(),
   credential_mode: z.string().nullable(),
   has_platform_oauth_credentials: z.boolean(),
@@ -148,3 +159,9 @@ export function validateConnectOAuthForm(
   }
   return null;
 }
+
+export const createConnectLinkResponseSchema = z.object({
+  id: z.string().uuid(),
+  connect_url: z.string().url(),
+  expires_at: z.string().datetime({ offset: true }),
+});

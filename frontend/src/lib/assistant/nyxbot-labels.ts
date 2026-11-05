@@ -1,6 +1,7 @@
 import { getProviderBrand } from "@/lib/provider-branding";
 import type {
   AssistantAgent,
+  AssistantGroupMember,
   AssistantAgentKind,
   NyxAgentAccessMode,
   NyxAgentActionConfirmation,
@@ -89,21 +90,25 @@ const EVENT_HEADER = /^NyxID events[^:\n]*:\s*/;
 
 /**
  * The individual notices of a server-authored `event` message. The server
- * writes one `- ` line per event, but an event's text may itself span lines
- * (a specialist's multi-line reply excerpt), so a new notice starts only at a
- * top-level `- ` line outside an open quote; the server swaps double quotes
- * inside quoted text for single ones, so an odd count means still inside.
+ * indents continuation lines, leaving unindented `- ` lines as boundaries.
+ * Old rows use quote balancing, with known event openers recovering from
+ * excerpts whose closing quote was truncated by the server.
  * Text without the events header (an automation's instruction) is one notice.
  */
 export function eventNotices(text: string): string[] {
   if (!EVENT_HEADER.test(text)) return [text.trim()];
+  const indented = text.match(EVENT_HEADER)?.[0].includes("continuation lines are indented");
   const notices: string[] = [];
-  for (const line of text.replace(EVENT_HEADER, "").split("\n")) {
+  const lines = text.replace(EVENT_HEADER, "").split("\n");
+  let remainingQuotes = (lines.join("\n").match(/"/g) ?? []).length;
+  for (const line of lines) {
     const current = notices.at(-1);
     const insideQuote = current !== undefined && (current.match(/"/g)?.length ?? 0) % 2 === 1;
-    if (/^- /.test(line) && !insideQuote) notices.push(line.slice(2).trim());
+    const knownEvent = /^- (?:Specialist |The user |NyxBot |Asynchronous service operation|Skill |The owner |The \S+ channel bot )/.test(line);
+    if (/^- /.test(line) && (indented || !insideQuote || (knownEvent && remainingQuotes === 0))) notices.push(line.slice(2).trim());
     else if (current === undefined) notices.push(line.replace(/^\s*-\s+/, "").trim());
-    else notices[notices.length - 1] = `${current}\n${line}`;
+    else notices[notices.length - 1] = `${current}\n${indented ? line.replace(/^ {2}/, "") : line}`;
+    remainingQuotes -= (line.match(/"/g) ?? []).length;
   }
   const kept = notices.map((notice) => notice.trim()).filter(Boolean);
   return kept.length ? kept : [text.trim()];
@@ -300,16 +305,16 @@ export function agentHandle(agent: NamedAgent): string | undefined {
 }
 
 /**
- * Conversation and group payloads carry only `{id, name, kind}`; the display
- * name lives on the agent list. Join by id.
+ * Respect server display names, including a cleared name. Older payloads
+ * without the field can still join the viewer's agent list by id.
  */
-export function withDisplayName<T extends { readonly id: string }>(
+export function withDisplayName<T extends { readonly id: string; readonly display_name?: string | null }>(
   ref: T,
   agents: readonly { readonly id: string; readonly display_name: string | null }[] | undefined,
 ): T & { readonly display_name: string | null } {
   return {
     ...ref,
-    display_name: agents?.find((agent) => agent.id === ref.id)?.display_name ?? null,
+    display_name: ref.display_name !== undefined ? ref.display_name : agents?.find((agent) => agent.id === ref.id)?.display_name ?? null,
   };
 }
 
@@ -333,10 +338,10 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
   >();
   for (const agent of agents) {
     const id =
-      agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
+      agent.share_role ? "shared" : agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
     const section = groups.get(id) ?? {
       id,
-      label: id === "personal" ? "Personal" : (agent.owner_name ?? id),
+      label: id === "personal" ? "Personal" : id === "shared" ? "Shared with me" : (agent.owner_name ?? id),
       agents: [],
     };
     section.agents.push(agent);
@@ -378,6 +383,7 @@ export const ACTION_RISK_LABEL = {
 
 /** Why a card asks, for its risk line. */
 export function confirmationReason(confirmation: NyxAgentActionConfirmation): string {
+  if (confirmation.reason === "org_connection") return "Using this organization connection requires your instruction, including in Full access.";
   if (confirmation.reason === "webhook") return "This automation's confirmation policy asks.";
   if (confirmation.reason === "policy") {
     return "This machine's or saved login's confirmation setting asks.";
@@ -387,6 +393,11 @@ export function confirmationReason(confirmation: NyxAgentActionConfirmation): st
     : "Your access mode asks.";
 }
 
+/** Missing deployment metadata is unknown, never a reason to omit an image. */
+export function modelCannotViewImages(model: Pick<NyxAgentModel, "input_modalities"> | undefined): boolean {
+  return model?.input_modalities != null && !model.input_modalities.includes("image");
+}
+
 /** Prefer the upstream name; older servers supply only the routing alias. */
 export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): string {
   const alias = model.id.replace(/^nyxagent\//, "");
@@ -394,4 +405,26 @@ export function modelDisplayName(model: Pick<NyxAgentModel, "id" | "label">): st
   if (label && label !== alias && label !== model.id) return label;
   if (model.id === "nyxagent/chat") return "Default model";
   return alias.replace(/[_-]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+export function groupAgentUnavailableReason(
+  member: AssistantGroupMember,
+): string {
+  const owner = member.owner_name ?? "the agent owner";
+  switch (member.unavailable_reason) {
+    case "destroyed":
+      return "This agent was destroyed. Ask the creator to remove it.";
+    case "removed":
+      return "This agent is no longer available. Ask the creator to remove it.";
+    case "org_agent_not_guestable":
+      return "Organization agents cannot allow guests. Ask an organization administrator for access.";
+    case "owner_approval_pending":
+      return `Waiting for ${owner} to allow participants.`;
+    case "not_shared_with_you":
+      return `Not shared with you — ask ${owner} to allow participants.`;
+    case "guest_access_off":
+      return `Participant access is off — ask ${owner} to allow participants.`;
+    default:
+      return `This agent is unavailable to you. Ask ${owner} for access.`;
+  }
 }

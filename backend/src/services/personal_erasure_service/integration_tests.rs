@@ -100,6 +100,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"machine-selection","user_id":&owner},
         ),
         (
+            "channel_whatsapp_native",
+            doc! {"_id":"native-wa","owner_id":&owner,"meta_app_id":"123"},
+        ),
+        (
             "channel_delivery_receipts",
             doc! {"_id":"receipt","user_id":&owner,"recipient_id":"personal-recipient"},
         ),
@@ -118,6 +122,20 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_resources",
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
+        ),
+        // An older replica may have deleted the group before it knew these
+        // additive collections. Erasure must not depend on a surviving parent.
+        (
+            "assistant_group_read_states",
+            doc! {"_id":"read-state","user_id":&owner,"group_id":"deleted-group","last_seen_seq":42_i64},
+        ),
+        (
+            "assistant_group_mention_notifications",
+            doc! {"_id":"pending-mention","user_id":&owner,"group_id":"deleted-group"},
+        ),
+        (
+            "assistant_voice_announcements",
+            doc! {"_id":"private-notice","user_id":&owner,"conversation_id":"private-chat","text":"Private notification"},
         ),
         (
             "assistant_agent_learning_members",
@@ -211,8 +229,16 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"org-resource","user_id":&other,"created_by":&owner},
         ),
         (
+            "assistant_voice_announcements",
+            doc! {"_id":"other-notice","user_id":&other,"conversation_id":"other-chat","text":"Other notification"},
+        ),
+        (
             "channel_conversations",
             doc! {"_id":"org-chat","user_id":&other,"created_by":&owner},
+        ),
+        (
+            "channel_whatsapp_native",
+            doc! {"_id":"org-native-wa","owner_id":&other,"created_by":&owner},
         ),
         (
             "channel_messages",

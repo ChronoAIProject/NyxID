@@ -761,6 +761,11 @@ async fn resolve_reply_token_message_context(
 /// proxy/LLM only; replying must use a real agent API key or the per-callback
 /// reply token (both documented in CHANNEL_BOT_RELAY.md).
 fn reject_relay_auth(auth_user: &AuthUser) -> AppResult<()> {
+    if crate::services::assistant_service_execution::is_shared_auth(auth_user) {
+        return Err(AppError::Forbidden(
+            "Shared agents must use an explicitly allowed chat post".into(),
+        ));
+    }
     if auth_user.auth_method == crate::mw::auth::AuthMethod::Relay {
         return Err(AppError::Forbidden(
             "Relay tokens cannot post channel replies; use the agent API key or the per-callback reply token".to_string(),
@@ -1115,6 +1120,11 @@ async fn deliver_initiated_inner(
     // Keep this multi-stage delivery future on the heap. Its callers include
     // Tokio workers and nested image/automation delivery on normal stacks.
     Box::pin(async move {
+        if crate::services::assistant_service_execution::is_shared_auth(auth_user) {
+            return Err(AppError::Forbidden(
+                "Shared agents must use an explicitly allowed chat post".into(),
+            ));
+        }
         if !adapter.outbound_capabilities().initiated_send
             || (bot.platform == "x"
                 && crate::services::channel_adapters::x::is_public_conversation(
@@ -1237,6 +1247,7 @@ async fn deliver_initiated_inner(
             } else {
                 None
             };
+            crate::services::channel_platform::revalidate_post_effect().await?;
             adapter
                 .send_reply_outcome(
                     &state.http_client,
@@ -3826,6 +3837,8 @@ mod tests {
 
     fn api_key_auth_user(api_key: &ApiKey) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -3861,6 +3874,8 @@ mod tests {
 
     fn auth_user_with_method(method: crate::mw::auth::AuthMethod) -> AuthUser {
         AuthUser {
+            execution_enrolled: false,
+            execution_permission: None,
             mfa_assured: false,
             mfa_enabled: None,
             org_agent_access: None,
@@ -3982,6 +3997,7 @@ mod tests {
             .expect("encrypt test bot token");
 
         let api_key = ApiKey {
+            permission_policy_id: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.clone(),
             name: "agent".to_string(),
@@ -4075,6 +4091,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4108,6 +4125,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,
@@ -4315,6 +4333,7 @@ mod tests {
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            nyxbot_admission: None,
             thread_context: None,
             activity: None,
             platform_send: None,

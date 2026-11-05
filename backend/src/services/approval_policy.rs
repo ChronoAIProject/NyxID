@@ -118,6 +118,18 @@ pub fn evaluate(
     }
 }
 
+/// Separately authored marker. Existing unmarked rules keep their mode semantics.
+pub(crate) fn mandatory_review(
+    config: &ServiceApprovalConfig,
+    descriptor: &OperationDescriptor,
+) -> bool {
+    config
+        .rules
+        .iter()
+        .find(|rule| rule_matches(rule, descriptor))
+        .is_some_and(|rule| rule.mandatory_review)
+}
+
 pub fn grant_scope_covers(scope: Option<&str>, descriptor: &OperationDescriptor) -> bool {
     let Some(scope) = scope else {
         return true;
@@ -135,6 +147,12 @@ pub fn grant_scope_covers(scope: Option<&str>, descriptor: &OperationDescriptor)
 }
 
 pub fn validate_rules(rules: &[ApprovalRule]) -> Result<(), String> {
+    if rules.iter().any(|rule| rule.mandatory_review) {
+        return Err(
+            "Mandatory organization review is reader-only until execution enforcement is released"
+                .into(),
+        );
+    }
     if rules.len() > MAX_APPROVAL_RULES {
         return Err(format!(
             "approval rules cannot exceed {MAX_APPROVAL_RULES} entries"
@@ -455,6 +473,7 @@ mod tests {
         mode: ApprovalMode,
     ) -> ApprovalRule {
         ApprovalRule {
+            mandatory_review: false,
             methods: methods.iter().map(|method| (*method).to_string()).collect(),
             resource_pattern: "*".to_string(),
             verbs,
@@ -490,6 +509,24 @@ mod tests {
 
     fn github_contents_descriptor(path: &str) -> OperationDescriptor {
         crate::services::operation_descriptor::build_http_descriptor("PUT", path, None)
+    }
+
+    #[test]
+    fn mandatory_review_is_additive_and_authoring_stays_disabled() {
+        let legacy = serde_json::json!({"methods":["POST"],"mode":"per_request"});
+        let mut rule: ApprovalRule = serde_json::from_value(legacy).unwrap();
+        assert!(!rule.mandatory_review);
+        assert!(validate_rules(&[rule.clone()]).is_ok());
+        assert!(
+            serde_json::to_value(&rule)
+                .unwrap()
+                .get("mandatory_review")
+                .is_none()
+        );
+        rule.mandatory_review = true;
+        let decoded: ApprovalRule = bson::from_document(bson::to_document(&rule).unwrap()).unwrap();
+        assert!(decoded.mandatory_review);
+        assert!(validate_rules(&[decoded]).is_err());
     }
 
     #[test]

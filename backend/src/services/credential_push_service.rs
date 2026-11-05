@@ -447,6 +447,7 @@ pub async fn push_no_auth_to_node_strict(
     target_url: Option<&str>,
 ) -> AppResult<()> {
     let params = CredentialUpdateParams {
+        target_revision: None,
         service_slug: service_slug.to_string(),
         injection_method: "none".to_string(),
         header_name: None,
@@ -581,6 +582,7 @@ fn build_credential_params_from_fields(
 ) -> CredentialUpdateParams {
     match auth_method {
         "ifttt_webhook" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "ifttt_webhook".to_string(),
             header_name: None,
@@ -590,6 +592,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "bearer" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             // Bearer auth is always injected under `Authorization`, matching
@@ -609,6 +612,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "header" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some(auth_key_name.to_string()),
@@ -618,6 +622,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "query" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "query_param".to_string(),
             header_name: None,
@@ -627,6 +632,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "basic" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some("Authorization".to_string()),
@@ -639,6 +645,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "path" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "path_prefix".to_string(),
             header_name: Some(auth_key_name.to_string()),
@@ -648,6 +655,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         "none" => CredentialUpdateParams {
+            target_revision: None,
             // No-auth placeholder: node keeps the slug entry (so
             // `proxy_executor` can resolve `target_url`) but stops
             // injecting any secret. Used when a server-held service
@@ -668,6 +676,7 @@ fn build_credential_params_from_fields(
         // field). The node agent's ws_client + credential_store
         // re-parse the JSON inside proxy_executor at signing time.
         "aws_sigv4" => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "aws_sigv4".to_string(),
             header_name: None,
@@ -677,6 +686,7 @@ fn build_credential_params_from_fields(
             target_url,
         },
         _ => CredentialUpdateParams {
+            target_revision: None,
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some(auth_key_name.to_string()),
@@ -1075,6 +1085,7 @@ mod no_auth_strict_push_tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 credential_ack_correlation: true,
+                credential_target_update_v1: false,
                 remote_credential_crypto_v1: false,
                 proxy_max_body_size: None,
             },

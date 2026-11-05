@@ -1,3 +1,4 @@
+import { Label, FieldHelp } from "@/components/ui/label";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useWatch } from "react-hook-form";
@@ -145,10 +146,10 @@ export function DevicesBindPage() {
       style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
     >
       <header className="flex flex-col gap-1">
-        <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">
+        <h1 className="type-section-heading text-foreground sm:type-metric">
           Bind device
         </h1>
-        <p className="break-words text-13 text-muted-foreground">
+        <p className="break-words text-15 text-muted-foreground">
           Approve a device-code request and create scoped device credentials.
         </p>
       </header>
@@ -184,7 +185,7 @@ export function DevicesBindPage() {
                         <Input
                           {...field}
                           autoComplete="one-time-code"
-                          className="h-11 font-mono text-base"
+                          className="h-11 font-mono text-14"
                           inputMode="text"
                           maxLength={14}
                           placeholder="XXXX-XXXX-XXXX"
@@ -218,7 +219,7 @@ export function DevicesBindPage() {
                         }}
                       >
                         <FormControl>
-                          <SelectTrigger className="h-11 text-sm">
+                          <SelectTrigger className="h-11 text-14">
                             <SelectValue placeholder="Personal account" />
                           </SelectTrigger>
                         </FormControl>
@@ -247,7 +248,7 @@ export function DevicesBindPage() {
                       <FormControl>
                         <Input
                           {...field}
-                          className="h-11 text-sm"
+                          className="h-11 text-14"
                           maxLength={200}
                           placeholder="Hallway camera"
                           value={field.value ?? ""}
@@ -286,18 +287,18 @@ export function DevicesBindPage() {
                     return (
                       <FormItem>
                         <FormLabel>Grant proxy access to (optional)</FormLabel>
-                        <FormDescription className="text-12 leading-relaxed">
+                        <FormDescription className="text-14">
                           Pick which of your services this device should be
                           allowed to proxy through. You can add more later from
                           the API Keys page.
                         </FormDescription>
                         <div className="relative max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                           {isServicesLoading ? (
-                            <p className="px-2 py-3 text-12 text-muted-foreground">
+                            <p className="px-2 py-3 text-14 text-muted-foreground">
                               Loading services...
                             </p>
                           ) : grantableServices.length === 0 ? (
-                            <p className="px-2 py-3 text-12 text-muted-foreground">
+                            <p className="px-2 py-3 text-14 text-muted-foreground">
                               {selectedOwner
                                 ? "This org has no services available for device access."
                                 : "Your personal account has no services available for device access."}
@@ -328,17 +329,17 @@ export function DevicesBindPage() {
                                         )
                                       }
                                     />
-                                    <label
+                                    <Label
                                       htmlFor={checkboxId}
                                       className="min-w-0 flex-1 cursor-pointer"
                                     >
-                                      <span className="block truncate text-13 font-medium text-foreground">
+                                      <span className="block truncate text-foreground">
                                         {service.label}
                                       </span>
-                                      <span className="block truncate font-mono text-12 text-muted-foreground">
+                                      <FieldHelp variant="body" className="block truncate font-mono text-muted-foreground">
                                         {service.slug}
-                                      </span>
-                                    </label>
+                                      </FieldHelp>
+                                    </Label>
                                   </div>
                                 );
                               })
@@ -352,7 +353,7 @@ export function DevicesBindPage() {
 
                 <div className="flex justify-end">
                   <Button
-                    className="h-11 w-full text-sm sm:w-auto"
+                    className="h-11 w-full text-14 sm:w-auto"
                     disabled={approveDevice.isPending}
                     isLoading={approveDevice.isPending}
                     type="submit"
@@ -390,7 +391,7 @@ function ApprovalSuccess({ device }: { readonly device: ApproveDeviceResponse })
         </div>
       </CardHeader>
       <CardContent>
-        <dl className="grid gap-3 text-13 sm:grid-cols-2">
+        <dl className="grid gap-3 text-15 sm:grid-cols-2">
           <DetailRow label="Device" value={device.device_label} />
           <DetailRow label="HW ID" value={device.hw_id} />
           <DetailRow label="API key" value={maskIdentifier(device.api_key_id)} />
@@ -412,10 +413,10 @@ function DetailRow({
 }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/30 px-3 py-2">
-      <dt className="text-11 font-medium uppercase text-muted-foreground">
+      <dt className="type-secondary-emphasis uppercase text-muted-foreground">
         {label}
       </dt>
-      <dd className="mt-1 truncate font-mono text-13 text-foreground">
+      <dd className="mt-1 truncate font-mono text-15 text-foreground">
         {value}
       </dd>
     </div>

@@ -48,6 +48,8 @@ pub struct McpCatalogDiagnostics {
 
 #[derive(Debug, Serialize)]
 pub struct McpServiceConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_connection: Option<serde_json::Value>,
     pub service_id: String,
     pub service_name: String,
     pub service_slug: String,
@@ -144,13 +146,19 @@ pub async fn get_mcp_config(
     for service in &mut catalog.services {
         service.endpoints.retain(|endpoint| {
             !crate::services::lark_attachment_tool::is_attachment_operation(endpoint)
+                && !crate::services::lark_im_tool::image_candidate(endpoint)
         });
     }
     crate::services::agent_operation_scope_service::filter_catalog(
         &auth_user.assistant_operation_scopes,
         &mut catalog.services,
     );
-    let mcp_services = config_services(&catalog.services);
+    let mut mcp_services = config_services(&catalog.services);
+    if let Some(shared) = auth_user.org_agent_access.as_ref().and_then(|a| a.shared()) {
+        for service in &mut mcp_services {
+            service.shared_connection = shared.discovery_metadata(&service.service_id);
+        }
+    }
 
     let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();
     let total_services = mcp_services.len();
@@ -212,23 +220,28 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
             let endpoints = svc
                 .endpoints
                 .iter()
-                .map(|ep| McpEndpointConfig {
-                    endpoint_id: ep.endpoint_id.clone(),
-                    name: ep.name.clone(),
-                    description: ep.description.clone(),
-                    method: ep.method.clone(),
-                    path: ep.path.clone(),
-                    parameters: ep.parameters.clone(),
-                    request_body_schema: ep.request_body_schema.clone(),
-                    request_content_type: ep.request_content_type.clone(),
-                    request_body_required: ep.request_body_required,
-                    response_description: ep.response_description.clone(),
-                    response: ep.response.clone(),
-                    operation_digest: mcp_service::endpoint_contract_digest(ep),
+                .map(|ep| {
+                    let mut legacy = ep.clone();
+                    crate::services::lark_im_tool::legacy_message_contract(&mut legacy);
+                    McpEndpointConfig {
+                        endpoint_id: ep.endpoint_id.clone(),
+                        name: ep.name.clone(),
+                        description: ep.description.clone(),
+                        method: ep.method.clone(),
+                        path: ep.path.clone(),
+                        parameters: ep.parameters.clone(),
+                        request_body_schema: legacy.request_body_schema,
+                        request_content_type: ep.request_content_type.clone(),
+                        request_body_required: ep.request_body_required,
+                        response_description: ep.response_description.clone(),
+                        response: ep.response.clone(),
+                        operation_digest: mcp_service::endpoint_contract_digest(ep),
+                    }
                 })
                 .collect();
 
             McpServiceConfig {
+                shared_connection: None,
                 service_id: svc.service_id.clone(),
                 service_name: svc.service_name.clone(),
                 service_slug: svc.service_slug.clone(),
@@ -273,6 +286,7 @@ mod tests {
 
     fn service_with_schema(schema: serde_json::Value) -> McpServiceConfig {
         McpServiceConfig {
+            shared_connection: None,
             recommended_skill_refs: None,
             skills_revision: None,
             service_id: "service-1".to_string(),

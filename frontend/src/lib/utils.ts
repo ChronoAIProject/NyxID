@@ -1,13 +1,20 @@
 import { type ClassValue, clsx } from "clsx";
 import { extendTailwindMerge } from "tailwind-merge";
+import { TEXT_STYLES } from "./typography";
 
 // `text-12` etc. are the custom font-size tokens in app.css (`--text-*`).
 // Without registering them, tailwind-merge reads them as text *colours* and
 // drops one of `text-12 text-foreground`.
-const twMerge = extendTailwindMerge({
+const twMerge = extendTailwindMerge<"typography-role">({
   extend: {
+    classGroups: {
+      "typography-role": Object.values(TEXT_STYLES),
+    },
+    conflictingClassGroups: {
+      "typography-role": ["font-size", "font-weight", "leading"],
+    },
     theme: {
-      text: ["9", "10", "11", "12", "13", "14", "15", "17", "20", "22", "24", "28", "36"],
+      text: ["9", "10", "11", "12", "13", "14", "15", "16", "17", "20", "22", "24", "28", "36"],
     },
   },
 });

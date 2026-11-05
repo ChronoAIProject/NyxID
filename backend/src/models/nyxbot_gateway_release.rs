@@ -29,6 +29,8 @@ pub enum ReleaseReason {
 /// Immutable cleanup authority. Observations never widen the captured version.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotGatewayRelease {
+    #[serde(default)]
+    pub gateway_source: Option<super::nyxbot_channel::GatewaySource>,
     #[serde(rename = "_id")]
     pub id: String,
     pub schema_version: i32,

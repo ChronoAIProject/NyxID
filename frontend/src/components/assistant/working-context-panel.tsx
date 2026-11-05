@@ -35,7 +35,7 @@ export function WorkingContextPanel({
   return (
     <Sheet open={open} onOpenChange={(next) => { setOpen(next); setConfirming(false); }}>
       <SheetTrigger asChild>
-        <Button size="sm" variant="ghost" aria-label="Working context" title="Working context" className={compact ? "h-7 w-7 px-0" : undefined}>
+        <Button size={compact ? "icon" : "sm"} variant="ghost" aria-label="Working context" title="Working context">
           <NotebookText aria-hidden="true" />
           <span className={compact ? "sr-only" : undefined}>Working context</span>
         </Button>
@@ -44,7 +44,7 @@ export function WorkingContextPanel({
         <SheetHeader>
           <SheetTitle>Working context</SheetTitle>
         </SheetHeader>
-        <div className="mt-4 space-y-2 text-11 text-text-tertiary">
+        <div className="mt-4 space-y-2 text-13 text-text-tertiary">
           {query.isPending ? <p>Loading working context…</p> : null}
           {query.isError ? (
             <p role="alert" className="text-destructive">

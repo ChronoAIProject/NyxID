@@ -93,9 +93,10 @@ fn exact_model_requests() -> Vec<(&'static str, Value)> {
     vec![
         (
             "responses",
-            // The metadata-aware guest route contract must not turn this
-            // existing owner request into read-class/fungible model consent.
+            // Recognizing benign correlation metadata must not hide a real
+            // provider handle elsewhere in the generation request.
             json!({"model":"m","store":false,"input":"account context",
+                "previous_response_id":"resp_account_a",
                 "client_metadata":{"root_turn_id":"root","session_id":"session",
                     "thread_id":"thread","turn_id":"turn","x-codex-installation-id":"installation",
                     "x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}","x-codex-window-id":"window"}}),
@@ -322,6 +323,7 @@ async fn org_stateful_model_transport_full_access_and_auto_resume_keep_exact_con
     for (path, body) in exact_model_requests() {
         for setting in [AccessMode::Autopilot, AccessMode::Nyxmode] {
             let mut f = orchestrator_fixture("org_compact_runtime").await;
+            super::instructions::activate(&f).await;
             mode(&f, setting).await;
             let owner = org(&f).await;
             let catalog = catalog(&f).await;

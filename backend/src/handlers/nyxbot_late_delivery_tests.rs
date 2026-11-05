@@ -100,6 +100,8 @@ async fn fixture(name: &str) -> Fixture {
         version: 1,
         state: "waiting".into(),
         origin: ChannelOrigin {
+            org_execution: None,
+            native_event_id: None,
             nyxbot_channel_id: channel.id.clone(),
             partition: PARTITION.into(),
             platform: "telegram".into(),
@@ -839,36 +841,296 @@ async fn checking_notice_arrives_after_five_seconds_without_consuming_final_answ
 
 #[tokio::test]
 async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery() {
-    const SAFE: &str = "This assistant isn't available to guests yet.";
-    for streamed in [true, false] {
-        let f = fixture("guest_1995_channel_refusal").await;
-        settled(&f, false).await;
-        f.state.db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
-            .update_one(doc!{"conversation_id":f.event.conversation_id.as_deref(),"turn_id":f.event.turn_id.as_deref(),"role":"assistant"},
-                doc!{"$set":{"text":"","status":"failed","error_code":"guest_model_route_required"}}).await.unwrap();
-        if streamed {
-            let (sender, receiver) = broadcast::channel(8);
-            sender.send(json!({"event":"turn.completed","status":"failed","error":{"code":"guest_model_route_required"}})).unwrap();
-            let response = late_delivery::provider_stream(
-                f.state.clone(),
-                f.event.id.clone(),
-                "response".into(),
-                json!({"type":"response.created"}),
-                receiver,
-                Utc::now(),
-            );
-            let text = body_text(response).await;
-            assert!(text.contains(SAFE));
-            assert!(!text.contains("response.failed"));
-            assert_eq!(status(&f).await, "streamed");
+    const SETUP: &str =
+        "Visitor setup could not finish. The owner has been notified. Please try again later.";
+    const RETRY: &str = "This assistant can't answer right now. Please try again later.";
+    for reason in [
+        None,
+        Some("connection_not_platform"),
+        Some("model_connection_unavailable"),
+        Some("no_admission"),
+        Some("unknown_reason"),
+    ] {
+        let expected = if reason == Some("model_connection_unavailable") {
+            SETUP
         } else {
-            delivery::detach(&f.state.db, &f.event.id).await.unwrap();
-            late_delivery::sweep(&f.state).await.unwrap();
-            let requests = sends(&f).await;
-            assert_eq!(requests.len(), 1);
-            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-            assert_eq!(body["text"], SAFE);
+            RETRY
+        };
+        for streamed in [true, false] {
+            let f = fixture("guest_1995_channel_refusal").await;
+            settled(&f, false).await;
+            let metadata = crate::models::assistant_message::TurnMetadata {
+                failure_reason: reason.map(|reason| {
+                    Box::new(crate::models::assistant_message::TurnFailureReason {
+                        source: "nyxid".into(),
+                        stage: "model_proxy".into(),
+                        code: "guest_model_route_required".into(),
+                        http_status: Some(403),
+                        nyxid_error_code: Some(9000),
+                        model_route: Some(Box::new(
+                            crate::models::assistant_conversation::ModelRouteDiagnostic {
+                                reason: reason.into(),
+                                unknown_fields: vec![],
+                                attempt_id: Some("current".into()),
+                                at: Utc::now(),
+                            },
+                        )),
+                    })
+                }),
+                ..Default::default()
+            };
+            f.state.db.collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+                .update_one(doc!{"conversation_id":f.event.conversation_id.as_deref(),"turn_id":f.event.turn_id.as_deref(),"role":"assistant"},
+                    doc!{"$set":{"text":"","status":"failed","error_code":"guest_model_route_required", "turn_metadata":bson::to_bson(&metadata).unwrap()}}).await.unwrap();
+            if streamed {
+                let (sender, receiver) = broadcast::channel(8);
+                sender.send(json!({"event":"turn.completed","status":"failed","error":{"code":"guest_model_route_required"},"turn_metadata":metadata})).unwrap();
+                let response = late_delivery::provider_stream(
+                    f.state.clone(),
+                    f.event.id.clone(),
+                    "response".into(),
+                    json!({"type":"response.created"}),
+                    receiver,
+                    Utc::now(),
+                );
+                let text = body_text(response).await;
+                assert!(text.contains(expected), "{reason:?}: {text}");
+                assert!(!text.contains("response.failed"));
+                assert_eq!(status(&f).await, "streamed");
+            } else {
+                delivery::detach(&f.state.db, &f.event.id).await.unwrap();
+                late_delivery::sweep(&f.state).await.unwrap();
+                let requests = sends(&f).await;
+                assert_eq!(requests.len(), 1);
+                let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+                assert_eq!(body["text"], expected);
+            }
+            f.state.db.drop().await.unwrap();
         }
-        assert!(engine::TurnError::new("guest_model_route_required").message == SAFE);
+    }
+}
+
+async fn typing_fixture(
+    name: &str,
+) -> (
+    Fixture,
+    crate::models::assistant_conversation::AssistantConversation,
+) {
+    let mut f = fixture(name).await;
+    let request: engine::TurnRequest =
+        serde_json::from_value(json!({"text":"Check", "conversation_id":&f.event.conversation_id}))
+            .unwrap();
+    let mut row = engine::begin_turn(&f.state.db, OWNER, &request, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let turn = row.active_turn.as_mut().unwrap();
+    turn.origin = TurnOrigin::Channel;
+    turn.asked_from = Some(f.event.delivery.as_ref().unwrap().origin.clone());
+    turn.channel_event_id = Some(f.event.id.clone());
+    f.event.turn_id = Some(turn.turn_id.clone());
+    f.state
+        .db
+        .collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"active_turn":bson::to_bson(turn).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let encrypted = f
+        .state
+        .encryption_keys
+        .encrypt(br#"{"event_ref":"cmaeg1.ev.original","capabilities":{"typing":true}}"#)
+        .await
+        .unwrap();
+    patch(&f, doc! {"turn_id":&f.event.turn_id,"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}).await;
+    (f, row)
+}
+
+#[tokio::test]
+async fn channel_typing_refreshes_without_messages_and_stops_with_turn() {
+    let (f, row) = typing_fixture("channel_typing_lifecycle").await;
+    Mock::given(method("POST"))
+        .and(path("/events/cmaeg1.ev.original/typing"))
+        .and(wiremock::matchers::header(
+            "content-type",
+            "application/json",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"outcome":"sent"})))
+        .expect(3)
+        .mount(&f.gateway)
+        .await;
+    let before = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    let decrypts_before = f.state.encryption_keys.decrypt_stats().v2_current;
+    let task = tokio_util::task::AbortOnDropHandle::new(typing::start(&f.state, &row).unwrap());
+    tokio::time::timeout(Duration::from_secs(11), async {
+        while f.gateway.received_requests().await.unwrap().len() < 3 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Exactly one context unwrap plus one agent credential unwrap across
+    // three platform ticks. No repeated credential resolution/KMS work.
+    assert_eq!(
+        f.state.encryption_keys.decrypt_stats().v2_current - decrypts_before,
+        2
+    );
+    drop(task);
+    let count = f.gateway.received_requests().await.unwrap().len();
+    tokio::time::sleep(Duration::from_millis(4300)).await;
+    assert_eq!(f.gateway.received_requests().await.unwrap().len(), count);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(status(&f).await, "waiting");
+}
+
+#[tokio::test]
+async fn relay_recovery_and_late_sender_share_one_irreversible_claim() {
+    use crate::{
+        models::nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
+        services::nyxbot_response_recovery as recovery,
+    };
+    let mut f = fixture("relay_recovery_delivery_race").await;
+    f.channel.binding_id = Some("recovery-binding".into());
+    f.state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&f.channel.id}, &f.channel)
+        .await
+        .unwrap();
+    let payload = recovery::Payload::new("recovery-race", "nyxbot-test", Default::default());
+    let stored = GatewayResponse {
+        id: Uuid::new_v4().to_string(),
+        response_id: "recovery-race".into(),
+        user_id: OWNER.into(),
+        channel_id: f.channel.id.clone(),
+        binding_id: "recovery-binding".into(),
+        partition: PARTITION.into(),
+        event_key: f.event.id.clone(),
+        request_hash: "test".into(),
+        conversation_id: f.event.conversation_id.clone(),
+        terminal: false,
+        revision: 0,
+        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        created_at: Utc::now(),
+        expires_at: Utc::now() + ChronoDuration::hours(1),
+    };
+    f.state
+        .db
+        .collection::<GatewayResponse>(RESPONSES)
+        .insert_one(&stored)
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        patch(
+            &f,
+            doc! {"delivery.state":"pending","gateway_replay_claimed":false},
+        )
+        .await;
+        let (replay, send) = tokio::join!(
+            relay_responses::claim_replay(&f.state, &f.channel, &stored.response_id),
+            delivery::claim_send(&f.state.db, &f.event.id, "sender")
+        );
+        replay.unwrap();
+        let state = status(&f).await;
+        assert_eq!(send.unwrap(), state == "sending");
+        assert!(matches!(state.as_str(), "replay" | "sending"));
+        assert!(
+            !delivery::claim_send(&f.state.db, &f.event.id, "duplicate")
+                .await
+                .unwrap()
+        );
+    }
+    // An uncertain outbound send can never be reclaimed by a recovery reader.
+    patch(&f, doc! {"delivery.state":"unknown"}).await;
+    relay_responses::claim_replay(&f.state, &f.channel, &stored.response_id)
+        .await
+        .unwrap();
+    assert_eq!(status(&f).await, "unknown");
+    let mut body = payload;
+    body.finish(Some("already possibly delivered"), false);
+    relay_responses::suppress_output(&mut body);
+    assert_eq!(body.snapshot["output"], json!([]));
+    assert!(
+        !body
+            .frames
+            .iter()
+            .any(|f| f["type"] == "response.output_item.done")
+    );
+    for (n, frame) in body.frames.iter().enumerate() {
+        assert_eq!(frame["sequence_number"], n);
+    }
+}
+
+#[tokio::test]
+async fn channel_typing_stops_on_first_platform_error_or_live_refusal() {
+    for cause in ["platform", "stop", "event", "channel"] {
+        let (f, row) = typing_fixture("typing_refusal").await;
+        Mock::given(method("POST"))
+            .and(path("/events/cmaeg1.ev.original/typing"))
+            .respond_with(if cause == "platform" {
+                ResponseTemplate::new(503)
+            } else {
+                ResponseTemplate::new(200).set_body_json(json!({"outcome":"sent"}))
+            })
+            .expect(1)
+            .mount(&f.gateway)
+            .await;
+        let task = typing::start(&f.state, &row).unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while f.gateway.received_requests().await.unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        match cause {
+            "stop" => {
+                f.state
+                    .db
+                    .collection::<bson::Document>(CONVERSATIONS)
+                    .update_one(
+                        doc! {"_id":&row.id},
+                        doc! {"$set":{"active_turn.stop_requested":true}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "event" => {
+                patch(&f, doc! {"turn_id":"different-turn"}).await;
+            }
+            "channel" => {
+                f.state
+                    .db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .update_one(
+                        doc! {"_id":&f.channel.id},
+                        doc! {"$set":{"status":"disconnected"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        f.gateway.verify().await;
+        assert_eq!(f.gateway.received_requests().await.unwrap().len(), 1);
     }
 }

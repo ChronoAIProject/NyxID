@@ -1,7 +1,9 @@
 mod bills;
 mod operations;
+mod org_wallet;
 mod taxes;
 mod usage;
+mod wallet_view;
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -212,6 +214,7 @@ pub(crate) struct FakeLago {
     invoice_data: Option<serde_json::Value>,
     invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
+    topup_wallets: std::sync::Mutex<Vec<String>>,
     wallet_balance: Option<crate::models::credits::Credits>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
@@ -290,6 +293,20 @@ impl LagoApi for FakeLago {
             balance_credits: self
                 .wallet_balance
                 .unwrap_or_else(|| crate::models::credits::Credits::from_whole(10_000)),
+        })
+    }
+
+    async fn create_wallet_topup(
+        &self,
+        wallet_id: &str,
+        _: &crate::services::billing::lago_client::WalletTopUpInput,
+    ) -> AppResult<crate::services::billing::lago_client::WalletTopUpCheckout> {
+        self.topup_wallets.lock().unwrap().push(wallet_id.into());
+        Ok(crate::services::billing::lago_client::WalletTopUpCheckout {
+            wallet_transaction_id: format!("{wallet_id}:topup"),
+            lago_invoice_id: Some(format!("{wallet_id}:invoice")),
+            payment_url: "https://pay.example/checkout".into(),
+            payment_provider: Some("stripe".into()),
         })
     }
 
@@ -604,6 +621,14 @@ async fn run_billing_route_coverage_smoke() {
             format!("/api/v1/proxy/{}", proxy_catalog.id),
             "/api/v1/proxy/{service_id}",
         ),
+        (
+            format!("/api/v1/proxy/s/{}/", proxy.slug),
+            "/api/v1/proxy/s/{slug}/",
+        ),
+        (
+            format!("/api/v1/proxy/{}/", proxy_catalog.id),
+            "/api/v1/proxy/{service_id}/",
+        ),
     ] {
         call_mounted_route(
             &app,
@@ -612,7 +637,7 @@ async fn run_billing_route_coverage_smoke() {
         .await;
         exercised_routes.insert(mounted_route);
     }
-    assert_route_settled_count(&db, &proxy.slug, BillingMetric::Requests, 5).await;
+    assert_route_settled_count(&db, &proxy.slug, BillingMetric::Requests, 7).await;
 
     let node = insert_route_node(&state, &owner_id, "billing-route-node").await;
     let node_proxy = insert_route_service(
@@ -876,6 +901,7 @@ async fn run_billing_route_coverage_smoke() {
     }));
     db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
         .insert_one(ApprovalRequest {
+            execution_proposal: None,
             assistant_group: None,
             id: request_id.clone(),
             user_id: owner_id.clone(),

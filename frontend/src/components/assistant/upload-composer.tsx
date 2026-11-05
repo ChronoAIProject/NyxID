@@ -63,6 +63,7 @@ type Pending = {
 type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
   readonly scope: UploadScope;
   readonly attachmentMenuItems?: ReactNode;
+  readonly imageWarning?: string;
   readonly onVoiceSettings?: () => void;
   readonly onVoicePrepare?: () => boolean;
   readonly onVoice?: (conversationId: string, preparation?: PreparedMicrophone) => Promise<void>;
@@ -70,7 +71,7 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 };
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
-export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, ...props }: Props) {
+export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, imageWarning, ...props }: Props) {
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -335,7 +336,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
           {preparingVoice && (
             <div
               role="status"
-              className="flex items-center justify-between gap-2 pb-2 text-12 text-text-secondary"
+              className="flex items-center justify-between gap-2 pb-2 text-14 text-text-secondary"
             >
               Allow microphone access…
               <Button
@@ -398,6 +399,9 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
       }
       attachments={
         <div className={files.length || notice ? "mb-2 space-y-2" : undefined}>
+          {imageWarning && files.some((file) => file.kind === "image" && !file.error) && (
+            <p role="status" className="text-14 text-muted-foreground">{imageWarning}</p>
+          )}
           {files.length > 0 && (
             <div className="relative min-w-0">
               <ul
@@ -411,31 +415,31 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                   <li
                     key={file.key}
                     title={`${file.name} · Type @${file.handle} to refer to this file`}
-                    className={`relative h-24 shrink-0 overflow-hidden rounded-xl border bg-card text-xs ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-24" : "w-44"}`}
+                    className={`relative flex min-h-[8em] max-w-[75vw] shrink-0 flex-col overflow-hidden rounded-xl border bg-card text-14 ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-[8em]" : "w-[14em]"}`}
                   >
                     {file.preview ? (
                       <button
                         type="button"
-                        className="h-full w-full bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                        className="w-full flex-1 bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                         aria-label={`Preview ${file.name}`}
                         onClick={() => setPreview(file)}
                       >
                         <img
                           src={file.preview}
                           alt={file.name}
-                          className="h-full w-full object-cover"
+                          className="aspect-square max-h-[8em] w-full object-cover"
                         />
                       </button>
                     ) : (
-                      <div className="flex h-full flex-col justify-between p-3">
+                      <div className="flex flex-1 flex-col justify-between gap-2 p-3 pr-[calc(1.125em+1em*var(--display-density,1)+var(--spacing)*2)]">
                         {file.kind === "pasted-text" ? (
-                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">
+                          <p className="line-clamp-2 text-12 text-muted-foreground">
                             {file.text}
                           </p>
                         ) : (
                           <FileText
                             aria-hidden="true"
-                            className="h-6 w-6 text-muted-foreground"
+                            className="size-[2em] text-muted-foreground"
                             strokeWidth={1.5}
                           />
                         )}
@@ -446,7 +450,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                               : (file.item?.label ?? file.name)}
                           </p>
                           {!file.error && file.item && (
-                            <p className="mt-0.5 text-[10px] text-muted-foreground">
+                            <p className="mt-0.5 text-12 text-muted-foreground">
                               {file.kind === "pasted-text"
                                 ? "TEXT"
                                 : file.name.includes(".")
@@ -467,7 +471,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                       <p
                         role="alert"
                         title={file.error}
-                        className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive"
+                        className="line-clamp-2 bg-card/95 px-2 py-1 text-12 text-destructive"
                       >
                         {file.error}
                       </p>
@@ -477,7 +481,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                         className={
                           file.item
                             ? "sr-only"
-                            : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"
+                            : "bg-card/95 px-2 py-1 text-12 text-muted-foreground"
                         }
                       >
                         {file.item
@@ -487,9 +491,9 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                             : `Uploading ${file.progress}%`}
                       </p>
                     )}
-                    <button
+                    <button data-icon-button=""
                       type="button"
-                      className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      className="absolute right-1 top-1 flex items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                       aria-label={`Remove ${file.name}`}
                       onClick={() => remove(file.key)}
                       disabled={props.sending}
@@ -512,7 +516,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
             </div>
           )}
           {notice && (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {notice}
             </p>
           )}

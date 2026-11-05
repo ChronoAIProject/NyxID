@@ -7,6 +7,28 @@ pub const EVENTS_COLLECTION_NAME: &str = "nyxbot_events";
 pub const WATCHES_COLLECTION_NAME: &str = "nyxbot_watches";
 pub const LINK_CODE_TTL_HOURS: i64 = 24;
 
+/// Verified native source identity. Absent on all legacy/relay connections.
+/// Credentials remain in the bot's existing encrypted credential store.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GatewaySource {
+    Discord {
+        bot_id: String,
+    },
+    /// Verified identity for a dedicated-app BYO WhatsApp bot. These are
+    /// provider identifiers only; access tokens and app secrets never live in
+    /// the channel row.
+    #[serde(rename = "whatsapp")]
+    WhatsApp {
+        app_id: String,
+        waba_id: String,
+        phone_number_id: String,
+    },
+    /// A newer source remains readable during a rolling deployment, but never executable.
+    #[serde(other)]
+    Unsupported,
+}
+
 /// Negotiated transport metadata, never provider references or message bodies.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -37,6 +59,20 @@ pub struct GatewayBotMentionSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_specialist: Option<super::org_channel::Binding>,
+    #[serde(default)]
+    pub gateway_source: Option<GatewaySource>,
+    /// `preparing` admits provider binding only; `ready` permits native turns.
+    #[serde(default)]
+    pub gateway_native_phase: Option<String>,
+    #[serde(default)]
+    pub gateway_native_activation: Option<String>,
+    /// Bounded gateway problem code only; never upstream error prose.
+    #[serde(default)]
+    pub gateway_native_activation_detail: Option<String>,
+    #[serde(default)]
+    pub gateway_native_delivery: Option<String>,
     #[serde(default)]
     pub gateway_bot_mentions: GatewayBotMentionSupport,
     #[serde(default)]
@@ -154,6 +190,9 @@ pub struct NyxbotChannel {
     /// their own thread, as a guest).
     #[serde(default)]
     pub private_chats: Option<String>,
+    /// Initial posting permission for new private chats only; absent means off.
+    #[serde(default)]
+    pub private_chat_posts: Option<bool>,
     /// Whether the chat app's messages reach the agent, judged from the
     /// newest inbound message: `ok` or `failing`; `None` before any message.
     #[serde(default)]
@@ -365,7 +404,8 @@ pub struct NyxbotEvent {
     pub resolved_thread_id: Option<String>,
     #[serde(default)]
     pub resolved_conversation_id: Option<String>,
-    /// SHA-256 of `binding_id` and the idempotency key.
+    /// SHA-256 namespace of the custom binding and stable source event ID;
+    /// ordinary relay events retain their platform event identity.
     #[serde(rename = "_id")]
     pub id: String,
     pub channel_id: String,
@@ -376,6 +416,10 @@ pub struct NyxbotEvent {
     /// originated from NyxID's own relay.
     #[serde(default)]
     pub relay_message_id: Option<String>,
+    /// Namespaced source binding for an independent CMA custom event. The
+    /// event still uses the approved destination chat row for delivery.
+    #[serde(default)]
+    pub custom_binding_id: Option<String>,
     #[serde(with = "crate::models::bson_bytes::optional", default)]
     pub event_context_ciphertext: Option<Vec<u8>>,
     /// `running`, `queued`, `completed`, `failed`, `refused`, or `interrupted`. Queued work is

@@ -1103,7 +1103,11 @@ async fn create_key_inner(
         // `find_existing_provider_token` stays ONLY for `api_key`-type
         // providers, which are out of scope for the multi-connection
         // work and keep their existing single-credential behavior.
-        let existing_provider_token = if matches!(provider_type, Some("oauth2" | "device_code")) {
+        // A credential the caller just supplied always defines the new
+        // connection; reuse is only a fallback when none was given.
+        let existing_provider_token = if matches!(provider_type, Some("oauth2" | "device_code"))
+            || !credential.trim().is_empty()
+        {
             None
         } else if let Some(provider_config_id) = svc.provider_config_id.as_deref() {
             find_existing_provider_token(db, user_id, provider_config_id).await?
@@ -8936,6 +8940,103 @@ mod tests {
         assert!(
             key.connection_id.is_none(),
             "api_key provider reuse path stays connection-less"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_key_api_key_provider_uses_a_supplied_credential_over_the_existing_token() {
+        // Adding another API-key account (e.g. a second GitHub PAT through a
+        // hosted link) must store the key the person entered, not silently
+        // reuse the provider token already on file.
+        let Some(db) = connect_test_database("ukey_api_key_supplied_wins").await else {
+            eprintln!("skipping unified_key_service integration test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        let provider = multi_conn_provider("api_key");
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let now = Utc::now();
+        let token_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                secret_context_versions: Default::default(),
+                id: token_id.clone(),
+                user_id: user_id.clone(),
+                provider_config_id: provider.id.clone(),
+                connection_id: None,
+                credential_user_id: None,
+                token_type: "api_key".to_string(),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                api_key_encrypted: Some(
+                    encryption_keys
+                        .encrypt(b"reusable-provider-api-key")
+                        .await
+                        .unwrap(),
+                ),
+                status: "active".to_string(),
+                state_version: 1,
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: None,
+                metadata: None,
+                gateway_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let created = create_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "second-account-key",
+            "second account",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            OauthClientCredentialsInput::None,
+            false,
+        )
+        .await
+        .expect("add should succeed");
+        let key = created.api_key.expect("add mints a UserApiKey");
+        assert_ne!(key.source_id.as_deref(), Some(token_id.as_str()));
+        assert_eq!(
+            crate::services::credential_record_service::CredentialRecord::key(&key)
+                .text(
+                    &encryption_keys,
+                    "credential_encrypted",
+                    key.credential_encrypted.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .as_str(),
+            "second-account-key"
         );
     }
 

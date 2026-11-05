@@ -1,3 +1,6 @@
+import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
+import { FloatingCmaSessions } from "@/components/assistant/cma-session-card";
+import { captureGroupInvite } from "./lib/collaboration-invite";
 import "@/lib/platform-personal-handoff";
 import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
@@ -160,11 +163,14 @@ import {
 const rootRoute = createRootRoute({
   component: () => (
     <TooltipProvider delayDuration={200}>
-      <Suspense>
-        <Outlet />
-      </Suspense>
-      <Toaster />
-      <CreditsDeniedHost />
+      <CmaSessionProvider>
+        <Suspense>
+          <Outlet />
+        </Suspense>
+        <Toaster />
+        <CreditsDeniedHost />
+        <FloatingCmaSessions />
+      </CmaSessionProvider>
     </TooltipProvider>
   ),
 });
@@ -397,6 +403,7 @@ const standaloneAuthBeforeLoad = async ({
 }: {
   location: { pathname: string; searchStr: string };
 }) => {
+  captureGroupInvite();
   if (import.meta.env.DEV) {
     const { isMockMode, getMockUser } = await import("./lib/mock-data");
     if (isMockMode()) {

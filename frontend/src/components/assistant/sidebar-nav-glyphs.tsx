@@ -1,106 +1,112 @@
-import { useCallback, useEffect, useId, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useEffectEvent, useId, useMemo, useRef, useSyncExternalStore, type CSSProperties, type RefObject } from "react";
+import { useThemeStore } from "@/stores/theme-store";
 
-/* Easter-egg redraws of the lucide House, CalendarClock, Monitor, LayoutGrid
-   and ShieldCheck icons for the assistant sidebar. At rest each is
-   geometrically identical to the lucide original; hovering the row it sits
-   in plays a small animation twice, and leaving early lets the current play
-   finish at the rest frame instead of snapping. Reduced motion never starts
-   one. */
+/* Activation-only redraws of lucide's workspace icons. A click/tap or
+   Enter/Space starts one cycle; activating again restarts from rest. The
+   short-lived timeline survives SPA/sidebar remounts, never hover or focus.
+   Every cycle ends on the lucide rest frame; reduced motion stays at rest. */
 
 interface GlyphProps {
   readonly className?: string;
 }
 
-/** Plays per hover: enough to be noticed, not enough to nag. */
-const PLAYS_PER_HOVER = 2;
-
+type GlyphName = "home" | "automations" | "machines" | "plugins" | "approvals";
+interface Playback { readonly id: number; readonly startedAt: number }
+const playbacks = new Map<GlyphName, Playback>();
+const timers = new Map<GlyphName, ReturnType<typeof setTimeout>>();
+const listeners = new Set<() => void>();
+let nextPlayback = 0;
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+};
+function finishPlayback(name: GlyphName, playback: Playback) {
+  if (playbacks.get(name) !== playback) return;
+  clearTimeout(timers.get(name));
+  timers.delete(name);
+  playbacks.delete(name);
+  listeners.forEach(listener => listener());
+}
 function prefersReducedMotion(): boolean {
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  return useThemeStore.getState().motion === "reduce" || window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
-
-/** Tracks hover on the row (the nearest link or button) around `ref`.
- *  `hovering` follows the pointer exactly. `playing` turns on at pointer
- *  enter (never under reduced motion) and turns off at a cycle boundary,
- *  reported through `endCycle()`, once the pointer has left or the hover has
- *  had its plays. */
-function useRowHoverPlayback(ref: RefObject<SVGSVGElement | null>) {
-  const hovered = useRef(false);
-  const plays = useRef(0);
-  const [hovering, setHovering] = useState(false);
-  const [playing, setPlaying] = useState(false);
-
+function useRowActivation(ref: RefObject<SVGSVGElement | null>, name: GlyphName, cycleMs: number) {
+  const snapshot = useCallback(() => playbacks.get(name), [name]);
+  const playback = useSyncExternalStore(subscribe, snapshot, () => undefined);
+  // Freeze the CSS delay for this mount/run; unrelated rerenders must not
+  // advance a running CSS animation a second time.
+  const elapsed = useMemo(() => playback ? Math.max(0, performance.now() - playback.startedAt) : 0, [playback]);
   useEffect(() => {
-    const row = ref.current?.closest("a, button");
-    if (!row) return;
-    const enter = () => {
-      hovered.current = true;
-      plays.current = 0;
-      setHovering(true);
-      if (!prefersReducedMotion()) setPlaying(true);
+    const rowFor = (event: Event) => {
+      const row = ref.current?.closest<HTMLElement>("a, button");
+      return row && event.target instanceof Node && row.contains(event.target) ? row : undefined;
     };
-    const leave = () => {
-      hovered.current = false;
-      setHovering(false);
+    const activate = (event: MouseEvent) => {
+      if (event.button !== 0 || !rowFor(event) || prefersReducedMotion()) return;
+      clearTimeout(timers.get(name));
+      const next = { id: ++nextPlayback, startedAt: performance.now() };
+      playbacks.set(name, next);
+      timers.set(name, setTimeout(() => finishPlayback(name, next), cycleMs));
+      listeners.forEach(listener => listener());
     };
-    row.addEventListener("pointerenter", enter);
-    row.addEventListener("pointerleave", leave);
-    return () => {
-      row.removeEventListener("pointerenter", enter);
-      row.removeEventListener("pointerleave", leave);
-    };
-  }, [ref]);
-
-  /** Call at the end of each cycle; returns whether playback stopped. */
-  const endCycle = useCallback(() => {
-    plays.current += 1;
-    const done = !hovered.current || plays.current >= PLAYS_PER_HOVER;
-    if (done) setPlaying(false);
-    return done;
-  }, []);
-
-  /** Stops playback if the pointer has gone, whatever the cycle count. */
-  const stopIfLeft = useCallback(() => {
-    if (!hovered.current) setPlaying(false);
-  }, []);
-
-  return { hovering, playing, endCycle, stopIfLeft };
-}
-
-/** Calls `draw(elapsedInCycle)` every frame while playing, ending each cycle
- *  through `endCycle()`, so playback always stops on the rest frame. For
- *  animations CSS cannot express portably. */
-function useHoverFrameLoop(
-  ref: RefObject<SVGSVGElement | null>,
-  cycleMs: number,
-  draw: (elapsedInCycle: number) => void,
-) {
-  const { playing, endCycle } = useRowHoverPlayback(ref);
-  const drawRef = useRef(draw);
-  drawRef.current = draw;
-
-  useEffect(() => {
-    if (!playing) return;
-    let frame = 0;
-    let start: number | undefined;
-    let cycle = 0;
-    const tick = (now: number) => {
-      start ??= now;
-      const elapsed = now - start;
-      if (Math.floor(elapsed / cycleMs) > cycle) {
-        cycle += 1;
-        if (endCycle()) {
-          drawRef.current(0);
-          return;
-        }
+    const space = (event: KeyboardEvent) => {
+      const row = rowFor(event);
+      // Native buttons and Enter on links already dispatch click. Space on
+      // a link needs explicit activation rather than scrolling the page.
+      if (event.key === " " && row?.tagName === "A") {
+        event.preventDefault();
+        if (!event.repeat) row.click();
       }
-      drawRef.current(elapsed % cycleMs);
+    };
+    const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const motionChanged = () => {
+      const current = playbacks.get(name);
+      if (current && prefersReducedMotion()) finishPlayback(name, current);
+    };
+    document.addEventListener("click", activate, true);
+    document.addEventListener("keydown", space);
+    motion.addEventListener("change", motionChanged);
+    const unsubscribeMotion = useThemeStore.subscribe(motionChanged);
+    motionChanged();
+    return () => {
+      document.removeEventListener("click", activate, true);
+      document.removeEventListener("keydown", space);
+      motion.removeEventListener("change", motionChanged);
+      unsubscribeMotion();
+    };
+  }, [ref, name, cycleMs]);
+  const finish = useCallback(() => { if (playback) finishPlayback(name, playback); }, [name, playback]);
+  const style = { "--nav-glyph-offset": `${-elapsed}ms`, "--nav-glyph-duration": `${cycleMs}ms` } as CSSProperties;
+  return { playback, playing: Boolean(playback), elapsed, style, finish };
+}
+
+/** Safari-compatible shape animation, sharing the activation's original clock. */
+function useActivationFrameLoop(
+  ref: RefObject<SVGSVGElement | null>,
+  name: GlyphName,
+  cycleMs: number,
+  draw: (elapsed: number) => void,
+) {
+  const activation = useRowActivation(ref, name, cycleMs);
+  const drawFrame = useEffectEvent(draw);
+  const { playback, finish } = activation;
+  useEffect(() => {
+    if (!playback) return;
+    let frame = 0;
+    const tick = (now: number) => {
+      const elapsed = Math.max(0, now - playback.startedAt);
+      if (elapsed >= cycleMs) {
+        drawFrame(0);
+        finish();
+        return;
+      }
+      drawFrame(elapsed);
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [playing, endCycle, cycleMs]);
-
-  return playing;
+    return () => { cancelAnimationFrame(frame); drawFrame(0); };
+  }, [playback, finish, cycleMs]);
+  return activation;
 }
 
 function easeInOutCubic(t: number): number {
@@ -108,6 +114,7 @@ function easeInOutCubic(t: number): number {
 }
 
 const SVG_ATTRS = {
+  "data-ui-icon": "",
   "aria-hidden": true,
   focusable: false,
   width: 24,
@@ -120,38 +127,34 @@ const SVG_ATTRS = {
   strokeLinejoin: "round",
 } as const;
 
-/* A chimney pops up out of the right roof slope with a small overshoot,
-   then puffs of smoke rise from it, drifting right and swelling as they
-   fade. The chimney is clipped to the area above the roof line (the clip
-   sits on an untransformed group, so it stays put while the chimney moves
-   inside it), which lets it rise out of the roof and sink back into it.
-   The chimney top is near the top of the viewBox, so the svg lets the smoke
-   overflow into the row's padding. Each puff rises twice (CSS iteration
-   count). On leave the chimney sinks and any puffs in flight fade out; the
-   puffs unmount once that fade has finished. */
+/* One activation pops the chimney, releases three puffs, then sinks it below
+   the roof clip. The hidden chimney and absent puffs leave lucide's House. */
 const SMOKE_PUFFS = [0, 0.7, 1.4];
 
-/** House whose chimney pops up and smokes while the row is hovered. */
 export function HomeGlyph({ className }: GlyphProps) {
   const ref = useRef<SVGSVGElement>(null);
   const clipId = `nav-glyph-roof-${useId().replace(/[^\w-]/g, "")}`;
-  const { hovering, playing, stopIfLeft } = useRowHoverPlayback(ref);
+  const { playback, playing, elapsed, style, finish } = useRowActivation(ref, "home", 3800);
   return (
     <svg
       ref={ref}
       {...SVG_ATTRS}
       overflow="visible"
       className={className}
-      data-hovering={hovering || undefined}
+      data-playing={playing || undefined}
+      data-playback-id={playback?.id}
+      data-nav-glyph="home"
+      style={style}
     >
       <clipPath id={clipId}>
         {/* Everything above the centre line of the right roof slope. */}
         <path d="M13 2.22L22 9.93V-12H13Z" />
       </clipPath>
+      <g key={playback?.id} onAnimationEnd={(event) => { if ((event.target as SVGElement).classList.contains("nav-glyph-chimney")) finish(); }}>
       <g clipPath={`url(#${clipId})`}>
         <path className="nav-glyph-chimney" d="M16 4.8V2.5h2.5v4.4" />
       </g>
-      <g className="nav-glyph-smoke" onTransitionEnd={stopIfLeft}>
+      <g className="nav-glyph-smoke">
         {playing
           ? SMOKE_PUFFS.map((delay) => (
               <circle
@@ -162,10 +165,11 @@ export function HomeGlyph({ className }: GlyphProps) {
                 r="1.4"
                 fill="currentColor"
                 stroke="none"
-                style={{ animationDelay: `${0.45 + delay}s` }}
+                style={{ animationDelay: `${450 + delay * 1000 - elapsed}ms` }}
               />
             ))
           : null}
+      </g>
       </g>
       <path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8" />
       <path d="M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -176,16 +180,18 @@ export function HomeGlyph({ className }: GlyphProps) {
 /** Calendar whose clock hands spin, the minute hand twice as fast. */
 export function AutomationsGlyph({ className }: GlyphProps) {
   const ref = useRef<SVGSVGElement>(null);
-  const { playing, endCycle } = useRowHoverPlayback(ref);
+  const { playback, playing, style, finish } = useRowActivation(ref, "automations", 2200);
   return (
-    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined}>
+    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined} data-playback-id={playback?.id} data-nav-glyph="automations" style={style}>
       <path d="M16 2v4" />
       <path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5" />
       <path d="M3 10h5" />
       <path d="M8 2v4" />
       <circle cx="16" cy="16" r="6" />
-      <path className="nav-glyph-minute-hand" d="M16 16.2V14" onAnimationIteration={endCycle} />
-      <path className="nav-glyph-hour-hand" d="M16 16.2l1.6 1" />
+      <g key={playback?.id}>
+        <path className="nav-glyph-minute-hand" d="M16 16.2V14" onAnimationEnd={finish} />
+        <path className="nav-glyph-hour-hand" d="M16 16.2l1.6 1" />
+      </g>
     </svg>
   );
 }
@@ -193,17 +199,18 @@ export function AutomationsGlyph({ className }: GlyphProps) {
 /** Monitor with a heartbeat trace sweeping across the screen. */
 export function MachinesGlyph({ className }: GlyphProps) {
   const ref = useRef<SVGSVGElement>(null);
-  const { playing, endCycle } = useRowHoverPlayback(ref);
+  const { playback, playing, style, finish } = useRowActivation(ref, "machines", 2000);
   return (
-    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined}>
+    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined} data-playback-id={playback?.id} data-nav-glyph="machines" style={style}>
       <rect width="20" height="14" x="2" y="3" rx="2" />
       <line x1="8" x2="16" y1="21" y2="21" />
       <line x1="12" x2="12" y1="17" y2="21" />
       <path
+        key={playback?.id}
         className="nav-glyph-heartbeat"
         pathLength={100}
         d="M5 10h3.5l1.5-2.5 2 5.5 1.5-5 1 2h4.5"
-        onAnimationIteration={endCycle}
+        onAnimationEnd={finish}
       />
     </svg>
   );
@@ -283,12 +290,12 @@ function tilePath(elapsedInCycle: number): string {
 export function PluginsGlyph({ className }: GlyphProps) {
   const ref = useRef<SVGSVGElement>(null);
   const tileRef = useRef<SVGPathElement>(null);
-  const playing = useHoverFrameLoop(ref, CYCLE_MS, (ms) => {
+  const { playback, playing, style } = useActivationFrameLoop(ref, "plugins", CYCLE_MS, (ms) => {
     tileRef.current?.setAttribute("d", tilePath(ms));
   });
 
   return (
-    <svg ref={ref} {...SVG_ATTRS} className={className}>
+    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined} data-playback-id={playback?.id} data-nav-glyph="plugins" style={style}>
       <rect width="7" height="7" x="3" y="3" rx="1" />
       {playing ? (
         <path ref={tileRef} d={tilePath(0)} />
@@ -393,11 +400,11 @@ function markPath({ fold, split, spinDeg }: MarkState): string {
 export function ApprovalsGlyph({ className }: GlyphProps) {
   const ref = useRef<SVGSVGElement>(null);
   const markRef = useRef<SVGPathElement>(null);
-  useHoverFrameLoop(ref, MARK_CYCLE_MS, (ms) => {
+  const { playback, playing, style } = useActivationFrameLoop(ref, "approvals", MARK_CYCLE_MS, (ms) => {
     markRef.current?.setAttribute("d", markPath(markState(ms)));
   });
   return (
-    <svg ref={ref} {...SVG_ATTRS} className={className}>
+    <svg ref={ref} {...SVG_ATTRS} className={className} data-playing={playing || undefined} data-playback-id={playback?.id} data-nav-glyph="approvals" style={style}>
       <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
       <path ref={markRef} d={markPath(TICK_STATE)} />
     </svg>

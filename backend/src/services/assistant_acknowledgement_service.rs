@@ -240,6 +240,15 @@ pub async fn effective_access_mode(
     db: &Database,
     chat: &ChatAuthority,
 ) -> AppResult<crate::models::assistant_settings::AccessMode> {
+    if chat
+        .org_agent_access
+        .as_ref()
+        .is_some_and(|a| a.shared().is_some())
+    {
+        return Ok(super::assistant_settings_service::get(db, &chat.user_id)
+            .await?
+            .access_mode);
+    }
     effective_mode_for_agent(db, &chat.user_id, &chat.agent_id).await
 }
 
@@ -298,6 +307,7 @@ pub async fn retire_full_access_confirmations(
     let sweep_time = bson::DateTime::now();
     let mut filter = doc! {
         "kind": "action", "decider": "user", "status": "pending",
+        "confirmation.reason": {"$nin":["org_connection","delegation"]},
         "created_at": {"$lte": sweep_time},
     };
     if let Some(user) = user {
@@ -345,7 +355,7 @@ pub async fn retire_full_access_confirmations(
         if !ids.is_empty() {
             collection
                 .update_many(
-                    doc! {"_id": {"$in": ids}, "status": "pending"},
+                    doc! {"_id": {"$in": ids}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
                     doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
                 )
                 .await?;
@@ -428,6 +438,11 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
     Some(if team::read_only(name) {
         Read
     } else if team::destructive(name)
+        || (name == "manage_collaboration_group"
+            && matches!(
+                args["change"]["action"].as_str(),
+                Some("delete" | "leave" | "remove")
+            ))
         || (name == "update_group"
             && (args["leave"].as_bool() == Some(true)
                 || args.get("participant_user_ids").is_some()))
@@ -435,11 +450,14 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
         Destructive
     } else if matches!(
         name,
-        "grant_subagent"
+        "manage_collaboration_group"
+            | "set_agent_sharing"
+            | "grant_subagent"
             | "set_guest_access"
             | "set_agent_operations"
             | "set_agent_skills"
             | "connect_channel_bot"
+            | "retry_channel_gateway"
             | "link_channel_bot"
             | "update_channel_access"
             | "update_channel_chat"
@@ -480,6 +498,7 @@ pub fn service_action_class(read_only: bool, destructive: bool) -> OwnerActionCl
 /// reason at once, and is consumed exactly once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConfirmationNeed {
+    pub org_instruction: OrgInstructionRequirement,
     pub class: OwnerActionClass,
     /// The owner's access mode asks for this class.
     pub mode: Option<crate::models::assistant_settings::AccessMode>,
@@ -487,6 +506,16 @@ pub struct ConfirmationNeed {
     pub webhook: bool,
     /// Another policy floor (machine or saved-login confirmation) asks.
     pub policy: bool,
+    /// Sharing an owner's services or agent access is always an owner decision,
+    /// including Full access. This floor is narrower than general policy floors.
+    pub delegation: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OrgInstructionRequirement {
+    #[default]
+    None,
+    Required,
 }
 
 /// Effects of one action as seen by the webhook confirmation policy, which
@@ -496,6 +525,7 @@ pub struct ActionFacts {
     pub class: OwnerActionClass,
     pub read_only: bool,
     pub destructive: bool,
+    pub delegation: bool,
 }
 
 impl ActionFacts {
@@ -504,6 +534,14 @@ impl ActionFacts {
             class,
             read_only: class == OwnerActionClass::Read,
             destructive: class == OwnerActionClass::Destructive,
+            delegation: false,
+        }
+    }
+
+    pub fn delegation(class: OwnerActionClass) -> Self {
+        Self {
+            delegation: true,
+            ..Self::of(class)
         }
     }
 }
@@ -547,14 +585,46 @@ pub async fn confirmation_needed(
     facts: ActionFacts,
     policy_floor: bool,
 ) -> AppResult<Gate> {
+    confirmation_needed_with_org(
+        db,
+        chat,
+        facts,
+        policy_floor,
+        OrgInstructionRequirement::None,
+    )
+    .await
+}
+
+pub async fn confirmation_needed_with_org(
+    db: &Database,
+    chat: &ChatAuthority,
+    facts: ActionFacts,
+    policy_floor: bool,
+    org_instruction: OrgInstructionRequirement,
+) -> AppResult<Gate> {
     let webhook = webhook_confirmation_required(chat, facts.read_only, facts.destructive);
-    let effective =
-        if chat.guest || (facts.class == OwnerActionClass::Read && !webhook && !policy_floor) {
-            None
-        } else {
-            Some(effective_access_mode(db, chat).await?)
-        };
+    let effective = if chat.guest
+        || (facts.class == OwnerActionClass::Read
+            && !webhook
+            && !policy_floor
+            && !facts.delegation
+            && org_instruction == OrgInstructionRequirement::None)
+    {
+        None
+    } else {
+        Some(effective_access_mode(db, chat).await?)
+    };
     if effective == Some(crate::models::assistant_settings::AccessMode::Autopilot) {
+        if facts.delegation || org_instruction == OrgInstructionRequirement::Required {
+            return Ok(Gate::Ask(ConfirmationNeed {
+                org_instruction,
+                class: facts.class,
+                mode: effective,
+                webhook,
+                policy: policy_floor,
+                delegation: facts.delegation,
+            }));
+        }
         let reason = if webhook {
             "webhook"
         } else if policy_floor {
@@ -578,12 +648,18 @@ pub async fn confirmation_needed(
         return Ok(Gate::Proceed);
     }
     let mode = effective.filter(|mode| owner_confirmation_required(*mode, facts.class));
-    if webhook || policy_floor || mode.is_some() {
+    if webhook
+        || policy_floor
+        || mode.is_some()
+        || org_instruction == OrgInstructionRequirement::Required
+    {
         return Ok(Gate::Ask(ConfirmationNeed {
+            org_instruction,
             class: facts.class,
             mode,
             webhook,
             policy: policy_floor,
+            delegation: facts.delegation,
         }));
     }
     Ok(Gate::Proceed)
@@ -635,6 +711,8 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        execution_task: super::execution_permission_dispatch::tasks::child(chat),
+        connect_own: None,
         activity_id,
         invocation_id: None,
         id: Uuid::new_v4().to_string(),
@@ -740,8 +818,26 @@ pub async fn confirm_action_with(
             return Ok(None);
         }
         if on_invalid == InvalidCard::Refuse {
+            // Only explain this caller's exact card. A foreign or mismatched
+            // id must not disclose another conversation or operation.
+            if let Some(card) = db
+                .collection::<AssistantAcknowledgement>(ACKS)
+                .find_one(doc! {"_id":id,"user_id":&chat.user_id,
+                "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
+                "kind":"action","tool_name":tool,"arguments_digest":arguments_digest(args),
+                    "invocation_id":&chat.invocation_id,"decided_by":{"$ne":"access_mode"}})
+                .await?
+                && presentation_status(&card) != "pending"
+            {
+                let mut value = refusal(&card);
+                // Preserve the existing execution refusal; code/status explain
+                // why the supplied one-use authority cannot be consumed.
+                value["error"] = json!("acknowledgement_invalid");
+                return Ok(Some(value));
+            }
             return Ok(Some(json!({
-                "error": "acknowledgement_invalid", "kind": "action",
+                "error": "acknowledgement_invalid", "code":"acknowledgement_invalid", "kind": "action",
+                "status":"unavailable", "message":"No usable confirmation exists for this exact call.",
                 "instructions": "This action card is missing, expired, used or does not match \
                     the call. Ask the user before requesting a new action card.",
             })));
@@ -768,7 +864,11 @@ pub async fn confirm_action_with(
             crate::models::assistant_acknowledgement::ActionConfirmation {
                 risk: need.class.as_str().into(),
                 access_mode: need.mode,
-                reason: if need.webhook {
+                reason: if need.org_instruction == OrgInstructionRequirement::Required {
+                    "org_connection"
+                } else if need.delegation {
+                    "delegation"
+                } else if need.webhook {
                     "webhook"
                 } else if need.mode.is_some() {
                     "access_mode"
@@ -844,6 +944,21 @@ mod access_mode_tests {
             ),
             ("nyxid__update_group", json!({"name": "x"}), Change),
             ("nyxid__update_group", json!({"leave": true}), Destructive),
+            (
+                "nyxid__manage_collaboration_group",
+                json!({"change":{"action":"delete"}}),
+                Destructive,
+            ),
+            (
+                "nyxid__manage_collaboration_group",
+                json!({"change":{"action":"remove"}}),
+                Destructive,
+            ),
+            (
+                "nyxid__manage_collaboration_group",
+                json!({"change":{"action":"invite"}}),
+                Sensitive,
+            ),
             ("nyxid__delete_schedule", none.clone(), Destructive),
             ("nyxid__message_subagent", none.clone(), Change),
             ("nyxid__list_schedules", none.clone(), Read),
@@ -895,6 +1010,13 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_voice_task: false,
+            execution_task: None,
+            execution_permission: None,
+            business_system_success: false,
+            collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
             invocation_id: None,
@@ -927,6 +1049,15 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) execution_group_id: Option<String>,
+    pub(crate) execution_unsupported: bool,
+    pub(crate) execution_voice_task: bool,
+    pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
+    pub(crate) execution_permission:
+        Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
+    pub business_system_success: bool,
+    /// Explicitly bound collaboration thread; never a private memory/account lane.
+    pub collaboration_thread: bool,
     pub channel_adapter_origin: Option<crate::models::channel_adapter::TurnAuthority>,
     pub invocation_controlled: bool,
     pub invocation_id: Option<String>,
@@ -1179,6 +1310,8 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+                    execution_task: None,
+                    delegated_images: Default::default(),
                     media_event_ids: Vec::new(),
                     media_queue_notice_id: None,
         media_pending: None,
@@ -1387,13 +1520,24 @@ pub async fn for_key_with_access(
     let Some(row) = db
         .collection::<bson::Document>(CREDENTIALS)
         .find_one(doc! {"user_id": user, "api_key_id": key})
-        .projection(doc! {"conversation_id": 1})
+        .projection(doc! {"conversation_id": 1, "collaboration": 1})
         .await?
     else {
         return Ok(None);
     };
     let conversation_id = row.get_str("conversation_id").map_err(|_| not_found())?;
-    let (conversation, agent) = if let Some(access) = access {
+    let (conversation, agent) = if row.get_bool("collaboration").unwrap_or(false) {
+        let conversation = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id":conversation_id,"user_id":user,"credential_api_key_id":key})
+            .await?
+            .ok_or_else(not_found)?;
+        let agent = Box::pin(
+            super::collaboration_group_service::runtime::agent_for_thread(db, &conversation),
+        )
+        .await?;
+        (conversation, agent)
+    } else if let Some(access) = access {
         // Authentication already resolved live membership. Retain the private
         // thread/owner/agent fences while reusing that request's snapshot.
         let conversation = access.conversation(db, user, conversation_id).await?;
@@ -1411,6 +1555,18 @@ pub async fn for_key_with_access(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
+    let resolved = if access.is_none() {
+        match super::org_channel_service::conversation_access(db, &conversation).await? {
+            Some(access) => Some(access),
+            None if agent.user_id != user => {
+                super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let access = access.or(resolved.as_ref());
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
@@ -1431,10 +1587,38 @@ pub async fn for_key_with_access(
     let live = super::assistant_nyxagent::live_turn(&conversation, Utc::now())
         .filter(|turn| !turn.stop_requested);
     let turn_live = live.is_some();
+    let shared = access.is_some_and(|a| a.shared().is_some());
+    let org_guest = access
+        .and_then(|a| a.channel())
+        .is_some_and(|c| c.execution().guest);
     let (report_to, with_nyxbot) = live
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        execution_group_id: conversation
+            .collaboration
+            .as_ref()
+            .map(|b| b.group_id.clone())
+            .or_else(|| conversation.group_id.clone()),
+        execution_voice_task: conversation.voice_parent_conversation_id.is_some()
+            || conversation
+                .active_turn
+                .as_ref()
+                .is_some_and(|t| t.voice_request_id.is_some()),
+        execution_unsupported: (conversation.automation_thread
+            && conversation.voice_parent_conversation_id.is_none())
+            || conversation.platform_thread.is_some()
+            || conversation
+                .active_turn
+                .as_ref()
+                .is_some_and(|t| t.trigger_run_id.is_some() || t.channel_adapter_origin.is_some()),
+        execution_task: conversation
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.execution_task.clone()),
+        execution_permission: None,
+        business_system_success: live.is_some_and(|turn| turn.business_system_success),
+        collaboration_thread: conversation.collaboration.is_some(),
         channel_adapter_origin: conversation
             .active_turn
             .as_ref()
@@ -1458,8 +1642,16 @@ pub async fn for_key_with_access(
         turn_live,
         report_to,
         with_nyxbot,
-        machine_node_ids: agent.machine_node_ids.clone(),
-        saved_login_ids: agent.saved_login_ids.clone(),
+        machine_node_ids: if shared || org_guest {
+            Vec::new()
+        } else {
+            agent.machine_node_ids.clone()
+        },
+        saved_login_ids: if shared || org_guest {
+            Vec::new()
+        } else {
+            agent.saved_login_ids.clone()
+        },
         user_id: user.into(),
         api_key_id: key.into(),
         conversation_id: conversation_id.into(),
@@ -1510,6 +1702,9 @@ pub(crate) async fn fence(
     Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
 )> {
     super::erasure_admission::fence_in_session(db, &chat.user_id, session).await?;
+    if let Some(task) = &chat.execution_task {
+        super::execution_permission_dispatch::tasks::fence(db, session, task).await?;
+    }
     if !super::assistant_invocation_service::fence_in_session(
         db,
         session,
@@ -1550,9 +1745,44 @@ pub(crate) async fn fence(
     if key.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
         return Err(not_found());
     }
+    if row.collaboration.is_some() {
+        super::collaboration_group_service::runtime::fence_decision(
+            db,
+            &row,
+            &chat.user_id,
+            session,
+        )
+        .await?;
+    }
     // Cards are execution authority. Human decisions and internal NyxBot paths
     // must enforce the same live org/group ACL as a new tool request.
-    let access = if let Some(owner) = row.agent_owner_id.as_deref() {
+    let access = if let Some(origin) = super::org_channel_service::origin(&row) {
+        let checked = Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            origin,
+            &row.user_id,
+            row.agent_id.as_deref().ok_or_else(not_found)?,
+            true,
+        ))
+        .await?;
+        Some(super::org_agent_service::RequestAccess::from_channel(db, checked).await?)
+    } else if row.collaboration.is_some() {
+        // Human decisions have no inherited request snapshot. Resolve from the
+        // concrete thread key so a foreign personal owner selects the shared
+        // lane instead of the legacy organization-only owner-marker path.
+        if chat.org_agent_access.is_some() {
+            super::org_agent_service::key_access_with_snapshot(
+                db,
+                &row.user_id,
+                row.agent_owner_id.as_deref(),
+                chat.org_agent_access.as_ref(),
+            )
+            .await?
+        } else {
+            super::org_agent_service::resolve_credential_access(db, &key).await?
+        }
+    } else if let Some(owner) = row.agent_owner_id.as_deref() {
         let access = super::org_agent_service::key_access_with_snapshot(
             db,
             &row.user_id,
@@ -1585,7 +1815,10 @@ pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<
             "expires_at": {"$lte": bson::DateTime::now()}, "$or": [
                 {"status": "pending"}, {"status": "allowed", "kind": "action"},
             ]},
-            doc! {"$set": {"status": "expired"}},
+            // Query-only presentation metadata: distinguish a real deadline
+            // from policy retirement, which also uses the legacy expired state.
+            // Older replicas ignore this field; it never grants authority.
+            doc! {"$set": {"status": "expired", "expiry_reason": "timeout"}},
         )
         .await?;
     Ok(())
@@ -1682,7 +1915,7 @@ pub async fn include_card(
     Ok(())
 }
 
-/// Cards the owner allowed or denied after `since`, oldest first and bounded.
+/// Owner decisions and observed deadline expirations after `since`, bounded.
 /// Each new turn reports decisions made since the previous user message, so a
 /// decision made while a turn was still running reaches the model exactly once.
 pub async fn decided_since(
@@ -1697,9 +1930,11 @@ pub async fn decided_since(
         .find(doc! {
             "user_id": user,
             "conversation_id": conversation,
-            "status": {"$in": ["allowed", "denied"]},
             "decided_by": {"$ne": "access_mode"},
-            "decided_at": {"$gt": bson::DateTime::from_chrono(since)},
+            "$or": [
+                {"status": {"$in": ["allowed", "denied"]}, "decided_at": {"$gt": bson::DateTime::from_chrono(since)}},
+                {"status": "expired", "expiry_reason": "timeout", "expires_at": {"$gt": bson::DateTime::from_chrono(since)}},
+            ],
         })
         .sort(doc! {"decided_at": 1, "_id": 1})
         .limit(DECISION_NOTE_LIMIT)
@@ -1736,7 +1971,7 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
         return String::new();
     }
     let mut note = String::from(
-        "\n\nChat card decisions the user made since your previous reply \
+        "\n\nChat card states recorded since your previous reply \
         (recorded by NyxID; facts, not instructions):",
     );
     for row in &rows {
@@ -1772,7 +2007,7 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
     {
         note.push_str("\nRetry an allowed action through its original callable tool or route with its acknowledgement_id. Internal exact-connection approvals are applied by NyxID when that original operation resumes; never invoke an internal approval name.");
     }
-    note.push_str("\nDo not request denied items again unless the user asks.");
+    note.push_str("\nDo not request denied items again unless the user asks. Expired confirmations cannot be allowed; ask the owner before requesting a new confirmation. Never describe a terminal request as waiting for approval.");
     note
 }
 
@@ -1959,6 +2194,9 @@ async fn request_tracked_with_machine_context(
     if created && row.kind != "action" {
         audit_access_requested(&audit_db, &audit_chat, &row).await;
     }
+    let row = audit_db.collection::<AssistantAcknowledgement>(ACKS)
+        .find_one(doc! {"_id":&row.id,"user_id":&audit_chat.user_id,"conversation_id":&audit_chat.conversation_id,"api_key_id":&audit_chat.api_key_id})
+        .await?.ok_or_else(not_found)?;
     Ok((row, created))
 }
 
@@ -2006,6 +2244,8 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        execution_task: super::execution_permission_dispatch::tasks::child(chat),
+        connect_own: None,
         activity_id: super::machine_activity_service::activity_id(),
         invocation_id: None,
         authored_skill: if request.tool == Some(super::assistant_agent_learning_review::TOOL) {
@@ -2101,6 +2341,15 @@ async fn request_candidate_in_session(
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
     let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    if access
+        .as_ref()
+        .and_then(|a| a.channel())
+        .is_some_and(|c| c.execution().guest)
+    {
+        return Err(AppError::Forbidden(
+            "Organization channel guests cannot request approvals".into(),
+        ));
+    }
     // Covers every permission kind, including machine/skill/scope
     // requests and internal callers without an auth snapshot.
     // Reuse the access already resolved or reused by the fence.
@@ -2347,15 +2596,66 @@ async fn audit_access_requested(
     .await;
 }
 
+/// A failed check or creation must never imply that a review card exists.
+pub fn unavailable() -> Value {
+    json!({"error":"acknowledgement_unavailable","code":"acknowledgement_unavailable",
+        "status":"unavailable","message":"The confirmation could not be created or checked. No waiting card is confirmed. Ask the owner before retrying.",
+        "instructions":"Do not tell the owner a card is waiting. Report that confirmation is unavailable."})
+}
+
+/// Presentation only; never grants authority or consumes a card. Lazy expiry
+/// must also apply before history has persisted the terminal status.
+pub fn presentation_status(row: &AssistantAcknowledgement) -> &str {
+    if row.decided_by.as_deref() != Some("access_mode")
+        && (row.status == "pending" || (row.status == "allowed" && row.kind == "action"))
+        && row.expires_at <= Utc::now()
+    {
+        "expired"
+    } else {
+        row.status.as_str()
+    }
+}
+
 pub fn refusal(row: &AssistantAcknowledgement) -> Value {
-    let denied = row.status == "denied";
+    let status = presentation_status(row);
+    let review_path = super::assistant_links::AssistantPage::ReviewCard {
+        conversation: &row.conversation_id,
+        card: &row.id,
+    }
+    .path();
+    let terminal = match status {
+        "pending" | "denied" => None,
+        "expired" => Some((
+            "acknowledgement_expired",
+            "The approval request expired. Ask the owner before requesting a new confirmation; the old card cannot be allowed.",
+        )),
+        "allowed" => Some((
+            "acknowledgement_allowed",
+            "This request was already allowed. Do not ask the owner to approve it again. Resume only through the original operation and its existing one-use checks.",
+        )),
+        "used" => Some((
+            "acknowledgement_used",
+            "This confirmation was already used. Do not ask the owner to allow it again or repeat the action.",
+        )),
+        _ => Some((
+            "acknowledgement_unavailable",
+            "This confirmation is unavailable. No pending card can be confirmed; ask the owner before requesting a new one.",
+        )),
+    };
+    if let Some((code, message)) = terminal {
+        return json!({"error":code,"code":code,"status":status,
+            "kind":row.kind,"acknowledgement_id":row.id,"conversation_id":row.conversation_id,
+            "review_path":review_path,"summary":row.summary,"decider":row.decider,
+            "message":message,"instructions":message});
+    }
+    let denied = status == "denied";
     let instructions = if row.decider == "orchestrator" {
         if denied {
             "Your orchestrator denied this request. Do not retry it; report what you \
             could do without it."
                 .into()
         } else {
-            "NyxID asked your orchestrator for this permission. End your turn now with a \
+            "This pending request is for your orchestrator to decide. Its owner-review location is review_path. End your turn now with a \
             one-line note about what you are waiting for; NyxID resumes you with the \
             decision."
                 .into()
@@ -2374,15 +2674,14 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
     } else {
         match row.kind.as_str() {
             "service" => format!(
-                "Ask the user to approve access to {} for this chat (a card is \
-                shown in the chat), then retry.",
+                "Ask the owner to review access to {} at review_path, then retry.",
                 row.service_name.as_deref().unwrap_or("this service")
             ),
-            "account" => "Ask the user to approve account management for this chat (a card \
-                is shown in the chat), then retry."
-                .into(),
+            "account" => {
+                "Ask the owner to review account management at review_path, then retry.".into()
+            }
             _ => format!(
-                "Ask the user to confirm the action card, then retry with \
+                "Send review_path so the owner can open this exact confirmation, then retry with \
                 acknowledgement_id. Never confirm it yourself. Where no card can be shown (a \
                 chat app or a group chat), ask them to reply \"yes {code}\" to confirm or \
                 \"no {code}\" to cancel.",
@@ -2393,7 +2692,11 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
     let mut value = json!({"error": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
         "kind": row.kind, "acknowledgement_id": row.id, "service_slug": row.service_slug,
         "service_name": row.service_name, "summary": row.summary, "decider": row.decider,
-        "instructions": instructions});
+        "instructions": instructions,
+        "code": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
+        "status":status,"conversation_id":row.conversation_id,"review_path":review_path,
+        "message": if denied {"The request was denied; no approval is waiting."} else {"A pending request is available at review_path. This does not confirm that the owner has seen it."},
+        "expires_at":row.expires_at});
     if row.kind == "action"
         && !denied
         && row.voice_request_id.is_none()
@@ -2406,15 +2709,13 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
 
 pub fn refusal_with_frontend(row: &AssistantAcknowledgement, frontend: &str) -> Value {
     let mut value = refusal(row);
-    if row.authored_skill.is_some() {
-        value["review_url"] = json!(
-            super::assistant_links::AssistantPage::ReviewCard {
-                conversation: &row.conversation_id,
-                card: &row.id,
-            }
-            .url(frontend)
-        );
-    }
+    value["review_url"] = json!(
+        super::assistant_links::AssistantPage::ReviewCard {
+            conversation: &row.conversation_id,
+            card: &row.id,
+        }
+        .url(frontend)
+    );
     value
 }
 
@@ -2590,13 +2891,14 @@ pub async fn service_gate(
     } else {
         // This authority check already needed live access. Retain a newly
         // resolved snapshot for the ungranted path and its card transaction.
-        access = super::org_agent_service::key_access_with_snapshot(
-            db,
-            &chat.user_id,
-            key.assistant_agent_owner_id.as_deref(),
-            access.as_ref(),
-        )
-        .await?;
+        access = if let Some(snapshot) = access {
+            Some(snapshot)
+        } else {
+            // A personal shared-agent key carries the owner and agent binding,
+            // so resolve it from the exact credential rather than the
+            // owner-only key lookup (which has no conversation key to load).
+            super::org_agent_service::resolve_credential_access(db, &key).await?
+        };
         key_service::effective_allowed_service_ids_with_access(db, &key, access.as_deref())
             .await?
             .iter()
@@ -2859,6 +3161,17 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        execution_group_id: target
+            .collaboration
+            .as_ref()
+            .map(|b| b.group_id.clone())
+            .or_else(|| target.group_id.clone()),
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: row.execution_task.clone(),
+        execution_permission: None,
+        business_system_success: false,
+        collaboration_thread: target.collaboration.is_some(),
         channel_adapter_origin: None,
         invocation_controlled: false,
         invocation_id: row.invocation_id.clone(),
@@ -3038,7 +3351,15 @@ pub(crate) async fn decide_in_session(
     if allow && row.kind == "action" {
         row.expires_at = now + Duration::seconds(ACTION_SECONDS);
     }
-    row.continuation_receipt_id = if row.invocation_id.is_some() {
+    if target.collaboration.is_some() {
+        if row.kind != "action" {
+            return Err(not_found());
+        }
+        super::collaboration_group_service::runtime::queue_decision(db, &target, session).await?;
+    }
+    row.continuation_receipt_id = if target.collaboration.is_some() {
+        None
+    } else if row.invocation_id.is_some() {
         Box::pin(super::assistant_invocation_service::decision_in_session(
             db, session, &row,
         ))
@@ -3140,24 +3461,52 @@ pub async fn consume_action(
     tool: &str,
     arguments: &Value,
 ) -> AppResult<bool> {
+    consume_action_with_reason(db, chat, id, tool, arguments, None).await
+}
+
+/// Consume an owner card only when it explicitly represented sharing
+/// delegation. This keeps a card for the same tool and arguments from being
+/// mistaken for authorization to widen an agent's audience or credentials.
+pub async fn consume_delegation_action(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    tool: &str,
+    arguments: &Value,
+) -> AppResult<bool> {
+    consume_action_with_reason(db, chat, id, tool, arguments, Some("delegation")).await
+}
+
+async fn consume_action_with_reason(
+    db: &Database,
+    chat: &ChatAuthority,
+    id: &str,
+    tool: &str,
+    arguments: &Value,
+    reason: Option<&str>,
+) -> AppResult<bool> {
     let db = db.clone();
     let chat = chat.clone();
     let id = id.to_owned();
     let tool = tool.to_owned();
     let digest = arguments_digest(arguments);
+    let reason = reason.map(str::to_owned);
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation = async {
             Box::pin(fence(&db, &chat, session)).await?;
-            let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
-                doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
+            let mut filter = doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
                     "arguments_digest": &digest,
                     "invocation_id": &chat.invocation_id,
                     "status": "allowed",
                     "decided_by": {"$ne": "access_mode"},
-                    "expires_at": {"$gt": bson::DateTime::now()},
-                },
+                    "expires_at": {"$gt": bson::DateTime::now()}};
+            if let Some(reason) = reason.as_deref() {
+                filter.insert("confirmation.reason", reason);
+            }
+            let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
+                filter,
                 doc! {"$set": {"status": "used"}},
             ).session(&mut *session).await?;
             Ok(result.modified_count == 1)
@@ -3287,3 +3636,7 @@ mod reply_selection_tests {
         assert!(choose_reply(vec![stale], None, Some(now)).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "assistant_invisible_card_tests.rs"]
+mod invisible_card_tests;

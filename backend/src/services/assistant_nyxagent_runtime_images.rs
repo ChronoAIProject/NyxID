@@ -5,6 +5,62 @@ use std::collections::HashSet;
 
 const MAX_IMAGE_ROUNDS: u32 = 2;
 
+pub(super) async fn model_support(
+    state: &AppState,
+    egress: &dyn contract::NyxAgentEgress,
+    authority: &contract::NyxAgentExecutionContext,
+    model: &str,
+    policy: Option<BillingRoutePolicy>,
+) -> Option<bool> {
+    if let contract::NyxAgentExecutionContext::Owner { user_id, .. } = authority
+        && let Some(support) =
+            crate::services::assistant_nyxagent_model_cache::image_input(&state.db, user_id, model)
+                .await
+    {
+        return support;
+    }
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        egress.model_image_input(authority, model, policy),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+pub(super) async fn record_upload_outcome(
+    state: &AppState,
+    row: &AssistantConversation,
+    id: &str,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<(), TurnError> {
+    let turn_id = &row.active_turn.as_ref().expect("claimed turn").turn_id;
+    let update = doc! {"$set":{"attachments.$.image_input":status,"attachments.$.image_input_reason":reason}};
+    state.db.collection::<mongodb::bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(doc! {"user_id":&row.user_id,"conversation_id":&row.id,"turn_id":turn_id,"attachments.id":id}, update.clone())
+        .await.map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
+    if let Some(group_id) = &row.group_id {
+        let owner = if row.group_request_id.is_some() {
+            row.agent_owner_id.as_deref().unwrap_or(&row.user_id)
+        } else {
+            &row.user_id
+        };
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
+            )
+            .update_one(
+                doc! {"user_id":owner,"group_id":group_id,"attachments.id":id},
+                update,
+            )
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    }
+    Ok(())
+}
+
 fn requests_inspection(attachment: &crate::models::assistant_conversation::TurnAttachment) -> bool {
     attachment.origin == "tool"
         && attachment.image_inspection != Some(false)
@@ -20,6 +76,7 @@ pub(crate) struct ToolImages {
     pending: Vec<String>,
     omitted: Vec<String>,
     attempted: bool,
+    model_unsupported: bool,
     pub fallback: Option<TurnResult>,
 }
 
@@ -37,7 +94,12 @@ impl ToolImages {
         self.parts.clear();
         self.note.clear();
         self.pending.clear();
-        let current = match engine::get(&state.db, &row.user_id, &row.id).await {
+        let refreshed = if row.collaboration.is_some() {
+            crate::services::collaboration_group_service::runtime::refresh(&state.db, row).await
+        } else {
+            engine::get(&state.db, &row.user_id, &row.id).await
+        };
+        let current = match refreshed {
             Ok(current) => current,
             Err(_) => {
                 tracing::warn!("Optional tool image preparation could not read the conversation");
@@ -63,6 +125,34 @@ impl ToolImages {
         }
         if self.rounds >= MAX_IMAGE_ROUNDS {
             return Ok(false);
+        }
+        if self.model_unsupported
+            || model_support(state, egress, authority, &row.model, policy).await == Some(false)
+        {
+            for item in &items {
+                mark(
+                    state,
+                    row,
+                    &item.id,
+                    "unavailable",
+                    Some(if self.model_unsupported {
+                        "image_input_unsupported"
+                    } else {
+                        "model_text_only"
+                    }),
+                )
+                .await;
+            }
+            self.seen.extend(items.iter().map(|item| item.id.clone()));
+            // Keep the existing bounded continuation so the agent also learns
+            // why the tool image was omitted. No image URL accompanies it.
+            self.rounds += 1;
+            self.note = format!(
+                "{} These tool-image attachments cannot be viewed: {}. Complete your answer using other information. Do not repeat actions already completed.",
+                uploads::MODEL_IMAGE_FALLBACK,
+                json!(items.iter().map(|item| &item.id).collect::<Vec<_>>()),
+            );
+            return Ok(true);
         }
         let capabilities =
             upstream_capabilities(state, egress, authority, credential, policy).await;
@@ -102,21 +192,35 @@ impl ToolImages {
         self.attempted = !self.pending.is_empty();
         // Included images remain unclassified until their response settles.
         for id in self.omitted.drain(..) {
-            mark(state, row, &id, "unavailable").await;
+            mark(state, row, &id, "unavailable", None).await;
         }
     }
 
     pub async fn failed(&mut self, state: &AppState, row: &AssistantConversation) {
         if self.attempted {
             for id in self.pending.drain(..) {
-                mark(state, row, &id, "unavailable").await;
+                mark(state, row, &id, "unavailable", None).await;
             }
+        }
+    }
+
+    pub async fn unsupported(&mut self, state: &AppState, row: &AssistantConversation) {
+        self.model_unsupported = true;
+        for id in self.pending.drain(..) {
+            mark(
+                state,
+                row,
+                &id,
+                "unavailable",
+                Some("image_input_unsupported"),
+            )
+            .await;
         }
     }
 
     pub async fn sent(&mut self, state: &AppState, row: &AssistantConversation) {
         for id in self.pending.drain(..) {
-            mark(state, row, &id, "sent").await;
+            mark(state, row, &id, "sent", None).await;
         }
         self.attempted = false;
         self.parts.clear();
@@ -124,7 +228,13 @@ impl ToolImages {
     }
 }
 
-async fn mark(state: &AppState, row: &AssistantConversation, id: &str, status: &str) {
+async fn mark(
+    state: &AppState,
+    row: &AssistantConversation,
+    id: &str,
+    status: &str,
+    reason: Option<&str>,
+) {
     if state
         .db
         .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -132,7 +242,7 @@ async fn mark(state: &AppState, row: &AssistantConversation, id: &str, status: &
             doc! {"_id":&row.id,"user_id":&row.user_id,
             "active_turn.turn_id":&row.active_turn.as_ref().expect("claimed turn").turn_id,
             "active_turn.attachments.id":id},
-            doc! {"$set":{"active_turn.attachments.$.image_input":status}},
+            doc! {"$set":{"active_turn.attachments.$.image_input":status,"active_turn.attachments.$.image_input_reason":reason}},
         )
         .await
         .is_err()

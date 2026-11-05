@@ -1,4 +1,11 @@
 //! Realtime voice coordination; provider input never grants execution authority.
+pub mod access;
+pub mod announcements;
+pub mod application;
+pub mod binding;
+pub mod client_key;
+#[cfg(test)]
+mod client_key_tests;
 pub mod confirmation;
 #[cfg(test)]
 mod confirmation_tests;
@@ -8,14 +15,18 @@ mod credential_tests;
 pub mod credentials;
 pub mod diagnostics;
 pub mod dictation;
+pub mod execution;
 pub mod grok;
 pub mod grok_runtime;
 pub mod openai;
 #[cfg(test)]
 mod openai_tests;
+pub mod progress;
 pub mod receipt;
+mod responses;
 pub mod runtime;
 pub mod session;
+mod speech;
 #[cfg(test)]
 mod tests;
 mod tokens;
@@ -56,3 +67,5 @@ pub fn selected_voice(
         .map(str::to_owned)
         .ok_or(crate::errors::AppError::VoiceProviderUnavailable)
 }
+
+pub(crate) mod shared;

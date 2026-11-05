@@ -588,6 +588,35 @@ logging to a website and then hand back the control to nyxbot".
   - Cross-replica: follow the existing browser SSH terminal (`/ssh/{id}/terminal`)
     and node dispatch patterns, so the browser and the node can be on different
     replicas.
+- **Native desktop admission.** The upgrade uses the real auth extractor and
+  first-party-human rejection layers. An explicit Authorization header must be
+  exactly one nonempty `Bearer` credential verified as an `AccessToken`, with
+  no OAuth client, acting client or API key identity; a present live authenticated
+  session (`sid`); verified person provenance; unrestricted service/node authority
+  and no resource restriction. This credential may omit Origin or send exactly
+  the configured frontend or `BASE_URL` origin (Android's transport default).
+  Null, empty, duplicate, malformed and unrelated Origins are refused. Origins
+  come from server configuration, never Host or forwarded headers. Cookie auth
+  still requires exactly the frontend origin and verified Person provenance.
+  Bearer identity wins over cookies;
+  invalid or malformed explicit credentials cannot fall back to a valid cookie.
+  Node write ACL, capability, conversation and context checks still apply.
+  After signing-secret decryption, a fresh authority check must finish within
+  three seconds before the HTTP upgrade is accepted. The relay requires another
+  successful check before subscribing or dispatching its first DesktopOpen.
+  Each check covers the live session, active person/current MFA policy, node
+  write ACL and DesktopOpen capability, selected context ACL and desktop identity.
+  An independent watcher repeats the whole check every ten seconds with a
+  three-second timeout, including while setup, node commands or socket writes
+  stall. Frames and control dispatch require a successful check no older than
+  ten seconds; a stale result triggers a fresh bounded check before the effect.
+  For an active relay on a progressing executor, a persistent session/resource
+  revocation stops forwarding within thirteen seconds. This does not retract
+  already-buffered transport bytes or bound the whole pending HTTP request;
+  pending setup must pass the fresh pre-upgrade and relay gates before effects.
+  The policy close send has its own three-second bound. An authority failure
+  closes with WebSocket policy code 1008. Closing a viewer
+  releases only its connection; it does not Stop or take/hand back control.
 - **Sessions.**
   - Desktop sessions start on demand (the panel opens, or the agent uses
     computer tools) and end when no viewer and no agent activity remain, after
@@ -1006,7 +1035,7 @@ This document describes what shipped. Also update:
 Machine tools in scheduled turns retain the same live machine/login grants,
 owner-control lockout and `machine_confirm` rules as owner-initiated turns.
 Webhook turns add their per-run confirmation policy. One exact-argument,
-one-use owner action card satisfies both policies when both require approval in Auto or Ask every time. Full access bypasses all confirmation policies with automatic receipts (reason `webhook` or `policy`), while retaining grants, owner-control lockout and signed execution fences.
+one-use owner action card satisfies both policies when both require approval in Auto or Ask every time. Full access retains protected org-connection instruction cards and otherwise bypasses confirmation policies with automatic receipts (reason `webhook` or `policy`), while retaining grants, owner-control lockout and signed execution fences.
 Exec, file writes/attachment saves, job cancellation and changing computer
 input are destructive because they can overwrite data or interrupt arbitrary
 work. Saved-login filling and requesting owner control are changing, but not
@@ -1734,7 +1763,7 @@ there is no fleet-wide 500-lease limit. At saturation new work gets HTTP 429
 work, renewals and job cancellation continue. V1 work bypasses lease admission.
 
 Permission modes use the display names Full access (`autopilot`), Auto (`nyxmode`)
-and Ask every time (`ask_every_time`). Full access bypasses every owner ask,
+and Ask every time (`ask_every_time`). Full access retains protected org-connection instruction cards and otherwise bypasses owner asks,
 including pairing, capability widening, machine updates and saved-login fills,
 and records the completed action automatically. Resource confirmation settings
 apply in Auto and Ask every time. Grants, origin checks, protected fields,
@@ -1743,7 +1772,9 @@ owner-control lockout, node authority and update attestation remain required.
 ### NyxBot organization service use
 
 The existing machine-exec card identifies exact declared organization connections
-and states they may be used by this command for this job. The persisted job grant
+and states they may be used by this command for this job. Its refusal includes
+ownership and personal-setup guidance for each unresolved declaration; a supported
+catalog also supplies the card's hosted **Connect your own** action. The persisted job grant
 binds command/arguments, job ID, key generation, connections/owners and their
 credential/config authority. Every detached gateway request rechecks the live key,
 membership, policy, job expiry and machine lease. Revocation or drift ends service
@@ -1757,3 +1788,9 @@ Externally authorized Remote Machine jobs use their existing source and machine
 grants instead of NyxBot chat consent. Signed gateway requests retain exact
 service declarations, streaming and billing attribution, with live source,
 grant, runtime and lease checks before dispatch.
+
+## Organization instruction and the owner-card boundary
+
+When `assistant:org-instruction-v1` is active, NyxBot and personal specialists must have trusted owner selection of each exact org connection this turn or one approved card for the bounded command and its declared service identities, including Full access. A selected declaration does not authorize another declaration or a pool sibling. Saved-login, destructive and machine policies remain independent. New jobs retain an instruction receipt for that job only; unproven legacy org jobs refuse and require a reviewed replacement command. See [service execution](NYXBOT_SERVICE_EXECUTION.md).
+
+The existing owner-card trust boundary is unchanged: a signed-in owner UI decision or verified owner-channel reply (including `yes <code>`) is accepted. An agent driving the owner's signed-in browser can click an existing card. This rule does not add hardware presence, a separate decision principal, or a stronger card authentication protocol.

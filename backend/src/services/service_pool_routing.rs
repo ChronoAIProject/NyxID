@@ -75,10 +75,10 @@ async fn route_member_is_eligible(
     )
     .await
     {
-        Ok(Some(resolution)) => Ok(!resolution
+        Ok(Some(resolution)) => Ok(resolution
             .node_id
             .as_ref()
-            .is_some_and(|id| allowed_node_ids.is_some_and(|ids| !ids.contains(id)))),
+            .is_none_or(|id| allowed_node_ids.is_none_or(|ids| ids.contains(id)))),
         Ok(None) => Ok(false),
         Err(error) if service_pool_service::member_unavailable(&error) => Ok(false),
         Err(error) => Err(error),
@@ -94,6 +94,35 @@ pub async fn select_slug_metadata(
     slug: &str,
     org_agent_access: Option<&crate::services::org_agent_service::RequestAccess>,
 ) -> AppResult<SlugMetadataRoute> {
+    if let Some(shared) = org_agent_access.and_then(|access| access.shared()) {
+        if shared.actor() != actor_user_id {
+            return Err(super::shared_agent_service::missing());
+        }
+        match shared.connection_for_slug(slug) {
+            Ok(connection) => return Ok(SlugMetadataRoute::Service(connection.id.clone())),
+            Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        super::shared_agent_transport::require_ready(db).await?;
+        let mut pools = Vec::new();
+        for owner in [shared.actor(), shared.owner()] {
+            if let Some(pool) = service_pool_service::find_pool_by_slug(db, owner, slug).await?
+                && pool.members.iter().any(|m| {
+                    m.enabled
+                        && shared
+                            .connections()
+                            .get(&m.user_service_id)
+                            .is_some_and(|s| s.user_id == owner)
+                })
+            {
+                pools.push(pool);
+            }
+        }
+        if pools.len() != 1 {
+            return Err(super::shared_agent_service::missing());
+        }
+        return Ok(SlugMetadataRoute::Pool(Box::new(pools.remove(0))));
+    }
     // Organization-bound keys prefer the granted connection owned by the bound
     // organization. Reuse the request snapshot so membership is not resolved
     // a second time during routing; credential availability is checked later

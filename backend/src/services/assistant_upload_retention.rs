@@ -126,7 +126,7 @@ async fn ensure_settings(db: &Database) -> AppResult<()> {
 }
 
 fn projection() -> Document {
-    doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "origin":1,
+    doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "collaboration_group_id":1, "origin":1,
     "content_type":1, "message_id":1, "created_at":1, "bound_at":1, "expires_at":1,
     "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
 }
@@ -202,11 +202,23 @@ async fn turn_settled(db: &Database, row: &Document, now: DateTime<Utc>) -> AppR
         conversation = first.get_str("conversation_id").unwrap_or_default().into();
         turn = first.get_str("turn_id").unwrap_or_default().into();
     }
+    let mut thread_filter = doc! {"_id":&conversation,"user_id":owner};
+    if user_upload(row)
+        && let Ok(group) = row.get_str("group_id")
+    {
+        // A collaboration guest executes on the agent owner's key, while the
+        // public upload and its retention lifetime belong to the requester.
+        thread_filter.remove("user_id");
+        thread_filter.insert("$or", bson::bson!([
+            {"user_id":owner},
+            {"collaboration.version":1,"collaboration.group_id":group,"collaboration.original_requester_id":owner},
+        ]));
+    }
     let thread = db
         .collection::<crate::models::assistant_conversation::AssistantConversation>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&conversation,"user_id":owner})
+        .find_one(thread_filter)
         .await?;
     Ok(thread
         .as_ref()
@@ -362,6 +374,7 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
             "user_id",
             "conversation_id",
             "group_id",
+            "collaboration_group_id",
             "origin",
             "message_id",
             "created_at",

@@ -44,11 +44,11 @@ export function ClientSecretDialog({
         <div className="space-y-4">
           {clientId && (
             <div className="space-y-2">
-              <p className="text-xs uppercase tracking-wide text-text-tertiary">
+              <p className="text-13 uppercase tracking-wide text-text-tertiary">
                 Client ID
               </p>
               <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-                <p className="min-w-0 flex-1 truncate font-mono text-xs">
+                <p className="min-w-0 flex-1 truncate font-mono text-13">
                   {clientId}
                 </p>
                 <Button
@@ -64,11 +64,11 @@ export function ClientSecretDialog({
             </div>
           )}
           <div className="space-y-2">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">
               Client Secret
             </p>
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
-              <p className="min-w-0 flex-1 truncate font-mono text-xs">
+              <p className="min-w-0 flex-1 truncate font-mono text-13">
                 {clientSecret}
               </p>
               <Button
@@ -82,7 +82,7 @@ export function ClientSecretDialog({
               </Button>
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             <strong>Lost it?</strong> If you don&apos;t copy this now,
             you&apos;ll need to rotate the credential to get a new one. (Old
             value stops working immediately on rotate.)

@@ -234,7 +234,7 @@ pub async fn materialize(
 
 /// Provider control JSON responses are bounded to 256 KiB, allowing attachment-rich objects.
 pub async fn response_json(request: reqwest::RequestBuilder) -> AppResult<Value> {
-    super::channel_platform::mark_provider_attempt();
+    super::channel_platform::mark_provider_attempt().await?;
     let response = request
         .timeout(TIMEOUT)
         .send()
@@ -294,7 +294,7 @@ pub fn platform_response(
 pub async fn platform_json_value(
     request: reqwest::RequestBuilder,
 ) -> AppResult<(reqwest::StatusCode, Value)> {
-    super::channel_platform::mark_provider_attempt();
+    super::channel_platform::mark_provider_attempt().await?;
     let response = request
         .timeout(TIMEOUT)
         .send()

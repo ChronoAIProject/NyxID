@@ -20,6 +20,10 @@ pub struct AssistantGroup {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    /// Explicit new-group discriminator. Never inferred from participants and
+    /// never added to a legacy personal or organization group on read.
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::Collaboration>,
     #[serde(default)]
     pub participant_user_ids: Vec<String>,
     #[serde(default)]
@@ -59,6 +63,9 @@ pub struct AssistantGroup {
 /// One message in a group transcript.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupMessage {
+    /// Independent of author/owner, including system notices.
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::MessageBinding>,
     #[serde(default)]
     pub activities: Vec<super::assistant_conversation::TurnActivity>,
     /// Server-only routing marker, including notices with no human author.
@@ -86,6 +93,9 @@ pub struct GroupMessage {
     pub text: String,
     #[serde(default)]
     pub recipient_agent_ids: Vec<String>,
+    /// Live collaboration participants mentioned when this message was published.
+    #[serde(default)]
+    pub mentioned_participant_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -117,6 +127,10 @@ impl GroupFollower {
 /// when an agent hands work to another member.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    #[serde(default)]
+    pub collaboration: Option<super::assistant_group_collaboration::RequestBinding>,
     #[serde(rename = "_id")]
     pub id: String,
     pub group_id: String,

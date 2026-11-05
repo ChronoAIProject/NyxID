@@ -885,6 +885,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<User>(USERS)
             .insert_one(User {
+                execution_permission_enrollment: None,
                 id: "org-1".to_string(),
                 email: "org-1@invalid.local".to_string(),
                 password_hash: None,

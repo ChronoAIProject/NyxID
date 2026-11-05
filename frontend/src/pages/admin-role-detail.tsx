@@ -172,10 +172,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
+        <h3 className="mb-2 font-display type-card-title">
           Role not found
         </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
+        <p className="mb-4 text-14 text-muted-foreground">
           The role you are looking for does not exist or has been deleted.
         </p>
         <Button
@@ -251,7 +251,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No permissions assigned.
             </p>
           </div>
@@ -261,7 +261,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
               <Badge
                 key={perm}
                 variant="secondary"
-                className="font-mono text-xs"
+                className="font-mono text-12"
               >
                 {perm}
               </Badge>

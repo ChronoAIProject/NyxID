@@ -91,6 +91,7 @@ pub async fn create_org_user_with_id(
         .unwrap_or_else(|| synthetic_org_email(id));
 
     let org = User {
+        execution_permission_enrollment: None,
         id: id.to_string(),
         email,
         password_hash: None,
@@ -342,6 +343,16 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // use which.
     let now_bson = bson::DateTime::from_chrono(Utc::now());
     let blocker_specs: Vec<(&str, mongodb::bson::Document, &str)> = vec![
+        (
+            crate::models::assistant_conversation::COLLECTION_NAME,
+            doc! {"channel.org_execution.org_id":org_user_id,"active_turn":{"$ne":null}},
+            "active organization channel turns",
+        ),
+        (
+            crate::models::org_channel::HOLDS,
+            doc! {"org_id":org_user_id,"state":"reserved"},
+            "unsettled organization channel usage",
+        ),
         (
             crate::models::user_service::COLLECTION_NAME,
             // Soft-deleted UserServices stay in the collection with
@@ -666,6 +677,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     db.collection::<bson::Document>(crate::models::node::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id, "is_active": false })
         .await?;
+    super::org_channel_service::lifecycle::erase_org(db, org_user_id).await?;
     // User-provided OAuth client credentials (per-user override of the
     // service-level OAuth app). Hard-deleted, no platform-side cleanup,
     // no DELETE handler that would let the admin clear them ahead of
@@ -795,9 +807,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // Cascade memberships
     crate::services::org_role_scope_service::delete_all_for_org(db, org_user_id).await?;
     crate::services::feature_flag_service::delete_all_for_org(db, org_user_id).await?;
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .delete_many(doc! { "org_user_id": org_user_id })
-        .await?;
+    super::execution_permission_enrollment::jobs::delete_org_memberships(db, org_user_id).await?;
     // Cascade invites
     db.collection::<bson::Document>(crate::models::org_invite::COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
@@ -974,6 +984,7 @@ pub async fn create_membership(
                 "Membership changed; retry the invitation".into(),
             ));
         }
+        super::execution_permission_enrollment::lifecycle::apply(db, member_user_id, super::execution_permission_enrollment::lifecycle::Change::Membership { org: org_user_id, role: Some(role) }, &mut transaction).await?;
         return Ok(OrgMembership {
             id: row.id,
             org_user_id: org_user_id.to_string(),
@@ -999,7 +1010,10 @@ pub async fn create_membership(
     };
 
     match collection.insert_one(&membership).session(&mut transaction).await {
-        Ok(_) => Ok(membership),
+        Ok(_) => {
+            super::execution_permission_enrollment::lifecycle::apply(db, member_user_id, super::execution_permission_enrollment::lifecycle::Change::Membership { org: org_user_id, role: Some(role) }, &mut transaction).await?;
+            Ok(membership)
+        },
         Err(e) if is_duplicate_key_error(&e) => Err(AppError::Conflict(
             "User is already a member of this org".to_string(),
         )),
@@ -1143,6 +1157,15 @@ pub async fn update_membership(
             )
             .await?;
         }
+        if role.is_some_and(|r| !r.can_proxy()) {
+            super::org_channel_service::lifecycle::revoke_member_in_session(
+                db,
+                &mut transaction,
+                &current.org_user_id,
+                &current.member_user_id,
+            )
+            .await?;
+        }
         if role == Some(OrgRole::Admin) {
             super::org_membership_authority::fence_live_member(
                 db,
@@ -1151,7 +1174,8 @@ pub async fn update_membership(
             )
             .await?;
         }
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+        let updated = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
             .find_one_and_update(
                 doc! {"_id": membership_id,"revoked_at":null},
                 doc! {"$set":update},
@@ -1159,7 +1183,20 @@ pub async fn update_membership(
             .return_document(mongodb::options::ReturnDocument::After)
             .session(&mut transaction)
             .await?
-            .ok_or_else(|| AppError::Conflict("Membership changed; reload before editing".into()))
+            .ok_or_else(|| {
+                AppError::Conflict("Membership changed; reload before editing".into())
+            })?;
+        super::execution_permission_enrollment::lifecycle::apply(
+            db,
+            &current.member_user_id,
+            super::execution_permission_enrollment::lifecycle::Change::Membership {
+                org: &current.org_user_id,
+                role: Some(updated.role),
+            },
+            &mut transaction,
+        )
+        .await?;
+        Ok(updated)
     }
     .await;
     super::org_membership_authority::finish(transaction, result).await
@@ -1215,6 +1252,23 @@ pub async fn revoke_membership(
                 "Membership changed; reload before removal".into(),
             ));
         }
+        super::org_channel_service::lifecycle::revoke_member_in_session(
+            db,
+            &mut transaction,
+            org_user_id,
+            member_user_id,
+        )
+        .await?;
+        super::execution_permission_enrollment::lifecycle::apply(
+            db,
+            member_user_id,
+            super::execution_permission_enrollment::lifecycle::Change::Membership {
+                org: org_user_id,
+                role: None,
+            },
+            &mut transaction,
+        )
+        .await?;
         Ok(())
     }
     .await;
@@ -1768,6 +1822,7 @@ mod tests {
         use chrono::Utc;
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: "11111111-2222-3333-4444-555555555555".to_string(),
             email: email.to_string(),
             password_hash: None,
