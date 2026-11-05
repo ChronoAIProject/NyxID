@@ -510,10 +510,10 @@
     "/ai/conversations/{conversation_id}/messages": {
       "get": {
         "operationId": "get_conversation_messages",
-        "summary": "Get messages from a Telnyx AI conversation.",
+        "summary": "Get messages from a Telnyx AI conversation, one page at a time.",
         "x-aevatar-tool": {
           "name": "get_conversation_messages",
-          "description": "Get messages from a Telnyx AI conversation.",
+          "description": "Get messages from a Telnyx AI conversation. Results are paged (default 20 per page); read meta.total_pages and request each page[number] with page[size] up to 100 to get the full transcript.",
           "readOnly": true,
           "destructive": false,
           "requiresApproval": false
@@ -538,6 +538,27 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "page[number]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Page to return, starting at 1."
+            }
+          },
+          {
+            "name": "page[size]",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Messages per page (Telnyx default 20, maximum 100)."
             }
           }
         ]
