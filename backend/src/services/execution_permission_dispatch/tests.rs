@@ -438,6 +438,7 @@ async fn twenty_duplicate_operation_claims_send_once_and_uncertain_never_replays
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
+            admission: OnceCell::new(),
             snapshot: OnceCell::new(),
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
@@ -503,6 +504,7 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
         drain: OnceLock::new(),
         authenticated_key: OnceLock::new(),
         source_credential: OnceLock::new(),
+        admission: OnceCell::new(),
         snapshot: OnceCell::new(),
         authority: OnceCell::new(),
         policies: tokio::sync::Mutex::new(Vec::new()),
@@ -874,15 +876,7 @@ async fn owner_ask_turn_covered_suppresses_risk_card_and_preserves_live_turn_fen
     )
     .await
     .unwrap();
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let key = f
         .state
         .db
@@ -1470,6 +1464,7 @@ async fn operation_candidates_use_independent_claims_and_prefer_reusable_coverag
         drain: OnceLock::new(),
         authenticated_key: OnceLock::new(),
         source_credential: OnceLock::new(),
+        admission: OnceCell::new(),
         snapshot: OnceCell::new(),
         authority: OnceCell::new(),
         policies: tokio::sync::Mutex::new(Vec::new()),
@@ -1510,15 +1505,7 @@ async fn covered_risk_keeps_webhook_policy_delegation_and_org_instruction_floors
         "https://example.com",
     )
     .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let key = f
         .state
         .db
@@ -1593,15 +1580,7 @@ async fn message_root_admission_recovery_and_stop_fence_persistent_permission() 
     use super::super::assistant_nyxagent as engine;
     let f = super::super::assistant_authority_tests::orchestrator_fixture("execution_task_runtime")
         .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
         conversation_id: None,
         text: "One logical task".into(),
@@ -1938,15 +1917,7 @@ async fn invocation_admission_has_a_server_root_and_cancel_fences_recovery() {
     let f =
         super::super::assistant_authority_tests::orchestrator_fixture("execution_invocation_root")
             .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
         conversation_id: None,
         text: "One invocation".into(),
@@ -2009,15 +1980,7 @@ async fn message_delegation_preserves_root_but_new_human_input_does_not_inherit_
     let f =
         super::super::assistant_authority_tests::orchestrator_fixture("execution_delegation_root")
             .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
         conversation_id: None,
         text: "A parent task".into(),
@@ -2594,3 +2557,6 @@ async fn mcp_denial_and_gap_keep_transport_parity_without_provider_effects() {
 
 #[path = "proposal_tests.rs"]
 pub(super) mod proposal_tests;
+
+#[path = "enrollment_tests.rs"]
+mod enrollment_tests;

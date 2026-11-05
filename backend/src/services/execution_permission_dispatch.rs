@@ -44,6 +44,7 @@ pub(crate) struct RequestContext {
     drain: OnceLock<Drain>,
     authenticated_key: OnceLock<String>,
     source_credential: OnceLock<String>,
+    admission: OnceCell<bool>,
     snapshot: OnceCell<Vec<ApprovalGrant>>,
     authority: OnceCell<Arc<authority::Snapshot>>,
     policies: tokio::sync::Mutex<Vec<(String, PolicyDecision)>>,
@@ -110,6 +111,30 @@ impl RequestContext {
         auth.execution_permission = Some(context);
         auth.assistant_chat = Some(Arc::new(chat));
         Ok(())
+    }
+
+    /// The hint only opts into this bounded live read. A fresh false result is
+    /// legacy; persisted task/proposal/child work must drain instead.
+    async fn admit_candidate(
+        &self,
+        db: &Database,
+        chat: Option<&acks::ChatAuthority>,
+    ) -> AppResult<bool> {
+        let enabled = *self
+            .admission
+            .get_or_try_init(|| async {
+                super::execution_permission_enrollment::live_enabled(db, &self.actor, None).await
+            })
+            .await?;
+        if !enabled
+            && (self.resume.is_some()
+                || self.descendant.is_some()
+                || self.participating()
+                || chat.is_some_and(|c| c.execution_task.is_some()))
+        {
+            return Err(refused());
+        }
+        Ok(enabled)
     }
 
     pub(crate) fn participating(&self) -> bool {
@@ -185,6 +210,7 @@ impl RequestContext {
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
+            admission: OnceCell::new(),
             snapshot: OnceCell::new(),
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
@@ -313,24 +339,26 @@ async fn require_enrolled(
     actor: &str,
     session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
-    let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","execution_permission_enrollment":1_i32};
-    // A write serializes disabling enrollment against a provider dispatch barrier.
-    let matched = if let Some(session) = session {
-        db.collection::<Document>("users")
+    let mut session = session;
+    if !super::execution_permission_enrollment::live_enabled(db, actor, session.as_deref_mut())
+        .await?
+    {
+        return Err(refused());
+    }
+    // Keep the existing account-disable fence, not a flag-change fence. The
+    // rollout flag can race dispatch; exact permission/claim fences cannot.
+    if let Some(session) = session {
+        let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
+        if db
+            .collection::<Document>("users")
             .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
             .session(session)
             .await?
             .matched_count
-            == 1
-    } else {
-        db.collection::<Document>("users")
-            .find_one(filter)
-            .projection(doc! {"_id":1})
-            .await?
-            .is_some()
-    };
-    if !matched {
-        return Err(refused());
+            != 1
+        {
+            return Err(refused());
+        }
     }
     Ok(())
 }
@@ -526,6 +554,9 @@ pub(crate) fn prepare<'a>(
         let Some(context) = context else {
             return Ok(None);
         };
+        if !context.admit_candidate(db, chat).await? {
+            return Ok(None);
+        }
         if let Some(native) = &context.native {
             native.require_effect(&effect)?;
         }
@@ -870,6 +901,7 @@ impl Permit {
                 drain: OnceLock::new(),
                 authenticated_key: OnceLock::new(),
                 source_credential: OnceLock::new(),
+                admission: OnceCell::new(),
                 snapshot: OnceCell::new(),
                 authority: OnceCell::new(),
                 policies: tokio::sync::Mutex::new(Vec::new()),
@@ -1371,6 +1403,12 @@ pub(crate) fn admit_http<'a>(
             nyxid_service_adapters::ifttt::AUTH_METHOD
                 | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
         ) || super::telnyx_platform_service::contract(&target.service).is_some()
+        {
+            return Ok(());
+        }
+        if !context
+            .admit_candidate(&state.db, auth.assistant_chat.as_deref())
+            .await?
         {
             return Ok(());
         }

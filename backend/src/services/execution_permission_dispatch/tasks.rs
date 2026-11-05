@@ -67,7 +67,23 @@ pub(crate) fn admit<'a>(
         if !start.execution_enrollment && inherited.is_none() {
             return Ok(());
         }
-        require_enrolled(db, &row.user_id, Some(session)).await?;
+        // Queue roots and voice requests already carry durable enrollment.
+        // Only a genuinely fresh human turn may choose legacy on a stale hint.
+        let marked = inherited.is_some()
+            || turn.voice_request_id.is_some()
+            || row.group_request_id.is_some()
+            || row.collaboration.is_some();
+        if marked {
+            require_enrolled(db, &row.user_id, Some(session)).await?;
+        } else if !super::super::execution_permission_enrollment::live_enabled(
+            db,
+            &row.user_id,
+            Some(session),
+        )
+        .await?
+        {
+            return Ok(());
+        }
         if let Some(request) = turn.voice_request_id.as_deref() {
             let voice = voice_task(db, session, row, request).await?;
             if inherited.as_ref().is_some_and(|t| !same_task(t, &voice)) {
@@ -319,6 +335,7 @@ pub(crate) async fn fence(
     session: &mut ClientSession,
     task: &TaskAdmission,
 ) -> AppResult<()> {
+    require_enrolled(db, &task.actor_user_id, Some(session)).await?;
     let filter = live_filter(task)?;
     if db
         .collection::<Document>(collection(&task.task))

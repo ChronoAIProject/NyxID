@@ -2199,6 +2199,8 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         std::time::Duration::from_secs(config.cluster_slot_renew_secs),
     );
 
+    let execution_enrollment =
+        crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
         local_machine_platform: None,
         db: db.clone(),
@@ -2412,6 +2414,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
+        execution_enrollment,
         telemetry: None,
     }
 }
