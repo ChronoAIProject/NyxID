@@ -264,7 +264,7 @@ pub const ORG_INSTRUCTION_FLAG_KEY: &str = "assistant:org-instruction-v1";
 pub const EXECUTION_PERMISSIONS_FLAG_KEY: &str = "permissions:execution-v1";
 const EXECUTION_PERMISSIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: EXECUTION_PERMISSIONS_FLAG_KEY,
-    description: "Stage explicit execution permissions after fleet readiness; contract readers only, no execution or authoring enabled yet",
+    description: "Explicit execution permissions for assistant chats: one approval card can save a permission (one operation, task, window or until revoked) and resume the request; covered requests skip repeated prompts. Per-person enables only; requires the reader, dispatch and authoring readiness capabilities",
     default_enabled: false,
 };
 const ORG_INSTRUCTION_FLAG: FeatureFlagDef = FeatureFlagDef {
