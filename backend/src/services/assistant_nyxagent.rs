@@ -3857,16 +3857,21 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
     request_stop_row(db, &existing).await
 }
 
-/// Return the already-loaded snapshot so human Stop can scope transports without
-/// an extra legacy read. `None` denotes main's broad legacy transport cleanup.
-pub async fn request_stop_target(
-    db: &Database,
-    owner: &str,
-    id: &str,
-) -> AppResult<Option<AssistantConversation>> {
+pub enum StopTarget {
+    Legacy,
+    Scoped(Option<Box<AssistantConversation>>),
+}
+
+/// Reuse the existing read and return only a successfully stopped turn. Losing
+/// the exact-turn fence must not cancel transports of a now-waiting run.
+pub async fn request_stop_target(db: &Database, owner: &str, id: &str) -> AppResult<StopTarget> {
     let row = get(db, owner, id).await?;
-    request_stop_row(db, &row).await?;
-    Ok(row.automation_v2.then_some(row))
+    let stopped = request_stop_row_target(db, &row).await?;
+    Ok(if row.automation_v2 {
+        StopTarget::Scoped(stopped.map(Box::new))
+    } else {
+        StopTarget::Legacy
+    })
 }
 
 /// Internal lifecycle callers have already authorized their parent resource.
@@ -3875,24 +3880,33 @@ pub(crate) async fn request_stop_row(
     db: &Database,
     existing: &AssistantConversation,
 ) -> AppResult<()> {
+    request_stop_row_target(db, existing).await.map(|_| ())
+}
+
+pub(crate) async fn request_stop_row_target(
+    db: &Database,
+    existing: &AssistantConversation,
+) -> AppResult<Option<AssistantConversation>> {
     let user_id = existing.user_id.as_str();
     let id = existing.id.as_str();
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let Some(existing_turn) = existing.active_turn.as_ref() else {
         if existing.automation_v2 {
-            return Ok(());
+            return Ok(None);
         }
-        return super::async_service_operation::cancel(db, user_id, id).await;
+        super::async_service_operation::cancel(db, user_id, id).await?;
+        return Ok(None);
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
     super::execution_permission_dispatch::tasks::stop(db, existing).await?;
     if existing_turn.heartbeat_at.is_none() && live_turn(existing, now).is_none() {
         if existing.automation_v2 {
-            return Ok(());
+            return Ok(None);
         }
-        return super::async_service_operation::cancel(db, user_id, id).await;
+        super::async_service_operation::cancel(db, user_id, id).await?;
+        return Ok(None);
     }
     let expected_turn_id = existing_turn.turn_id.clone();
     let row = db
@@ -3914,10 +3928,10 @@ pub(crate) async fn request_stop_row(
     }
     let Some(row) = row else {
         // A concurrent settlement, delete, or new turn won the exact fence.
-        return Ok(());
+        return Ok(None);
     };
     let Some(turn) = row.active_turn.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
     if existing.automation_v2 {
         super::async_service_operation::cancel_turn(db, user_id, id, &turn.turn_id).await?;
@@ -3939,7 +3953,7 @@ pub(crate) async fn request_stop_row(
     // behavior: the worker may observe the durable flag, while an absent worker
     // is reclaimed only by the existing lease/TTL path.
     let Some(heartbeat) = turn.heartbeat_at else {
-        return Ok(());
+        return Ok(Some(row));
     };
     let turn_id = turn.turn_id.clone();
     let delay = if heartbeat <= stale_before {
@@ -3958,7 +3972,7 @@ pub(crate) async fn request_stop_row(
             tracing::debug!(conversation_id = %id, turn_id = %turn_id, %error, "Forced assistant stop deferred");
         }
     });
-    Ok(())
+    Ok(Some(row))
 }
 
 /// Record that a claimed turn waits for one of its owner's running slots,

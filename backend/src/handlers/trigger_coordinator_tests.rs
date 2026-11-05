@@ -278,9 +278,12 @@ async fn v2_cancel_is_exact_idempotent_and_idle_stop_keeps_waiting_run() {
         v2::barrier(&state.db, &run).await.unwrap(),
         v2::Barrier::Waiting
     );
-    engine::request_stop(&state.db, OWNER, &row.id)
-        .await
-        .unwrap();
+    assert!(matches!(
+        engine::request_stop_target(&state.db, OWNER, &row.id)
+            .await
+            .unwrap(),
+        engine::StopTarget::Scoped(None)
+    ));
     assert_eq!(
         state
             .db
@@ -1297,9 +1300,14 @@ async fn v2_stop_root_targets_descendants_but_stale_stop_cannot_select_waiting_w
             .unwrap()
             .is_empty()
     );
-    engine::request_stop(&state.db, OWNER, &row.id)
-        .await
-        .unwrap();
+    let engine::StopTarget::Scoped(Some(stopped)) =
+        engine::request_stop_target(&state.db, OWNER, &row.id)
+            .await
+            .unwrap()
+    else {
+        panic!("A successful exact Stop must return its transport target");
+    };
+    assert!(stopped.active_turn.as_ref().unwrap().stop_requested);
     let targets = v2::stopped_targets(&state.db, &row).await.unwrap();
     assert!(targets.iter().any(|target| target.id == descendant.id));
     assert!(
@@ -1324,7 +1332,12 @@ async fn v2_stop_root_targets_descendants_but_stale_stop_cannot_select_waiting_w
         v2::barrier(&state.db, &run).await.unwrap(),
         v2::Barrier::Waiting
     );
-    engine::request_stop_row(&state.db, &row).await.unwrap();
+    assert!(
+        engine::request_stop_row_target(&state.db, &row)
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(
         v2::stopped_targets(&state.db, &row)
             .await
@@ -1555,12 +1568,12 @@ async fn legacy_turn_stop_and_group_paths_do_not_read_or_persist_v2_state() {
     assert!(!row.automation_v2);
     assert!(row.active_turn.as_ref().unwrap().automation_work.is_none());
     save_reply(&state, &row, "Ordinary reply", None).await;
-    assert!(
+    assert!(matches!(
         engine::request_stop_target(&state.db, OWNER, &row.id)
             .await
-            .unwrap()
-            .is_none()
-    );
+            .unwrap(),
+        engine::StopTarget::Legacy
+    ));
     let group = crate::services::assistant_group_service::create(
         &state.db,
         OWNER,

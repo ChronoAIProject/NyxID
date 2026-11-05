@@ -1536,23 +1536,29 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    if let Some(snapshot) = engine::request_stop_target(&state.db, &user_id, &id).await? {
-        if let Some(turn) = snapshot.active_turn.as_ref() {
-            super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
+    match engine::request_stop_target(&state.db, &user_id, &id).await? {
+        engine::StopTarget::Scoped(Some(snapshot)) => {
+            if let Some(turn) = snapshot.active_turn.as_ref() {
+                super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
+                    .await?;
+                let descendants = crate::services::trigger_schedule::continuation::stopped_targets(
+                    &state.db, &snapshot,
+                )
                 .await?;
-            let descendants = crate::services::trigger_schedule::continuation::stopped_targets(
-                &state.db, &snapshot,
-            )
-            .await?;
-            if descendants.is_empty() {
-                crate::services::machine_service::cancel_turn(&state, &user_id, &id, turn).await?;
-            } else {
-                super::trigger_scheduler::cancel_transports(&state, &descendants).await?;
+                if descendants.is_empty() {
+                    crate::services::machine_service::cancel_turn(&state, &user_id, &id, turn)
+                        .await?;
+                } else {
+                    super::trigger_scheduler::cancel_transports(&state, &descendants).await?;
+                }
             }
         }
-    } else {
-        super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
-        super::machine_cancel::conversation(&state, &user_id, &id).await?;
+        engine::StopTarget::Scoped(None) => {}
+        engine::StopTarget::Legacy => {
+            super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id)
+                .await?;
+            super::machine_cancel::conversation(&state, &user_id, &id).await?;
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
