@@ -15,6 +15,7 @@ use mongodb::{
 };
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    super::announcements::ensure_indexes(db).await?;
     db.collection::<VoiceSession>(COLLECTION_NAME)
         .create_indexes([
             IndexModel::builder()
@@ -47,6 +48,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn admit(
     db: &Database,
     user: &str,
@@ -65,6 +67,32 @@ pub async fn admit(
         credential_identity,
         worker,
         false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn admit_for_client_key(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    request: &str,
+    preferences: VoicePreferences,
+    identity: String,
+    worker: &str,
+    key: Option<super::client_key::ClientKey>,
+) -> AppResult<VoiceSession> {
+    admit_audio(
+        db,
+        user,
+        conversation,
+        request,
+        preferences,
+        identity,
+        worker,
+        false,
+        key,
     )
     .await
 }
@@ -87,6 +115,7 @@ pub async fn admit_dictation(
         identity,
         worker,
         true,
+        None,
     )
     .await
 }
@@ -101,6 +130,7 @@ async fn admit_audio(
     credential_identity: String,
     worker: &str,
     dictation: bool,
+    client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<VoiceSession> {
     super::super::assistant_voice::require_enabled(db, user)
         .await
@@ -130,6 +160,8 @@ async fn admit_audio(
     let shared_execution =
         super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        responses: Default::default(),
+        client_key,
         last_work_at: None,
         shared_execution,
         id: uuid::Uuid::new_v4().to_string(),
@@ -182,6 +214,7 @@ async fn admit_audio(
         .start_transaction()
         .and_run2(async move |tx| {
             let result: AppResult<VoiceSession> = Box::pin(async {
+                super::client_key::fence_call(&db, &saved, tx).await?;
                 if db
                     .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
                     .update_one(
@@ -315,6 +348,10 @@ pub async fn close(
                     && closed.billing_finalized
                     && (closed.final_usage_confirmed || Utc::now() >= closed.reconcile_deadline)
                 {
+                    db.collection::<Document>(super::announcements::COLLECTION)
+                        .delete_many(doc! {"user_id":&closed.user_id,"session_id":&closed.id})
+                        .session(&mut *tx)
+                        .await?;
                     db.collection::<VoiceSession>(COLLECTION_NAME)
                         .delete_one(doc! {"_id":&closed.id})
                         .session(&mut *tx)
@@ -346,6 +383,7 @@ pub async fn claim_orphans(db: &Database, worker: &str) -> AppResult<Vec<VoiceSe
     Ok(claimed)
 }
 
+#[cfg(test)]
 pub async fn control(
     db: &Database,
     user: &str,
@@ -354,6 +392,30 @@ pub async fn control(
     command_id: &str,
     expected_revision: i64,
     action: &str,
+) -> AppResult<VoiceSession> {
+    control_for_caller(
+        db,
+        user,
+        conversation,
+        id,
+        command_id,
+        expected_revision,
+        action,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn control_for_caller(
+    db: &Database,
+    user: &str,
+    conversation: &str,
+    id: &str,
+    command_id: &str,
+    expected_revision: i64,
+    action: &str,
+    require_source: bool,
 ) -> AppResult<VoiceSession> {
     if uuid::Uuid::parse_str(command_id).is_err() || !matches!(action, "mute" | "unmute" | "end") {
         return Err(AppError::ValidationError("Invalid voice control".into()));
@@ -380,11 +442,40 @@ pub async fn control(
     if action != "end" {
         filter.insert("control_revision", expected_revision);
     }
-    db.collection::<VoiceSession>(COLLECTION_NAME)
-        .find_one_and_update(filter, doc! {"$set":set,"$inc":{"control_revision":1}})
-        .return_document(ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::Conflict("Voice controls changed; refresh the session".into()))
+    let mut tx = db.client().start_session().await?;
+    let db = db.clone();
+    tx.start_transaction()
+        .and_run2(async move |tx| {
+            let result = Box::pin(async {
+                if require_source {
+                    super::client_key::fence_call(&db, &row, tx).await?;
+                    super::client_key::call_operation(
+                        &db,
+                        &row,
+                        "POST",
+                        &format!("/voice/sessions/{}/control", row.id),
+                        false,
+                        tx,
+                    )
+                    .await?;
+                }
+                db.collection::<VoiceSession>(COLLECTION_NAME)
+                    .find_one_and_update(
+                        filter.clone(),
+                        doc! {"$set":&set,"$inc":{"control_revision":1}},
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut *tx)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Conflict("Voice controls changed; refresh the session".into())
+                    })
+            })
+            .await;
+            super::super::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(super::super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn heartbeat(

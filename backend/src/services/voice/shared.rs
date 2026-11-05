@@ -128,6 +128,7 @@ pub async fn revalidate(db: &Database, call: &VoiceSession) -> AppResult<()> {
 }
 
 pub async fn before_start(state: &crate::AppState, call: &VoiceSession) -> AppResult<()> {
+    Box::pin(super::client_key::revalidate(&state.db, call)).await?;
     if call.shared_execution.is_some() {
         revalidate(&state.db, call).await?;
         let current = Box::pin(super::credentials::resolve(

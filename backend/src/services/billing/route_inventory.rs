@@ -165,6 +165,21 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
     },
     BillingRouteSpec {
+        handler: "handlers::assistant_voice::internal::service_request",
+        route: "/api/v1/proxy/nyxbot-voice/{service_id}/{*path}",
+        policy: BillingRoutePolicy::Exempt("Voice runtime owns call usage and settlement"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_voice::internal::service_root",
+        route: "/api/v1/proxy/nyxbot-voice/{service_id}",
+        policy: BillingRoutePolicy::Exempt("Voice service root has no operation"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::assistant_voice::internal::service_root",
+        route: "/api/v1/proxy/nyxbot-voice/{service_id}/",
+        policy: BillingRoutePolicy::Exempt("Voice service root has no operation"),
+    },
+    BillingRouteSpec {
         handler: "handlers::proxy::proxy_request",
         route: "/api/v1/proxy/{service_id}/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),

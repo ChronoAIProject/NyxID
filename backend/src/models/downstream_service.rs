@@ -85,6 +85,10 @@ pub struct VoiceChoice {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct VoiceInference {
     pub protocol: VoiceProtocol,
+    /// Catalog-selected task model. Explicit null means dictation only; preserve
+    /// it on save so migration can distinguish an older absent field.
+    #[serde(default)]
+    pub delegation_model: Option<String>,
     pub models: Vec<VoiceModel>,
     pub voices: Vec<VoiceChoice>,
     pub usage_source: VoiceUsageSource,

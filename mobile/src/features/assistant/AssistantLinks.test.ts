@@ -547,7 +547,7 @@ test("real link host routes account panels, preserves channel URL, retains the t
       }),
     },
     "../../lib/env": {
-      NYXID_FRONTEND_URL: origin,
+      getFrontendUrl: () => origin,
       NYXID_TRUSTED_FRONTEND_URLS: [origin],
       firstPartyFrontendUrls: () => [origin],
     },

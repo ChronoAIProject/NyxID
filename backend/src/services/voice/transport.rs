@@ -1,7 +1,7 @@
 //! Provider boundary; only server-generated normalized commands cross it.
 use super::{grok::Handle, openai};
 use crate::errors::AppResult;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub enum Transport {
     Openai(Box<openai::Socket>),
@@ -25,6 +25,24 @@ impl Transport {
             Self::Openai(socket) => openai::send(socket, event).await,
             Self::Grok(socket) => socket.send(event).await,
         }
+    }
+    /// Presentation facts are context for natural speech, never an exact read-back.
+    pub(super) async fn presentation_context(&mut self, facts: Value) -> AppResult<()> {
+        let content = facts.to_string();
+        if content.len() > super::runtime::COMMENTARY_MAX_BYTES {
+            return Err(crate::errors::AppError::Internal(
+                "Voice presentation context exceeds its bound".into(),
+            ));
+        }
+        if self.is_grok() {
+            return self
+                .send(json!({"type":"nyx.presentation_context","facts":facts}))
+                .await;
+        }
+        self.send(json!({"type":"session.commentary.append",
+            "event_id":uuid::Uuid::new_v4().to_string(),
+            "delegation_id":null,"content":content}))
+            .await
     }
     pub async fn receive(&mut self) -> AppResult<Option<Value>> {
         match self {
