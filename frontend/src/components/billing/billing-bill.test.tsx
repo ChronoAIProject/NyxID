@@ -41,7 +41,14 @@ describe("BillingBill", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Download receipt" }),
     );
-    expect(mocks.receipt).toHaveBeenCalledWith("invoice-1");
+    expect(mocks.receipt).toHaveBeenCalledWith("invoice-1", undefined);
+  });
+  it("uses the selected org for its bill, invoices and receipt", async () => {
+    render(<BillingBill enabled ownerId="org" />);
+    expect(mocks.bill).toHaveBeenCalledWith(true, "org");
+    expect(mocks.history).toHaveBeenCalledWith(1, true, "org");
+    await userEvent.click(screen.getByRole("button", { name: "Download receipt" }));
+    expect(mocks.receipt).toHaveBeenCalledWith("invoice-1", "org");
   });
   it("uses currency amounts, trimmed rates, UTC dates and human payment labels", () => {
     const original = Date.prototype.toLocaleDateString;
@@ -125,7 +132,7 @@ describe("BillingBill", () => {
   it("does not expose bill UI before rollout is ready", () => {
     render(<BillingBill enabled={false} />);
     expect(screen.queryByText("Current bill")).not.toBeInTheDocument();
-    expect(mocks.bill).toHaveBeenCalledWith(false);
-    expect(mocks.history).toHaveBeenCalledWith(1, false);
+    expect(mocks.bill).toHaveBeenCalledWith(false, undefined);
+    expect(mocks.history).toHaveBeenCalledWith(1, false, undefined);
   });
 });

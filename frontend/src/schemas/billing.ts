@@ -16,6 +16,7 @@ export const BILLING_SERVICE_FILTER_LIMIT = 50;
 const billingServiceKeySchema = z.string().trim().min(1).max(200);
 
 export const billingSearchSchema = z.object({
+  ownerId: z.string().uuid().optional().catch(undefined),
   tab: z.enum(["billing", "usage"]).optional().catch(undefined),
   period: z.enum(BILLING_USAGE_PERIODS).optional().catch(undefined),
   /** Legacy single-service filter; `services` wins when both are present. */
@@ -47,6 +48,7 @@ export function normalizeBillingSearch(search: Record<string, unknown>) {
       parsed.services ??
       (parsed.service && parsed.service !== "all" ? [parsed.service] : []),
     action: parsed.action,
+    ownerId: parsed.ownerId,
   };
 }
 export type BillingSearch = ReturnType<typeof normalizeBillingSearch>;
