@@ -35,7 +35,6 @@ async fn authorize(state: &AppState, auth: &AuthUser) -> AppResult<ProducerAutho
     }
     sandbox_runtime::authorize_producer(
         &state.db,
-        state.config.cma_billing_service_account_id.as_deref(),
         &auth.user_id.to_string(),
         &auth.scope,
         auth.token_jti.as_deref().unwrap_or_default(),
