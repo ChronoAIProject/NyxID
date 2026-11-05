@@ -1,3 +1,4 @@
+import { LarkBotSetupStatus, LARK_VERIFY_SUCCESS } from "@/components/channels/lark-bot-setup-status";
 import { ChannelActivities, LatestActivity } from "@/components/channels/channel-activities";
 import { WhatsappNativeSection } from "@/components/channels/whatsapp-native";
 import { useChannelActivities } from "@/hooks/use-channel-activities";
@@ -1007,17 +1008,18 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
         : "Optional — only required when Encrypt is enabled in the Lark/Feishu console.",
     });
     rows.push({
-      status: bot.app_secret_configured ? "done" : "todo",
+      status: bot.last_verification?.status === "verified" || bot.app_secret_configured ? "done" : "waiting",
       label: "App ID + App Secret",
-      hint: bot.app_secret_configured
-        ? "Credentials configured."
-        : "Set under Edit Verification below — needed for NyxID to call the Lark/Feishu APIs and post replies.",
+      hint: bot.last_verification?.status === "verified"
+        ? "App credentials verified. Callback and member verification are separate."
+        : bot.app_secret_configured ? "Credentials configured; use Verify Bot to check them."
+          : "Use Verify Bot to check the saved app credentials. If credentials are missing, set them under Edit Verification below.",
     });
     if (bot.permission_setup_url) {
       rows.push({
-        status: "todo",
+        status: "waiting",
         label: "Bot permissions",
-        hint: "Bulk-enable the recommended scopes in the Permissions section below.",
+        hint: "Not inspected by NyxID. Review the recommended scopes in the Permissions section below.",
       });
     }
   } else {
@@ -1040,12 +1042,13 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
     <div className="space-y-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-6">
       <div className="space-y-1">
         <p className="type-card-title text-foreground">
-          {isDiscord ? "Finish Discord setup" : "Finish webhook setup"}
+          {isDiscord ? "Finish Discord setup" : isLark ? "Finish Lark / Feishu setup" : "Finish webhook setup"}
         </p>
         <p className="text-14 text-muted-foreground">
           {isDiscord ? "Ordinary chat arrives through the Gateway connection. Send the bot a DM or @mention it; the first authenticated message activates the bot. The Interactions Endpoint URL is optional and only needed for slash commands/components." : <>Register the URL below in {getPlatform(bot.platform).label} and complete
           the checklist. The bot moves to Active automatically once{" "}
           {getPlatform(bot.platform).label} delivers a verified inbound message.</>}
+          {isLark ? " The URL challenge checks callback reachability only; it does not activate the bot or verify a member. Review Setup status below for the separate steps." : null}
         </p>
       </div>
 
@@ -1129,8 +1132,9 @@ export function ChannelBotDetailPage() {
     setVerificationContext({ id: bot.id, updatedAt: bot.updated_at, previousCheckId: bot.last_verification?.id ?? null });
     try {
       const result = await verifyMutation.mutateAsync(botId);
-      if (result.last_verification?.status === "verified") toast.success("WhatsApp credentials verified");
+      if (result.last_verification?.status === "verified") toast.success(bot.platform === "lark" || bot.platform === "feishu" ? LARK_VERIFY_SUCCESS : "WhatsApp credentials verified");
       else if (result.status === "failed" || result.status === "invalid") toast.error("Bot verification failed");
+      else if (bot.platform === "lark" || bot.platform === "feishu") toast.success(LARK_VERIFY_SUCCESS);
       else if (result.status === "active") toast.success("Bot verified successfully");
       else toast.success("Bot verification completed");
     } catch (err) {
@@ -1205,11 +1209,15 @@ export function ChannelBotDetailPage() {
         <div role="alert"><ErrorBanner message={bot.error} /></div>
       ) : verifyMutation.variables === botId && verifyMutation.isSuccess && (
         <p role="status" className="text-13 text-muted-foreground">
-          Verification complete. Status: {statusLabel(verifyMutation.data.status)}.
+          {bot.platform === "lark" || bot.platform === "feishu"
+            ? verifyMutation.data.last_verification?.status === "verified" ? LARK_VERIFY_SUCCESS : "Credential check finished. Review setup status below; callback and member verification are separate."
+            : `Verification complete. Status: ${statusLabel(verifyMutation.data.status)}.`}
         </p>
       ))}
 
       {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
+
+      {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
 
       {/* Bot Information */}
       <DetailSection

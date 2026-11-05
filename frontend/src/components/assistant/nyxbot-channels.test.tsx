@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { assistantAgentSchema, nyxAgentChannelAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
@@ -31,7 +31,7 @@ vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: () => data.orgChannels,
 }));
 vi.mock("./org-specialist-channel-settings", () => ({
-  OrgSpecialistChannelSettings: () => <div>Member verification</div>,
+  OrgSpecialistChannelSettings: () => <section data-member-verification="" tabIndex={-1} aria-label="Verify my chat account">Member verification</section>,
 }));
 vi.mock("./nyxbot-channel-chats", () => ({
   ChannelChats: ({ agents }: { agents: readonly AssistantAgent[] }) => (
@@ -399,4 +399,35 @@ it("2183 never presents an older relay-sourced gateway as native", () => {
   render(<ChannelBotsManager agents={[]} />);
   expect(screen.getByText(/Agent Event Gateway with NyxID relay intake/)).toBeVisible();
   expect(screen.queryByText(/Native gateway selected/)).toBeNull();
+});
+
+it("focuses the exact linked connection without starting member confirmation", () => {
+  data.channels = [connection("active"), { ...connection("active"), id: "second", bot_label: "Other bot" }];
+  render(<ChannelBotsManager agents={[agent("first")]} connectionId="second" />);
+  expect(screen.getByRole("listitem", { name: "Other bot connection" })).toHaveFocus();
+  expect(data.connect).not.toHaveBeenCalled();
+  expect(data.link).not.toHaveBeenCalled();
+});
+
+it("explains individual verification after connecting an organization specialist", async () => {
+  data.orgChannels = true;
+  data.orgs = [{ id: "team", your_role: "admin" }];
+  data.bots = [{ id: "owned", user_id: "team", label: "Team bot", platform: "lark" }];
+  const specialist = { ...agent("org-specialist", "idle", "org"), owner_id: "team" };
+  data.connect.mockResolvedValue({ channel_agent: { bot_label: "Team bot", status: "active", org_specialist: { org_id: "team" } } });
+  render(<ChannelBotsManager agents={[specialist]} agent={specialist} />);
+  await userEvent.click(screen.getByRole("button", { name: "Connect another bot" }));
+  await userEvent.click(screen.getByRole("button", { name: "Connect Team bot to org-specialist" }));
+  expect(await screen.findByRole("status")).toHaveTextContent("Each member, including admins, must verify their own chat account");
+  expect(screen.queryByText("LINK123")).not.toBeInTheDocument();
+});
+
+
+it("deep links to member verification within the matching organization connection", () => {
+  const org = { org_id: "team", guest_enabled: false, delegated_service_ids: [] };
+  data.channels = [{ ...connection("active"), org_specialist: org }, { ...connection("active"), id: "second", bot_label: "Other bot", org_specialist: org }];
+  render(<ChannelBotsManager agents={[agent("first")]} connectionId="second" />);
+  const row = screen.getByRole("listitem", { name: "Other bot connection" });
+  expect(within(row).getByRole("region", { name: "Verify my chat account" })).toHaveFocus();
+  expect(data.connect).not.toHaveBeenCalled();
 });

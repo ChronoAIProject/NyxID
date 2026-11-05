@@ -3905,7 +3905,11 @@ async fn org_channel_targets_are_refused_before_any_owner_confirmation() {
                     assert!(error, "{tool} {selector}: {value}");
                     assert_eq!(
                         value,
-                        acks::organization_agent_channel_refusal(),
+                        if selector == agent.id && tool != "nyxid__channel_bot_setup_link" {
+                            acks::organization_agent_channel_disabled_refusal()
+                        } else {
+                            acks::organization_agent_channel_refusal()
+                        },
                         "{tool} {selector} {mode:?}"
                     );
                     assert_eq!(

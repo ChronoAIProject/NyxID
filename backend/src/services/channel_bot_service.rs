@@ -1901,15 +1901,19 @@ pub async fn record_webhook_error(
 
 /// Best-effort liveness stamp after an authenticated, admitted inbound batch.
 /// Clears webhook and failure diagnostics that the delivery disproves.
-pub async fn record_inbound_success(db: &mongodb::Database, bot: &ChannelBot) {
+pub(crate) async fn record_inbound_success(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    source: super::channel_inbound_service::InboundSource,
+) {
     let now = mongodb::bson::DateTime::now();
     let mut set = doc! {
         "diagnostics.last_inbound_at": now,
-        "diagnostics.last_inbound_source": if bot.webhook_registered { "webhook" } else { "poll" },
+        "diagnostics.last_inbound_source": source.as_str(),
         "diagnostics.consecutive_errors": 0,
         "diagnostics.last_webhook_error": mongodb::bson::Bson::Null,
     };
-    if bot.webhook_registered {
+    if source == super::channel_inbound_service::InboundSource::Webhook {
         set.insert("diagnostics.last_webhook_at", now);
     }
     // Only delivery-shaped reasons are disproved by a successful delivery.
@@ -1938,6 +1942,25 @@ pub async fn record_inbound_success(db: &mongodb::Database, bot: &ChannelBot) {
     .await;
     if let Err(error) = result {
         tracing::warn!(%error, bot_id = %bot.id, "channel bot inbound diagnostics write failed");
+    }
+}
+
+/// Separate receipt from routing: a missing ChannelMessage is not missing inbound.
+pub(crate) async fn record_inbound_route(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    result: &'static str,
+) {
+    if let Err(error) = db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &bot.id, "user_id": &bot.user_id },
+            doc! { "$set": { "diagnostics.last_route_at": mongodb::bson::DateTime::now(),
+            "diagnostics.last_route_result": result } },
+        )
+        .await
+    {
+        tracing::warn!(%error, bot_id = %bot.id, "channel bot route diagnostics write failed");
     }
 }
 

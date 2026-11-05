@@ -1084,6 +1084,7 @@ function NyxAgentThreadPage() {
           agentId={openDetailsAgentId}
           agents={agents.data?.agents ?? []}
           proposalId={search.proposal}
+          connectionId={search.connection}
           tab={search.details}
           open={openDetailsAgentId !== undefined}
           onOpenChange={(open) => {

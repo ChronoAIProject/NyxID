@@ -4,6 +4,7 @@ export const orgChannelSettingsSchema = z.object({
   channel_id: z.string(),
   org_id: z.string(),
   can_manage: z.boolean(),
+  member_verified: z.boolean().optional(),
   guest_enabled: z.boolean(),
   delegated_service_ids: z.array(z.string()),
   daily_credits: z.string().nullable(),
