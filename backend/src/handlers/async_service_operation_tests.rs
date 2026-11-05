@@ -1642,6 +1642,7 @@ async fn attach_voice(
     .await;
     let now = chrono::Utc::now();
     let request = VoiceRequest {
+        execution_enrolled: false,
         model_task: None,
         progress: None,
         timing: Default::default(),
@@ -2624,4 +2625,222 @@ async fn cma_origin_exact_candidates_and_connection_discovery_ignore_terminal_hi
         }
     }
     assert_eq!(ids.len(), 151);
+}
+
+#[tokio::test]
+async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_task_and_actor() {
+    use crate::services::execution_permission_dispatch::phase_b_tests as permissions;
+    for outcome in ["covered", "gap", "prohibited"] {
+        let a = AsyncFixture::new().await;
+        permissions::enroll(&a.f.state.db, &a.f.owner).await;
+        let root = permissions::task(&a.f.state.db, &a.f.row).await;
+        permissions::legacy_review(&a.f.state, &a.f.owner).await;
+        let watch = a.submit().await;
+        assert_eq!(watch.execution_task.as_ref().unwrap().task, root.task);
+        a.due().await;
+        let watch = watches::claim(&a.f.state.db).await.unwrap().unwrap();
+        engine::finish_turn(
+            &a.f.state.db,
+            &a.f.row,
+            &a.f.row.credential_api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: "The operation is running".into(),
+                session_id: None,
+                response_id: None,
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        let service = crate::services::user_service_service::find_user_service_by_id(
+            &a.f.state.db,
+            &a.service,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let catalog = service.catalog_service_id.unwrap();
+        a.f.state.db.collection::<bson::Document>("service_approval_configs").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&a.f.owner,"service_id":&catalog,"service_name":"Watch","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        let key =
+            crate::services::key_service::get_api_key(&a.f.state.db, &a.f.owner, &watch.api_key_id)
+                .await
+                .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user_for_watch(&a.f.state.db, &key, &watch)
+            .await
+            .unwrap();
+        if outcome != "gap" {
+            let mut grant =
+                permissions::grant(&a.f.state, &auth, &a.service, "GET", "/executions/{id}").await;
+            if outcome == "prohibited" {
+                grant.execution.as_mut().unwrap().version = 99;
+            }
+            a.f.state
+                .db
+                .collection("approval_grants")
+                .insert_one(grant)
+                .await
+                .unwrap();
+        }
+        let before = a.calls.lock().unwrap().len();
+        let result =
+            async_operations::call(&a.f.state, &watch, &watch.contract.status_operation).await;
+        if outcome == "covered" {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(result.is_err(), "{result:?}");
+        }
+        assert_eq!(
+            a.calls.lock().unwrap().len(),
+            before + usize::from(outcome == "covered")
+        );
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>("approval_requests")
+                .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                .await
+                .unwrap(),
+            0
+        );
+        if outcome != "gap" {
+            assert_eq!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        if outcome == "gap" {
+            assert!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap()
+                    > 0,
+                "watch gap retains legacy approval"
+            );
+        }
+        if outcome == "covered" {
+            // A status permission does not cover result or cancellation.
+            assert!(
+                async_operations::call(&a.f.state, &watch, &watch.contract.result_operation)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(a.calls.lock().unwrap().len(), before + 1);
+            let mut uncertain = watch.clone();
+            uncertain.state = "submitting".into();
+            uncertain.operation_id = None;
+            assert!(
+                async_operations::call(&a.f.state, &uncertain, &watch.contract.status_operation)
+                    .await
+                    .is_err()
+            );
+            let mut other = watch.clone();
+            other.user_id = uuid::Uuid::new_v4().to_string();
+            assert!(
+                async_operations::call(&a.f.state, &other, &watch.contract.status_operation)
+                    .await
+                    .is_err()
+            );
+            a.f.state
+                .db
+                .collection::<bson::Document>("assistant_messages")
+                .update_one(
+                    doc! {"_id":&root.task.root_id},
+                    doc! {"$set":{"execution_task.cancelled":true}},
+                )
+                .await
+                .unwrap();
+            assert!(
+                async_operations::call(&a.f.state, &watch, &watch.contract.status_operation)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(a.calls.lock().unwrap().len(), before + 1);
+        }
+        a.f.state.db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn execution_permission_watch_submission_has_legacy_gap_and_one_covered_send() {
+    use crate::services::execution_permission_dispatch::phase_b_tests as permissions;
+    for outcome in ["covered", "gap", "prohibited"] {
+        let a = AsyncFixture::new().await;
+        permissions::enroll(&a.f.state.db, &a.f.owner).await;
+        permissions::task(&a.f.state.db, &a.f.row).await;
+        permissions::legacy_review(&a.f.state, &a.f.owner).await;
+        let service = crate::services::user_service_service::find_user_service_by_id(
+            &a.f.state.db,
+            &a.service,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        a.f.state.db.collection::<bson::Document>("service_approval_configs").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&a.f.owner,"service_id":&service.catalog_service_id,"service_name":"Watch","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        let key = crate::services::key_service::get_api_key(
+            &a.f.state.db,
+            &a.f.owner,
+            &a.f.row.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&a.f.state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        if outcome != "gap" {
+            let mut grant =
+                permissions::grant(&a.f.state, &auth, &a.service, "POST", "/executions").await;
+            if outcome == "prohibited" {
+                grant.execution.as_mut().unwrap().version = 99;
+            }
+            a.f.state
+                .db
+                .collection("approval_grants")
+                .insert_one(grant)
+                .await
+                .unwrap();
+        }
+        let auth = authenticate(&a.f).await;
+        let response=direct_call(&a.f,&auth,"sandbox__submit_execution_handler",json!({"Idempotency-Key":"phase-b-submit","script":"print('hello')","language":"python"})).await;
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["result"]["isError"], outcome != "covered", "{value}");
+        assert_eq!(
+            a.calls.lock().unwrap().len(),
+            usize::from(outcome == "covered")
+        );
+        assert_eq!(
+            a.f.state
+                .db
+                .collection::<bson::Document>("approval_requests")
+                .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                .await
+                .unwrap(),
+            0
+        );
+        if outcome != "gap" {
+            assert_eq!(
+                a.f.state
+                    .db
+                    .collection::<bson::Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        a.f.state.db.drop().await.unwrap();
+    }
 }

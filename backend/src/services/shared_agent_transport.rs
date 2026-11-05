@@ -73,7 +73,7 @@ pub async fn require_stream_policy(
 }
 
 pub async fn revalidate(db: &Database, row: &SharedExecution) -> AppResult<()> {
-    revalidate_inner(db, row, false).await
+    revalidate_inner(db, row, false, false).await
 }
 
 pub async fn revalidate_watch(
@@ -81,12 +81,37 @@ pub async fn revalidate_watch(
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
 ) -> AppResult<()> {
     if let Some(binding) = &watch.shared_execution {
-        revalidate_inner(db, binding, watch.state == "cancelling").await?;
+        revalidate_inner(
+            db,
+            binding,
+            watch.state == "cancelling",
+            watch.execution_task.is_some(),
+        )
+        .await?;
     }
     Ok(())
 }
 
-async fn revalidate_inner(db: &Database, row: &SharedExecution, cleanup: bool) -> AppResult<()> {
+pub(crate) async fn revalidate_permission_submission(
+    db: &Database,
+    row: &SharedExecution,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+) -> AppResult<()> {
+    let covered = chat.execution_task.is_some()
+        && super::execution_permission_dispatch::covers(
+            chat,
+            crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent,
+            &row.connection,
+        );
+    revalidate_inner(db, row, false, covered).await
+}
+
+async fn revalidate_inner(
+    db: &Database,
+    row: &SharedExecution,
+    cleanup: bool,
+    permission_watch: bool,
+) -> AppResult<()> {
     require_ready(db).await?;
     let key = db
         .collection::<ApiKey>(crate::models::api_key::COLLECTION_NAME)
@@ -167,7 +192,7 @@ async fn revalidate_inner(db: &Database, row: &SharedExecution, cleanup: bool) -
             }
         }
     }
-    if service.user_id == row.actor {
+    if service.user_id == row.actor && !(permission_watch && row.consent_id.is_none()) {
         consent::Permit::from_execution(row)
             .ok_or_else(sharing::missing)?
             .revalidate(db, shared, &row.actor)

@@ -35,13 +35,12 @@ pub(crate) fn admit<'a>(
     Box::pin(async move {
         let turn = row.active_turn.as_ref().ok_or_else(refused)?;
         if row.guest_turn
-            || row.automation_thread
+            || (row.automation_thread && row.voice_parent_conversation_id.is_none())
             || row.platform_thread.is_some()
-            || turn.voice_request_id.is_some()
         {
             return Ok(());
         }
-        let inherited = turn
+        let mut inherited = turn
             .execution_task
             .clone()
             .or_else(|| start.execution_parent.as_ref().map(|p| p.task.clone()))
@@ -69,6 +68,13 @@ pub(crate) fn admit<'a>(
             return Ok(());
         }
         require_enrolled(db, &row.user_id, Some(session)).await?;
+        if let Some(request) = turn.voice_request_id.as_deref() {
+            let voice = voice_task(db, session, row, request).await?;
+            if inherited.as_ref().is_some_and(|t| !same_task(t, &voice)) {
+                return Err(refused());
+            }
+            inherited = Some(voice);
+        }
         if let Some(parent) = &start.execution_parent {
             let parent_turn = parent.task.parent_turn_id.as_deref().ok_or_else(refused)?;
             let conversations = db.collection::<AssistantConversation>("assistant_conversations");
@@ -207,6 +213,69 @@ pub(crate) fn admit<'a>(
     })
 }
 
+/// Voice continuations/recovery reuse the original request's visible message
+/// root. The root request and message are fenced together with turn admission.
+async fn voice_task(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    request_id: &str,
+) -> AppResult<TaskAdmission> {
+    use crate::models::assistant_voice::{REQUESTS, VoiceRequest};
+    let requests = db.collection::<VoiceRequest>(REQUESTS);
+    let source = requests
+        .find_one(doc! {"_id":request_id,"user_id":&row.user_id,
+        "task_conversation_id":&row.id,"state":{"$ne":"cancelled"}})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(refused)?;
+    let root = requests.find_one_and_update(doc! {
+        "_id":source.root_request_id.as_deref().unwrap_or(&source.id),"user_id":&row.user_id,
+        "task_conversation_id":&row.id,"execution_enrolled":true,"state":{"$ne":"cancelled"}
+    },doc! {"$inc":{"execution_dispatch_fence":1_i64}}).session(&mut *session).await?.ok_or_else(refused)?;
+    if row.voice_parent_conversation_id.as_deref() != Some(root.conversation_id.as_str()) {
+        return Err(refused());
+    }
+    let messages = db.collection::<Document>("assistant_messages");
+    let filter = doc! {"_id":&root.message_id,"conversation_id":&root.conversation_id,"user_id":&row.user_id};
+    let message = messages
+        .find_one(filter.clone())
+        .session(&mut *session)
+        .await?
+        .ok_or_else(refused)?;
+    if let Ok(task) = message.get_document("execution_task") {
+        return bson::from_document(task.clone()).map_err(encoding);
+    }
+    let task = TaskAdmission {
+        version: VERSION,
+        task: TaskRef {
+            root_kind: TaskRootKind::Message,
+            root_id: root.message_id,
+        },
+        actor_user_id: row.user_id.clone(),
+        audience: Audience::Private {
+            user_id: row.user_id.clone(),
+        },
+        epoch: 1,
+        hard_deadline: root.created_at + chrono::Duration::hours(24),
+        cancelled: false,
+        parent_turn_id: None,
+    };
+    if messages
+        .update_one(
+            filter,
+            doc! {"$set":{"execution_task":bson::to_bson(&task).map_err(encoding)?}},
+        )
+        .session(session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
+    }
+    Ok(task)
+}
+
 fn live_filter(task: &TaskAdmission) -> AppResult<Document> {
     if task.version != VERSION
         || task.cancelled
@@ -314,7 +383,25 @@ pub(crate) fn settle<'a>(
             "execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
             "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}
         }).session(&mut *session).await?.is_some();
-        if !pending_card && !descendant && !pending_effect {
+        let mut background = false;
+        for (collection, states) in [
+            ("machine_jobs", vec!["running"]),
+            (
+                "assistant_async_operations",
+                vec!["submitting", "waiting", "cancelling", "ready", "queued"],
+            ),
+        ] {
+            background |= db
+                .collection::<Document>(collection)
+                .find_one(doc! {
+                    "user_id":&row.user_id,"execution_task.task":&reference,"state":{"$in":states},
+                    "expires_at":{"$gt":bson::DateTime::now()}
+                })
+                .session(&mut *session)
+                .await?
+                .is_some();
+        }
+        if !pending_card && !descendant && !pending_effect && !background {
             db.collection::<Document>(collection(&task.task))
                 .update_one(
                     doc! {"_id":&task.task.root_id,"execution_task.epoch":task.epoch},

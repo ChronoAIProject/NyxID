@@ -122,6 +122,19 @@ impl AsyncContinuation {
             crate::services::user_service_service::find_user_service_by_id(db, &w.service_id)
                 .await?
                 .ok_or_else(denied)?;
+        if w.execution_task.is_some()
+            && w.shared_execution
+                .as_ref()
+                .is_some_and(|binding| binding.consent_id.is_none())
+            && service.user_id == chat.user_id
+            && !super::super::execution_permission_dispatch::covers(
+                chat,
+                crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent,
+                &w.service_id,
+            )
+        {
+            return Err(denied());
+        }
         let instruction_required =
             require_instruction && instruction::covered(db, chat, &service).await?;
         if instruction_required && w.instruction_receipt_version != 1 {
@@ -415,7 +428,10 @@ impl Admission {
     ) -> AppResult<()> {
         let shared = self.shared_execution()?;
         if let Some(binding) = &shared {
-            crate::services::shared_agent_transport::revalidate(db, binding).await?;
+            crate::services::shared_agent_transport::revalidate_permission_submission(
+                db, binding, &self.chat,
+            )
+            .await?;
         }
         // Only an unchanged, personal default connection can be observed through
         // the owner's REST proxy. Override/shared credentials must never be relabelled.

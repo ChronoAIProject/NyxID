@@ -153,6 +153,7 @@ async fn start_for_caller(
             &body.client_request_id,
             body.preferences.into(),
             &body.sdp_offer,
+            auth.execution_enrolled && caller.key.is_none(),
             proof,
         ))
         .await?;

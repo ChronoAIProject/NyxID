@@ -90,7 +90,7 @@ pub async fn caller(db: &Database, auth: &AuthUser) -> AppResult<Caller> {
         return Err(AppError::Forbidden("Agent Key voice is not enabled".into()));
     }
     // Reuse authentication's live user/organization checks, not just a key row.
-    let fresh = crate::mw::auth::api_key_auth_user(
+    let mut fresh = crate::mw::auth::api_key_auth_user(
         db,
         &key,
         auth.api_key_credential_id.clone(),
@@ -101,6 +101,9 @@ pub async fn caller(db: &Database, auth: &AuthUser) -> AppResult<Caller> {
     if fresh.org_agent_access.is_some() {
         return Err(refused());
     }
+    // Device voice is an external source, even when its owner is enrolled.
+    // Its accepted tasks retain legacy confirmations and cannot borrow consent.
+    crate::services::execution_permission_dispatch::exclude(&mut fresh);
     child(db, &key, auth.api_key_credential_id.as_deref()).await?;
     Ok(Caller {
         auth: fresh,

@@ -57,6 +57,9 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    /// Non-authorizing enrollment hint copied from the authenticated person.
+    #[serde(default)]
+    pub execution_enrolled: bool,
     /// Model-authored task provenance, distinct from the user's ASR captions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_task: Option<VoiceTaskSource>,
