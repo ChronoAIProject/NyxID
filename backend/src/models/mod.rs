@@ -9,6 +9,7 @@ pub mod approval_request;
 pub mod assistant_action_receipt;
 pub mod assistant_resource;
 pub mod assistant_sharing;
+pub mod assistant_voice_announcement;
 pub mod assistant_wire_log;
 pub mod audit_log;
 pub mod auth_device_code;
@@ -248,3 +249,4 @@ pub mod assistant_delegated_image;
 
 pub mod cma_session_origin;
 pub mod org_channel;
+pub mod voice_responses;

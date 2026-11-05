@@ -32,6 +32,7 @@ export const FEATURE_FLAG = {
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
   DIRECT_CHAT_ENGINE: "experimental:direct-chat-engine",
   ASSISTANT_VOICE: "assistant:voice",
+  VOICE_AGENT_KEY: "assistant:voice-agent-key",
   VOICE_GROK: "assistant:voice-grok",
   VOICE_GROK_PLATFORM: "assistant:voice-grok-platform",
   VOICE_OPENAI_PLATFORM: "assistant:voice-openai-platform",

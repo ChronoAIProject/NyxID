@@ -524,6 +524,27 @@ pub(super) async fn settle_voice_window(
     seconds: i64,
     initial_window: bool,
 ) -> AppResult<()> {
+    settle_voice_checkpoint(
+        db,
+        request_id,
+        PlatformUsage {
+            voice_seconds: seconds,
+            requests: i64::from(initial_window && seconds > 0),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+}
+
+/// A durable voice checkpoint supplies observed units; the existing meter owns
+/// pricing, funding, finalization and idempotent settlement for every component.
+pub(crate) async fn settle_voice_checkpoint(
+    db: &mongodb::Database,
+    request_id: &str,
+    usage: PlatformUsage,
+    model: Option<String>,
+) -> AppResult<()> {
     reservation::release_unforwarded_rows(
         db,
         request_id,
@@ -537,23 +558,15 @@ pub(super) async fn settle_voice_window(
         .await?
         .try_collect()
         .await?;
-    let usage = PlatformUsage {
-        voice_seconds: seconds,
-        ..Default::default()
-    };
     let mut finalized = Vec::new();
     for row in rows {
         if let Some(saved) = finalize_matching(
             db,
             doc! {"_id":&row.id,"status":"forwarded"},
-            if row.metric == BillingMetric::Requests {
-                i64::from(initial_window && seconds > 0)
-            } else {
-                platform_quantity(row.metric, &usage)
-            },
-            None,
-            None,
-            None,
+            platform_quantity(row.metric, &usage),
+            model.clone(),
+            Some(&usage),
+            usage.reported_model.as_deref(),
             None,
             Utc::now(),
         )
