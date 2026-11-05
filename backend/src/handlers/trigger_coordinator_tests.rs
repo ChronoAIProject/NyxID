@@ -202,6 +202,29 @@ async fn v2_barrier_recovers_recorded_terminal_result_and_next_occurrence() {
     assert_eq!(finished.reason.as_deref(), Some("coordinator_completed"));
     let next = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
     assert_ne!(next.id, run.id);
+    let job = schedules::claim(&state.db, &next.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    run_job_once(&state, &job).await.unwrap();
+    let next_finished = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if let Some(run) = state
+                .db
+                .collection::<TriggerRun>(RUNS)
+                .find_one(doc! {"_id": &next.id, "outcome": "completed"})
+                .await
+                .unwrap()
+            {
+                break run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(next_finished.id, next.id);
+    assert!(next_finished.started_at.is_some());
     server.abort();
 }
 
@@ -333,6 +356,20 @@ async fn v2_cancel_is_exact_idempotent_and_idle_stop_keeps_waiting_run() {
 async fn v2_child_deletion_queues_failure_and_cleans_both_roles_without_marker() {
     let (state, _, run, row, server) = root("v2_delete", false).await;
     let child = child(&state, &row).await;
+    let receipts = state.db.collection::<Document>(HANDOFFS);
+    let receipt = receipts
+        .find_one(doc! {"run_id": &run.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut terminal_child = receipt.clone();
+    terminal_child.insert("_id", Uuid::new_v4().to_string());
+    terminal_child.insert("state", "delivered");
+    receipts.insert_one(terminal_child).await.unwrap();
+    let mut foreign = receipt.clone();
+    foreign.insert("_id", Uuid::new_v4().to_string());
+    foreign.insert("user_id", "another-owner");
+    receipts.insert_one(foreign).await.unwrap();
     state
         .db
         .collection::<Document>(CONVERSATIONS)
@@ -354,20 +391,41 @@ async fn v2_child_deletion_queues_failure_and_cleans_both_roles_without_marker()
         state
             .db
             .collection::<Document>(HANDOFFS)
-            .count_documents(doc! {"child_thread_id": &child.id})
+            .count_documents(doc! {"user_id": OWNER, "child_thread_id": &child.id})
             .await
             .unwrap(),
         0
     );
+    assert_eq!(
+        receipts
+            .count_documents(doc! {"user_id": "another-owner", "child_thread_id": &child.id})
+            .await
+            .unwrap(),
+        1
+    );
+    for status in ["pending", "delivered"] {
+        let mut parent_receipt = receipt.clone();
+        parent_receipt.insert("_id", Uuid::new_v4().to_string());
+        parent_receipt.insert("child_thread_id", Uuid::new_v4().to_string());
+        parent_receipt.insert("state", status);
+        receipts.insert_one(parent_receipt).await.unwrap();
+    }
     engine::delete(&state.db, OWNER, &row.id).await.unwrap();
     assert_eq!(
         state
             .db
             .collection::<Document>(HANDOFFS)
-            .count_documents(doc! {"parent_thread_id": &row.id})
+            .count_documents(doc! {"user_id": OWNER, "parent_thread_id": &row.id})
             .await
             .unwrap(),
         0
+    );
+    assert_eq!(
+        receipts
+            .count_documents(doc! {"user_id": "another-owner", "parent_thread_id": &row.id})
+            .await
+            .unwrap(),
+        1
     );
     server.abort();
 }
