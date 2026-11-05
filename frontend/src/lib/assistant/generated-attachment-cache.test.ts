@@ -36,7 +36,7 @@ it("shares concurrent fetches and retains a completed blob across list remounts"
   clearGeneratedAttachmentCache();
   expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
 });
-it("pins active URLs, queues beyond four residents, and evicts a released file", async () => {
+it("pins active URLs within the byte budget and evicts a released file", async () => {
   const leases = Array.from({ length: 4 }, (_, n) =>
     acquireGeneratedAttachment(`/file/${n}`),
   );
@@ -94,4 +94,43 @@ it("revokes on expiry, idle eviction and account change", async () => {
   transitionAssistantIdentity("another-owner");
   expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3);
   account.release();
+});
+
+it("fits eight known small files together and rejects bytes exceeding their reservation", async () => {
+  const leases = Array.from({ length: 8 }, (_, n) =>
+    acquireGeneratedAttachment(`/small/${n}`, undefined, 32),
+  );
+  await Promise.all(leases.map((lease) => lease.ready));
+  expect(assistantHttp).toHaveBeenCalledTimes(8);
+  const understated = acquireGeneratedAttachment("/understated", undefined, 1);
+  await expect(understated.ready).rejects.toThrow(/limit/);
+  leases.forEach((lease) => lease.release());
+  understated.release();
+});
+
+it("holds an aborted fetch's byte reservation until its body has settled", async () => {
+  const pinned = Array.from({ length: 3 }, (_, n) =>
+    acquireGeneratedAttachment(`/pinned/${n}`),
+  );
+  await Promise.all(pinned.map((lease) => lease.ready));
+  await Promise.resolve();
+  let finishCancellation!: () => void;
+  vi.mocked(assistantHttp).mockImplementationOnce(
+    () =>
+      new Promise((_resolve, reject) => {
+        finishCancellation = () => reject(new DOMException("aborted", "AbortError"));
+      }),
+  );
+  const abandoned = acquireGeneratedAttachment("/abandoned");
+  const rejected = expect(abandoned.ready).rejects.toThrow(/released/);
+  abandoned.release();
+  await rejected;
+  const queued = acquireGeneratedAttachment("/after-abandoned");
+  const callsBeforeCancellationSettled = vi.mocked(assistantHttp).mock.calls.length;
+  finishCancellation();
+  await queued.ready;
+  pinned.forEach((lease) => lease.release());
+  queued.release();
+  expect(callsBeforeCancellationSettled).toBe(4);
+  expect(assistantHttp).toHaveBeenCalledTimes(5);
 });

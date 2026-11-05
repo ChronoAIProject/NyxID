@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { attachmentFailure } from "@/lib/assistant/attachment-errors";
 import { acquireGeneratedAttachment } from "@/lib/assistant/generated-attachment-cache";
@@ -11,7 +11,27 @@ export function GeneratedAttachment({
 }: {
   readonly attachment: ChatImage;
 }) {
+  const container = useRef<HTMLDivElement>(null);
+  const downloaded = useRef(false);
+  const [visible, setVisible] = useState(
+    () => typeof IntersectionObserver === "undefined",
+  );
+  const [height, setHeight] = useState<number>();
   const [url, setUrl] = useState<string>();
+  useEffect(() => {
+    if (!container.current || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => {
+      const entered = entry?.isIntersecting ?? false;
+      setVisible(entered);
+      if (!entered) {
+        const height = entry?.boundingClientRect.height ?? 0;
+        if (height > 0) setHeight((previous) => Math.max(previous ?? 0, height));
+        setUrl(undefined);
+      }
+    });
+    observer.observe(container.current);
+    return () => observer.disconnect();
+  }, []);
   const [error, setError] = useState<string>();
   const [decodeFailed, setDecodeFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -52,17 +72,19 @@ export function GeneratedAttachment({
       : "download";
   const inline = preview === "image" || preview === "video";
   useEffect(() => {
-    if (expired || (!inline && !downloadRequested)) return;
+    if (!visible || expired || (!inline && !downloadRequested)) return;
     const lease = acquireGeneratedAttachment(
       attachment.endpoint,
       attachment.expiresAt,
+      attachment.size,
     );
     let active = true;
     lease.ready
       .then((objectUrl) => {
         if (!active) return;
         setUrl(objectUrl);
-        if (!inline) {
+        if (!inline && !downloaded.current) {
+          downloaded.current = true;
           const link = document.createElement("a");
           link.href = objectUrl;
           link.download = name;
@@ -79,6 +101,8 @@ export function GeneratedAttachment({
     };
   }, [
     attachment.endpoint,
+    attachment.size,
+    visible,
     expired,
     attempt,
     inline,
@@ -87,7 +111,11 @@ export function GeneratedAttachment({
     attachment.expiresAt,
   ]);
   return (
-    <div className="min-w-0 max-w-full space-y-2 rounded-lg border border-hairline bg-card p-3">
+    <div
+      ref={container}
+      style={{ minHeight: height }}
+      className="min-w-0 max-w-full space-y-2 rounded-lg border border-hairline bg-card p-3"
+    >
       <p className="break-words text-xs font-medium">{name}</p>
       <p className="text-11 text-muted-foreground">
         {attachment.contentType} ·{" "}

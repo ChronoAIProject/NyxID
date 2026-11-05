@@ -2,12 +2,14 @@ import { assistantHttp } from "./assistant-http";
 import { subscribeAssistantIdentity } from "./identity";
 
 const FILE_BYTES = 8 * 1024 * 1024;
-const MAX_ENTRIES = 4; // <=32 MiB resident, plus <=32 MiB while assembling responses.
+const CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_ENTRIES = 64;
 const IDLE_MS = 120_000;
 interface Entry {
   readonly key: string;
   readonly controller: AbortController;
   readonly ready: Promise<string>;
+  readonly reservedBytes: number;
   resolve: (url: string) => void;
   reject: (error: unknown) => void;
   refs: number;
@@ -17,7 +19,7 @@ interface Entry {
   timer?: ReturnType<typeof setTimeout>;
 }
 const entries = new Map<string, Entry>();
-let fetching = 0;
+const inFlight = new Set<Entry>();
 
 function remove(entry: Entry) {
   if (entries.get(entry.key) !== entry) return;
@@ -32,7 +34,7 @@ async function fetchBlob(entry: Entry) {
     signal: entry.controller.signal,
   });
   const declared = Number(response.headers.get("content-length"));
-  if (declared > FILE_BYTES)
+  if (declared > entry.reservedBytes)
     throw new Error("Generated file exceeds download limit");
   const reader = response.body?.getReader();
   if (!reader) throw new Error("Generated file body unavailable");
@@ -43,7 +45,7 @@ async function fetchBlob(entry: Entry) {
       const chunk = await reader.read();
       if (chunk.done) break;
       size += chunk.value.byteLength;
-      if (size > FILE_BYTES)
+      if (size > entry.reservedBytes)
         throw new Error("Generated file exceeds download limit");
       parts.push(chunk.value as Uint8Array<ArrayBuffer>);
     }
@@ -55,21 +57,29 @@ async function fetchBlob(entry: Entry) {
   });
 }
 function pump() {
-  let resident = [...entries.values()].filter((entry) => entry.started).length;
+  // Removed downloads keep their reservation until cancellation releases the body.
+  const started = new Set([
+    ...[...entries.values()].filter((entry) => entry.started),
+    ...inFlight,
+  ]);
+  let resident = started.size;
+  let bytes = [...started].reduce((sum, entry) => sum + entry.reservedBytes, 0);
   for (const entry of entries.values()) {
-    if (entry.started || fetching >= 2) continue;
-    if (resident >= MAX_ENTRIES) {
+    if (entry.started || inFlight.size >= 2) continue;
+    while (resident >= MAX_ENTRIES || bytes + entry.reservedBytes > CACHE_BYTES) {
       const unused = [...entries.values()].find(
         (candidate) =>
           candidate.started && candidate.settled && candidate.refs === 0,
       );
-      if (!unused) break;
+      if (!unused) return;
       remove(unused);
       resident -= 1;
+      bytes -= unused.reservedBytes;
     }
     entry.started = true;
     resident += 1;
-    fetching += 1;
+    bytes += entry.reservedBytes;
+    inFlight.add(entry);
     void fetchBlob(entry)
       .then((blob) => {
         if (entries.get(entry.key) !== entry || entry.controller.signal.aborted)
@@ -83,7 +93,7 @@ function pump() {
       })
       .finally(() => {
         entry.settled = true;
-        fetching -= 1;
+        inFlight.delete(entry);
         pump();
       });
   }
@@ -92,6 +102,7 @@ function pump() {
 export function acquireGeneratedAttachment(
   endpoint: string,
   expiresAt?: string,
+  size?: number,
 ) {
   let entry = entries.get(endpoint);
   if (!entry) {
@@ -103,6 +114,10 @@ export function acquireGeneratedAttachment(
     });
     entry = {
       key: endpoint,
+      reservedBytes:
+        size !== undefined && Number.isSafeInteger(size) && size > 0 && size <= FILE_BYTES
+          ? size
+          : FILE_BYTES,
       controller: new AbortController(),
       ready,
       resolve,
@@ -113,6 +128,8 @@ export function acquireGeneratedAttachment(
     };
     entries.set(endpoint, entry);
   }
+  entries.delete(endpoint);
+  entries.set(endpoint, entry);
   clearTimeout(entry.timer);
   entry.refs += 1;
   const lease = entry;

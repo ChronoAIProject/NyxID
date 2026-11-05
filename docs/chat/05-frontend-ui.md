@@ -582,9 +582,11 @@ keep the verified download available. The reader accepts future delivery states 
 rejection reasons without rejecting the whole conversation.
 
 A session-only cache shares authenticated fetches and object URLs across consumers
-and list remounts. It retains at most four files (32 MiB payload), fetches at most
-two concurrently, and bounds every response to 8 MiB. Active leases pin entries;
-idle LRU eviction, two-minute idle expiry, file expiry and account transitions
+and list remounts. It retains at most 32 MiB of payload and 64 resident files, fetches at
+most two concurrently, and bounds every response to 8 MiB and its reserved size.
+Canceled fetches retain their reservation until their response body settles.
+Known file sizes let all eight small files in one result fit together. Visible cards pin entries and release them on leaving the viewport, so later
+previews in the same reply can load. Idle LRU eviction, two-minute idle expiry, file expiry and account transitions
 revoke URLs. No file bytes enter persistent browser storage. Recovery refreshes the
 original reply's history page and invalidates the conversation query, preserving
 the draft and page state. Controls use the existing Button variants.
