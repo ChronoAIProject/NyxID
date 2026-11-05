@@ -79,13 +79,20 @@ async fn matching(
     Ok(rows.pop())
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpsertResponse {
+    #[serde(flatten)]
+    pub record: RecordResponse,
+    pub created: bool,
+}
+
 pub async fn upsert(
     db: &Database,
     owner: &str,
     actor: CrmActor,
     input: UpsertInput,
     receipt: Option<ReceiptContext>,
-) -> AppResult<RecordResponse> {
+) -> AppResult<UpsertResponse> {
     let context = (db.clone(), owner.to_owned(), actor, input, receipt.clone());
     let result = crate::services::transaction_service::run_db_only(
         db,
@@ -98,7 +105,7 @@ pub async fn upsert(
                         .map_err(|_| AppError::Internal("Invalid stored CRM result".into()));
                 }
                 let object = records::object_in_session(db, owner, &input.object, tx).await?;
-                if let Some(row) =
+                let (record, created) = if let Some(row) =
                     matching(db, owner, &object, &input.match_field, &input.values, tx).await?
                 {
                     // Agents still carry server-bound source ordering. Re-reading a revision
@@ -119,10 +126,11 @@ pub async fn upsert(
                             protect: vec![],
                             unprotect: vec![],
                         },
-                        receipt,
+                        &None,
                         tx,
                     )
                     .await
+                    .map(|record| (record, false))?
                 } else {
                     if input.expected_revision.is_some() {
                         return Err(super::validation_error(
@@ -139,11 +147,16 @@ pub async fn upsert(
                             values: input.values.clone(),
                             protect: vec![],
                         },
-                        receipt,
+                        &None,
                         tx,
                     )
                     .await
-                }
+                    .map(|record| (record, true))?
+                };
+                let response = UpsertResponse { record, created };
+                records::insert_receipt(db, tx, receipt.as_ref(), &response, chrono::Utc::now())
+                    .await?;
+                Ok(response)
             })
         },
     )

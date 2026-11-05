@@ -2646,11 +2646,10 @@ async fn b4_retry_fences_completed_calls_carries_attachments_and_chains() {
     .await
     .unwrap();
     let failed_turn = failed.active_turn.as_ref().unwrap().turn_id.clone();
-    let crm_artifact = crate::models::assistant_crm_artifact::TurnCrmArtifact {
-        kind: crate::models::assistant_crm_artifact::CrmArtifactKind::Object,
+    let crm_artifact = crate::models::assistant_crm_artifact::TurnCrmArtifact::Object {
         id: Uuid::new_v4().to_string(),
         owner_id: user.clone(),
-        object_key: Some("asset".into()),
+        object_key: "asset".into(),
         title: "Assets".into(),
         role: crate::models::assistant_crm_artifact::CrmArtifactRole::Created,
     };

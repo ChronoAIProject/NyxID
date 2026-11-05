@@ -23,52 +23,72 @@ pub fn title(value: &str) -> String {
         .to_owned()
 }
 
-/// Atomic insert with a bounded tail; duplicate identities update in place.
-/// Each competing writer rechecks identity after the insert/update race.
+/// One atomic update deduplicates identities, preserves creation and bounds the tail.
+/// There is no client retry loop under contention.
 pub async fn record(
     db: &Database,
     chat: &ChatAuthority,
     mut artifact: TurnCrmArtifact,
 ) -> AppResult<()> {
-    artifact.title = title(&artifact.title);
+    let sanitized = title(artifact.title());
+    *artifact.title_mut() = sanitized;
     let turn = chat
         .turn_id
         .as_deref()
         .ok_or(AppError::AssistantTurnRequired)?;
     let entry = bson::to_bson(&artifact)
         .map_err(|_| AppError::Internal("CRM artifact serialization failed".into()))?;
-    let kind = bson::to_bson(&artifact.kind)
+    let kind = bson::to_bson(&artifact.kind())
         .map_err(|_| AppError::Internal("CRM artifact kind serialization failed".into()))?;
-    let base =
-        doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"active_turn.turn_id":turn};
-    let collection = db.collection::<bson::Document>(COLLECTION_NAME);
-    loop {
-        let mut existing = base.clone();
-        existing.insert(
-            "active_turn.crm_artifacts",
-            doc! {"$elemMatch":{"kind":&kind,"id":&artifact.id}},
-        );
-        if collection
-            .update_one(
-                existing,
-                doc! {"$set":{"active_turn.crm_artifacts.$":&entry}},
-            )
-            .await?
-            .matched_count
-            == 1
-        {
-            return Ok(());
-        }
-        let mut absent = base.clone();
-        absent.insert(
-            "active_turn.crm_artifacts",
-            doc! {"$not":{"$elemMatch":{"kind":&kind,"id":&artifact.id}}},
-        );
-        if collection.update_one(absent, doc! {"$push":{"active_turn.crm_artifacts":{"$each":[&entry],"$slice":-(MAX_TURN_CRM_ARTIFACTS as i32)}}}).await?.matched_count == 1 { return Ok(()); }
-        if collection.find_one(base.clone()).await?.is_none() {
-            return Err(AppError::AssistantTurnRequired);
-        }
+    let role = bson::to_bson(&artifact.role())
+        .map_err(|_| AppError::Internal("CRM artifact role serialization failed".into()))?;
+    let same = doc! {"$and":[{"$eq":["$$artifact.kind",kind]},{"$eq":["$$artifact.id",{"$literal":artifact.id()}]}]};
+    let replacement = doc! {"$mergeObjects":[{"$literal":&entry},{"role":{"$cond":[{"$eq":["$$artifact.role","created"]},"created",role]}}]};
+    let updated = db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+        doc! {"_id":&chat.conversation_id,"user_id":&chat.user_id,"active_turn.turn_id":turn},
+        vec![doc! {"$set":{"active_turn.crm_artifacts":{"$let":{
+            "vars":{"entries":{"$ifNull":["$active_turn.crm_artifacts",[]]}},
+            "in":{"$cond":[
+                {"$anyElementTrue":[{"$map":{"input":"$$entries","as":"artifact","in":same.clone()}}]},
+                {"$map":{"input":"$$entries","as":"artifact","in":{"$cond":[same,replacement,"$$artifact"]}}},
+                {"$slice":[{"$concatArrays":["$$entries",{"$literal":[entry]}]},-(MAX_TURN_CRM_ARTIFACTS as i32)]}
+            ]}
+        }}}}],
+    ).await?;
+    if updated.matched_count == 1 {
+        Ok(())
+    } else {
+        Err(AppError::AssistantTurnRequired)
     }
+}
+
+/// A committed effect remains successful even if its optional chat reference cannot be saved.
+pub async fn committed_result(
+    db: &Database,
+    chat: &ChatAuthority,
+    artifact: AppResult<TurnCrmArtifact>,
+    result: serde_json::Value,
+) -> serde_json::Value {
+    let outcome = match artifact {
+        Ok(artifact) => record(db, chat, artifact).await,
+        Err(error) => Err(error),
+    };
+    if outcome.is_err() {
+        tracing::warn!(conversation_id = %chat.conversation_id, turn_id = ?chat.turn_id, "CRM artifact reference could not be recorded after a successful operation");
+    }
+    result
+}
+
+/// Empty messages retain the existing delivery path without a feature-flag read.
+pub async fn enabled_for(
+    db: &Database,
+    owner: &str,
+    artifacts: &[TurnCrmArtifact],
+) -> AppResult<bool> {
+    if artifacts.is_empty() {
+        return Ok(false);
+    }
+    super::enabled(db, owner).await
 }
 
 pub async fn settled(
@@ -109,24 +129,31 @@ pub async fn publish_group(
 
 /// Channel payloads contain ordinary links, never a CRM snapshot.
 pub fn append_links(text: &str, artifacts: &[TurnCrmArtifact], frontend: &str) -> String {
-    use crate::{
-        models::assistant_crm_artifact::CrmArtifactKind, services::assistant_links::AssistantPage,
-    };
+    use crate::services::assistant_links::AssistantPage;
     let mut text = text.to_owned();
     for artifact in artifacts.iter().take(MAX_TURN_CRM_ARTIFACTS) {
-        let page = match artifact.kind {
-            CrmArtifactKind::View => AssistantPage::CrmView {
-                owner: &artifact.owner_id,
-                id: &artifact.id,
+        let page = match artifact {
+            TurnCrmArtifact::View { owner_id, id, .. } => AssistantPage::CrmView {
+                owner: owner_id,
+                id,
             },
-            CrmArtifactKind::Record => AssistantPage::CrmRecord {
-                owner: &artifact.owner_id,
-                object: artifact.object_key.as_deref().unwrap_or_default(),
-                id: &artifact.id,
+            TurnCrmArtifact::Record {
+                owner_id,
+                object_key,
+                id,
+                ..
+            } => AssistantPage::CrmRecord {
+                owner: owner_id,
+                object: object_key,
+                id,
             },
-            CrmArtifactKind::Object => AssistantPage::CrmObject {
-                owner: &artifact.owner_id,
-                object: artifact.object_key.as_deref().unwrap_or_default(),
+            TurnCrmArtifact::Object {
+                owner_id,
+                object_key,
+                ..
+            } => AssistantPage::CrmObject {
+                owner: owner_id,
+                object: object_key,
             },
         };
         let link = page.url(frontend);

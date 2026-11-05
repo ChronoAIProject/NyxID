@@ -5,11 +5,18 @@ import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
 import { cmaOperationSchema } from "./cma-operation";
 
-export const turnCrmArtifactSchema = z.object({
-  kind: z.enum(["view", "record", "object"]),
-  id: z.string(), owner_id: z.string(), object_key: z.string().nullish(),
-  title: z.string().max(200), role: z.enum(["created", "presented"]),
-}).strict();
+const crmArtifactFields = {
+  id: z.string().min(1),
+  owner_id: z.string().min(1),
+  title: z.string().max(200),
+  role: z.enum(["created", "presented"]),
+};
+const crmArtifactObjectKey = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/);
+export const turnCrmArtifactSchema = z.discriminatedUnion("kind", [
+  z.object({ ...crmArtifactFields, kind: z.literal("view"), object_key: z.null().optional() }).strict(),
+  z.object({ ...crmArtifactFields, kind: z.literal("record"), object_key: crmArtifactObjectKey }).strict(),
+  z.object({ ...crmArtifactFields, kind: z.literal("object"), object_key: crmArtifactObjectKey }).strict(),
+]);
 export type TurnCrmArtifact = z.infer<typeof turnCrmArtifactSchema>;
 const crmArtifacts = z.array(turnCrmArtifactSchema).max(8).optional();
 

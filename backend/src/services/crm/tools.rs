@@ -561,14 +561,10 @@ async fn execute_inner(
             "crm_present" => {
                 if args["kind"] == "view" {
                     let view = views::get(&state.db, owner, id(args, "id")?).await?;
-                    Ok(
-                        json!({"id":view.id,"title":super::artifacts::title(&view.title),"kind":"view"}),
-                    )
+                    Ok(view_summary(&view))
                 } else {
                     let record = records::get(&state.db, owner, id(args, "id")?).await?;
-                    Ok(
-                        json!({"id":record.id,"object_key":record.object_key,"kind":"record","revision":record.revision}),
-                    )
+                    Ok(record_summary(&state.db, owner, &record).await?)
                 }
             }
             "crm_create_object" => encoded(objects::ObjectApi::from(
@@ -729,17 +725,13 @@ async fn execute_inner(
     };
 
     redact_links(&chat, &agent, owner, &mut result);
-    use crate::models::assistant_crm_artifact::{
-        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
-    };
+    use crate::models::assistant_crm_artifact::{CrmArtifactKind, CrmArtifactRole};
     let artifact = match name {
         "crm_save_view" | "crm_update_view" => {
             Some((CrmArtifactKind::View, CrmArtifactRole::Created))
         }
         "crm_create_object" => Some((CrmArtifactKind::Object, CrmArtifactRole::Created)),
-        "crm_upsert_record"
-            if result["revision"] == 1 && args["input"]["expected_revision"].is_null() =>
-        {
+        "crm_upsert_record" if result["created"] == true => {
             Some((CrmArtifactKind::Record, CrmArtifactRole::Created))
         }
         "crm_present" => Some((
@@ -753,33 +745,8 @@ async fn execute_inner(
         _ => None,
     };
     if let Some((kind, role)) = artifact {
-        let title = result["title"]
-            .as_str()
-            .or_else(|| result["label"].as_str())
-            .unwrap_or_else(|| match kind {
-                CrmArtifactKind::View => "Saved view",
-                CrmArtifactKind::Record => "Record",
-                CrmArtifactKind::Object => "Dataset",
-            });
-        super::artifacts::record(
-            &state.db,
-            &chat,
-            TurnCrmArtifact {
-                kind,
-                role,
-                id: result["id"]
-                    .as_str()
-                    .ok_or_else(|| AppError::Internal("CRM artifact identity missing".into()))?
-                    .into(),
-                owner_id: owner.into(),
-                object_key: result["object_key"]
-                    .as_str()
-                    .or_else(|| result["key"].as_str())
-                    .map(str::to_owned),
-                title: title.into(),
-            },
-        )
-        .await?;
+        let reference = artifact_reference(&state.db, owner, kind, role, &result).await;
+        result = super::artifacts::committed_result(&state.db, &chat, reference, result).await;
     }
 
     if class != acks::OwnerActionClass::Read {
@@ -791,6 +758,123 @@ async fn execute_inner(
     Ok(
         json!({"result":result,"owner_id":owner,"workspace_url":format!("{}/assistant/crm?owner={}",state.config.frontend_url.trim_end_matches('/'),owner)}),
     )
+}
+
+async fn record_summary(
+    db: &mongodb::Database,
+    owner: &str,
+    record: &records::RecordResponse,
+) -> AppResult<Value> {
+    let object = objects::get(db, owner, &record.object_key).await?;
+    let title = record_title(&object, &record.values);
+    let fields: Vec<_> = object.fields.iter().filter(|field| !field.archived)
+        .filter_map(|field| {
+            let value = record.values.get(&field.key)?;
+            let value = match value {
+                Value::String(value) => json!(super::artifacts::title(value)),
+                Value::Bool(_) | Value::Number(_) | Value::Null => value.clone(),
+                _ => return None,
+            };
+            Some(json!({"key":field.key,"label":super::artifacts::title(&field.label),"value":value}))
+        }).take(5).collect();
+    Ok(
+        json!({"id":record.id,"kind":"record","object_key":record.object_key,"object_label":super::artifacts::title(&object.label),"title":title,"fields":fields,"revision":record.revision}),
+    )
+}
+
+fn record_title(
+    object: &crate::models::crm_object::CrmObject,
+    values: &std::collections::BTreeMap<String, Value>,
+) -> String {
+    let field = object.fields.iter().find(|field| {
+        field.required
+            && matches!(
+                field.kind,
+                crate::models::crm_object::CrmFieldKind::Text { .. }
+            )
+    });
+    super::artifacts::title(
+        field
+            .and_then(|field| values.get(&field.key))
+            .and_then(Value::as_str)
+            .unwrap_or(&object.label),
+    )
+}
+
+fn view_summary(view: &views::ViewResponse) -> Value {
+    let objects: std::collections::BTreeSet<_> = view.envelope["queries"]
+        .as_object()
+        .into_iter()
+        .flat_map(|queries| queries.values())
+        .filter_map(|query| query["query"]["object"].as_str())
+        .take(12)
+        .collect();
+    let components: std::collections::BTreeSet<_> = view.envelope["spec"]["elements"]
+        .as_object()
+        .into_iter()
+        .flat_map(|elements| elements.values())
+        .filter_map(|element| element["type"].as_str())
+        .take(60)
+        .collect();
+    json!({"id":view.id,"kind":"view","title":super::artifacts::title(&view.title),"objects":objects,"components":components})
+}
+
+async fn artifact_reference(
+    db: &mongodb::Database,
+    owner: &str,
+    kind: crate::models::assistant_crm_artifact::CrmArtifactKind,
+    role: crate::models::assistant_crm_artifact::CrmArtifactRole,
+    result: &Value,
+) -> AppResult<crate::models::assistant_crm_artifact::TurnCrmArtifact> {
+    use crate::models::assistant_crm_artifact::{CrmArtifactKind, TurnCrmArtifact};
+    let id = result["id"]
+        .as_str()
+        .ok_or_else(|| AppError::Internal("CRM artifact identity missing".into()))?
+        .to_owned();
+    let owner_id = owner.to_owned();
+    let title = super::artifacts::title(
+        result["title"]
+            .as_str()
+            .or_else(|| result["label"].as_str())
+            .unwrap_or("Saved view"),
+    );
+    if kind == CrmArtifactKind::View {
+        return Ok(TurnCrmArtifact::View {
+            id,
+            owner_id,
+            title,
+            role,
+        });
+    }
+    let object_key = result["object_key"]
+        .as_str()
+        .or_else(|| result["key"].as_str())
+        .ok_or_else(|| AppError::Internal("CRM artifact object key missing".into()))?
+        .to_owned();
+    if kind == CrmArtifactKind::Object {
+        return Ok(TurnCrmArtifact::Object {
+            id,
+            owner_id,
+            object_key,
+            title,
+            role,
+        });
+    }
+    let title = if result["title"].is_string() {
+        title
+    } else {
+        let object = objects::get(db, owner, &object_key).await?;
+        let values = serde_json::from_value(result["values"].clone())
+            .map_err(|_| AppError::Internal("CRM artifact record values missing".into()))?;
+        record_title(&object, &values)
+    };
+    Ok(TurnCrmArtifact::Record {
+        id,
+        owner_id,
+        object_key,
+        title,
+        role,
+    })
 }
 
 use crate::models::assistant_agent::{CrmCapability, CrmGrant};

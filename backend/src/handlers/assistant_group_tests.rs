@@ -38,9 +38,7 @@ fn crm_group_message_dto_omits_artifacts_for_flag_off_viewers() {
 
 #[tokio::test]
 async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
-    use crate::models::assistant_crm_artifact::{
-        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
-    };
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
     let f =
         crate::services::assistant_authority_tests::orchestrator_fixture("crm_group_artifact_only")
             .await;
@@ -53,11 +51,10 @@ async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
     )
     .await
     .unwrap();
-    let artifact = TurnCrmArtifact {
-        kind: CrmArtifactKind::Object,
+    let artifact = TurnCrmArtifact::Object {
         id: Uuid::new_v4().to_string(),
         owner_id: f.owner.clone(),
-        object_key: Some("asset".into()),
+        object_key: "asset".into(),
         title: "Assets".into(),
         role: CrmArtifactRole::Created,
     };

@@ -1614,17 +1614,14 @@ async fn crm_live_stream_rechecks_flag_before_delivering_queued_events() {
 
 #[tokio::test]
 async fn crm_history_masks_active_and_settled_artifacts_when_flag_is_off() {
-    use crate::models::assistant_crm_artifact::{
-        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
-    };
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
     use crate::services::feature_flag_service::{self, FlagTarget};
     let f =
         crate::services::assistant_authority_tests::orchestrator_fixture("crm_history_flag").await;
-    let artifact = TurnCrmArtifact {
-        kind: CrmArtifactKind::Object,
+    let artifact = TurnCrmArtifact::Object {
         id: Uuid::new_v4().to_string(),
         owner_id: f.owner.clone(),
-        object_key: Some("asset".into()),
+        object_key: "asset".into(),
         title: "Assets".into(),
         role: CrmArtifactRole::Created,
     };

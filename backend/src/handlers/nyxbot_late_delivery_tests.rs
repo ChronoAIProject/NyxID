@@ -237,17 +237,13 @@ async fn committed_stream_is_never_late_sent_even_after_deadline() {
 
 #[tokio::test]
 async fn crm_artifact_channel_links_cover_stream_late_delivery_and_flag_off() {
-    use crate::models::assistant_crm_artifact::{
-        CrmArtifactKind, CrmArtifactRole, TurnCrmArtifact,
-    };
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
     use crate::services::feature_flag_service::{self, FlagTarget};
     let f = fixture("crm_channel_artifacts").await;
     settled(&f, false).await;
-    let artifact = TurnCrmArtifact {
-        kind: CrmArtifactKind::View,
+    let artifact = TurnCrmArtifact::View {
         id: Uuid::new_v4().to_string(),
         owner_id: OWNER.into(),
-        object_key: None,
         title: "Private title".into(),
         role: CrmArtifactRole::Created,
     };
@@ -276,7 +272,7 @@ async fn crm_artifact_channel_links_cover_stream_late_delivery_and_flag_off() {
     .unwrap();
     let link = crate::services::assistant_links::AssistantPage::CrmView {
         owner: OWNER,
-        id: &artifact.id,
+        id: artifact.id(),
     }
     .url(&f.state.config.frontend_url);
     let streamed =

@@ -669,6 +669,14 @@ async fn crm_artifact_tools_create_present_replay_and_live_grants() {
         .await
         .unwrap();
     assert!(presented["result"].get("values").is_none());
+    assert_eq!(record["result"]["created"], true);
+    assert_eq!(presented["result"]["title"], "First");
+    assert_eq!(presented["result"]["object_label"], "Asset");
+    assert_eq!(
+        presented["result"]["fields"],
+        json!([{"key":"name","label":"Name","value":"First"}])
+    );
+    assert_eq!(presented["result"]["revision"], 1);
     let row = f
         .state
         .db
@@ -680,12 +688,12 @@ async fn crm_artifact_tools_create_present_replay_and_live_grants() {
     let artifacts = &row.active_turn.unwrap().crm_artifacts;
     assert_eq!(artifacts.len(), 2);
     assert_eq!(
-        artifacts[0].kind,
+        artifacts[0].kind(),
         crate::models::assistant_crm_artifact::CrmArtifactKind::Object
     );
     assert_eq!(
-        artifacts[1].role,
-        crate::models::assistant_crm_artifact::CrmArtifactRole::Presented
+        artifacts[1].role(),
+        crate::models::assistant_crm_artifact::CrmArtifactRole::Created
     );
     let serialized = serde_json::to_value(artifacts).unwrap().to_string();
     assert!(!serialized.contains("values"));
@@ -725,9 +733,13 @@ async fn crm_saved_views_are_created_then_presented_artifacts() {
     .await
     .unwrap();
     let id = saved["result"]["id"].as_str().unwrap();
-    call(&f, "crm_present", json!({"kind":"view","id":id}), 2)
+    let presented = call(&f, "crm_present", json!({"kind":"view","id":id}), 2)
         .await
         .unwrap();
+    assert_eq!(presented["result"]["objects"], json!(["company"]));
+    assert_eq!(presented["result"]["components"], json!(["ObjectTable"]));
+    assert_eq!(presented["result"]["title"], "Companies");
+    assert!(presented["result"].get("envelope").is_none());
     let live = f
         .state
         .db
@@ -739,8 +751,8 @@ async fn crm_saved_views_are_created_then_presented_artifacts() {
     let artifacts = live.active_turn.unwrap().crm_artifacts;
     assert_eq!(artifacts.len(), 1);
     assert_eq!(
-        artifacts[0].role,
-        crate::models::assistant_crm_artifact::CrmArtifactRole::Presented
+        artifacts[0].role(),
+        crate::models::assistant_crm_artifact::CrmArtifactRole::Created
     );
     crate::services::assistant_nyxagent::finish_turn(
         &f.state.db,
@@ -774,11 +786,9 @@ async fn crm_saved_views_are_created_then_presented_artifacts() {
 async fn crm_artifacts_atomic_deduplication_bound_and_link_delivery() {
     use crate::models::assistant_crm_artifact::*;
     let f = fixture().await;
-    let make = |id: usize, role| TurnCrmArtifact {
-        kind: CrmArtifactKind::View,
+    let make = |id: usize, role| TurnCrmArtifact::View {
         id: format!("view-{id}"),
         owner_id: f.owner.clone(),
-        object_key: None,
         title: "Clean\n\u{202e}title".into(),
         role,
     };
@@ -792,7 +802,10 @@ async fn crm_artifacts_atomic_deduplication_bound_and_link_delivery() {
     )
     .await
     .unwrap();
-    super::super::artifacts::record(&f.state.db, &f.chat, make(9, CrmArtifactRole::Presented))
+    super::super::artifacts::record(&f.state.db, &f.chat, make(9, CrmArtifactRole::Created)).await.unwrap();
+    let mut presented = make(9, CrmArtifactRole::Presented);
+    *presented.title_mut() = "Updated title".into();
+    super::super::artifacts::record(&f.state.db, &f.chat, presented)
         .await
         .unwrap();
     let row = f
@@ -805,12 +818,21 @@ async fn crm_artifacts_atomic_deduplication_bound_and_link_delivery() {
         .unwrap();
     let artifacts = row.active_turn.unwrap().crm_artifacts;
     assert_eq!(artifacts.len(), MAX_TURN_CRM_ARTIFACTS);
-    let ids: std::collections::HashSet<_> = artifacts.iter().map(|a| (&a.kind, &a.id)).collect();
+    let ids: std::collections::HashSet<_> = artifacts.iter().map(|a| (a.kind(), a.id())).collect();
     assert_eq!(ids.len(), artifacts.len());
-    assert!(artifacts.iter().all(|a| a.title == "Cleantitle"));
+    assert!(artifacts.iter().all(|a| a.title()
+        == if a.id() == "view-9" {
+            "Updated title"
+        } else {
+            "Cleantitle"
+        }));
     assert_eq!(
-        artifacts.iter().find(|a| a.id == "view-9").unwrap().role,
-        CrmArtifactRole::Presented
+        artifacts
+            .iter()
+            .find(|a| a.id() == "view-9")
+            .unwrap()
+            .role(),
+        CrmArtifactRole::Created
     );
     let once = super::super::artifacts::append_links("Reply", &artifacts, "https://nyxid.test");
     assert_eq!(
@@ -902,9 +924,14 @@ async fn crm_custom_object_validation_and_owner_cap_are_transactional() {
         )
     );
     assert_ne!(a.is_ok(), b.is_ok());
+    assert!(matches!(
+        a.err().or_else(|| b.err()).unwrap(),
+        AppError::CrmValidationFailed(_)
+    ));
     assert_eq!(
         objects::list(&f.state.db, &f.owner).await.unwrap().len(),
         50
     );
     f.state.db.drop().await.unwrap();
 }
+
