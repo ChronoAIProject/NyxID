@@ -2,6 +2,7 @@ import {
   CmaSessionContext,
   cmaSessionKey,
   type Observation,
+  type ObservedCmaSession,
 } from "./cma-session-context";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useRouterState } from "@tanstack/react-router";
@@ -23,20 +24,43 @@ export function CmaSessionProvider({
   readonly children: ReactNode;
 }) {
   const ownerId = useAuthStore((state) => state.user?.id);
-  return ownerId ? (
-    <OwnedCmaSessions key={ownerId} ownerId={ownerId}>
+  const [observed, setObserved] = useState<{
+    ownerId: string | undefined;
+    sessions: readonly ObservedCmaSession[];
+  }>({ ownerId, sessions: [] });
+  if (observed.ownerId !== ownerId) {
+    setObserved({ ownerId, sessions: [] });
+  }
+  const publish = useCallback(
+    (owner: string, sessions: readonly ObservedCmaSession[]) => {
+      setObserved((previous) =>
+        previous.ownerId === owner ? { ownerId: owner, sessions } : previous,
+      );
+    },
+    [],
+  );
+  // Account changes reset the observer, while login routes keep their in-flight
+  // completion handlers mounted through profile restoration.
+  return (
+    <CmaSessionContext
+      value={observed.ownerId === ownerId ? observed.sessions : []}
+    >
+      {ownerId && (
+        <OwnedCmaSessions key={ownerId} ownerId={ownerId} onChange={publish} />
+      )}
       {children}
-    </OwnedCmaSessions>
-  ) : (
-    children
+    </CmaSessionContext>
   );
 }
 function OwnedCmaSessions({
   ownerId,
-  children,
+  onChange,
 }: {
   readonly ownerId: string;
-  readonly children: ReactNode;
+  readonly onChange: (
+    ownerId: string,
+    sessions: readonly ObservedCmaSession[],
+  ) => void;
 }) {
   const conversation = useRouterState({
     select: (state) => {
@@ -69,27 +93,26 @@ function OwnedCmaSessions({
     },
     [],
   );
-  return (
-    <CmaSessionContext
-      value={sessions.map((session) => ({
+  useEffect(() => {
+    onChange(
+      ownerId,
+      sessions.map((session) => ({
         session,
         ...(observations[cmaSessionKey(session)] ?? {
           state: initialCmaSession(session),
           reconnect: () => undefined,
         }),
-      }))}
-    >
-      {sessions.map((session) => (
-        <SessionStream
-          key={cmaSessionKey(session)}
-          ownerId={ownerId}
-          session={session}
-          publish={publish}
-        />
-      ))}
-      {children}
-    </CmaSessionContext>
-  );
+      })),
+    );
+  }, [ownerId, sessions, observations, onChange]);
+  return sessions.map((session) => (
+    <SessionStream
+      key={cmaSessionKey(session)}
+      ownerId={ownerId}
+      session={session}
+      publish={publish}
+    />
+  ));
 }
 function SessionStream({
   ownerId,
