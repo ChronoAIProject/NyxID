@@ -2293,11 +2293,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.role = AgentRole::Orchestrator;
     }
     // Refuses destroyed agents before any write.
-    let authority = super::assistant_agent_credential_service::authority_with_access(
-        db,
-        &row,
-        &mut *session,
-        start.org_access.as_ref(),
+    let authority = Box::pin(
+        super::assistant_agent_credential_service::authority_with_access(
+            db,
+            &row,
+            &mut *session,
+            start.org_access.as_ref(),
+        ),
     )
     .await?;
     row.shared_agent_thread = matches!(

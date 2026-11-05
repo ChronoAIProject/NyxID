@@ -478,7 +478,7 @@ pub(crate) async fn member_settled(
             _ => {}
         }
     }
-    let result: AppResult<()> = async {
+    let result: AppResult<()> = Box::pin(async {
         let group = groups::get(&state.db, owner, group_id).await?;
         let agent = team::agent_for_conversation(&state.db, row).await?;
         let has_artifacts = match row.active_turn.as_ref() {
@@ -563,7 +563,7 @@ pub(crate) async fn member_settled(
             }
         }
         Ok(())
-    }
+    })
     .await;
     if let Err(error) = result {
         tracing::debug!(%error, "Group reply not posted");
@@ -1351,7 +1351,7 @@ pub async fn post_message(
             ),
         ));
     }
-    let (message, addressed) = post_with_uploads(
+    let (message, addressed) = Box::pin(post_with_uploads(
         &state,
         &owner,
         &id,
@@ -1360,7 +1360,7 @@ pub async fn post_message(
         &body.attachment_ids,
         body.recipient_agent_ids.as_deref(),
         None,
-    )
+    ))
     .await?;
     let agents = team::agents(&state.db, &message.user_id, true).await?;
     Ok((
