@@ -1628,6 +1628,7 @@ async fn dispatch_specialists(
             let targets = Box::pin(team::resolve_targets(
                 db,
                 state.node_ws_manager.as_ref(),
+                owner,
                 resource_owner,
                 &string_list(args, "services"),
             ))
@@ -1758,6 +1759,7 @@ async fn dispatch_specialists(
             let (targets, refused) = Box::pin(team::resolve_each_target(
                 db,
                 state.node_ws_manager.as_ref(),
+                owner,
                 &agent.user_id,
                 &requested,
             ))
@@ -2136,6 +2138,7 @@ async fn dispatch_agent_settings(
                     db,
                     state.node_ws_manager.as_ref(),
                     owner,
+                    &agent.user_id,
                     &requested,
                 ))
                 .await?;
@@ -3176,6 +3179,7 @@ pub async fn create_agent(
     let targets = Box::pin(team::resolve_targets(
         &state.db,
         state.node_ws_manager.as_ref(),
+        &owner,
         &resource_owner,
         &body.services,
     ))
@@ -3409,6 +3413,7 @@ pub async fn set_agent_grants(
     let targets = Box::pin(team::resolve_targets(
         &state.db,
         state.node_ws_manager.as_ref(),
+        &owner,
         &current.user_id,
         &body.services,
     ))

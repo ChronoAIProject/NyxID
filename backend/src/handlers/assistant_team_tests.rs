@@ -1854,7 +1854,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
         refused[1]["reason"]
             .as_str()
             .unwrap()
-            .contains("Unknown or unavailable service: no-such-api"),
+            .contains("Unknown service or no access: no-such-api"),
         "{value}"
     );
     // Nothing grantable: an error that says why.
@@ -1880,7 +1880,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
         value["message"]
             .as_str()
             .unwrap()
-            .contains("Unknown or unavailable service: no-such-api"),
+            .contains("Unknown service or no access: no-such-api"),
         "{value}"
     );
     server.abort();
