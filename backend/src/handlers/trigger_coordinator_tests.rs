@@ -701,6 +701,11 @@ async fn v2_specialist_webhook_editor_mentions_reviewer_and_nyxbot_then_resumes_
         None,
     )
     .await;
+    // Admission persists dispatch identities; recover the same fresh snapshot
+    // that the production member_settled callback loads after saving a reply.
+    let group = crate::services::assistant_group_service::get(&state.db, OWNER, &groups.id)
+        .await
+        .unwrap();
     work_groups::recover(&state.db, &group).await.unwrap();
     let group = crate::services::assistant_group_service::get(&state.db, OWNER, &groups.id)
         .await
@@ -722,6 +727,9 @@ async fn v2_specialist_webhook_editor_mentions_reviewer_and_nyxbot_then_resumes_
             .unwrap();
         let member = group_turn(&state, &current, agent).await;
         save_reply(&state, &member, "Review finished", None).await;
+        let current = crate::services::assistant_group_service::get(&state.db, OWNER, &groups.id)
+            .await
+            .unwrap();
         work_groups::recover(&state.db, &current).await.unwrap();
     }
     let group = crate::services::assistant_group_service::get(&state.db, OWNER, &groups.id)
@@ -2267,6 +2275,9 @@ async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
         let child = group_turn(&state, &group, &agent).await;
         save_reply(&state, &child, "Finished", None).await;
     }
+    let group = crate::services::assistant_group_service::get(&state.db, OWNER, &group.id)
+        .await
+        .unwrap();
     work_groups::recover(&state.db, &group).await.unwrap();
     let current = engine::get(&state.db, OWNER, &row.id).await.unwrap();
     let summary = current
