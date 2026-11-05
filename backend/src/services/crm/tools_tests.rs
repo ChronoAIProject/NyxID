@@ -274,14 +274,16 @@ async fn crm_native_schema_dto_replay_and_concrete_confirmation() {
     let f = fixture().await;
     let mut args = json!({"mutation_key":"add-score","object":"company","input":{"expected_schema_revision":1,"field":{"key":"score","label":"Score","type":"number","format":"percent","required":false,"archived":false}}});
     // Honor an owner card if the configured access mode requests one.
-    let refusal = call(&f, "crm_add_field", args.clone(), 1).await.unwrap();
-    if let Some(ack) = refusal["acknowledgement_id"].as_str() {
+    let response = call(&f, "crm_add_field", args.clone(), 1).await.unwrap();
+    let first = if let Some(ack) = response["acknowledgement_id"].as_str() {
         acks::decide(&f.state.db, &f.owner, &f.chat.conversation_id, ack, true)
             .await
             .unwrap();
         args["acknowledgement_id"] = json!(ack);
-    }
-    let first = call(&f, "crm_add_field", args.clone(), 2).await.unwrap();
+        call(&f, "crm_add_field", args.clone(), 2).await.unwrap()
+    } else {
+        response
+    };
     let replay = call(&f, "crm_add_field", args.clone(), 3).await.unwrap();
     assert_eq!(first, replay);
     assert!(first["result"]["id"].is_string());

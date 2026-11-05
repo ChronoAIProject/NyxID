@@ -265,7 +265,7 @@ pub async fn create(
                         }
                     }
                 }
-                let now = Utc::now();
+                let now = bson::DateTime::now().to_chrono();
                 let object = CrmObject {
                     id: Uuid::new_v4().to_string(),
                     owner_id: owner.clone(),
@@ -339,7 +339,7 @@ pub async fn add_field(
             if current.fields.iter().any(|candidate| candidate.key == field.key) {
                 return Err(super::validation_error("field.key", "already exists on this object"));
             }
-            let now = Utc::now();
+            let now = bson::DateTime::now().to_chrono();
             let updated = db.collection::<CrmObject>(COLLECTION_NAME).update_one(
                 doc! {"_id": &current.id, "owner_id": owner, "schema_revision": expected},
                 doc! {"$push": {"fields": bson::to_bson(field).map_err(|error| AppError::Internal(error.to_string()))?}, "$inc": {"schema_revision": 1_i64}, "$set": {"updated_at": bson::DateTime::from_chrono(now)}},
@@ -455,7 +455,7 @@ pub async fn patch_field(
         super::records::insert_receipt(db, tx, receipt.as_ref(), &current, Utc::now()).await?;
         return Ok(current);
     }
-    let now = Utc::now();
+    let now = bson::DateTime::now().to_chrono();
     let updated = db
         .collection::<CrmObject>(COLLECTION_NAME)
         .update_one(
