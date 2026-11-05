@@ -1,3 +1,4 @@
+import { useCrmQueryPolicy } from "@/lib/crm/query-policy";
 import { useVisibleCrmQuery } from "@/lib/crm/query-visibility";
 import { z } from "zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -133,7 +134,7 @@ export function useCrmViews(ownerId?: string, cursor?: string) {
         ),
       enabled: Boolean(actor && owner),
       retry: false,
-      refetchInterval: 30_000,
+      ...useCrmQueryPolicy(),
     }),
     owner,
   );
@@ -156,7 +157,7 @@ export function useCrmView(viewId: string | undefined, ownerId?: string) {
         ),
       enabled: Boolean(actor && owner && viewId),
       retry: false,
-      refetchInterval: 30_000,
+      ...useCrmQueryPolicy(),
     }),
     owner,
   );

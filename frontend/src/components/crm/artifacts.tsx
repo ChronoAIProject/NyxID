@@ -1,3 +1,5 @@
+import { Link } from "@tanstack/react-router";
+import { CrmPollingContext } from "@/lib/crm/query-policy";
 import type { ReactNode } from "react";
 import { ApiError } from "@/lib/api-client";
 import { useCrmAggregate, useCrmObject, useCrmRecord } from "@/hooks/use-crm";
@@ -9,11 +11,11 @@ import { CrmOwnerContext } from "@/lib/crm/owner-context";
 
 function Frame({
   title,
-  href,
+  artifact,
   children,
 }: {
   readonly title: string;
-  readonly href: string;
+  readonly artifact: TurnCrmArtifact;
   readonly children: ReactNode;
 }) {
   return (
@@ -23,12 +25,13 @@ function Frame({
     >
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
         <h3 className="truncate text-13 font-semibold">{title}</h3>
-        <a
-          href={href}
+        <Link
+          to="/assistant/crm"
+          search={artifactSearch(artifact)}
           className="shrink-0 text-12 text-primary underline underline-offset-4"
         >
           Open
-        </a>
+        </Link>
       </div>
       <div className="max-h-96 overflow-auto p-4">{children}</div>
     </section>
@@ -48,30 +51,32 @@ function State({
       </p>
     );
   const unavailable =
-    error instanceof ApiError && [401, 403, 404, 410].includes(error.status);
+    error instanceof ApiError && [403, 404, 410].includes(error.status);
   return (
     <p role="alert" className="my-3 text-12 text-text-secondary">
-      {unavailable
-        ? "This artifact is no longer available"
-        : "Could not load this artifact. It will retry when the connection is restored."}
+      {error instanceof ApiError && error.status === 401
+        ? "Your session has expired. Sign in to reopen this artifact."
+        : unavailable
+          ? "This artifact is no longer available"
+          : "Could not load this artifact. It will retry when the connection is restored."}
     </p>
   );
 }
-function href(artifact: TurnCrmArtifact) {
-  const query = new URLSearchParams({ owner: artifact.owner_id });
-  if (artifact.kind === "view") query.set("view", artifact.id);
-  else {
-    query.set("object", artifact.object_key ?? "");
-    if (artifact.kind === "record") query.set("record", artifact.id);
-  }
-  return `/assistant/crm?${query}`;
+function artifactSearch(artifact: TurnCrmArtifact) {
+  return {
+    owner: artifact.owner_id,
+    view: artifact.kind === "view" ? artifact.id : undefined,
+    object: artifact.kind === "view" ? undefined : artifact.object_key,
+    record: artifact.kind === "record" ? artifact.id : undefined,
+    surface: undefined,
+  };
 }
 function ViewArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
   const view = useCrmView(artifact.id, artifact.owner_id);
   if (view.isError) return <State error={view.error} />;
   if (!view.data) return <State loading />;
   return (
-    <Frame title={view.data.title} href={href(artifact)}>
+    <Frame title={view.data.title} artifact={artifact}>
       <CrmViewRenderer
         envelope={view.data.envelope}
         ownerId={artifact.owner_id}
@@ -99,7 +104,11 @@ function RecordArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
   return (
     <Frame
       title={title}
-      href={href({ ...artifact, object_key: record.data.object_key })}
+      artifact={{
+        ...artifact,
+        kind: "record",
+        object_key: record.data.object_key,
+      }}
     >
       <p className="mb-2 text-11 text-text-tertiary">
         {object.data.label}
@@ -125,7 +134,7 @@ function RecordArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
 }
 function ObjectArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
   const object = useCrmObject(
-    artifact.object_key ?? undefined,
+    artifact.kind === "object" ? artifact.object_key : undefined,
     artifact.owner_id,
   );
   const count = useCrmAggregate(
@@ -142,14 +151,13 @@ function ObjectArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
   if (object.isError || count.isError)
     return <State error={object.error ?? count.error} />;
   if (!object.data || !count.data) return <State loading />;
-  const total = count.data.points.reduce(
-    (sum, point) => sum + (point.value ?? 0),
-    0,
-  );
+  const total = count.data.total;
   return (
-    <Frame title={object.data.plural_label} href={href(artifact)}>
+    <Frame title={object.data.plural_label} artifact={artifact}>
       <p className="text-12 text-text-secondary">
-        {total === 0 ? "No records yet." : `${total.toLocaleString()} records`}
+        {total === 0
+          ? "No records yet."
+          : `${total?.toLocaleString() ?? "Unknown"} records`}
       </p>
     </Frame>
   );
@@ -160,7 +168,7 @@ export default function CrmArtifacts({
   readonly artifacts: readonly TurnCrmArtifact[];
 }) {
   return (
-    <div>
+    <CrmPollingContext value={false}>
       {artifacts
         .slice(0, 8)
         .map((artifact) =>
@@ -172,6 +180,6 @@ export default function CrmArtifacts({
             <ObjectArtifact key={`object:${artifact.id}`} artifact={artifact} />
           ),
         )}
-    </div>
+    </CrmPollingContext>
   );
 }

@@ -1,3 +1,4 @@
+import { useCrmQueryPolicy } from "@/lib/crm/query-policy";
 import { useVisibleCrmQuery } from "@/lib/crm/query-visibility";
 import { z } from "zod";
 import {
@@ -28,7 +29,6 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 
 const CRM_PATH = "/assistant/crm";
-const CRM_POLL_INTERVAL_MS = 30_000;
 
 export const crmQueryKeys = {
   root: (owner: string | undefined) => ["crm", owner] as const,
@@ -91,7 +91,7 @@ export function useCrmObjects(ownerId?: string, enabled = true) {
         ).objects,
       enabled: enabled && Boolean(actor && owner),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -119,7 +119,7 @@ export function useCrmObject(
         ),
       enabled: enabled && Boolean(actor && owner && objectKey),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -155,7 +155,7 @@ export function useCrmTableQuery(
       },
       enabled: (options?.enabled ?? true) && Boolean(actor && owner && query),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -196,7 +196,7 @@ export function useCrmAggregate(
       },
       enabled: enabled && Boolean(actor && owner && query && parsed?.success),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -216,7 +216,7 @@ export function useCrmRecord(recordId: string | undefined, ownerId?: string) {
         ),
       enabled: Boolean(actor && owner && recordId),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -248,7 +248,7 @@ export function useCrmActivities(
       },
       enabled: Boolean(actor && owner && recordId),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -279,7 +279,7 @@ export function useCrmActivityHistory(recordId: string, ownerId?: string) {
       getNextPageParam: (page) => page.next_cursor ?? undefined,
       enabled: Boolean(actor && owner && recordId),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -303,7 +303,7 @@ export function useCrmRelated(recordId: string | undefined, ownerId?: string) {
         ),
       enabled: Boolean(actor && owner && recordId),
       retry: false,
-      refetchInterval: CRM_POLL_INTERVAL_MS,
+      ...useCrmQueryPolicy(),
       refetchIntervalInBackground: false,
     }),
     owner,
@@ -687,16 +687,18 @@ export function useCrmPeopleLabels(ids: readonly string[], ownerId?: string) {
       queryFn: async () => {
         const people: z.infer<typeof crmPersonSchema>[] = [];
         for (let index = 0; index < unique.length; index += 200) {
-          const result = z.object({ people: z.array(crmPersonSchema) }).parse(
-            await assistantJson(`${CRM_PATH}/people/lookup`, {
-              method: "POST",
-              body: ownerBody(
-                { ids: unique.slice(index, index + 200) },
-                owner,
-                actor,
-              ),
-            }),
-          );
+          const result = z
+            .object({ people: z.array(crmPersonSchema) })
+            .parse(
+              await assistantJson(`${CRM_PATH}/people/lookup`, {
+                method: "POST",
+                body: ownerBody(
+                  { ids: unique.slice(index, index + 200) },
+                  owner,
+                  actor,
+                ),
+              }),
+            );
           people.push(...result.people);
         }
         return people;

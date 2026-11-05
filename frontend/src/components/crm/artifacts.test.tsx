@@ -1,3 +1,4 @@
+import { renderCrmRoute } from "@/test/crm-router";
 import { render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import CrmArtifacts from "./artifacts";
@@ -43,7 +44,7 @@ it("renders nothing when the person has the flag off", () => {
   const view = render(<CrmArtifactBlock artifacts={[artifact]} />);
   expect(view.container).toBeEmptyDOMElement();
 });
-it("uses the viewer's live record instead of values or titles from the message", () => {
+it("uses the viewer's live record instead of values or titles from the message", async () => {
   state.record = {
     data: {
       id: "r",
@@ -58,7 +59,7 @@ it("uses the viewer's live record instead of values or titles from the message",
       fields: [{ key: "name", label: "Name", required: true, type: "text" }],
     },
   };
-  render(<CrmArtifacts artifacts={[artifact]} />);
+  await renderCrmRoute(<CrmArtifacts artifacts={[artifact]} />);
   expect(
     screen.getByRole("heading", { name: "Live name" }),
   ).toBeInTheDocument();
@@ -96,20 +97,44 @@ it("shows loading and connection errors explicitly", () => {
     "Could not load this artifact",
   );
 });
-it("renders a saved view and an empty dataset with reopen links", () => {
+it("renders a saved view and an empty dataset with reopen links", async () => {
   state.view = {
     data: { title: "Live saved view", envelope: {}, valid: true, errors: [] },
   };
   state.object = { data: { key: "asset", plural_label: "Assets" } };
-  state.count = { data: { points: [{ value: 0 }] } };
-  render(
+  state.count = { data: { points: [{ value: 123 }], total: 0 } };
+  await renderCrmRoute(
     <CrmArtifacts
       artifacts={[
-        { ...artifact, kind: "view" },
+        {
+          kind: "view",
+          id: "v",
+          owner_id: "owner",
+          title: "Stored view",
+          role: "presented",
+        },
         { ...artifact, id: "o", kind: "object", object_key: "asset" },
       ]}
     />,
   );
   expect(screen.getByText("Live view contents")).toBeInTheDocument();
   expect(screen.getByText("No records yet.")).toBeInTheDocument();
+});
+
+it("treats session expiry as reauthentication, not deletion", () => {
+  state.record = {
+    isError: true,
+    error: new ApiError(401, {
+      error: "unauthorized",
+      error_code: 1001,
+      message: "Expired",
+    }),
+  };
+  render(<CrmArtifacts artifacts={[artifact]} />);
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "Your session has expired. Sign in",
+  );
+  expect(
+    screen.queryByText("This artifact is no longer available"),
+  ).not.toBeInTheDocument();
 });
