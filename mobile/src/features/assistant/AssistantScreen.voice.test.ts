@@ -476,6 +476,10 @@ function setup(
       props: { style: { flex: 1 }, onTouchStart, ref: viewportRef, children },
     }),
   });
+  harness.mock(
+    "./ChatSurface",
+    harness.load(fileURLToPath(new URL("./ChatSurface.tsx", import.meta.url))),
+  );
   const Screen = harness.load(
     fileURLToPath(new URL("./AssistantScreen.tsx", import.meta.url)),
   ).AssistantScreen as (input: typeof props) => Element;

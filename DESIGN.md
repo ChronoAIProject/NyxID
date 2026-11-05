@@ -978,9 +978,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   composer. Compose actions preserve the viewed agent and start empty. Each
   thread keeps its own in-memory text/attachment draft when visiting Home or
   another thread; Home has a separate NyxBot composer.
-- Native private-user messages have neutral card fill, a 1pt border, 38pt leading
-  inset and corners 12/12/3/12. Private chat omits redundant “You”; group speakers,
-  real specialist attribution, orchestration, updates, via and guidance remain.
+- Native private and crew chats share `ChatSurface`: 8pt row/message gaps,
+  10pt vertical message padding, 20pt history separators and header clearance,
+  and the same user turn with a 38pt leading inset, 14/10pt bubble padding,
+  18/18/4/18 corners and the selected accessible bubble palette. Private chat
+  omits redundant “You”; crew author names/avatars, recipient pills, member
+  subtitle and settings remain. User prose shares 14/23pt body typography;
+  agent prose, headings, links, code, activity and attachments share their
+  production components without a crew markdown override. Both composer docks
+  share 12pt margins, the saved column width, and the same frame/input/toolbar.
+  Pending crew cards scroll in the transcript column, so jump-to-latest and
+  edge fades always anchor directly above the composer on both surfaces.
   Native reply footers show only an icon Copy action and a local day/month date,
   8pt apart and 8pt below the body. Reply feedback votes are omitted on native by
   user decision (2026-10-28); full timestamps remain accessible on long press.

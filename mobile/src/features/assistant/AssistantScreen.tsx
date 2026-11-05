@@ -1,3 +1,10 @@
+import {
+  ChatComposerDock,
+  ChatIconButton as IconButton,
+  ChatMessageTurn,
+  ChatTranscriptSeparator,
+  chatSurfaceStyles,
+} from "./ChatSurface";
 import { TranscriptViewport } from "./TranscriptViewport";
 import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
@@ -45,7 +52,6 @@ import {
   LayoutAnimation,
   Modal,
   Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -78,11 +84,8 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
-import {
-  chatBubbleColors,
-  userBubbleCorners,
-} from "../../theme/chatAppearance";
-import { fonts, radius } from "../../theme/designTokens";
+import { chatBubbleColors } from "../../theme/chatAppearance";
+import { fonts } from "../../theme/designTokens";
 import { useAssistant } from "./useAssistant";
 import { NyxBotHome } from "./NyxBotHome";
 import { showNyxBotHome } from "./nyxBotHomeModel";
@@ -967,30 +970,10 @@ export function AssistantScreen({
         }
       />
     );
-    if (isUser)
-      return (
-        <View style={styles.userTurn}>
-          {notes}
-          <View style={styles.userRow}>
-            <View
-              style={[
-                styles.message,
-                styles.userMessage,
-                { backgroundColor: bubble.background },
-              ]}
-            >
-              {body}
-            </View>
-            {footer}
-          </View>
-        </View>
-      );
     return (
-      <View style={styles.message}>
-        {notes}
+      <ChatMessageTurn user={isUser} notes={notes} footer={footer}>
         {body}
-        {footer}
-      </View>
+      </ChatMessageTurn>
     );
   }
 
@@ -1155,7 +1138,7 @@ export function AssistantScreen({
             data={messages}
             keyExtractor={(item) => item.id}
             renderItem={renderMessage}
-            ItemSeparatorComponent={TranscriptSeparator}
+            ItemSeparatorComponent={ChatTranscriptSeparator}
             keyboardShouldPersistTaps="handled"
             keyboardDismissMode="on-drag"
             contentContainerStyle={[
@@ -1435,27 +1418,25 @@ export function AssistantScreen({
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
       </TranscriptViewport>
-      <View style={styles.composerInset}>
+      <ChatComposerDock>
         {/* Voice mode slides up in place of the composer; the chat above stays
             on screen, so its cards and links work during the call. */}
         {voiceThread && voiceThread === assistant.conversationId ? (
-          <View style={[styles.composer, chatColumn]}>
-            <AssistantVoiceConversation
-              key={`voice:${voiceThread}`}
-              thread={voiceThread}
-              agentName={agentName}
-              minimized={voiceMinimized}
-              onExpand={() => changeVoiceSize(false)}
-              draft={draft}
-              onChangeText={updateDraft}
-              onSendText={() => void sendDraft()}
-              canSendText={canSend || canGuideSend}
-              onClose={() => setVoiceThread(undefined)}
-              onUpdate={() => void assistant.recover()}
-            />
-          </View>
+          <AssistantVoiceConversation
+            key={`voice:${voiceThread}`}
+            thread={voiceThread}
+            agentName={agentName}
+            minimized={voiceMinimized}
+            onExpand={() => changeVoiceSize(false)}
+            draft={draft}
+            onChangeText={updateDraft}
+            onSendText={() => void sendDraft()}
+            canSendText={canSend || canGuideSend}
+            onClose={() => setVoiceThread(undefined)}
+            onUpdate={() => void assistant.recover()}
+          />
         ) : (
-          <ChatComposerFrame style={[styles.composer, chatColumn]}>
+          <ChatComposerFrame>
             {guidance.canSteer ? (
               <Label muted style={styles.composerHint}>
                 Still replying. What you send now steers this reply; Stop ends
@@ -1635,7 +1616,7 @@ export function AssistantScreen({
             ) : null}
           </ChatComposerFrame>
         )}
-      </View>
+      </ChatComposerDock>
 
       <Sheet
         visible={!!sheet && sheet !== "permissions"}
@@ -1745,38 +1726,6 @@ export function AssistantScreen({
   );
 }
 
-function TranscriptSeparator() {
-  return <View style={styles.transcriptSeparator} />;
-}
-
-function IconButton({
-  children,
-  label,
-  onPress,
-  disabled,
-}: {
-  children: React.ReactNode;
-  label: string;
-  onPress: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.iconButton,
-        { opacity: disabled ? 0.4 : pressed ? 0.65 : 1 },
-      ]}
-    >
-      {children}
-    </Pressable>
-  );
-}
-
 function Sheet({
   visible,
   title,
@@ -1840,70 +1789,39 @@ function formatDate(value: string) {
         minute: "2-digit",
       });
 }
-const styles = StyleSheet.create({
-  fill: { flex: 1 },
-  row: { flexDirection: "row", alignItems: "center", gap: 8 },
-  headerActions: { flexDirection: "row", alignItems: "center" },
-  iconButton: {
-    minWidth: 44,
-    minHeight: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: radius.md,
-  },
-  transcript: { paddingVertical: 8, flexGrow: 1 },
-  transcriptHeader: { marginBottom: 20 },
-  transcriptSeparator: { height: 20 },
-  message: { gap: 8, paddingVertical: 10 },
-  userTurn: { gap: 8 },
-  turnActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  userRow: {
-    alignSelf: "flex-end",
-    alignItems: "flex-end",
-    marginLeft: 38,
-    gap: 2,
-    paddingVertical: 6,
-  },
-  userMessage: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    ...userBubbleCorners,
-  },
-  messageLabel: { fontSize: 11, fontFamily: fonts.bodySemi },
-  messageText: { fontFamily: fonts.bodyRegular, fontSize: 14, lineHeight: 23 },
-  metadata: { fontSize: 11 },
-  runningActivity: { flexShrink: 1, fontSize: 11 },
-  footer: { gap: 16, paddingTop: 20 },
-  welcome: { alignItems: "center", paddingVertical: 100 },
-  welcomeTitle: {
-    fontFamily: fonts.displaySemi,
-    fontSize: 24,
-    lineHeight: 32,
-    textAlign: "center",
-  },
-  welcomeBody: {
-    fontFamily: fonts.bodyRegular,
-    fontSize: 15,
-    lineHeight: 22,
-    textAlign: "center",
-    maxWidth: 300,
-    marginTop: 10,
-  },
-  thinking: { alignSelf: "flex-start", marginVertical: 10 },
-  composerInset: { paddingHorizontal: 12 },
-  chatPage: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 4, gap: 8 },
-  composer: { marginBottom: 0 },
-  composerHint: { fontSize: 11, lineHeight: 16, paddingHorizontal: 12 },
-  errorRow: { gap: 8, marginHorizontal: 12 },
-  sheet: { flex: 1, paddingTop: 20 },
-  sheetHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    gap: 16,
-  },
-  sheetSection: { fontFamily: fonts.bodySemi, fontSize: 13 },
-  sheetTitle: { fontFamily: fonts.displaySemi, fontSize: 22, lineHeight: 30 },
-  sheetContent: { padding: 20, paddingBottom: 40, gap: 14 },
-});
+const styles = {
+  ...chatSurfaceStyles,
+  ...StyleSheet.create({
+    headerActions: { flexDirection: "row", alignItems: "center" },
+    turnActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+    metadata: { fontSize: 11 },
+    runningActivity: { flexShrink: 1, fontSize: 11 },
+    welcome: { alignItems: "center", paddingVertical: 100 },
+    welcomeTitle: {
+      fontFamily: fonts.displaySemi,
+      fontSize: 24,
+      lineHeight: 32,
+      textAlign: "center",
+    },
+    welcomeBody: {
+      fontFamily: fonts.bodyRegular,
+      fontSize: 15,
+      lineHeight: 22,
+      textAlign: "center",
+      maxWidth: 300,
+      marginTop: 10,
+    },
+    thinking: { alignSelf: "flex-start", marginVertical: 10 },
+    sheet: { flex: 1, paddingTop: 20 },
+    sheetHeader: {
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingHorizontal: 20,
+      gap: 16,
+    },
+    sheetSection: { fontFamily: fonts.bodySemi, fontSize: 13 },
+    sheetTitle: { fontFamily: fonts.displaySemi, fontSize: 22, lineHeight: 30 },
+    sheetContent: { padding: 20, paddingBottom: 40, gap: 14 },
+  }),
+};

@@ -11,9 +11,17 @@ const nodes = (n: any): E[] =>
         "ChatComposerInput",
         "ChatComposerToolbar",
         "TranscriptViewport",
+        "ChatComposerDock",
+        "ChatMessageTurn",
+        "ChatIconButton",
       ].includes(n.type.name)
       ? nodes(n.type(n.props))
-      : [n, ...[n.props.children].flat(Infinity).flatMap(nodes)]
+      : [
+          n,
+          ...[n.props.children, n.props.ListFooterComponent]
+            .flat(Infinity)
+            .flatMap(nodes),
+        ]
     : [];
 
 function setup({
@@ -217,6 +225,12 @@ function setup({
       props: { ...p, style: { flex: 1, minHeight: 0 } },
     }),
   });
+  h.mock(
+    "../assistant/ChatSurface",
+    h.load(
+      fileURLToPath(new URL("../assistant/ChatSurface.tsx", import.meta.url)),
+    ),
+  );
   const Screen = h.load(
     fileURLToPath(new URL("./GroupChatScreen.tsx", import.meta.url)),
   ).GroupChatScreen as any;
@@ -295,8 +309,10 @@ test("crew header shows member identity and narrows recipients through its picke
   chat.data.group.working_agent_ids = ["research"];
   h.render();
   assert.equal(identity().props.status, "Running");
-  const working = nodes(h.value()).find((n) => n.type === "FlatList")!.props
-    .ListFooterComponent;
+  const working = nodes(
+    nodes(h.value()).find((n) => n.type === "FlatList")!.props
+      .ListFooterComponent,
+  ).find((n) => n.props.accessibilityLiveRegion === "polite")!;
   assert.equal(
     working.props.accessibilityLabel,
     "Agents working. Researcher is working…",
@@ -320,9 +336,10 @@ test("crew header shows member identity and narrows recipients through its picke
   chat.data.group.working_agent_ids = [];
   h.render();
   assert.equal(
-    nodes(h.value()).find((n) => n.type === "FlatList")!.props
-      .ListFooterComponent,
-    null,
+    nodes(h.value())
+      .find((n) => n.type === "FlatList")!
+      .props.ListFooterComponent.props.children.filter(Boolean).length,
+    0,
   );
   h.unmount();
 });
@@ -601,7 +618,11 @@ test("crew shares dictation, review, attachments and settings with private chat 
       actions.some((n) => n.type === type),
       type,
     );
-  assert.ok(actions.some((n) => n.props.label === "Crew composer settings"));
+  assert.ok(
+    actions.some(
+      (n) => n.props.accessibilityLabel === "Crew composer settings",
+    ),
+  );
   f.dictation.active = true;
   f.h.render();
   assert.equal(f.submit().props.disabled, true);
@@ -621,7 +642,7 @@ test("crew shares dictation, review, attachments and settings with private chat 
   f.h.unmount();
 });
 
-test("empty collaboration decisions reserve no transcript space and real decisions never grow into free space", () => {
+test("crew decisions scroll in the transcript footer and reserve no separate composer space", () => {
   const f = setup();
   f.chat.data.group.collaboration = collaboration;
   f.h.render();
@@ -636,8 +657,12 @@ test("empty collaboration decisions reserve no transcript space and real decisio
   const decisions = nodes(f.h.value()).find(
     (n) => n.props.accessibilityLabel === "Collaboration decisions",
   )!;
-  assert.equal(decisions.props.style.flexGrow, 0);
-  assert.equal(decisions.props.style.maxHeight, 180);
+  const list = nodes(f.h.value()).find((n) => n.type === "FlatList")!;
+  assert.ok(nodes(list.props.ListFooterComponent).includes(decisions));
+  assert.equal(decisions.type, "View");
+  assert.equal(decisions.props.style.flex, undefined);
+  assert.equal(decisions.props.style.maxHeight, undefined);
+  assert.equal(list.props.ListFooterComponent.props.style.paddingTop, 20);
   f.h.unmount();
 });
 
