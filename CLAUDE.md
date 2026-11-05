@@ -65,7 +65,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing. `SecurityReadinessUnavailable` also uses 12900 (HTTP 503, `security_readiness_unavailable`); clients must distinguish these errors by the response `error` key.
 - 13300 `MonitoringUnavailable` (HTTP 503, `monitoring_unavailable`): configured chrono-probe failed or returned an unusable response.
 - 13301 `MonitoringNotConfigured` (HTTP 404, `monitoring_not_configured`): `CHRONO_PROBE_URL` is unset or invalid; monitoring UI stays hidden.
-- 13400-13403 CRM: 13400 `CrmRevisionConflict`, 13401 `CrmValidationFailed`, 13402 `CrmIdempotencyMismatch`, 13403 `CrmViewInvalid`.
+- 13400-13404 CRM: 13400 `CrmRevisionConflict`, 13401 `CrmValidationFailed`, 13402 `CrmIdempotencyMismatch`, 13403 `CrmViewInvalid`, 13404 `CrmGenerationUnavailable` (HTTP 503).
 - 12500-12501 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503).
 
 ### 4. Frontend Patterns
