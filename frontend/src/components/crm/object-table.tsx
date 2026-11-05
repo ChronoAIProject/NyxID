@@ -262,11 +262,14 @@ function CrmObjectTableState({
                 <TableHeader>
                   <TableRow>
                     {fields.map((field) => (
-                      <TableHead key={field.key}>
+                      <TableHead
+                        key={field.key}
+                        className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+                      >
                         {isCrmSortableField(field) ? (
                           <button
                             type="button"
-                            className="inline-flex items-center gap-1 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                            className="inline-flex items-center gap-1 rounded-sm uppercase outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                             onClick={() => toggleSort(field)}
                           >
                             {field.label}

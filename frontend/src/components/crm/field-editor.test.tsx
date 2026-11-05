@@ -39,3 +39,27 @@ it("keeps optional boolean unset, false and true distinct and allows clearing", 
   await user.click(screen.getByRole("option", { name: "Not set" }));
   expect(screen.getByLabelText("Stored value")).toHaveTextContent("null");
 });
+
+it.each([
+  ["name", 1000, "INPUT"],
+  ["title", 1000, "INPUT"],
+  ["email", 1000, "INPUT"],
+  ["short_note", 200, "INPUT"],
+  ["description", 1000, "TEXTAREA"],
+])("renders %s with length %i using %s", (key, maxLength, tag) => {
+  render(
+    <CrmFieldEditor
+      field={{
+        key: String(key),
+        label: "Text",
+        type: "text",
+        max_length: Number(maxLength),
+        required: false,
+        archived: false,
+      }}
+      value=""
+      onChange={() => undefined}
+    />,
+  );
+  expect(screen.getByRole("textbox", { name: "Text" }).tagName).toBe(tag);
+});

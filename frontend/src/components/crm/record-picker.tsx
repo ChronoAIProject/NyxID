@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/popover";
 import { useCrmObject, useCrmTableQuery } from "@/hooks/use-crm";
 import type { CrmField, CrmRecordLink } from "@/schemas/crm";
+import { useAuthStore } from "@/stores/auth-store";
 
 type RecordField = Extract<CrmField, { type: "record" }>;
 
@@ -33,6 +34,12 @@ export function CrmRecordPicker({
   readonly describedBy?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const actorId = useAuthStore((state) => state.user?.id);
+  const scope = `${actorId ?? "anonymous"}:${ownerId ?? "personal"}:${field.target}`;
+  const [chosen, setChosen] = useState<{
+    scope: string;
+    labels: Map<string, string>;
+  }>({ scope, labels: new Map() });
   const [search, setSearch] = useState("");
   const [queryText, setQueryText] = useState("");
   const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
@@ -78,14 +85,15 @@ export function CrmRecordPicker({
       ),
     [value],
   );
-  const labels = new Map(
-    selectedLinks.map((link) => [
+  const labels = new Map<string, string>([
+    ...(chosen.scope === scope ? chosen.labels : new Map<string, string>()),
+    ...selectedLinks.map((link): [string, string] => [
       link.id,
       link.archived && !link.label.includes("(archived)")
         ? `${link.label} (archived)`
         : link.label,
     ]),
-  );
+  ]);
   for (const row of records.data?.rows ?? []) {
     if (titleField)
       labels.set(row.id, String(row.values[titleField.key] ?? "Untitled"));
@@ -96,6 +104,18 @@ export function CrmRecordPicker({
       : [...selectedIds].map((id) => labels.get(id) ?? id).join(", ");
 
   function choose(id: string) {
+    const nextIds =
+      field.cardinality === "one"
+        ? [id]
+        : selectedIds.has(id)
+          ? [...selectedIds].filter((value) => value !== id)
+          : [...selectedIds, id];
+    setChosen({
+      scope,
+      labels: new Map(
+        nextIds.slice(0, 100).map((id) => [id, labels.get(id) ?? "Record"]),
+      ),
+    });
     if (field.cardinality === "one") {
       onChange(id);
       setOpen(false);

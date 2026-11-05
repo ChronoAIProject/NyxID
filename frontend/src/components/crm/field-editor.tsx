@@ -38,7 +38,11 @@ export function CrmFieldEditor({
   const describedBy = error ? `${id}-error` : undefined;
   let control;
 
-  if (field.type === "text" && field.max_length > 500) {
+  if (
+    field.type === "text" &&
+    field.max_length > 200 &&
+    !["name", "title", "domain", "email"].includes(field.key)
+  ) {
     control = (
       <Textarea
         id={id}
