@@ -133,6 +133,13 @@ const VOICE_OPENAI_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const VOICE_AGENT_KEY_FLAG_KEY: &str = "assistant:voice-agent-key";
+const VOICE_AGENT_KEY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_AGENT_KEY_FLAG_KEY,
+    description: "Allow ordinary Agent Keys with an exact Bot Voice service grant to invoke personal Bots through realtime voice, preserving the Bot's existing permissions, tool confirmations and billing.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_VOICE_FLAG_KEY: &str = "assistant:voice";
 const ASSISTANT_VOICE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_VOICE_FLAG_KEY,
@@ -426,6 +433,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_AGENT_KEY_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
     VOICE_GROK_PLATFORM_FLAG,
@@ -476,6 +484,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_AGENT_KEY_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
     VOICE_GROK_PLATFORM_FLAG,
@@ -3093,6 +3102,7 @@ mod tests {
                 "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",
                 "assistant:voice",
+                "assistant:voice-agent-key",
                 "assistant:voice-openai-platform",
                 "assistant:voice-grok",
                 "assistant:voice-grok-platform",

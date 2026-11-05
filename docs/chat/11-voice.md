@@ -1,3 +1,5 @@
+> Ordinary Agent Key support is opt-in and uses a separate connection bound to each Bot. See [Agent Key voice](12-agent-key-voice.md) for the authorization and deployment contract. Browser voice and dictation retain their existing identity rules.
+
 # Realtime voice for NyxBot and specialists
 
 Status: **Phase 3 merged (PR #1751, v0.54.0); Phase 4 Grok private beta in implementation, flags off**. Initially researched 2026-10-03
@@ -19,7 +21,7 @@ authority and specialists retain their grants, B1 operation scopes, B2 skills
 and B3a organization checks. Voice creates no second tool executor or general
 "call any NyxID API" bridge.
 
-Use OpenAI **`gpt-live-1`**, client delegation, browser WebRTC audio and a
+Use OpenAI **`gpt-live-1`**, native Responses delegation, browser WebRTC audio and a
 server-owned sideband. Use xAI **`grok-voice-think-fast-2.0`**, pinned rather than
 the mutable `grok-voice-latest` alias, through a NyxID WebSocket relay. Both use
 one coordinator for transcript persistence, request admission, progress, cards,
@@ -47,10 +49,10 @@ Live/Realtime guides; their Realtime examples are a different protocol.
 | Topic | Evidence and design consequence |
 | --- | --- |
 | Latest documented GPT-Live model | [OpenAI model catalog][oa-models] and [GPT-Live 1][oa-model] list `gpt-live-1`. It is full duplex and uses `/v1/live/sessions`, **not** `/v1/realtime`. The requested `gpt-live-1-mini` page returned 404 and the catalog does not list it. Reserve the preference value, but mark it unavailable until documented and tested; never silently substitute a Realtime Mini model. The claimed September 10 GA date is not needed for this design and was not independently established. |
-| OpenAI browser connection | [WebRTC guide][oa-webrtc]: trusted server calls `POST /v1/live/sessions` with `{session:{model,instructions,delegation:{type:"client"},...},transport:{type:"webrtc",sdp}}`; answer is `transport.sdp`, identity is `session.id`. Browser channel label is `oai-events`. Wait for `session.started`; do not send `session.start` again. No ephemeral token is necessary. |
+| OpenAI browser connection | [WebRTC guide][oa-webrtc]: trusted server calls `POST /v1/live/sessions` with `{session:{model,instructions,delegation:{type:"responses",responses:{model:catalog.delegation_model,...}},...},transport:{type:"webrtc",sdp}}`; answer is `transport.sdp`, identity is `session.id`. Browser channel label is `oai-events`. Wait for `session.started`; do not send `session.start` again. No ephemeral token is necessary. |
 | OpenAI sideband | [Server controls][oa-controls]: attach to `wss://api.openai.com/v1/live/sessions/{session_id}/attach` with the creating project's authentication and required connection headers. It receives subsequent events, including reflected audio. Attach before releasing the answer to the browser; discard reflected audio immediately without persistence. No documented replay guarantee for events before attachment. |
 | Browser control permissions | [Live sideband reference][oa-sideband] describes `session.client.data_channel.allowed_client_events` and `allowed_server_events`. Omission allows all. Explicitly restrict them at creation; see §5. Trusted sideband permissions are unaffected. |
-| Client delegation | [Delegation][oa-delegation]: `session.delegation.created` carries `offset_ms`, `delegation.id`, `delegation.target`, **no task text**. Reconstruct the request from server-observed transcripts and task state. Append factual context with `session.thinking.append`, speakable facts with `session.commentary.append`, trusted behavior with `session.instructions.append`. Every append requires `delegation_id` (original ID or null) and at most 500 tokens. |
+| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. Its only function is `request_nyxbot({request})`. Complete function items become tasks only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
 | OpenAI configuration/usage | [Session guide][oa-sessions]: model, voice, input, store and delegation mode are startup choices. `session.update` only updates supported Responses delegation settings, not arbitrary Live configuration. `session.usage.updated.usage.seconds` is cumulative; `session.closed` contains final usage. Appended acknowledgements describe context injection, not speech completion. There is no client-delegation cancel event. |
 | OpenAI pricing/storage | [Model][oa-model] lists $0.05/minute billed per second, backend work separate. [Cost guide][oa-cost] says silence, mute and backend waiting count. WebRTC creation bills 15 initialization seconds credited against running duration: a 90-second session is 90, not 105. `store:false` is explicit; no recording download, forking or raw-audio storage. Provider retention policy is separate from NyxID retention. |
 | xAI model/transport | [Voice guide][xai-voice] now redirects to Speech to Speech: `wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0`; `grok-voice-latest` currently aliases it. Server Bearer authentication, bidirectional WebSocket, PCM and other codecs, JSON or binary audio transport. |
@@ -102,10 +104,11 @@ every browser turn.
 
 ### Admission and identity
 
-Every new route uses `login_client_context::require_first_party_human`, the
-human-only assistant router, its OAuth-client rejection layer and the effective
-NyxAgent/voice flags. API keys (including assistant keys), service accounts,
-delegated tokens, relay tokens and guests cannot start or attach to voice.
+Browser voice uses first-party human authentication and the effective
+NyxAgent/voice flags. Opt-in ordinary Agent Key voice uses a separately authorized
+connection bound to each selected personal Bot; see [Agent Key voice](12-agent-key-voice.md).
+Internal assistant keys, service accounts, OAuth-client tokens, delegated tokens,
+relay tokens and guests cannot start or attach through these voice routes.
 Ownership is checked before rate admission, credential resolution or provider
 creation. No body accepts an acting user, authority owner, upstream URL, provider
 session ID, secret, instructions, generic tool or billing principal.
@@ -191,7 +194,7 @@ event enum. Raw provider frames are never browser-authorized execution requests.
    Prepare one WebRTC offer; keep its outgoing mic track disabled initially.
 2. Validate the thread, resolved service/binding/model/voice, quotas and funds.
    Atomically allocate the live-session slot and an idempotent local start record.
-3. Create the provider session with `store:false`, client delegation, bounded
+3. Reserve the native Responses token stream, then create the provider session with `store:false`, Responses delegation, bounded
    instructions/history, selected `audio.output.voice`, and no `audio.format`.
    Configure `client.data_channel.allowed_client_events` to `[]`: all provider
    commands go through NyxID. Allow only needed transcript/lifecycle/error server
@@ -201,7 +204,7 @@ event enum. Raw provider frames are never browser-authorized execution requests.
    handlers, then return the SDP answer. The browser applies it, waits for
    `session.started` and NyxID `voice.ready`, then enables input. Captions may
    arrive directly on the data channel; they are presentation only. The sideband
-   is the authoritative source for transcript persistence and delegation.
+   is the authoritative source for transcript persistence and model-authored task calls.
 5. The browser holds a separate authenticated NyxID control socket. Data-channel
    tampering cannot inject tool requests, transcripts, usage or instructions.
    Browser mute disables its track immediately; server mute/unmute waits for the
@@ -232,7 +235,7 @@ exact documented shape. An optional integer expiry still shortens NyxID's local
 This identifies a reproducible post-create bug, not a production trace proving
 that every reported failure had the same cause.
 
-The request matches the reference: `session.delegation: {type: "client"}`,
+The request matches the reference: `session.delegation: {type: "responses", responses: {model: catalog.delegation_model, ...}}`,
 `session.audio.output.voice`, `store: false`, and `transport: {type: "webrtc", sdp}`.
 `allowed_client_events` is an array of event-name strings (`[]` allows none);
 `allowed_server_events` uses `{type: ...}` selectors, with `response_event` only
@@ -348,7 +351,7 @@ exact user-facing wording need no new environment variable.
 
 ### Request state machine
 
-`received -> waiting_for_transcript -> queued -> running -> awaiting_confirmation |
+`received -> waiting_for_model_task -> queued -> running -> awaiting_confirmation |
 completed | failed | cancelled | outcome_unknown`.
 
 ### Parallel voice work
@@ -390,15 +393,22 @@ as untrusted quoted data. A new voice task receives the visible thread's
 bounded recap on its first turn, so references to earlier chat context remain
 available without merging execution histories.
 
-1. Deduplicate a provider delegation by `(voice_session_id, provider_event_id /
-   delegation_id or call_id)`. Correlate OpenAI `offset_ms` with speaker intervals.
-   Allow up to 750 ms for late transcript fragments, with a two-second hard
-   deadline; missing/ambiguous text asks the user to repeat and starts no work.
-   Never infer a request from assistant output or timing silence alone.
-2. Persist the input segment(s) and request mapping transactionally, then
-   acknowledge: "I'll check that" or "I've queued that after the current task."
-   An optimistic model acknowledgement is not evidence of accepted execution;
-   the coordinator corrects it on admission failure.
+1. Live supplies conversation context to the catalog-selected Responses model.
+   Its only function accepts `request`, a complete self-contained task preserving
+   all requested outcomes and relevant references. Bind nested events to the
+   observed delegation, response and call IDs. Ignore argument deltas/done events
+   as execution triggers; wait for a complete function item and a successful
+   terminal response. Reject unknown tools/fields, oversized or empty tasks,
+   mismatched identities and incomplete responses. Model output never selects
+   a user, Key, Bot, service or permission.
+2. Admit through the existing session-fenced transaction and queue, deduplicated
+   by `(session_id, call_id)`. Store explicit `model_task` provenance separately
+   from ASR metadata; never relabel model text as a user transcript. Revalidate
+   the board Key and existing Bot/service grants. Fulfil the function once with
+   its queued/refused receipt, then send one `response.create` continuation.
+   A queued receipt is never a completed result. Caption sealing affects
+   presentation and existing literal confirmation gates, never task content.
+   Grok beta retains its separate utterance-reference adapter contract.
 3. The queue dispatcher rechecks live actor/agent access and calls the common
    turn runner. The claim transaction joins request ID, preallocated turn ID,
    user-message reference and `active_turn`; no second insertion of the spoken
@@ -418,15 +428,19 @@ available without merging execution histories.
    channel and automation work from starving.
 
 At `awaiting_confirmation`, retain the existing card and pending acknowledgement
-IDs on the request. Phase 3 performs §11's literal read-back, playback/input
+IDs on the request. Agent Key device calls require the owner's existing NyxID
+card; the credential does not authenticate the person speaking and cannot decide
+that card. Skill drafts also require full card review. First-party human Voice
+performs §11's literal read-back, playback/input
 gates and bounded classification. First `unclear` opens one new read-back;
 second `unclear` or silence keeps this state without deciding. Approve/deny
 creates one server continuation through ordinary admission. Audio end does not
 remove a pending card or imply denial.
 
 While work runs, translate allowlisted activity identifiers into short facts:
-"Checking your calendar", "Waiting for approval", "The specialist is working".
-Unknown labels become a generic service-stage description. Never narrate arguments, URLs,
+"Checking issue progress" or a server-authored approval read-back.
+Unknown activities, tool discovery, planning and internal resource waits stay
+silent; finished-step counts are telemetry, never spoken progress. Never narrate arguments, URLs,
 tool output, secrets or chain-of-thought. Send quiet state changes immediately;
 speak the first meaningful progress after about 2 s, then coalesce to at most
 one useful update per 8 s. Avoid repetitive reassurance. Activity status
@@ -436,8 +450,8 @@ Only durable settlement produces a final result announcement. Persist the full
 backend answer; send a bounded, factual speech summary (one/two coherent chunks,
 each <=500 tokens for Live) and leave details/cards/attachments on screen.
 Do not announce a provider effect as successful from a text delta or a completed
-activity alone. If no safe bounded summary is available, say the result is ready
-in the chat. Suppress duplicate or superseded announcements using task version
+activity alone. If no safe bounded summary is available, explain the
+presentation failure without redirecting the user to another conversation. Suppress duplicate or superseded announcements using task version
 and session generation. Append acknowledgement is not proof the user heard it;
 reconnect should show "Result ready" rather than blindly replaying speech.
 
@@ -445,22 +459,31 @@ reconnect should show "Result ready" rather than blindly replaying speech.
 
 The coordinator projects durable request state and matching live-turn activities
 into an additive `progress` snapshot: stage, a closed human-readable label, the
-last finished step, finished-step count and update time. A stale execution
-heartbeat reports that a fresh update is awaited. A tool error is a failed step,
-not successful completion. The first useful update is eligible after two seconds;
+last finished step, finished-step count and update time. Counts and technical
+stages remain observable without generic narration. A tool error is a failed
+step, not successful completion. The first useful update is eligible after two seconds;
 later changed evidence coalesces to one update per eight seconds across the call.
-User speech and a pending read-back defer narration; unchanged evidence is silent.
+User speech and a pending read-back defer narration; empty details, unchanged
+actions and changes to counts alone are silent.
 The UI displays the same projection. No arguments, outputs or raw operation names
 are used as progress narration.
 
 Settled hidden-task answers are copied in full through the existing transactional
 publisher, including when audio has ended. Concurrent sweeps adopt the same result
-receipt. Speech is one bounded, billed one-shot summary in the answer's language,
-with a two-second timeout and at most 100 characters, followed by the normal
-voice surface. It must state the finding/failure and point to the full chat answer.
-If summarization is unavailable, use only a complete safe sentence/clause or a
-fixed notice pointing to the saved answer. Unicode sentence/clause boundaries
-replace the old 64-byte fragments; never read a truncated clause. Admission-only
+receipt. Speech is one bounded, billed one-shot summary using the call's optional
+language preference, otherwise preserving the answer's language. There is no
+language allowlist. The summary has a three-second timeout and the existing
+480-byte UTF-8 commentary limit, followed by the normal voice surface. It states the
+concrete findings/failure and necessary detail directly, without mentioning saved
+answers, another chat, backend conversations or internal handoffs. If
+summarization is unavailable, a safe successful answer may be spoken whole within
+the same byte budget. Otherwise send bounded task-state facts for the live model
+to explain naturally in the conversation language. Presentation failure does not
+change a completed task into a failed task or request its execution again. Never
+select partial findings, rewrite Markdown, infer completeness from punctuation,
+or substitute a fixed spoken sentence. Grok queues presentation separately from
+user responses and prevents presentation responses from delegating work.
+Literal confirmation read-backs retain their existing lossless chunking. Admission-only
 and async-submit acknowledgements remain distinct from settled results.
 
 Read-back uses a server presentation of the existing card, while the original
@@ -486,8 +509,8 @@ separate `last_work_at` idle reference. The three-minute user-idle warning resum
 after work finishes; it never requires speech while accepted work is pending.
 The 30-minute deadline, 30-second heartbeat, live authority and funding checks
 still apply. On audio closure the call receipt explains why audio ended and
-that accepted tasks continue subject to their own limits, with answers/failures
-delivered to this chat. An available transport also receives this notice.
+that work already started continues subject to its own limits. It does not
+redirect the user to a backend conversation or saved answer. An available transport also receives this notice.
 Expiry, denied access, interrupted workers and service errors retain explicit
 failure explanations; call closure itself is not a task result.
 
@@ -584,7 +607,7 @@ sequenceDiagram
     U->>B: Tap mic; choose service/key/model/voice
     B->>V: Start(thread, choice, SDP offer, request ID)
     V->>D: Human/owner/B3a/ACL checks; live slot; reserve funds
-    V->>O: POST /v1/live/sessions (client delegation, store false)
+    V->>O: POST /v1/live/sessions (Responses delegation, store false)
     O-->>V: Provider session ID + SDP answer
     V->>O: Attach authenticated sideband; install handlers
     V-->>B: SDP answer + local voice session ID
@@ -592,9 +615,9 @@ sequenceDiagram
     O-->>V: Session/transcript events
     V-->>B: voice.ready (control socket)
     U->>O: Spoken service request over browser WebRTC
-    O-->>V: Input transcript deltas + delegation.created
+    O-->>V: Caption deltas + native model task call
     V->>D: Deduplicate; persist input and request; admit/queue
-    V->>O: commentary.append (accepted/queued, delegation_id)
+    V->>O: response.item.create (queued/refused receipt); response.create
     O-->>U: Immediate acknowledgement
     V->>N: Ordinary user turn on same thread/key
     N-->>V: Allowlisted activity state
@@ -602,13 +625,13 @@ sequenceDiagram
     O-->>U: Brief useful progress
     U->>O: Backchannel, interruption or another request
     Note over O,N: Full-duplex speech continues; interruption leaves work running
-    O-->>V: New transcript/delegation
+    O-->>V: New model-authored task
     V->>D: Queue new work behind active-turn fence
     N->>D: Settle result durably
     V->>O: commentary.append (settled result)
     O-->>U: Proactive result
     opt Explicit cancel of another running task
-        O-->>V: User transcript identifies task cancellation
+        O-->>V: Complete model task identifies requested cancellation
         V->>D: Expected-turn Stop; invalidate task continuation
         V->>N: Existing Stop/drop-stream and machine cancellation
         N->>D: Persist cancelled or uncertain outcome
@@ -630,7 +653,7 @@ sequenceDiagram
     B->>V: End (local capture/playback off immediately)
     V->>O: session.close
     O-->>V: session.closed with final usage.seconds
-    V->>D: Settle duration; release session slot
+    V->>D: Settle reported Responses tokens and duration; release slot
     V-->>B: voice.ended; close media/control transports
     Note over N,D: Accepted work survives audio end; reply/notification stays in thread
 ```
@@ -722,13 +745,13 @@ cascades; legally retained billing rows contain metadata only. Live voice is
 closed before deleting its thread. An active backend turn retains the existing
 409 deletion rule until stopped/settled.
 
-Paths below are relative to `/api/v1/assistant/nyxagent`. All are human-only,
-actor-scoped, flag-gated on creation and reauthorized on use. Enforcement,
+Paths below are relative to `/api/v1/assistant/nyxagent`. Browser and opt-in
+ordinary Agent Key voice routes are actor-scoped, flag-gated on creation and reauthorized on use. Enforcement,
 cleanup and Stop continue when the feature flag is disabled.
 
 | Route | Closed request / safe result |
 | --- | --- |
-| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Omit `conversation_id` for account settings before a draft exists; own connections are then personal only. Both forms require a first-party human and the voice feature. Metadata only, no credential provisioning side effects; start reauthorizes against the actual thread. |
+| `GET /voice/options?conversation_id=...` | Authorized realtime services and valid connection/binding choices, adapter, verified models/voices, availability reason, lane prices and billing owner label. Omit `conversation_id` for first-party human account settings before a draft exists; own connections are then personal only. An ordinary Agent Key must name a conversation belonging to its authorized Bot voice connection. Metadata only, no credential provisioning side effects; start reauthorizes against the actual thread. |
 | Existing `POST /drafts` | Create a normal private thread for selected agent before the first call if necessary. |
 | `POST /conversations/{id}/voice-sessions` | `{client_request_id,preferences:{service_id,connection_id?,key_source,model,voice,input_mode,language?,notify_on_completion},sdp_offer}`. OpenAI SDP required, xAI forbidden. Returns `{session,sdp_answer}`; the safe session DTO carries state, timing and revision, and options disclose limits. It does not change the thread's NyxAgent profile. |
 | `GET /conversations/{id}/voice-sessions/{sid}` | Authoritative safe state and task IDs for reconnect. No provider IDs, SDP, key IDs or transcript dump. |
@@ -772,11 +795,13 @@ centrally in `errors/mod.rs` during implementation.
 | Provider event/command | NyxID mapping and rule |
 | --- | --- |
 | HTTP create result; `session.started` | Bind server-owned provider session; `voice.ready` only after sideband and control readiness. Deduplicate start notifications. |
-| `session.input_transcript.delta` | Timed user caption/segment; authoritative only on sideband. Correlate with delegation offset; never generic confirmation. |
+| `session.input_transcript.delta` | Timed user caption for display/history; never constructs tasks or grants authority. Existing literal confirmation gates remain separate. |
 | `session.output_transcript.delta` | Timed assistant caption/segment; delivery tracked separately. |
-| `session.delegation.created` | Idempotent request admission using stored input transcript and known task state. |
+| `session.delegation.created` | Register Responses delegation/response identity; no task admission yet. |
+| `response.event` | Collect complete function items, checkpoint terminal reported tokens, then admit a successfully completed model task. Deltas and incomplete responses start no work. |
+| `response.item.create` / `response.create` | Return a function receipt and continue once; verified results arrive separately through existing announcements. |
 | `session.thinking.append` | Bounded factual quiet task state; may later be spoken, no secrets/reasoning. |
-| `session.commentary.append` | Accepted/queued/progress/result/cancellation fact, original delegation ID or null for unrelated session state. |
+| `session.commentary.append` | Accepted/queued/progress/result/cancellation fact, `delegation_id:null` in Responses mode. |
 | `session.instructions.append` | Application-authored behavior only; never verbatim user/tool text. Can steer speech; cannot undo audio or cancel work. |
 | `session.*.appended`, `client_event_id` | Track command acceptance/context injection; not task completion or playback receipt. Errors mark delivery uncertain, never rerun work. |
 | `session.input_audio.mute/unmute`, `.muted/.unmuted` | Server input gate in addition to local mic gate. Does not mute output or stop billing/tasks. |
@@ -1142,8 +1167,18 @@ pricing decision. Never advertise an unverified Mini discount.
   seconds, and repeated response IDs reuse deterministic settlement identities.
   xAI has no provider duration event: its token counts must never become a duration
   estimate. Implement this adapter path in Phase 4. Disable uncovered-byte estimation on
-  this voice surface. GPT-Live client delegation has no Responses backend to
-  double-charge; NyxAgent work is already metered on its normal path.
+  this voice surface. GPT-Live Responses tokens and NyxAgent task execution are
+  separate provider calls using existing token billing components.
+
+OpenAI Live reserves one ordinary token-stream hold before session creation,
+using `voice:{session_id}:responses`. Terminal Responses events checkpoint only
+provider-reported token classes, deduplicated by response ID. Closing drains
+terminal usage, sums known reports and freezes the checkpoint through the
+existing usage meter and claim-fenced settlement path. Duration retains its
+separate windows. Missing tail usage remains platform exposure. The catalog
+sets `delegation_model` independently of the voice model and exposes token
+metrics; backfill upgrades only untouched defaults, preserving administrator
+choices. Administrators can edit the Responses model in the catalog UI.
 
 Grok reserves tokens through the existing billing service before each response
 or scripted utterance, using a deterministic session/response-sequence identity.
@@ -1369,8 +1404,8 @@ reply latency. Transcript checkpoints are processed on the coordinator's
 one-second tick, and persisted captions are read by a separate one-second
 control-snapshot tick. Together these can add nearly two seconds of scheduling
 delay before a partial transcript becomes visible, beyond provider transcription
-and database time. OpenAI also seals input after a one-second fragment quiet
-window; this protects ordered, complete utterances used for delegation. A future
+and database time. OpenAI also seals caption checkpoints after a one-second
+fragment quiet window for display/history; this never selects task boundaries. A future
 coalesced caption push should preserve the session authorization checks and
 durable transcript authority while separating presentation updates from that
 seal window. Simply increasing both poll rates would also multiply database,
@@ -1386,7 +1421,7 @@ still require real-session measurements; fixtures do not establish those times.
 | OpenAI sideband lost while audio lives | Immediately stop delegation admission and tell UI to pause media; attempt bounded authenticated reattach solely to observe/close. Gap means transcript/usage uncertain. Rebuild a new session with saved text only after safe closure/user action. No client-forwarded events become authority. |
 | Grok upstream/client relay disconnect | Close upstream on client heartbeat expiry, checkpoint duration, discard raw buffers; retain requests. Reconnect never resends buffered old speech/tool calls. |
 | Control WS lag/resync or change-stream outage | Bounded buffers; task snapshot/history refresh and existing poll backstop. Refuse work when authoritative persistence/ACL state cannot be established. |
-| Replica crash/expired lease | Fenced recovery reclaims the generation. OpenAI sessions with a provider id reattach exactly once and resume the sideband; the browser reconnects its control stream with bounded backoff. Grok relays cannot resume and are closed with final usage/receipt. If the provider is gone or reattach fails, close with the message “The call ended during a server update; start a new call”. |
+| Replica crash/expired lease | Fenced recovery reclaims the generation. Native Responses sessions close and settle known usage after losing their sideband owner; in-flight tool calls are never reconstructed or replayed. Legacy client sessions may reattach; the browser reconnects its control stream with bounded backoff. Grok relays cannot resume and are closed with final usage/receipt. If the provider is gone or reattach fails, close with the message “The call ended during a server update; start a new call”. |
 | Billing denied before or during call | No start without initial funds; close before next unfunded window. Clear UI message, exact ledger recovery, keep accepted task results. |
 | Backend error or insufficient credits | Persist normal failed reply; announce the safe existing error. No credential replacement/retry for insufficient credits. An uncertain action stays uncertain. |
 | Queue full, rate limit, turn busy | Busy request visibly queues within bounds; full/rate-limited request is refused with retry guidance, not silently dropped or labelled started. |
@@ -1429,7 +1464,8 @@ its no-recording rule changes a provider's default retention policy.
 ### Deterministic/unit and integration coverage
 
 * Provider fixtures: exact Live start/attach/client permissions, late/reordered
-  transcript deltas, delegation without text, 500-token bounds, append errors,
+  transcript deltas, native complete task calls, duplicate/incomplete/mismatched
+  Responses events, closed task schemas, 500-token bounds, append errors,
   cumulative/final usage, close without finalization. Grok cumulative transcript
   correction, final events, multi-function batch, force-message lifecycle,
   manual commit/cancel/truncate, aliases and unknown events. No paid calls in CI.
@@ -1558,13 +1594,13 @@ Existing platform ACL, B1 scopes and B3a enforcement remain active throughout.
 ### Restart, rejoin and durable End
 
 The recovery worker claims an expired lease by incrementing the session generation
-and fencing on `(session_id, generation, lease_owner)`. For an un-ended OpenAI call it
-resolves the same credential identity, attaches to the persisted `provider_session_id`,
-and only then marks the row active and starts the coordinator. A second worker cannot
-attach because the claim and subsequent writes use the new generation. Pending
-transcripts, delegated requests, result announcements and read-back cards are rebuilt
-from their durable records. xAI's process-local relay is never replayed after restart;
-its measured usage is settled and the call receipt is emitted.
+and fencing on `(session_id, generation, lease_owner)`. A native Responses call
+closes after its sideband owner is lost: in-flight Responses state cannot be
+reliably replayed. Recovery closes the existing provider session when possible
+and settles durable reported token and duration checkpoints. Accepted task rows
+keep their existing independent recovery rules; no provider session or device
+operation is recreated. Legacy client-delegation calls may still reattach under
+a fresh fence. xAI's process-local relay is never replayed after restart.
 
 The browser keeps the WebRTC media object alive while its control WebSocket reconnects
 with bounded 1, 2, 4, 8, 15 and 30 second backoff. A recovered snapshot may carry a new

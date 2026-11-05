@@ -25,7 +25,7 @@ import { SkeletonRows } from "../../components/Skeleton";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { ApiError } from "../../lib/api/ApiError";
 import { servicesApi } from "../../lib/api/servicesApi";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 import type { WorkspaceNavigationProp } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
@@ -346,7 +346,7 @@ export function ServicesScreen({
       run(async () => {
         const url = new URL(
           `/keys/${encodeURIComponent(selectedId)}`,
-          validateBrowserUrl(NYXID_FRONTEND_URL),
+          validateBrowserUrl(getFrontendUrl()),
         );
         url.searchParams.set("tab", target);
         await WebBrowser.openBrowserAsync(url.href);
@@ -1091,7 +1091,7 @@ function ConnectForm({
     setLinkBusy(true);
     setLinkError(undefined);
     try {
-      const url = new URL("/keys", validateBrowserUrl(NYXID_FRONTEND_URL));
+      const url = new URL("/keys", validateBrowserUrl(getFrontendUrl()));
       url.searchParams.set("slug", entry.slug);
       await WebBrowser.openBrowserAsync(url.href);
       await onRefresh();

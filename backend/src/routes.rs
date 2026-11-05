@@ -94,6 +94,33 @@ macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/proxy/nyxbot-voice/{service_id}/{*path}",
+                "/api/v1/proxy/nyxbot-voice/{service_id}/{*path}",
+                "handlers::assistant_voice::internal::service_request",
+                axum::routing::any(handlers::assistant_voice::internal::service_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice runtime owns call usage and settlement"
+                )
+            ),
+            (
+                "/proxy/nyxbot-voice/{service_id}",
+                "/api/v1/proxy/nyxbot-voice/{service_id}",
+                "handlers::assistant_voice::internal::service_root",
+                axum::routing::any(handlers::assistant_voice::internal::service_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice service root has no operation"
+                )
+            ),
+            (
+                "/proxy/nyxbot-voice/{service_id}/",
+                "/api/v1/proxy/nyxbot-voice/{service_id}/",
+                "handlers::assistant_voice::internal::service_root",
+                axum::routing::any(handlers::assistant_voice::internal::service_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice service root has no operation"
+                )
+            ),
+            (
                 "/permission-execution/rest/{*path}",
                 "/api/v1/permission-execution/rest/{*path}",
                 "handlers::permission_keys::rest",
@@ -3190,6 +3217,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/machines/{node_id}/activity",
             get(handlers::machine_activity::list),
+        )
+        .route(
+            "/assistant/nyxagent/agents/{id}/voice-service",
+            get(handlers::assistant_voice::voice_service)
+                .put(handlers::assistant_voice::publish_voice_service),
         )
         .route(
             "/assistant/nyxagent/dictation/options",

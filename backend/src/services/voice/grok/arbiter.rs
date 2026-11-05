@@ -2,6 +2,13 @@
 use crate::errors::{AppError, AppResult};
 use std::collections::{HashSet, VecDeque};
 
+#[derive(Debug, PartialEq)]
+pub enum Speech {
+    Exact(String),
+    Context(String),
+    Natural,
+}
+
 #[derive(Default)]
 pub struct Arbiter {
     pub active: Option<String>,
@@ -10,21 +17,32 @@ pub struct Arbiter {
     pub playback_ms: i64,
     pub unresolved: HashSet<String>,
     pub cancelled: HashSet<String>,
-    lines: VecDeque<String>,
+    lines: VecDeque<Speech>,
     natural: bool,
+    presentation: bool,
 }
 impl Arbiter {
     pub fn line(&mut self, text: String) -> AppResult<()> {
         if text.len() > 8000 || self.lines.len() >= 32 {
             return Err(AppError::VoiceProviderUnavailable);
         }
-        self.lines.push_back(text);
+        self.lines.push_back(Speech::Exact(text));
         Ok(())
+    }
+    pub fn context(&mut self, text: String) -> AppResult<()> {
+        if text.len() > 8000 || self.lines.len() >= 32 {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        self.lines.push_back(Speech::Context(text));
+        Ok(())
+    }
+    pub fn presentation(&self) -> bool {
+        self.presentation
     }
     pub fn respond(&mut self) {
         self.natural = true;
     }
-    pub fn take_next(&mut self) -> Option<Option<String>> {
+    pub fn take_next(&mut self) -> Option<Speech> {
         if self.starting
             || self.active.is_some()
             || !self.unresolved.is_empty()
@@ -33,14 +51,15 @@ impl Arbiter {
             return None;
         }
         let next = if let Some(line) = self.lines.pop_front() {
-            Some(Some(line))
+            Some(line)
         } else if std::mem::take(&mut self.natural) {
-            Some(None)
+            Some(Speech::Natural)
         } else {
             None
         };
-        if next.is_some() {
+        if let Some(next) = &next {
             self.starting = true;
+            self.presentation = matches!(next, Speech::Context(_));
         }
         next
     }
@@ -57,6 +76,7 @@ impl Arbiter {
             return Err(AppError::VoiceProviderUnavailable);
         }
         self.active = None;
+        self.presentation = false;
         Ok(())
     }
 }

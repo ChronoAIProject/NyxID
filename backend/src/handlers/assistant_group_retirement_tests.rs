@@ -123,6 +123,15 @@ async fn crew_removal_revokes_key_settles_turn_and_readd_is_fresh() {
     .await
     .unwrap();
     for row in [&keep, &old] {
+        state
+            .db
+            .collection::<bson::Document>("assistant_voice_announcements")
+            .insert_one(doc! {
+                "_id": &row.id, "user_id": OWNER, "conversation_id": &row.id,
+                "text": "Private voice notification",
+            })
+            .await
+            .unwrap();
         state.db.collection::<bson::Document>("assistant_acknowledgements").insert_one(doc!{
             "_id":&row.id,"user_id":OWNER,"conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,"status":"pending"
         }).await.unwrap();
@@ -184,6 +193,7 @@ async fn crew_removal_revokes_key_settles_turn_and_readd_is_fresh() {
         "assistant_agent_credentials",
         "assistant_acknowledgements",
         "assistant_messages",
+        "assistant_voice_announcements",
     ] {
         assert_eq!(
             state
@@ -196,6 +206,16 @@ async fn crew_removal_revokes_key_settles_turn_and_readd_is_fresh() {
             "{collection}"
         );
     }
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("assistant_voice_announcements")
+            .count_documents(doc! {"conversation_id": &keep.id})
+            .await
+            .unwrap(),
+        1,
+        "Retiring one crew thread preserves another thread's voice notifications",
+    );
     assert_eq!(
         state
             .db
@@ -310,6 +330,15 @@ async fn crew_removal_revokes_key_settles_turn_and_readd_is_fresh() {
     for row in [&keep, &fresh] {
         assert_key_revoked(&state, &row.credential_api_key_id).await;
     }
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("assistant_voice_announcements")
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        0,
+    );
     server.abort();
     state.db.drop().await.unwrap();
 }

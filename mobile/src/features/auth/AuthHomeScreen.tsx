@@ -37,7 +37,7 @@ import {
   type SocialProvider,
 } from "./socialCallback";
 import { capture } from "../../lib/telemetry";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { createFlowStyles } from "../../theme/flowStyles";
@@ -396,7 +396,7 @@ export function AuthHomeScreen({ navigation }: Props) {
     setRegistrationNotice("Registration opens on the NyxID website. Close the browser to return here and sign in after verifying your email.");
     try {
       await WebBrowser.openBrowserAsync(
-        accountWebUrl(NYXID_FRONTEND_URL, "/register"),
+        accountWebUrl(getFrontendUrl(), "/register"),
       );
       if (isMountedRef.current) setRegistrationNotice("Returned from registration. Registration is not verified by closing the browser. Complete any email verification, then sign in below.");
     } catch (error) {
@@ -652,12 +652,12 @@ export function AuthHomeScreen({ navigation }: Props) {
               <>
                 <Text style={styles.errorText}>
                   Registration is invite-only.
-                  {NYXID_FRONTEND_URL ? (
+                  {getFrontendUrl() ? (
                     <>
                       {" "}
                       <Text
                         style={styles.errorLink}
-                        onPress={() => void Linking.openURL(NYXID_FRONTEND_URL)}
+                        onPress={() => void Linking.openURL(getFrontendUrl())}
                       >
                         Join the waitlist
                       </Text>

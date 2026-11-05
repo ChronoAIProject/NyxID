@@ -15,6 +15,7 @@ pub const MAX_FRAME: usize = 256 * 1024;
 pub type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct OpenAi {
+    pub(super) delegation_model: Option<String>,
     client: reqwest::Client,
     key: Zeroizing<String>,
     http_origin: String,
@@ -49,6 +50,7 @@ impl From<AppError> for CreateError {
 impl OpenAi {
     pub fn new(key: Zeroizing<String>) -> AppResult<Self> {
         Ok(Self {
+            delegation_model: None,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(std::time::Duration::from_secs(15))
@@ -58,6 +60,11 @@ impl OpenAi {
             http_origin: "https://api.openai.com".into(),
             ws_origin: "wss://api.openai.com".into(),
         })
+    }
+
+    pub(super) fn with_delegation_model(mut self, model: Option<String>) -> Self {
+        self.delegation_model = model;
+        self
     }
 
     pub async fn create(
@@ -71,7 +78,13 @@ impl OpenAi {
             .client
             .post(format!("{}/v1/live/sessions", self.http_origin))
             .bearer_auth(self.key.as_str())
-            .json(&start_payload(sdp, instructions, voice, model))
+            .json(&start_payload(
+                sdp,
+                instructions,
+                voice,
+                model,
+                self.delegation_model.as_deref(),
+            ))
             .send()
             .await
             .map_err(|_| Stage::Transport.error(AppError::VoiceProviderUnavailable))?;
@@ -184,9 +197,15 @@ pub fn valid_provider_id(id: &str) -> bool {
         && !id.chars().any(char::is_control)
 }
 
-pub fn start_payload(sdp: &str, instructions: &str, voice: &str, model: &str) -> Value {
+pub fn start_payload(
+    sdp: &str,
+    instructions: &str,
+    voice: &str,
+    model: &str,
+    delegation_model: Option<&str>,
+) -> Value {
     json!({"session":{"model":model,"store":false,"instructions":instructions,
-        "delegation":{"type":"client"},"audio":{"output":{"voice":voice}},
+        "delegation":delegation_model.map(super::responses::configuration).unwrap_or_else(|| json!({"type":"client"})),"audio":{"output":{"voice":voice}},
         "client":{"data_channel":{"allowed_client_events":[],"allowed_server_events":[
             {"type":"session.started"},{"type":"session.closed"},{"type":"error"}
         ]}}},"transport":{"type":"webrtc","sdp":sdp}})
