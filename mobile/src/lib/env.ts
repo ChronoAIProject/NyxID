@@ -1,6 +1,6 @@
 import {
   CONFIGURED_DOMAIN_SETS,
-  NYXID_FRONTEND_URL as activeFrontendUrl,
+  getFrontendUrl,
 } from "./domains";
 
 /**
@@ -18,9 +18,8 @@ export const IS_DEV_BUILD = process.env.EXPO_PUBLIC_DEV_MODE === "true";
  * the set of accepted frontend origins.
  */
 export {
-  NYXID_API_BASE_URL,
-  NYXID_FRONTEND_URL,
-  NYXID_LEGAL_BASE_URL,
+  getFrontendUrl,
+  getLegalBaseUrl,
 } from "./domains";
 export const NYXID_TRUSTED_API_BASE_URLS: readonly string[] =
   CONFIGURED_DOMAIN_SETS.map((set) => set.apiBaseUrl);
@@ -31,7 +30,7 @@ export const NYXID_TRUSTED_FRONTEND_URLS: readonly string[] =
  * one first (it resolves relative links), then every other embedded set.
  */
 export function firstPartyFrontendUrls(): readonly string[] {
-  return [activeFrontendUrl, ...NYXID_TRUSTED_FRONTEND_URLS];
+  return [getFrontendUrl(), ...NYXID_TRUSTED_FRONTEND_URLS];
 }
 export const NYXID_UNIVERSAL_LINK_HOST =
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST ?? "";

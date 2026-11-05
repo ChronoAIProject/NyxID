@@ -125,7 +125,7 @@ import {
 import { contextResetCopy, steeringNotice } from "./assistantTurnPresentation";
 import { NativeAuthoredSkillReview } from "../plugins/NativeAuthoredSkillReview";
 import { parseAutomationLink } from "../automations/automationLinks";
-import { NYXID_FRONTEND_URL, firstPartyFrontendUrls } from "../../lib/env";
+import { getFrontendUrl, firstPartyFrontendUrls } from "../../lib/env";
 import { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 import { AssistantVoiceConversation } from "./voice/AssistantVoiceConversation";
 import {
@@ -484,7 +484,7 @@ export function AssistantScreen({
       const href = safeAssistantLinkUrl(url);
       if (!href) return false;
       if (linkHost?.(href)) return false;
-      const automation = parseAutomationLink(href, NYXID_FRONTEND_URL);
+      const automation = parseAutomationLink(href, getFrontendUrl());
       if (automation?.kind === "invalid") {
         Alert.alert("Could not open automation", automation.message);
       } else if (automation?.kind === "automation") {
