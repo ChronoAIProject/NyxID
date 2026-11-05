@@ -486,7 +486,8 @@ async fn signup_keeps_plain_insert_without_enrollment_reads_or_transactions() {
     let created = crate::services::auth_service::register_user(
         &db,
         "new@example.test",
-        "valid-pass-2046",
+        // Runtime test credential; never a fixed password.
+        &crate::crypto::token::generate_random_token(),
         None,
         None,
         true,
