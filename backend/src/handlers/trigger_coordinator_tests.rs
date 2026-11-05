@@ -2240,7 +2240,7 @@ async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
         &state.db,
         OWNER,
         &group.id,
-        &[reviewer.id.clone()],
+        std::slice::from_ref(&reviewer.id),
     )
     .await
     .unwrap();
@@ -2399,7 +2399,7 @@ async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group
         &state.db,
         OWNER,
         "Shared crew",
-        &[shared.id.clone()],
+        std::slice::from_ref(&shared.id),
         "user",
     )
     .await

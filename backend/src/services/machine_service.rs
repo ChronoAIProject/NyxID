@@ -877,6 +877,53 @@ pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scoped_cancel_never_sends_conversation_cancel_to_legacy_or_exact_nodes() {
+        use crate::services::{
+            assistant_authority_tests::orchestrator_fixture,
+            machine_integration_tests::{node, peer},
+        };
+        for exact in [false, true] {
+            let f = orchestrator_fixture("automation_scoped_cancel_transport").await;
+            let mut node = node(&f, &f.owner).await;
+            node.machine.as_mut().unwrap().exact_cancel = exact;
+            f.state
+                .db
+                .collection::<Node>(NODES)
+                .replace_one(doc! {"_id": &node.id}, &node)
+                .await
+                .unwrap();
+            let (task, mut requests) = peer(&f, &node, json!({"ok": true})).await;
+            send_cancel_exact(
+                &f.state,
+                &node.id,
+                "shared-thread",
+                "ordinary-turn",
+                vec!["old-job".into(), "current-job".into()],
+            )
+            .await;
+            if exact {
+                let request = requests.try_recv().unwrap();
+                assert_eq!(request.operation, Operation::CancelExact);
+                assert_eq!(
+                    request.parameters,
+                    json!({"conversation_id": "shared-thread", "turn_id": "ordinary-turn", "job_ids": ["old-job", "current-job"]})
+                );
+            } else {
+                for job in ["old-job", "current-job"] {
+                    let request = requests.try_recv().unwrap();
+                    assert_eq!(request.operation, Operation::JobCancel);
+                    assert_eq!(request.parameters["job_id"], job);
+                    assert_eq!(request.parameters["conversation_id"], "shared-thread");
+                    assert_eq!(request.parameters["turn_id"], "ordinary-turn");
+                }
+            }
+            assert!(requests.try_recv().is_err());
+            task.abort();
+        }
+    }
+
     #[test]
     fn changes_confirm_all_commands_and_only_mutating_computer_tools() {
         for op in [
