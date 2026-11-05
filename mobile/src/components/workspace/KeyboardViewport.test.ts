@@ -13,7 +13,12 @@ type Element = {
   };
 };
 
-function setup(initialKeyboard?: Frame, safeAreaTop = 0, platform = "android") {
+function setup(
+  initialKeyboard?: Frame,
+  safeAreaTop = 0,
+  platform = "android",
+  safeAreaFrame = { y: 0, height: 852 },
+) {
   const keyboardListeners = new Map<
     string,
     (event: { endCoordinates: Frame }) => void
@@ -48,6 +53,7 @@ function setup(initialKeyboard?: Frame, safeAreaTop = 0, platform = "android") {
       jsx: (_type: unknown, props: unknown) => ({ props }),
     },
     "react-native-safe-area-context": {
+      useSafeAreaFrame: () => safeAreaFrame,
       useSafeAreaInsets: () => ({
         top: safeAreaTop,
         bottom: 24,
@@ -187,5 +193,36 @@ test("iOS measures the actual page or sheet origin without a guessed header or s
   });
   env.measurements.shift()!(0, 119, 393, 699);
   assert.equal(env.bottom(), 0);
+  env.harness.unmount();
+});
+
+for (const [windowHeight, sheetHeight, keyboardHeight] of [
+  [667, 637, 258],
+  [956, 894, 328],
+]) {
+  test(`iOS ${windowHeight}pt native sheet keeps the entire toolbar above the keyboard`, () => {
+    const env = setup(undefined, 0, "ios", { y: 0, height: sheetHeight! });
+    env.show({
+      screenY: windowHeight! - keyboardHeight!,
+      height: keyboardHeight!,
+    });
+    env.measurements.shift()!(0, 44, 375, sheetHeight! - 44);
+    assert.equal(env.bottom(), keyboardHeight);
+    env.layout();
+    env.measurements.shift()!(0, 44, 375, sheetHeight! - 44);
+    assert.equal(
+      env.bottom(),
+      keyboardHeight,
+      "the sheet offset is applied once",
+    );
+    env.harness.unmount();
+  });
+}
+
+test("an iOS drawer with an existing safe-area origin does not add that origin twice", () => {
+  const env = setup(undefined, 0, "ios", { y: 70, height: 782 });
+  env.show({ screenY: 552, height: 300 });
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(env.bottom(), 266);
   env.harness.unmount();
 });

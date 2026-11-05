@@ -6,14 +6,22 @@ import {
   type PropsWithChildren,
 } from "react";
 import { Dimensions, Keyboard, Platform, StyleSheet, View } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { keyboardOverlap, type KeyboardFrame } from "./keyboardOverlap";
+import {
+  useSafeAreaFrame,
+  useSafeAreaInsets,
+} from "react-native-safe-area-context";
+import {
+  keyboardInViewportWindow,
+  keyboardOverlap,
+  type KeyboardFrame,
+} from "./keyboardOverlap";
 
 /** Measure the page itself, including sheet/header placement. Padding only the
  * actual overlap avoids a second keyboard reservation after native resize.
  */
 export function KeyboardViewport({ children }: PropsWithChildren) {
   const insets = useSafeAreaInsets();
+  const safeAreaFrame = useSafeAreaFrame();
   const view = useRef<View>(null);
   const keyboard = useRef<KeyboardFrame | undefined>(Keyboard.metrics());
   const measurement = useRef(0);
@@ -34,11 +42,13 @@ export function KeyboardViewport({ children }: PropsWithChildren) {
       setBottom(
         keyboardOverlap(
           { y: y + (Platform.OS === "android" ? insets.top : 0), height },
-          frame,
+          Platform.OS === "ios"
+            ? keyboardInViewportWindow(frame, safeAreaFrame)
+            : frame,
         ),
       );
     });
-  }, [insets.top]);
+  }, [insets.top, safeAreaFrame.y, safeAreaFrame.height]);
 
   useEffect(() => {
     mounted.current = true;
