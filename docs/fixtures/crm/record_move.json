@@ -25,5 +25,26 @@
   "overrides": [],
   "archived": false,
   "created_at": "2000-01-01T00:00:00.000Z",
-  "updated_at": "2000-01-01T00:00:00.000Z"
+  "updated_at": "2000-01-01T00:00:00.000Z",
+  "created_by": {
+    "kind": "human",
+    "user_id": "00000000-0000-4000-8000-000000000002",
+    "agent_id": null,
+    "api_key_id": null,
+    "source": null
+  },
+  "updated_by": {
+    "kind": "human",
+    "user_id": "00000000-0000-4000-8000-000000000002",
+    "agent_id": null,
+    "api_key_id": null,
+    "source": null
+  },
+  "field_sources": {
+    "amount": "2000-01-01T00:00:00.000Z",
+    "company": "2000-01-01T00:00:00.000Z",
+    "expected_close": "2000-01-01T00:00:00.000Z",
+    "name": "2000-01-01T00:00:00.000Z",
+    "stage": "2000-01-01T00:00:00.000Z"
+  }
 }

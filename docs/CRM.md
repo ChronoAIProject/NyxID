@@ -1,6 +1,6 @@
 # CRM records and saved views
 
-Status: in development behind the default-off `assistant:crm` feature flag. Nothing here changes existing routes, collections or behavior. The design source is the [CRM and dynamic artifacts proposal](https://gist.github.com/ctkm-aelf/f0928ec823b8cb408df38bb24c4bcd34).
+CRM is behind the default-off `assistant:crm` feature flag. The design source is the [CRM and dynamic artifacts proposal](https://gist.github.com/ctkm-aelf/f0928ec823b8cb408df38bb24c4bcd34).
 
 The CRM has three separate contracts. Object metadata defines meaning and valid writes. Queries define authorized retrieval and aggregation. Saved views define presentation. A stage move changes a record. A dashboard edit changes a view. Neither regenerates the other.
 
@@ -14,7 +14,7 @@ Every document carries `owner_id`, the polymorphic owner (a person or an org use
 
 An inaccessible owner is not-found-shaped. Routes that address a document by id take the owner from the document; a mismatching `?owner_id=` is 404.
 
-All routes are under `/api/v1/assistant/crm`, inside the existing human-only router, and every handler calls `require_first_party_human` and the `assistant:crm` flag check (resolved for the acting person). The flag off returns 404. Agent access is a separate slice (see the end of this document).
+All routes are under `/api/v1/assistant/crm`, inside the existing human-only router, and every handler calls `require_first_party_human` and the `assistant:crm` flag check (resolved for the acting person). The flag off returns 404. Native assistant access uses the separate conversation-key boundary described below.
 
 ## Object metadata
 
@@ -47,7 +47,9 @@ CrmField {
 
 Key, type and record target are frozen after creation. Labels, option labels, option order, `required` and `archived` are editable. Archiving a field or option keeps stored values readable and displays them as archived. Adding an option or field is additive. Removing is archiving.
 
-Archiving rules keep every object writable: archiving a field forces `required = false`; the pipeline stage field cannot be archived; an option cannot be archived when it would leave a required select with no live option. Archived options in `closed_stages` are allowed (records keep the value; moves to it are refused).
+Archiving rules keep every object writable: archiving a field forces `required = false`; the pipeline stage field cannot be archived or made optional; an option cannot be archived when it would leave a required select with no live option. Archived options in `closed_stages` are allowed (records keep the value; moves to it are refused).
+
+Objects contain at most 100 fields, including archived definitions. Select fields contain at most 100 options; pipeline stage fields contain at most 50 options, including archived options. Labels are at most 200 characters. Required text must contain non-whitespace content; required boolean `false` is valid.
 
 Field writes require `expected_schema_revision`. The update filters on `{ _id, schema_revision: expected }`, applies `$push` or a positional `$set` plus `$inc`, and a mismatch returns `CrmRevisionConflict` with the current object.
 
@@ -71,10 +73,11 @@ CrmRecord {
   values: { field key: stored value },   // scalar fields only
   refs: { field key: [target record id] }, // mirror of crm_links, written in the same transaction
   overrides: [field key],        // human-protected fields (see below)
+  field_sources: { field key: BSON datetime }, // last accepted observation order
   created_by: CrmActor, updated_by: CrmActor,
   archived_at: datetime | null, created_at, updated_at
 }
-CrmActor { kind: "human" | "agent", user_id, agent_id?, api_key_id? }   // server-bound, never from payload
+CrmActor { kind: "human" | "agent", user_id, agent_id?, api_key_id?, source?: { conversation_id, turn_id, run_id?, ordered_at } }   // server-bound, never from payload
 ```
 
 Stored values (canonical BSON types, enforced by the validator): text and select are strings, number is a Double, currency is an Int64 amount in minor units (`125000` USD is 1,250.00), boolean, date is a `YYYY-MM-DD` string that must be a real calendar date, datetime is a BSON date, user is a person id string. API values use the same shapes, with datetime as RFC3339 and currency as `{ "amount_minor": 125000, "currency": "USD" }` on read and either that or a bare integer on write. `amount_minor` must be an integer with absolute value at most 2^53 - 1, and a supplied `currency` must equal the field's currency (error path `values.<field>.currency`).
@@ -91,17 +94,23 @@ Reads return `links: { field key: [{ id, object_key, label, archived }] }` where
 
 ### Writes, conflicts and replay
 
-Every POST, PATCH, PUT and DELETE under `/crm` takes an optional `Idempotency-Key` header (1 to 128 visible ASCII characters). The receipt lives in `crm_mutation_receipts` with `_id = sha256(owner_id + "\0" + acting person id + "\0" + key)`, a digest of method, route template, path ids, owner, acting person and canonical body, and the committed response. It is written in the same transaction as the effect and expires after 7 days; retrying past that window may execute again. The receipt lookup runs after the access check (a removed member cannot replay) and before revision checks. Same digest returns the stored response. A different digest fails with `CrmIdempotencyMismatch`. When two concurrent requests race, the loser's receipt insert hits the duplicate key: the transaction aborts, the receipt is re-read outside it, and the stored response (or 13402) is returned; the effect never runs twice (pattern: `services/approval_service.rs` receipt handling).
+Ordinary effectful POST, PATCH, PUT and DELETE operations under `/crm` take an optional `Idempotency-Key` header (1 to 128 visible ASCII characters). The receipt lives in `crm_mutation_receipts` with `_id = sha256(owner_id + "\0" + acting person id + "\0" + key)`, a digest of method, route template, path ids, owner, acting person and canonical body, and the committed response. It is written in the same transaction as the effect and expires after 7 days; retrying past that window may execute again. The receipt lookup runs after the access check (a removed member cannot replay) and before revision checks. Same digest returns the stored response. A different digest fails with `CrmIdempotencyMismatch`. When two concurrent requests race, the loser's receipt insert hits the duplicate key: the transaction aborts, the receipt is re-read outside it, and the stored response (or 13402) is returned; the effect never runs twice (pattern: `services/approval_service.rs` receipt handling).
 
 Patches carry `expected_revision`. A mismatch fails with `CrmRevisionConflict` and the current record in the error body's `current` field.
 
-Human overrides: a human patch may pass `protect: [field key]` and `unprotect: [field key]`. An agent write (later slice) to a protected field leaves the value unchanged and reports it under `skipped_protected`. Human writes are never blocked by overrides.
+The owner fence serializes record, schema, link, import and view mutations. Metadata and target validation run in the same transaction as the effect, so an archived field/target cannot race through a stale validation snapshot.
 
-Stage moves are `POST /records/{id}/move` with `{ expected_revision, to }`. They validate the option exists and is not archived, apply the same revision rules, and append a `stage_changed` activity in the same transaction.
+Human overrides: a human patch may pass `protect: [field key]` and `unprotect: [field key]`. An agent write to a protected field leaves the value unchanged and reports it under `skipped_protected`. Human writes are never blocked by overrides.
+
+Agent patches carry server-derived observation order. A scheduled run uses its admitted `scheduled_at`; an ordinary turn uses its admitted start time. An older observation cannot replace a newer accepted field result even if it rereads the current record revision; `skipped_stale` identifies refused fields. Accepting the same value at a newer observation time advances its source fence. Existing matches require the revision the agent inspected.
+
+Stage moves are `POST /records/{id}/move` with `{ expected_revision, to }`. They validate the option exists and is not archived, apply the same revision rules, and append a `stage_changed` activity in the same transaction. An ordinary PATCH that changes the pipeline stage uses the same from/to history path, including detail edits, imports and native tools. Each logical patch produces one activity: `stage_changed` with `from`, `to` and every changed field key when the stage changes, otherwise `updated`. A stage-and-amount edit therefore retains both field changes in one history row.
 
 ## Activities
 
 `crm_activities`: `{ _id, owner_id, record_id, object_key, kind: "created" | "updated" | "stage_changed" | "note", actor: CrmActor, summary: { changed_fields?, from?, to? }, body?: text (notes only, 1..=10000 chars), created_at }`. These are user-visible business events, separate from the security audit log, which records metadata-only `crm_*` audit events through the existing audit service.
+
+Activities use 50-row cursor pages. The timeline keeps live first-page refresh and offers older-page retry. Actor/source DTO dates are RFC3339, and record details expose field observation times. Notes retain draft and retry identity on failure; pending writes disable editing.
 
 ## Queries
 
@@ -117,7 +126,8 @@ CrmTableQuery {
 }
 CrmAggregateQuery {
   object, filters,
-  group_by?: field key (select, boolean, user, or record "one"),
+  group_by?: field key (select, boolean, user, record "one", date, datetime),
+  date_bucket?: { unit: "day" | "week" | "month", timezone: IANA timezone },
   measure: { op: "count" } | { op: "sum" | "avg" | "min" | "max", field },  // number or currency
   order: "option_order" | "value_desc" | "label_asc"   // option_order only for select
 }
@@ -127,9 +137,13 @@ Operators by kind: text `eq neq in contains is_set is_unset` (contains is case-i
 
 Table result: `{ object: CrmObject, rows: [{ id, revision, values, links, overrides, archived }], next_cursor, total_count }`. `total_count` counts the whole filtered population, not the page.
 
-Aggregate result: `{ points: [{ key, label, value, archived }], unit: { format: "count" | "number" | "currency", currency? }, total, truncated }`. Group keys are `string | boolean | null`; absent values use key `null`, label "None". Aggregate values and `total` are nullable when no measured value exists. A group whose option or target record is archived keeps its key with `archived: true`. `total` and points come from one grouped snapshot and cover the whole filtered population. Past 50 groups the bounded response returns the first 50 by `order`, then one `{ key: "__other__", label: "Other" }` point holding the remainder, and `truncated: true`, so points always sum to `total` for count and sum. Currency `sum`, `min`, `max` return checked integer minor units in the field currency; currency `avg` is rounded half-even to minor units. Filters and access apply before grouping, so hidden or archived source records never appear in totals.
+Aggregate result: `{ points: [{ key, label, value, archived }], unit: { format: "count" | "number" | "percent" | "currency", currency? }, total, truncated }`. Group keys are `string | boolean | null`; absent values use key `null`, label "None". Aggregate values and `total` are nullable when no measured value exists. A group whose option or target record is archived keeps its key with `archived: true`. `total` and points come from one grouped snapshot and cover the whole filtered population. Past 50 groups the bounded response returns the first 50 by `order`, then one `{ key: "__other__", label: "Other" }` point holding the remainder, and `truncated: true`, so available points sum to `total` for count and sum. Only the final point of a `truncated: true` result is the synthetic remainder; a real group may also have the literal key `__other__` or `__none__`. Renderers use separate typed presentation identities and retain archived markers on every real group. A sum with no measured values remains null for groups, Other and total; zero is returned only when a measured zero exists. Nonfinite results and unsafe monetary totals are rejected explicitly. Currency `sum`, `min`, `max` return checked integer minor units in the field currency; currency `avg` is rounded half-even to minor units. Filters and access apply before grouping, so hidden or archived source records never appear in totals.
 
-Board data is a table query filtered by one stage option per lane plus one aggregate `count` grouped by the stage field for authoritative lane totals. Records in an archived stage option appear in a read-only "Archived stages" lane so lane totals add up to the object total.
+Date/datetime grouping requires an explicit bucket and timezone. Calendar dates require `UTC` and retain the written date. Datetimes use the declared IANA timezone; weeks are ISO weeks starting Monday. Missing dates form a missing-date group; absent calendar buckets are omitted. These reports group current record values and do not reconstruct historical pipeline snapshots.
+
+User group labels use the same owner-scoped eligibility as the people API: an active person who owns the workspace or has a current membership. Removed, inactive and unrelated people render as “Unavailable member”.
+
+Board data is a table query filtered by one stage option per lane plus one aggregate `count` grouped by the stage field for authoritative lane totals. Records in an archived stage option appear in a read-only "Archived stages" lane so lane totals add up to the object total. Boards consistently exclude archived records; saved boards with `include_archived:true` are rejected. Stage fields are required and capped at 50 definitions so the 50-group bound cannot turn real lanes into Other. Every lane and record picker exposes bounded pagination. Count loading/failure is explicit; a failed count is never displayed as zero.
 
 Bounds: 20 filters, 200 rows per page, 50 aggregate groups, 10 seconds `max_time` per query.
 
@@ -171,11 +185,13 @@ The component catalog is closed for `nyxid-crm-v1`:
 
 Components read data only through `queryId`. The renderer executes each named query through the CRM query API and supplies results to the bound component. Props never carry rows, URLs, HTML, scripts or expressions, and components gain no authority from props.
 
-Element ids and query ids match `^[A-Za-z][A-Za-z0-9_-]{0,63}$`. `ObjectTable.columns` and `RecordForm.fields` must be live field keys of the bound object.
+Element ids and query ids match `^[A-Za-z][A-Za-z0-9_-]{0,63}$`. `ObjectTable.columns` and `RecordForm.fields` must be live field keys of the bound object. Explicit table columns must be included in a narrow query projection. Pipeline queries include the label and stage fields they display. Pie charts require count/sum; negative totals or slices produce an unsupported-data state. Monetary display uses exact decimal/BigInt conversion, including safe-integer boundary cents; chart geometry alone may use approximate scaled numbers.
+
+Envelope bytes are capped at 64 KiB, individual props at 8 KiB. Oversized structure is rejected before metadata I/O; validation loads each referenced object once. View lists use 20-row UUID keyset pages and share metadata across each page. Create/update validate behind the owner fence.
 
 Validation runs on save and on read, server-side, and is the authority. It checks the envelope versions, at most 60 elements and 60 child edges, depth at most 8, at most 12 queries, element types and props against the catalog (unknown props rejected), and requires the element graph to be a tree: only `Stack`/`Grid` have children, child ids are unique, every non-root element has exactly one parent, and every element is reachable from `root`. It also checks every query against current object metadata, every `queryId` exists, and the query kind and shape match the component. Errors are a list of `{ path, message }` an agent can repair, e.g. `spec.elements.chart.props.queryId`. Saving an invalid replacement fails and keeps the last valid revision. A stored view that no longer validates (for example a field was archived) still loads with `valid: false` and its errors, so the page shows what is broken instead of a blank screen.
 
-`PUT /views/{id}` requires `expected_revision`.
+`PUT /views/{id}` requires `expected_revision`. Stable links retain owner/view/record selection through reload and Back/Forward using TanStack Router. Opening a table/board record in a saved workspace opens the shared detail sheet. Record and view editors keep identity-based keys and a dirty revision baseline; live refetch cannot reset a draft. Authorization/not-found refusals mask and evict the affected cached data, while transient failures retain drafts with a refresh warning.
 
 ## Routes
 
@@ -184,10 +200,13 @@ All under `/api/v1/assistant/crm`. List and read routes accept `?owner_id=`. Wri
 - `GET /objects`, `GET /objects/{key}`. Both responses include `access: "read" | "work" | "schema"` for the acting person so the UI hides controls it cannot use; the server still enforces every level.
 - `POST /objects/{key}/fields` adds a field. `PATCH /objects/{key}/fields/{field_key}` edits label, required, archived and options (additive, reorder, relabel, archive). Both take `expected_schema_revision` and bump `schema_revision`.
 - `POST /query` (table), `POST /aggregate`.
+- `GET /people?cursor=`, `GET /people/{id}`, `POST /people/lookup` `{ ids }` (at most 200 IDs). Visible user labels are batched; per-cell lookups are avoided.
+- `POST /import/preview`, `POST /import/commit`, `POST /export` (shared table query, up to 100 rows per download).
+- `POST /views/generate` (required Idempotency-Key; separate paid-generation namespace).
 - `POST /records` `{ object, values, protect? }`. `GET /records/{id}`. `PATCH /records/{id}` `{ expected_revision, values, protect?, unprotect? }`. `POST /records/{id}/archive` and `/restore` `{ expected_revision }`. `POST /records/{id}/move`.
 - `GET /records/{id}/activities?cursor=`, `POST /records/{id}/notes` `{ body }`.
 - `GET /records/{id}/related` returns reverse links grouped by `(object_key, field_key)`, access-filtered, max 50 per group with counts.
-- `GET /views` returns `{ views: [...] }`; `POST /views`, `GET /views/{id}` (envelope plus `valid` and `errors`), `PUT /views/{id}`, `DELETE /views/{id}`, `POST /views/validate`.
+- `GET /views?cursor=` returns `{ views: [...], next_cursor }`; `POST /views`, `GET /views/{id}` (envelope plus `valid` and `errors`), `PUT /views/{id}`, `DELETE /views/{id}`, `POST /views/validate`.
 
 ## Error codes
 
@@ -197,19 +216,48 @@ Reserved block 13400-13409:
 - 13401 `CrmValidationFailed` (HTTP 422, `crm_validation_failed`), body includes `errors: [{ path, message }]`.
 - 13402 `CrmIdempotencyMismatch` (HTTP 409, `crm_idempotency_mismatch`).
 - 13403 `CrmViewInvalid` (HTTP 422, `crm_view_invalid`), body includes `errors`.
+- 13404 `CrmGenerationUnavailable` (HTTP 503, `crm_generation_unavailable`).
+
+`current` and `errors` are top-level recovery fields in REST and native tool errors. Native conflict links are redacted against live object grants before serialization.
 
 ## Live updates
 
-`assistant_live` gains identifier-only `crm_record` and `crm_saved_view` events (`{ type, owner_id, id }`), projecting `owner_id` for the two collections. Personal owners receive them directly. Org owners fan out through the existing resolved org path (`publish_resolved`) to active members with read access, coalesced per `(owner_id, collection)` per second. The browser invalidates CRM queries for that owner. Opening a page always refetches and CRM pages poll every 30 seconds while visible, so a missed event costs freshness, not correctness.
+`assistant_live` watches records, object metadata, activities and saved views and emits `{ type: "crm", owner_id }`. Its Mongo projection carries identifiers only, never values, note bodies, envelopes or source payloads. Changes coalesce by owner through the existing 250 ms queue. Personal owners receive direct delivery after a person lookup; org delivery considers subscribed users in bounded membership batches. The SSE boundary rechecks live owner access and the acting person's CRM flag before delivery.
+
+The client invalidates CRM queries for that owner. Stream ready/resync also invalidates CRM caches after reconnect. Visible pages retain the 30-second polling fallback. Unrelated-owner events do not refresh the workspace; model inference is never part of reads or refresh.
 
 ## Lifecycle
 
-Person-owned CRM rows are registered in the personal erasure inventory (which admin user deletion uses). Org-owned rows are purged in `org_service::delete_org_user`. `user` field values and `created_by.user_id` that name an erased person remain as dangling ids and render as "Deleted user". Deleting a conversation or agent never deletes CRM data. Deleting a view never deletes records.
+Person-owned CRM rows are registered in the personal erasure inventory (which admin user deletion uses). Org-owned rows are purged in `org_service::delete_org_user`. `user` field values and `created_by.user_id` that name an erased person remain as dangling ids and render as “Unavailable member”. Generation claims/results have a seven-day TTL and belong to both personal and org erasure inventories. Deleting a conversation or agent never deletes CRM data. Deleting a view never deletes records.
 
-## AI view generation (slice 2)
+## Import and export
 
-`POST /views/generate { owner_id?, object, prompt, draft? }` (Work level, same flag) asks a dedicated AI service to draft an envelope. The server builds the prompt from the object metadata, the closed `nyxid-crm-v1` catalog and the operator matrix (never record data), calls the bounded one-shot inference path (`services/assistant_oneshot_inference.rs`) with its own caller label, runs the validator, feeds `{ path, message }` errors back for at most one repair round, and returns `{ envelope, valid, errors }` without saving. The human saves through `POST /views`. The model route is an admin-pinned CRM service when configured, else the platform utility route, billed to the acting person as platform usage. Opening, filtering or refreshing a view never calls a model.
+Preview/commit accept `{ owner_id?, object, mapping: { source_column: field_key }, rows, match_field, policy, snapshot? }`. Bounds are 1–100 rows, at most 100 mapped columns and 512,000 encoded bytes. The UI accepts RFC 4180-style CSV, a JSON array of row objects, or the downloaded `{ records: [...] }` export envelope. JSON mapping uses the union of columns across the bounded batch. Missing JSON keys preserve existing values on updates; explicit null or blank clears an optional field. Creates still require all required fields.
 
-## Agent access (slice 3)
+Matching uses an active text identity field, trims surrounding whitespace and ignores case for an exact match. It never guesses names or relationships. Ambiguous, archived and duplicate batch identities fail. Policies are `create_only`, `update_or_create` and `skip_existing`. Preview returns inspectable per-row action, exact matched ID and revision, plus a snapshot binding schema revision and canonical input digest. Commit recomputes that snapshot under the owner fence and refuses schema, identity, revision or create/update/skip drift. The whole commit is atomic and its receipt is transactional. A fresh preview is necessary after a human edit. Native upsert requires an explicit inspected revision when a match already exists.
 
-Specialists and NyxBot get native `nyxid__crm_*` tools over the same service methods with a server-bound `CrmActor { kind: "agent" }`, a `crm` agent grant, the closed risk classifier (reads free, record writes are changes, archive is destructive, schema changes are sensitive), the owner's access mode for confirmation, and the NyxAgent tool-call id as the idempotency key. Guests are refused. Tool names and arguments mirror the REST routes so a later NyxID-hosted catalog service (in-process managed operations, never an HTTP self-loop) can expose the same operations to external clients.
+Exports use the displayed table filters (or the displayed board query) and typed raw values, with schema, total_count and next_cursor. Each download contains at most 100 records and can be imported directly. Currency decimal strings are parsed exactly to integer minor units, accept one optional minus sign and reject excess precision or unsafe amounts. Percentage numbers are fractions.
+
+## AI view generation
+
+`POST /views/generate { owner_id?, object, prompt, draft? }` requires Work access and Idempotency-Key. The server sends object metadata, the closed catalog and operator matrix to the bounded one-shot inference path, without record data. It validates the response and permits one repair round. The result is `{ envelope, valid, errors }`; saving is an explicit separate action. Generated catalog instructions include current-record dated reports and explicit timezone semantics.
+
+The route is the admin-configured CRM platform route, otherwise the configured platform utility route. An absent/unusable selected route fails closed; CRM never scans unrelated services or falls back to personal BYOK. Platform usage bills the acting person. Admin-only `GET/PUT /api/v1/admin/settings/crm-inference` reuses utility route validation and accepts a complete `{ service_slug, model }` pair or null to clear.
+
+Paid generation uses a deliberately separate retry namespace in `crm_generation_jobs`, independent of ordinary `crm_mutation_receipts`. The same owner/actor/key binds the canonical generation request for seven days. A claim commits before network work; no transaction spans inference. Concurrent identical requests dispatch at most once. Completed results replay before new-attempt metadata/size preflight, while current owner/work authority is still checked. Predispatch failures become retryable under the same identity. Running or potentially dispatched/uncertain requests never blindly dispatch again. The UI offers unchanged-request retry and an explicit new attempt that may incur another charge; editing object/prompt/JSON starts a clearly labelled new attempt. Opening/filtering/refreshing a view never calls a model.
+
+## Native assistant access
+
+NyxBot and specialists use native `nyxid__crm_*` tools through direct and universal MCP dispatch, sharing REST services. Tool discovery publishes operation-specific closed schemas and bounds. Reads need no mutation identity. Each write requires an explicit 1–128 visible-ASCII `mutation_key`; reuse it with unchanged arguments after response loss, even when the JSON-RPC correlation ID changes. Distinct logical writes use distinct keys, including different scheduled runs and conflict rebases. Receipt identity binds owner, acting person, conversation and this logical key; JSON-RPC IDs confer no retry identity. Confirmation IDs are excluded from the committed payload digest. An exact committed retry returns its stored result after current authority checks, without consuming the single-use confirmation again or repeating an effect. Native deletion can authorize the owner-scoped tombstone for this replay; a new delete key on a deleted view still fails.
+
+Specialist grants are typed entries `{ owner_id, object, capabilities: ["read", "write", "schema"] }`, at most 16 unique objects. Write/schema require Read; the owner must match the specialist's owner. Humans configure these grants in agent details. Read grants govern schema/query/record/history/views, Write governs record effects and saving/deleting views over their referenced objects, and Schema governs field changes. Related-object targets need Read for writes, filters and grouping; view forms also require Write. A specialist text-only view is refused because it references no explicitly granted object. Deleting another person's view additionally requires the human-equivalent schema role. NyxBot uses the acting person's live owner authority. Guests, shared chats and collaboration contexts are refused.
+
+The additive `crm` field on the specialist grants request is optional. Omitting it preserves the CRM grants read inside the update transaction; an explicit empty array revokes them. Nonempty CRM grant authoring must remain disabled until every API replica and grant writer has been upgraded and old writers have been drained, because older binaries replace the whole grants document without retaining unknown fields. Once a nonempty CRM grant has been written, rollback to those binaries is unsupported until the grant has been explicitly removed.
+
+Actors, owner/role, exact key/session, live turn, confirmation and run provenance are server-derived. Operation grants and reference targets are evaluated before and after confirmation. Mutation admission is scoped only to writes; reader initialization remains available to org viewers. Transactions fence agent grants, owner membership, person/key/credential and exact conversation/turn/session, including server-time expiry/stop checks, and fence again before receipt insertion. Confirmation cards identify the bounded operation, owner/object/record/view, changed field keys or schema properties/options and a stable CRM link. Security audits retain metadata only, without field/note payloads. Business activity remains separate.
+
+Scheduled specialists reuse existing schedule/trigger turn execution. Their field observation order is the admitted run time, preventing an older run from overwriting fresher enrichment merely by rereading the revision.
+
+## Verification
+
+The executable completion evidence and exact command/log paths are maintained in [crm-implementation-completion.md](plans/crm-implementation-completion.md). Backend regressions use the actual Mongo replica set, and frontend checks cover domain hooks, drafts, rendering, parsing and router recovery. Browser evidence with mocked APIs is labelled separately from transactional backend evidence.
