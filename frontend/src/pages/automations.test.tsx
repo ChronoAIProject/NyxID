@@ -676,3 +676,34 @@ it("shows the coordinator timeout reason after expiry", async () => {
     screen.queryByRole("button", { name: "Cancel run" }),
   ).not.toBeInTheDocument();
 });
+
+
+it.each(["cancelled", "continuation_limit_exceeded"])(
+  "shows a terminal %s reason when coordinator wait metadata remains",
+  async (reason) => {
+    const user = userEvent.setup();
+    mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+    mocks.history.mockReturnValue({
+      data: {
+        pages: [{
+          runs: [{
+            id: "finished-wait",
+            outcome: "failed",
+            scheduled_at: trigger.created_at,
+            duration_ms: null,
+            reason,
+            wait_kind: "coordinator",
+            coordinator_deadline: "2026-10-01T01:00:00Z",
+            can_cancel: false,
+          }],
+        }],
+      },
+    });
+    render(<AutomationsPage />);
+    await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+    expect(screen.getByText(reason.replaceAll("_", " "))).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for delegated work to finish")).not.toBeInTheDocument();
+    expect(screen.queryByText("Completion deadline")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
+  },
+);

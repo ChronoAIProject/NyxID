@@ -1042,7 +1042,7 @@ function AutomationHistory({
                     ) : (
                       run.reason && <p>{run.reason === "coordinator_timeout"
                         ? "Coordinator deadline expired (coordinator_timeout)."
-                        : run.wait_kind === "coordinator"
+                        : run.outcome === "waiting" && run.wait_kind === "coordinator"
                           ? "Waiting for delegated work to finish"
                           : run.reason.replaceAll("_", " ")}</p>
                     )}
