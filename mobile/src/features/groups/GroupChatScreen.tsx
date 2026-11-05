@@ -42,7 +42,7 @@ import {
 } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { AssistantReplyBody } from "../assistant/AssistantReplyBody";
-import { Check, Plus, Settings2, X } from "lucide-react-native";
+import { Check, Plus, MoreHorizontal, X } from "lucide-react-native";
 import {
   ActionButton,
   Card,
@@ -361,11 +361,11 @@ function GroupChat({
     const settings = () => (
       <WorkspaceHeaderVisibility>
         <Icon
-          label="Crew settings"
+          label="Crew options"
           onPress={onSettings}
           disabled={!group || chat.sending || uploads.session.sending}
         >
-          <Settings2 size={20} color={colors.textSecondary} />
+          <MoreHorizontal size={23} color={colors.textPrimary} />
         </Icon>
       </WorkspaceHeaderVisibility>
     );
@@ -1071,15 +1071,6 @@ function GroupChat({
                       onPress: uploads.choose,
                     }}
                     mention={mentionAction}
-                    settings={
-                      <Icon
-                        label="Crew composer settings"
-                        onPress={onSettings}
-                        disabled={blocked || dictation.active}
-                      >
-                        <Settings2 size={20} color={colors.textSecondary} />
-                      </Icon>
-                    }
                   >
                     <ComposerSubmitButton
                       kind={

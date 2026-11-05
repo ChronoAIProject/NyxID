@@ -983,7 +983,10 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   and the same user turn with a 38pt leading inset, 14/10pt bubble padding,
   18/18/4/18 corners and the selected accessible bubble palette. Private chat
   omits redundant “You”; crew author names/avatars, recipient pills, member
-  subtitle and settings remain. User prose shares 14/23pt body typography;
+  subtitle and header options remain. Crew header options use the same 23pt
+  MoreHorizontal affordance as private chat; no duplicate crew-settings control
+  occupies the composer. Private per-agent permissions remain a labelled
+  dropdown because they set execution mode, rather than crew membership. User prose shares 14/23pt body typography;
   agent prose, headings, links, code, activity and attachments share their
   production components without a crew markdown override. Both composer docks
   share 12pt margins, the saved column width, and the same frame/input/toolbar.

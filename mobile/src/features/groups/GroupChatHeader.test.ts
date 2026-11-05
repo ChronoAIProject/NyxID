@@ -29,6 +29,7 @@ function setup({
   missingResearch = false,
 } = {}) {
   let options: any;
+  let settingsOpened = 0;
   let dictationOptions: any;
   const dictation = { active: false, phase: "idle" };
   const members = [
@@ -102,7 +103,7 @@ function setup({
     "lucide-react-native": {
       Check: "Check",
       Plus: "Plus",
-      Settings2: "Settings",
+      MoreHorizontal: "MoreHorizontal",
       X: "X",
     },
     "../assistant/ChatIdentityHeader": {
@@ -238,7 +239,9 @@ function setup({
     const outer = Screen({
       groupId: "crew",
       onBack: () => {},
-      onSettings: () => {},
+      onSettings: () => {
+        settingsOpened++;
+      },
     });
     return outer.type(outer.props);
   });
@@ -254,6 +257,8 @@ function setup({
     chat,
     posted,
     identity,
+    headerActions: () => nodes(options.headerRight()),
+    settingsOpened: () => settingsOpened,
     input,
     submit,
     dictation,
@@ -601,7 +606,7 @@ test("a crew's first load shows a transcript skeleton", () => {
   h.unmount();
 });
 
-test("crew shares dictation, review, attachments and settings with private chat while retaining routed recipients", async () => {
+test("crew shares dictation, review and attachments with private chat while retaining routed recipients", async () => {
   const f = setup();
   f.input().props.onChangeText("Draft");
   f.h.flush();
@@ -618,10 +623,11 @@ test("crew shares dictation, review, attachments and settings with private chat 
       actions.some((n) => n.type === type),
       type,
     );
-  assert.ok(
+  assert.equal(
     actions.some(
       (n) => n.props.accessibilityLabel === "Crew composer settings",
     ),
+    false,
   );
   f.dictation.active = true;
   f.h.render();
@@ -747,5 +753,36 @@ test("typing into crew voice pauses capture until the draft is empty, including 
   panel().props.onChangeText("");
   f.h.flush();
   assert.equal(panel().props.enabled, true);
+  f.h.unmount();
+});
+
+test("crew options use the private header overflow affordance and avoid a duplicate composer control", () => {
+  const f = setup();
+  const actions = f.headerActions();
+  const options = actions.find(
+    (n) => n.props.accessibilityLabel === "Crew options",
+  )!;
+  assert.ok(options);
+  assert.ok(
+    actions.some((n) => n.type === "MoreHorizontal" && n.props.size === 23),
+  );
+  assert.equal(
+    actions.some((n) => n.type === "Settings"),
+    false,
+  );
+  options.props.onPress();
+  assert.equal(f.settingsOpened(), 1);
+  const toolbar = nodes(f.input().props.renderActions());
+  assert.equal(
+    toolbar.some(
+      (n) => n.props.accessibilityLabel === "Crew composer settings",
+    ),
+    false,
+  );
+  assert.equal(
+    toolbar.some((n) => n.type === "MoreHorizontal"),
+    false,
+  );
+  assert.equal(f.identity().props.members.length, 2);
   f.h.unmount();
 });
