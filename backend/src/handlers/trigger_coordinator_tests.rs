@@ -105,7 +105,7 @@ async fn root(
     let chat = crate::services::assistant_acknowledgement_service::for_key(
         &state.db,
         OWNER,
-        row.credential_api_key_id.as_deref(),
+        Some(&row.credential_api_key_id),
     )
     .await
     .unwrap()
