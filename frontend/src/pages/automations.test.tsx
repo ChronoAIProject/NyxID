@@ -64,6 +64,7 @@ vi.mock("@/hooks/use-automations", () => ({
 import { AutomationEditor, AutomationsPage } from "./automations";
 import { AutomationPreferences } from "@/components/assistant/automation-preferences";
 import type { TriggerResponse } from "@/schemas/triggers";
+import { formatAutomationTime } from "@/lib/automation-time";
 const trigger: TriggerResponse = {
   id: "80c7e6d9-41d5-48c3-bfd7-2bf9c92fa288",
   user_id: "owner",
@@ -119,6 +120,24 @@ function chooseOption(label: string, name: string) {
   fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowDown" });
   fireEvent.keyDown(screen.getByRole("option", { name }), { key: "Enter" });
 }
+
+it.each([
+  { status: "disabled", schedule: { kind: "at", at: "2026-10-22T08:40:00Z" }, next: "2026-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "disabled", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "active", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: null },
+] as const)("shows the effective next run on desktop and mobile: $status / $schedule.kind / $next", ({ status, schedule, next }) => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [{ ...trigger, status, schedule, next_run_at: next }] } });
+  render(<AutomationsPage />);
+  const expected = status === "active" ? formatAutomationTime(next, "Asia/Singapore") : "—";
+  const row = within(screen.getByRole("table")).getAllByRole("row")[1]!;
+  expect(within(row).getAllByRole("cell")[2]).toHaveTextContent(expected);
+  expect(screen.getByText(`Next: ${expected}`)).toBeInTheDocument();
+  expect(mocks.update).not.toHaveBeenCalled();
+});
 
 it("previews calendar times after the debounce and cancels stale previews", async () => {
   vi.useFakeTimers();

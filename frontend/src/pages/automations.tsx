@@ -229,7 +229,7 @@ export function AutomationsPage() {
                     </TableCell>
                     <TableCell>{target(row)}</TableCell>
                     <TableCell>
-                      {formatAutomationTime(row.next_run_at, zone)}
+                      {row.status === "active" ? formatAutomationTime(row.next_run_at, zone) : "—"}
                     </TableCell>
                     <TableCell className="capitalize">
                       {row.last_run?.outcome ?? "—"}
@@ -269,7 +269,7 @@ export function AutomationsPage() {
                   {row.status === "active" ? "Active" : "Paused"}
                 </p>
                 <p className="text-12">
-                  Next: {formatAutomationTime(row.next_run_at, zone)}
+                  Next: {row.status === "active" ? formatAutomationTime(row.next_run_at, zone) : "—"}
                 </p>
                 <p className="text-12 capitalize">
                   Last run: {row.last_run?.outcome ?? "—"}
