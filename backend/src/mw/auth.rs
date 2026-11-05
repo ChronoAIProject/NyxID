@@ -891,7 +891,16 @@ pub(crate) async fn api_key_auth_user_for_watch(
         false
     };
     let mut auth = api_key_auth_user_inner(db, key, None, None, None, shared_resume).await?;
-    crate::services::execution_permission_dispatch::exclude(&mut auth);
+    if watch.execution_task.is_some() {
+        crate::services::execution_permission_dispatch::descendants::attach(
+            &mut auth,
+            crate::services::execution_permission_dispatch::descendants::Descendant::Watch(
+                Box::new(watch.clone()),
+            ),
+        )?;
+    } else {
+        crate::services::execution_permission_dispatch::exclude(&mut auth);
+    }
     Ok(auth)
 }
 
@@ -979,7 +988,12 @@ async fn api_key_auth_user_inner(
     let marker = user
         .as_ref()
         .filter(|u| {
-            u.user_type.is_person() && key.purpose == crate::models::api_key::ApiKeyPurpose::General
+            u.user_type.is_person()
+                && matches!(
+                    key.purpose,
+                    crate::models::api_key::ApiKeyPurpose::General
+                        | crate::models::api_key::ApiKeyPurpose::PermissionBound
+                )
         })
         .and_then(|u| u.execution_permission_enrollment);
     let execution_permission =

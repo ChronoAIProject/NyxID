@@ -57,6 +57,9 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    /// Non-authorizing enrollment hint copied from the authenticated person.
+    #[serde(default)]
+    pub execution_enrolled: bool,
     #[serde(default)]
     pub progress: Option<VoiceTaskProgress>,
     /// First observed offsets from the call start, never transcript or tool content.

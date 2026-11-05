@@ -131,6 +131,7 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        execution_enrolled: false,
         progress: None,
         timing: Default::default(),
         started_at: None,
@@ -1146,6 +1147,7 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            execution_enrolled: parent.execution_enrolled,
             progress: None,
             timing: Default::default(),
             started_at: None,
@@ -1235,6 +1237,14 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                     .is_none()
                 {
                     return Ok(());
+                }
+                if request.execution_enrolled {
+                    let original = requests.find_one(doc! {"_id":root,"user_id":&user})
+                        .session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Voice task unavailable".into()))?;
+                    db.collection::<bson::Document>(MESSAGES).update_one(
+                        doc! {"_id":&original.message_id,"user_id":&user,"execution_task.version":1,"execution_task.cancelled":false},
+                        doc! {"$set":{"execution_task.cancelled":true},"$inc":{"execution_task.epoch":1_i64}})
+                        .session(&mut *session).await?;
                 }
                 // The original task is the cancellation fence even after its first
                 // turn settled. Every later continuation checks this same root.

@@ -19,6 +19,9 @@ pub enum SessionState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// Non-authorizing enrollment hint copied from the authenticated person.
+    #[serde(default)]
+    pub execution_enrolled: bool,
     /// Accepted work suspends user-idle expiry, but never heartbeat or hard limits.
     #[serde(default, with = "super::bson_datetime::optional")]
     pub last_work_at: Option<DateTime<Utc>>,

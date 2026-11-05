@@ -19,6 +19,7 @@ pub async fn prepare(
     request: &str,
     preferences: VoicePreferences,
     identity: String,
+    execution_enrolled: bool,
 ) -> AppResult<runtime::Started> {
     let row = session::admit(
         &state.db,
@@ -30,7 +31,12 @@ pub async fn prepare(
         &state.replica_identity.generation_id,
     )
     .await?;
-    let row = session::write(&state.db, &row, doc! {"protocol":"xai_realtime"}).await?;
+    let row = session::write(
+        &state.db,
+        &row,
+        doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled},
+    )
+    .await?;
     Ok(runtime::Started {
         session: row,
         sdp: String::new(),

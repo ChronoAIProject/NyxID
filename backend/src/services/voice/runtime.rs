@@ -33,6 +33,7 @@ pub async fn start(
     client_request_id: &str,
     mut preferences: VoicePreferences,
     sdp: &str,
+    execution_enrolled: bool,
 ) -> AppResult<Started> {
     super::super::assistant_voice::require_enabled(&state.db, user)
         .await
@@ -58,6 +59,7 @@ pub async fn start(
             client_request_id,
             preferences,
             resolved.identity,
+            execution_enrolled,
         )
         .await
         .map_err(|e| Stage::Thread.error(e));
@@ -82,6 +84,7 @@ pub async fn start(
     Box::pin(start_with_provider(
         state,
         StartInput {
+            execution_enrolled,
             user,
             conversation,
             client_request_id,
@@ -97,6 +100,7 @@ pub async fn start(
 }
 
 pub(super) struct StartInput<'a> {
+    pub execution_enrolled: bool,
     pub user: &'a str,
     pub conversation: &'a str,
     pub client_request_id: &'a str,
@@ -113,6 +117,7 @@ pub(super) async fn start_with_provider(
     concurrency: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Started> {
     let StartInput {
+        execution_enrolled,
         user,
         conversation,
         client_request_id,
@@ -134,6 +139,11 @@ pub(super) async fn start_with_provider(
     let mut created_session_id = None;
     let mut provider_attempted = false;
     let startup = async {
+        if execution_enrolled {
+            call = session::write(&state.db, &call, doc! {"execution_enrolled":true})
+                .await
+                .map_err(|e| Stage::Thread.error(e))?;
+        }
         let instructions = initial_context(&state.db, &call)
             .await
             .map_err(|e| Stage::Thread.error(e))?;

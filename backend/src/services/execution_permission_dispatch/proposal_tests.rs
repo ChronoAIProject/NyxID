@@ -10,7 +10,9 @@ use crate::services::{
     assistant_settings_service,
 };
 
-async fn assistant(name: &str) -> (Fixture, AssistantConversation) {
+pub(in crate::services::execution_permission_dispatch) async fn assistant(
+    name: &str,
+) -> (Fixture, AssistantConversation) {
     let mut f = Fixture::new(name).await;
     f.enroll(true).await;
     assistant_settings_service::update(

@@ -293,6 +293,7 @@ pub async fn delegate(
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
     let request = VoiceRequest {
+        execution_enrolled: call.execution_enrolled,
         progress: None,
         timing: Default::default(),
         started_at: None,
