@@ -874,7 +874,7 @@ pub(super) async fn settle_result(
                                 .await?;
                             let at = pending.map_or_else(Utc::now, |card| card.expires_at);
                             let at = schedules::continuation::confirmation_wait_in_session(
-                                db, &saved, at, session,
+                                &db, &saved, at, session,
                             )
                             .await?;
                             db.collection::<Document>(schedules::WORK)

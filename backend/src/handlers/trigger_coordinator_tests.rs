@@ -3,6 +3,7 @@
 use super::*;
 use crate::models::assistant_conversation::TurnOrigin;
 use crate::models::assistant_direct_handoff::COLLECTION_NAME as HANDOFFS;
+use crate::models::assistant_message::COLLECTION_NAME as MESSAGES;
 use crate::services::trigger_schedule::{continuation as v2, direct, group as work_groups};
 use futures::TryStreamExt;
 
@@ -1969,6 +1970,8 @@ async fn v2_child_fences_are_independent_and_ignore_bson_key_order() {
     let ordered = mongodb::bson::to_document(work).unwrap();
     let reordered: Document = ordered
         .iter()
+        .collect::<Vec<_>>()
+        .into_iter()
         .rev()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
@@ -2022,6 +2025,8 @@ async fn v2_child_fences_are_independent_and_ignore_bson_key_order() {
         let ordered = mongodb::bson::to_document(work).unwrap();
         let reordered: Document = ordered
             .iter()
+            .collect::<Vec<_>>()
+            .into_iter()
             .rev()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
