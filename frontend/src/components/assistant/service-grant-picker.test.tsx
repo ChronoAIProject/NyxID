@@ -10,6 +10,7 @@ vi.mock("@/hooks/use-keys", () => ({
         id: "first",
         slug: "calendar",
         label: "Calendar one",
+        execution_unavailable_reason: "node home-server offline",
         is_active: true,
         credential_source: { type: "org", org_id: "team", allowed: true },
       },
@@ -47,4 +48,15 @@ it("keeps separate organization connection IDs even when their slugs match", asy
     .setup()
     .click(screen.getByRole("checkbox", { name: /Calendar two/ }));
   expect(change).toHaveBeenCalledWith(["first", "second"]);
+});
+
+it("keeps an offline service selectable and shows an availability advisory", async () => {
+  const change = vi.fn();
+  render(<ServiceGrantPicker org="team" value={["first"]} onChange={change} />);
+  expect(screen.getByText(/Currently not executable \(node home-server offline\)/)).toBeVisible();
+  const row = screen.getByRole("checkbox", { name: /Calendar one/ });
+  expect(row).toBeChecked();
+  expect(row).toBeEnabled();
+  await userEvent.setup().click(row);
+  expect(change).toHaveBeenCalledWith([]);
 });
