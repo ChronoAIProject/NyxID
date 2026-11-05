@@ -811,6 +811,15 @@ async fn materialize(
         if row.state != "materialized"
             && (row.expires_at <= Utc::now() || manifest.expires_at <= Utc::now())
         {
+            if row.state == "pending" {
+                db.collection::<Document>(ARTIFACTS)
+                    .update_one(
+                        doc! {"_id":&row.id,"state":"pending"},
+                        doc! {"$set":{"state":"expired","data_encrypted":null,"secret_context_versions":{}}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+            }
             return Ok((Vec::new(), "result_expired"));
         }
         let normal_days = if row.content_type.starts_with("image/") {
@@ -1208,15 +1217,6 @@ pub async fn discard_in_session(
             doc! {"$set":{"state":"discarded","data_encrypted":null,"secret_context_versions":{}}},
         )
         .session(session)
-        .await?;
-    Ok(())
-}
-pub async fn sweep(db: &Database) -> AppResult<()> {
-    db.collection::<Document>(ARTIFACTS)
-        .update_many(
-            doc! {"expires_at":{"$lte":bson::DateTime::now()},"state":{"$in":["pending"]}},
-            doc! {"$set":{"state":"expired","data_encrypted":null,"secret_context_versions":{}}},
-        )
         .await?;
     Ok(())
 }

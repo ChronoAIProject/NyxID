@@ -694,7 +694,6 @@ async fn sweep_batch(db: &Database, token: &LeaseToken) -> AppResult<usize> {
 }
 
 pub async fn sweep(db: &Database) -> AppResult<usize> {
-    super::generated_artifacts::sweep(db).await?;
     let runtime = cluster_lease_runtime();
     let Some(token) = runtime.acquire(db, LEASE).await? else {
         return Ok(0);

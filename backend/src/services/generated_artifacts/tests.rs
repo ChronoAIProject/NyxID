@@ -1167,7 +1167,25 @@ async fn generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel() 
         before
     );
     db.collection::<Document>(ARTIFACTS).update_many(doc!{"watch_id":&w.id},doc!{"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
-    sweep(&db).await.unwrap();
+    // Expiry is enforced without adding a sweep to the dormant upload path.
+    // A generated materialization clears the exact expired pending row; idle
+    // records remain bounded by their purge_after TTL.
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let (attachments, reason) = materialize(
+        &db,
+        &keys,
+        &w,
+        &mut session,
+        "completion2037",
+        &[],
+        &reservation,
+    )
+    .await
+    .unwrap();
+    assert!(attachments.is_empty());
+    assert_eq!(reason, "result_expired");
+    session.commit_transaction().await.unwrap();
     let expired = db
         .collection::<PendingArtifact>(ARTIFACTS)
         .find_one(doc! {"watch_id":&w.id})
