@@ -135,7 +135,34 @@ pub(super) async fn verify_resolved_projected_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn resolve_projected(
+fn resolve_projected<'a>(
+    db: &'a Database,
+    keys: &'a crate::crypto::aes::EncryptionKeys,
+    chat: &'a acks::ChatAuthority,
+    id: &'a str,
+    actual: &'a crate::services::proxy_service::ProxyTarget,
+    method: &'a str,
+    path: &'a str,
+    projection: &'a HttpProjection,
+    materialize: bool,
+    model: bool,
+) -> futures::future::BoxFuture<'a, AppResult<crate::services::proxy_service::ProxyTarget>> {
+    Box::pin(resolve_projected_inner(
+        db,
+        keys,
+        chat,
+        id,
+        actual,
+        method,
+        path,
+        projection,
+        materialize,
+        model,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_projected_inner(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
     chat: &acks::ChatAuthority,
