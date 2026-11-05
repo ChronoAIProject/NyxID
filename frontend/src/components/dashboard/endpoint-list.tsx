@@ -157,7 +157,7 @@ function EndpointListEditor({
       {!endpoints || endpoints.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8">
           <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
-          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
             No endpoints configured.{" "}
             {hasApiSpecUrl
               ? "Use auto-discover or add one manually."
@@ -166,7 +166,7 @@ function EndpointListEditor({
         </div>
       ) : (
         <div className="rounded-lg border">
-          <table className="w-full text-12">
+          <table className="w-full text-14">
             <thead>
               <tr className="border-b bg-muted/50">
                 <th className="px-3 py-2 text-left font-medium text-muted-foreground">
@@ -188,7 +188,7 @@ function EndpointListEditor({
                 <tr key={ep.id} className="border-b last:border-0">
                   <td className="px-3 py-2">
                     <div className="flex items-center gap-2">
-                      <span className="text-xs">{ep.name}</span>
+                      <span className="text-13">{ep.name}</span>
                       <Badge
                         variant={
                           (ep.publication ?? "published") === "published"
@@ -199,7 +199,7 @@ function EndpointListEditor({
                         {ep.publication ?? "published"}
                       </Badge>
                       {!ep.is_active && (
-                        <Badge variant="secondary" className="text-10">
+                        <Badge variant="secondary" className="text-12">
                           Inactive
                         </Badge>
                       )}
@@ -208,13 +208,13 @@ function EndpointListEditor({
                   <td className="px-3 py-2">
                     <Badge
                       variant="secondary"
-                      className={`text-10 ${getMethodColor(ep.method)}`}
+                      className={`text-12 ${getMethodColor(ep.method)}`}
                     >
                       {ep.method}
                     </Badge>
                   </td>
                   <td className="px-3 py-2">
-                    <code className="text-xs text-muted-foreground">
+                    <code className="text-14 text-muted-foreground">
                       {ep.path}
                     </code>
                   </td>

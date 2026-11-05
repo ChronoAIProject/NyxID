@@ -2,7 +2,7 @@ import { CrmArtifactBlock } from "./blocks/crm-artifact-block";
 import { GroupAgentAccessRequest } from "./group-agent-access";
 import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
-import { collaborationApi } from "@/hooks/use-collaboration-groups";
+import { collaborationApi, useCollaborationRead } from "@/hooks/use-collaboration-groups";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -108,7 +108,7 @@ function UserText({ text, names, mentions = [] }: {
   return <>{mentionSegments(text, [...names, ...mentions.map((m) => m.handle)]).map((segment, index) => {
     const mention = segment.mention ? mentions.find((m) => m.handle.toLowerCase() === segment.text.slice(1).toLowerCase()) : undefined;
     return mention
-      ? <span key={index} data-group-mention title={`@${mention.handle}`} className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-11">@{mention.label}</span>
+      ? <span key={index} data-group-mention title={`@${mention.handle}`} className="inline-block rounded-full border border-border bg-muted px-1.5 py-0.5 text-13">@{mention.label}</span>
       : segment.mention ? <span key={index} className="font-semibold">{segment.text}</span> : <Fragment key={index}>{segment.text}</Fragment>;
   })}</>;
 }
@@ -123,14 +123,6 @@ function recipientLine(
       return member ? agentTitle(member) : "a removed agent";
     })
     .join(", ")}`;
-}
-
-function PeopleChips({ ids, participants }: { readonly ids: readonly string[]; readonly participants: readonly MentionPerson[] }) {
-  if (!ids.length) return null;
-  return <div aria-label="Mentioned people" className="my-1 flex flex-wrap gap-1">{ids.map((id) => {
-    const person = participants.find((p) => p.id === id);
-    return <span key={id} title={person?.handle ? `@${person.handle}` : undefined} className="rounded-full border border-border bg-muted px-2 py-0.5 text-11">@{person?.display_name ?? "Former participant"}</span>;
-  })}</div>;
 }
 
 export function GroupMessageRow({
@@ -162,7 +154,7 @@ export function GroupMessageRow({
         <p
           role="note"
           aria-label="Group notice"
-          className="text-center text-11 text-text-tertiary"
+          className="text-center text-13 text-text-tertiary"
         >
           {/* Name the agent unless the notice already starts with it
               ("<agent> could not reply (…)"). */}
@@ -183,14 +175,12 @@ export function GroupMessageRow({
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
         <UserMessageBubble className="max-w-[90%] text-16 [overflow-wrap:anywhere] sm:max-w-[78%]">
-          {message.author ? <p className="mb-1 text-11 font-medium">{message.author.display_name}</p> : null}
+          {message.author ? <p className="mb-1 type-secondary-emphasis">{message.author.display_name}</p> : null}
           {message.recipient_agent_ids?.length ? (
-            <p className="mb-1 text-11">
+            <p className="mb-1 text-13">
               {recipientLine(message.recipient_agent_ids, members)}
             </p>
           ) : null}
-          <CrmArtifactBlock artifacts={message.crm_artifacts} />
-          <PeopleChips ids={message.mentioned_participant_ids ?? []} participants={participants} />
           <UserText text={projection.text} names={names} mentions={projection.mentions} />
           {message.attachments?.map((item) => (
             <ToolImage
@@ -235,15 +225,15 @@ export function GroupMessageRow({
       </button>
       <div className="min-w-0">
         <div className="mb-0.5 flex flex-wrap items-baseline gap-x-2">
-          <span className="text-12 font-medium text-foreground">{title}</span>
+          <span className="type-row-title text-foreground">{title}</span>
           {handle ? (
-            <span className="text-11 text-text-tertiary">{handle}</span>
+            <span className="text-13 text-text-tertiary">{handle}</span>
           ) : null}
           {agent.kind === "nyxbot" ? (
-            <span className="text-10 text-text-tertiary">Personal agent</span>
+            <span className="text-12 text-text-tertiary">Personal agent</span>
           ) : null}
           <MessageTime value={message.created_at} />
-          {message.requester_user_id ? <span className="text-11 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
+          {message.requester_user_id ? <span className="text-13 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
         </div>
         <div className="px-px text-foreground">
           {message.activities
@@ -266,10 +256,10 @@ export function GroupMessageRow({
               }}
             />
           ))}
-          <PeopleChips ids={message.mentioned_participant_ids ?? []} participants={participants} />
+          <CrmArtifactBlock artifacts={message.crm_artifacts} />
           <TextBlock text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} />
           <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
-            <MessageCopyAction text={sanitizeAssistantMessageContent(projection.copyText)} />
+            <MessageCopyAction text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} format="markdown" />
             <ReplyFeedbackVotes feedback={feedback} />
           </div>
           <ReplyFeedbackFollowUp feedback={feedback} />
@@ -398,7 +388,7 @@ function GroupTranscript({
             </Button>
           ) : null}
           {!messages.length ? (
-            <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
+            <p className="flex flex-1 items-center justify-center px-6 text-center text-14 text-text-tertiary">
               Say hello. Mention an agent with @ to ask it directly.
             </p>
           ) : null}
@@ -422,7 +412,7 @@ function GroupTranscript({
               <span className="flex w-6 justify-center">
                 <AgentAvatar agent={working[0]!} size="md" />
               </span>
-              <span className="flex items-center gap-2 text-11 text-muted-foreground">
+              <span className="flex items-center gap-2 text-13 text-muted-foreground">
                 <WorkingDots />
                 {workingLabel(working.map((member) => agentTitle(member)))}
               </span>
@@ -466,7 +456,7 @@ function MemberButton({
           ) : null}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom" className="text-11">
+      <TooltipContent side="bottom" className="text-13">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
         {member.unavailable ? <p>{groupAgentUnavailableReason(member)}</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
@@ -494,7 +484,7 @@ function GroupHeader({
       <div className="space-y-1.5">
         <HeaderBar>
           <HeaderItem className="flex h-7 min-w-0 items-center">
-            <h2 className={cn("truncate font-semibold text-foreground", compact ? "text-11" : "text-13")}>
+            <h2 className={cn("truncate text-foreground", compact ? "type-secondary-strong" : "type-card-title")}>
               {group?.name ?? "Loading group…"}
             </h2>
           </HeaderItem>
@@ -515,7 +505,7 @@ function GroupHeader({
             </TooltipProvider>
           </HeaderItem>
           {working && !compact ? (
-            <HeaderItem className="flex shrink-0 items-center gap-1.5 text-11 text-muted-foreground">
+            <HeaderItem className="flex shrink-0 items-center gap-1.5 text-13 text-muted-foreground">
               <span
                 aria-hidden="true"
                 className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
@@ -537,7 +527,7 @@ function GroupHeader({
           </HeaderItem> : null}
         </HeaderBar>
         {compact ? null : (
-          <p className="text-11 text-text-tertiary">
+          <p className="text-13 text-text-tertiary">
             {group?.collaboration ? "Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only." : group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
           </p>
         )}
@@ -599,17 +589,17 @@ export function GroupPendingActions({
               aria-label={`Confirm: ${action.summary}`}
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
-              <p className="min-w-0 flex-1 text-12 text-foreground">
+              <p className="min-w-0 flex-1 text-14 text-foreground">
                 <span className="font-medium">{who}</span> wants to:{" "}
                 {action.summary}
               </p>
               {action.authored_skill ? (
                 action.acknowledgement_id && (!action.triggering_person || action.triggering_person.id === actorId) ? (
                   <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>Review draft</Link></Button>
-                ) : <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
+                ) : <span className="text-13 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
               ) : action.triggering_person ? (
                 <>
-                  <span className="text-11 text-muted-foreground">
+                  <span className="text-13 text-muted-foreground">
                     Awaiting {action.triggering_person.display_name}
                   </span>
                   {action.can_decide ? (
@@ -684,7 +674,7 @@ export function GroupRecipientPills({
       aria-label="Message recipients"
       className="mb-2 flex flex-wrap items-center gap-1.5"
     >
-      <span className="text-11 text-muted-foreground">To</span>
+      <span className="text-13 text-muted-foreground">To</span>
       {recipientIds.flatMap((id) => {
         const member = live.find((row) => row.id === id);
         return member
@@ -704,7 +694,7 @@ export function GroupRecipientPills({
           : [];
       })}
       {recipientIds.length ? null : (
-        <span role="status" className="text-11 text-muted-foreground">
+        <span role="status" className="text-13 text-muted-foreground">
           {group?.collaboration ? "Everyone in the group · no agent reply" : "Choose at least one recipient."}
         </span>
       )}
@@ -728,7 +718,7 @@ export function GroupRecipientPills({
               </DropdownMenuItem>
             ))}
             {group?.collaboration ? members.filter((m) => m.unavailable || m.destroyed).map((member) => (
-              <div key={member.id} className="max-w-sm space-y-2 p-2 text-12">
+              <div key={member.id} className="max-w-sm space-y-2 p-2 text-14">
                 <p className="font-medium">{agentTitle(member)}{member.owner_name ? ` · ${member.owner_name}` : ""}</p>
                 <p className="text-muted-foreground">{groupAgentUnavailableReason(member)}</p>
                 <GroupAgentAccessRequest group={group} member={member} />
@@ -782,6 +772,7 @@ export function NyxAgentGroupPage({
         }
       : message,
   );
+  useCollaborationRead(groupId, messages.at(-1)?.seq ?? 0, Boolean(group?.collaboration));
   const people = group?.collaboration ? (group.participants ?? []).filter((p) => p.handle) : [];
   const draftPeople = peopleMentions(draftText, people, group?.members ?? [], Boolean(group?.collaboration));
   const recipients = resolveRecipients(
@@ -885,7 +876,7 @@ export function NyxAgentGroupPage({
             </Button>
           </div>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
             Loading group...
           </div>
         )}

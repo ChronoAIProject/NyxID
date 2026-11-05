@@ -432,7 +432,7 @@ export function MachineDesktopPanel({
     <section
       ref={panel}
       className={cn(
-        "space-y-3 text-12",
+        "space-y-3 text-14",
         !pane && "rounded-xl border border-border/50 bg-card p-3",
         fullscreen && "overflow-auto bg-background p-4",
       )}
@@ -471,7 +471,7 @@ export function MachineDesktopPanel({
               title={value === "secure" ? "Secure browser" : "Dev browser"}
               disabled={controls && display !== value}
               className={cn(
-                "h-6 min-h-0 px-2 text-11",
+                "h-6 min-h-0 px-2 text-14",
                 display === value ? "bg-overlay-strong text-foreground" : "text-muted-foreground",
               )}
               onClick={() => {
@@ -512,7 +512,7 @@ export function MachineDesktopPanel({
             <SelectTrigger
               aria-label="Desktop context"
               title={contexts.isError ? "Separated contexts are unavailable on this machine" : "Workspace and browser"}
-              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-11 [&>span]:min-w-0 [&>span]:truncate"
+              className="h-7 w-auto min-w-16 max-w-40 shrink basis-40 text-14 [&>span]:min-w-0 [&>span]:truncate"
             >
               <SelectValue />
             </SelectTrigger>
@@ -825,7 +825,7 @@ function MachineDesktopSwitcher({
             aria-selected={active}
             onClick={() => setSelected(key)}
             className={cn(
-              "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-12 transition-colors",
+              "flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-14 transition-colors",
               active ? "bg-overlay-strong text-foreground" : "text-muted-foreground hover:bg-overlay hover:text-foreground",
             )}
           >
@@ -844,12 +844,10 @@ function MachineDesktopSwitcher({
     </div>
   ) : null;
   return (
-    <div className={cn("flex min-h-0 flex-col", pane && "h-full")}>
-      {/* In the column, the machine is one card in a stack; other cards
-          (pinned messages, for example) can sit beside it later. */}
-      <div className={cn(pane && "assistant-scrollbar min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain py-3 pl-3")}>
-        {/* Glued to the slab's right wall: square on that side. */}
-        <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
+    <div className="flex min-h-0 flex-col">
+      {/* The shell owns the preview stack's scrolling. Docked cards meet
+          the slab's right wall, with square corners on that side. */}
+      <div className={cn(pane && "rounded-l-2xl bg-card p-3 shadow-sm")}>
         <MachineDesktopPanel
           key={conversationDesktopKey(shown)}
           nodeId={shown.node_id}
@@ -863,7 +861,6 @@ function MachineDesktopSwitcher({
           leading={tabs}
           onStatus={setShownStatus}
         />
-        </div>
       </div>
     </div>
   );

@@ -259,6 +259,8 @@ impl ClientEvent {
                         "profile_edit",
                         "change_password",
                         "delete_account_confirm",
+                        "nyxbot_intro",
+                        "nyxbot_tour",
                         "other",
                     ])
                 } else {
@@ -292,6 +294,8 @@ impl ClientEvent {
                         "admin_add_service_account",
                         "admin_add_invite_code",
                         "delete_account_confirm",
+                        "nyxbot_intro",
+                        "nyxbot_tour",
                         "other",
                     ])
                 }

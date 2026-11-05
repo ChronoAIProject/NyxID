@@ -140,6 +140,8 @@ export type DialogId =
   | 'admin_add_service_account'
   | 'admin_add_invite_code'
   | 'delete_account_confirm'
+  | 'nyxbot_intro'
+  | 'nyxbot_tour'
   | 'other';
 
 // --- The discriminated union itself -----------------------------------

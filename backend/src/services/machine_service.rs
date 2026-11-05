@@ -247,6 +247,7 @@ pub fn issue_job_with_id<'a>(
             None
         };
         let job = MachineJob {
+            execution_task: super::execution_permission_dispatch::tasks::child(chat),
             id,
             user_id: chat.user_id.clone(),
             node_id: node.id.clone(),
@@ -301,6 +302,10 @@ pub fn issue_job_with_id<'a>(
             .and_run2(async move |session| {
                 let result: AppResult<_> = async {
                     fence_turn_operation_in_session(&db, session, &chat, &node).await?;
+                    if let Some(task) = &job.execution_task {
+                        super::execution_permission_dispatch::tasks::fence(&db, session, task)
+                            .await?;
+                    }
                     db.collection::<MachineJob>(JOBS)
                         .insert_one(&job)
                         .session(&mut *session)

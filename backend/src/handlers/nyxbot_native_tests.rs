@@ -30,7 +30,7 @@ use crate::{
     services::nyxbot_response_recovery as recovery,
 };
 
-fn native_channel<'a>(
+pub(super) fn native_channel<'a>(
     state: &'a AppState,
 ) -> futures::future::BoxFuture<'a, (NyxbotChannel, String)> {
     Box::pin(native_channel_impl(state))
@@ -797,12 +797,20 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&http)
         .await;
+    Mock::given(path("/guilds/300/roles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id":"900","managed":true,"tags":{"bot_id":"100"}},
+            {"id":"901","managed":true,"tags":{"bot_id":"999"}}
+        ])))
+        .expect(1)
+        .mount(&http)
+        .await;
     Mock::given(path_regex("^/channels/201/messages/[0-9]+$")).respond_with(|r:&wiremock::Request| {
         let id=r.url.path().rsplit('/').next().unwrap();
         let mention=match id {"601"=>json!([{"id":"100"}]),"603"=>json!([{"id":"8"}]),_=>json!([])};
         ResponseTemplate::new(200).set_body_json(json!({"id":id,"channel_id":"201","type":0,
             "author":{"id":"7","bot":false},"content":if id=="604" {"stop following"} else {"Hello"},
-            "mentions":mention,"mention_roles":[],"mention_everyone":false,"attachments":[]}))
+            "mentions":mention,"mention_roles":if id=="607" {json!(["900"])} else {json!([])},"mention_everyone":false,"attachments":[]}))
     }).mount(&http).await;
     for (id, expect_turn) in [
         ("601", true),
@@ -811,6 +819,7 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
         ("606", false),
         ("604", false),
         ("605", false),
+        ("607", true),
     ] {
         if id == "606" {
             state.db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":&row.id,"record_scope":"platform_thread"},
@@ -840,6 +849,21 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
             before + usize::from(expect_turn),
             "{id}: {output}"
         );
+        if id == "607" {
+            let source = state
+                .db
+                .collection::<crate::models::channel_message::ChannelMessage>(
+                    crate::models::channel_message::COLLECTION_NAME,
+                )
+                .find_one(doc! {"channel_bot_id":&row.channel_bot_id,"platform_message_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            let diagnostic = source.nyxbot_admission.unwrap();
+            assert_eq!(diagnostic.disposition, "addressed_managed_role");
+            assert!(diagnostic.turn_id.is_some());
+            assert_eq!(diagnostic.thread_follow_selection.as_deref(), Some("child"));
+        }
         if id == "601" {
             assert_eq!(state.db.collection::<NyxbotThread>(THREADS).count_documents(
                 doc! {"channel_id":&row.id,"record_scope":"platform_thread","follow_state":"active"}
@@ -853,7 +877,7 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(child.follow.follow_state.as_deref(), Some("stopped"));
+    assert_eq!(child.follow.follow_state.as_deref(), Some("active"));
     assert!(
         http.received_requests()
             .await
@@ -938,6 +962,12 @@ async fn native_enrollment_both_paths_gate_preparation_and_preserve_source_on_re
         }
         row = load_channel(&state, OWNER, &row.id).await.unwrap();
         assert!(crate::services::nyxbot_gateway_source::ready(&row));
+        if fresh {
+            let audit = state.db.collection::<crate::models::audit_log::AuditLog>(crate::models::audit_log::COLLECTION_NAME)
+                .find_one(doc! {"event_type":"nyxbot_channel_connected","event_data.channel_agent_id":&row.id}).await.unwrap().unwrap().event_data.unwrap();
+            assert_eq!(audit["transport"], "gateway");
+            assert_eq!(audit["gateway_native_activation"], "pending_discovery");
+        }
         assert_eq!(row.gateway_bot_id.as_deref(), Some("100"));
         assert_eq!(
             row.gateway_native_activation.as_deref(),

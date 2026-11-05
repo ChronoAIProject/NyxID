@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import type { ComponentProps } from "react";
 import {
   fireEvent,
@@ -116,15 +117,15 @@ function mount(subject = agent) {
 }
 async function edit() {
   fireEvent.click(screen.getByText("Google Drive", { exact: true }));
-  const edit = screen.getByRole("button", { name: "Edit connection order" });
-  await waitFor(() => expect(edit).toBeEnabled());
-  fireEvent.click(edit);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Edit connection order" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Edit connection order" }));
   fireEvent.click(screen.getByRole("button", { name: "Move Personal up" }));
 }
 it("saves account-wide order from Details with the live version and survives reopening", async () => {
   const view = mount();
   await edit();
   fireEvent.click(screen.getByRole("button", { name: "Save order" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes).toEqual([
       { ordered: [ids[1], ids[0]], expected_version: 3 },
@@ -149,6 +150,7 @@ it("requires an explicit reload on a version conflict", async () => {
   mount();
   await edit();
   fireEvent.click(screen.getByRole("button", { name: "Save order" }));
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "changed elsewhere",
   );
@@ -189,4 +191,16 @@ it("makes a destroyed agent's order read-only", async () => {
     screen.getByRole("button", { name: "Edit connection order" }),
   ).toBeDisabled();
   expect(writes).toHaveLength(0);
+});
+
+it("leaves pristine connection-order editing without a save bar or request", async () => {
+  mount();
+  const editButton = screen.getByRole("button", { name: "Edit connection order" });
+  await waitFor(() => expect(editButton).toBeEnabled());
+  fireEvent.click(editButton);
+  expect(screen.queryByRole("region", { name: "Unsaved changes" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Done" }));
+  expect(screen.getByRole("button", { name: "Edit connection order" })).toBeEnabled();
+  expect(screen.queryByRole("button", { name: "Move Personal up" })).toBeNull();
+  expect(writes).toEqual([]);
 });

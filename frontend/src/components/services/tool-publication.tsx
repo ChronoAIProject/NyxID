@@ -21,18 +21,18 @@ export function PublicationOperations({
   return (
     <div className="space-y-2">
       {!admin && (
-        <p className="text-11 text-text-tertiary">
+        <p className="text-13 text-text-tertiary">
           Admin publication and audience approval required before use.
         </p>
       )}
       {operations.map((op) => (
         <div
           key={op.id}
-          className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2 text-12"
+          className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-2 text-14"
         >
           <div>
             <span className="font-medium">{op.name}</span>
-            <code className="ml-2 text-11 text-text-tertiary">
+            <code className="ml-2 text-14 text-text-tertiary">
               {op.method} {op.path}
             </code>
           </div>

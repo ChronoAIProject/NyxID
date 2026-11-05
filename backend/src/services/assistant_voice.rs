@@ -131,6 +131,10 @@ pub async fn enqueue(
         return Err(AppError::ValidationError("Invalid voice request".into()));
     }
     let request = VoiceRequest {
+        execution_enrolled: false,
+        model_task: None,
+        progress: None,
+        timing: Default::default(),
         started_at: None,
         terminal_error_code: None,
         async_operation_pending: false,
@@ -247,6 +251,7 @@ pub(crate) async fn enqueue_in_session(
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
                 crm_artifacts: Vec::new(),
+                execution_task: None,
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
@@ -373,6 +378,23 @@ pub(crate) async fn publish_result(
                     }
                 } else { source };
                 let source = settled_result(&current, source);
+                // Timing survives audio closure and fast turns that settle
+                // between coordinator ticks. IDs and timestamps only.
+                if let Some(call) = db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
+                    .find_one(doc!{"_id":&current.session_id,"user_id":&current.user_id})
+                    .projection(doc!{"created_at":1}).session(&mut *session).await?
+                    && let Ok(start)=call.get_datetime("created_at") {
+                    let offset=|at:chrono::DateTime<Utc>|(at-start.to_chrono()).num_milliseconds().max(0);
+                    let mut marks=doc!{"timing.result_ms":offset(source.created_at)};
+                    if let Some(first)=source.activities.iter().map(|a|a.started_at).min() {
+                        marks.insert("timing.first_activity_ms",offset(first));
+                        marks.insert("timing.tool_started_ms",offset(first));
+                    }
+                    if let Some(end)=source.activities.iter().filter_map(|a|a.ended_at).min() {
+                        marks.insert("timing.first_tool_finished_ms",offset(end));
+                    }
+                    requests.update_one(doc!{"_id":&current.id},doc!{"$min":marks}).session(&mut *session).await?;
+                }
                 // Older replicas executed in the visible thread. Adopt their
                 // existing settled reply rather than copying it into that thread twice.
                 if source.conversation_id == current.conversation_id
@@ -403,10 +425,11 @@ pub(crate) async fn publish_result(
                     .await?
                     .ok_or_else(|| AppError::NotFound("Conversation not found".into()))?;
                 let id = Uuid::new_v4().to_string();
-                let text: String = source.text.chars().take(12_000).collect();
+                let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
                         crm_artifacts: source.crm_artifacts.clone(),
+                        execution_task: None,
                         delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
                         media_queue_notice_id: None,
@@ -659,6 +682,7 @@ pub(crate) async fn result_message(
     }
     Ok(Some(AssistantMessage {
         crm_artifacts: Vec::new(),
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -684,9 +708,8 @@ pub(crate) async fn result_message(
         seq: 0,
         turn_id: request.turn_id.clone(),
         role: "assistant".into(),
-        text:
-            "The voice request ended without a recorded result. Check its status before retrying."
-                .into(),
+        text: super::voice::progress::terminal_detail(request.terminal_error_code.as_deref())
+            .into(),
         status: "failed".into(),
         error_code: Some(
             request
@@ -901,6 +924,7 @@ async fn settle_lost_in_session(
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -1128,6 +1152,10 @@ pub(crate) async fn continuation(
     let request = enqueue_in_session(
         db,
         VoiceRequest {
+            execution_enrolled: parent.execution_enrolled,
+            model_task: None,
+            progress: None,
+            timing: Default::default(),
             started_at: None,
             terminal_error_code: None,
             async_operation_pending: false,
@@ -1216,6 +1244,14 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
                 {
                     return Ok(());
                 }
+                if request.execution_enrolled {
+                    let original = requests.find_one(doc! {"_id":root,"user_id":&user})
+                        .session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Voice task unavailable".into()))?;
+                    db.collection::<bson::Document>(MESSAGES).update_one(
+                        doc! {"_id":&original.message_id,"user_id":&user,"execution_task.version":1,"execution_task.cancelled":false},
+                        doc! {"$set":{"execution_task.cancelled":true},"$inc":{"execution_task.epoch":1_i64}})
+                        .session(&mut *session).await?;
+                }
                 // The original task is the cancellation fence even after its first
                 // turn settled. Every later continuation checks this same root.
                 requests
@@ -1290,6 +1326,7 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
 
 #[derive(serde::Serialize)]
 pub struct VoiceOption {
+    announcements: bool,
     service_id: String,
     connection_id: Option<String>,
     key_source: &'static str,
@@ -1455,6 +1492,9 @@ async fn audio_options(
             }
             own_connections.push(connection);
         }
+        let conversation_unavailable = (!dictation)
+            .then(|| super::inference_voice::conversation_unavailable_reason(voice))
+            .flatten();
         let billing = service.billing.as_ref();
         let platform_priced =
             super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing).is_ok();
@@ -1473,6 +1513,10 @@ async fn audio_options(
         {
             if platform_authorized {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: None,
                     key_source: "platform",
@@ -1484,17 +1528,19 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: platform_enabled && platform_priced,
-                    unavailable_reason: if !platform_enabled {
+                    available: platform_enabled
+                        && platform_priced
+                        && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if !platform_enabled {
                         Some("provider_rollout_pending")
                     } else if !platform_priced {
                         Some("duration_tariff_unavailable")
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.platform_key.pricing.clone()
                     } else {
                         None
@@ -1505,6 +1551,10 @@ async fn audio_options(
             }
             for connection in &own_connections {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: Some(connection.service.id.clone()),
                     key_source: "own",
@@ -1516,15 +1566,15 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: own_billing.is_ok(),
-                    unavailable_reason: if own_billing.is_err() {
+                    available: own_billing.is_ok() && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if own_billing.is_err() {
                         Some("duration_tariff_unavailable")
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.byok_pricing.clone()
                     } else {
                         None

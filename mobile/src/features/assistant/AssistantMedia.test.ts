@@ -8,11 +8,21 @@ import { groupMessageSchema } from "../groups/groupContracts";
 type E = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): E[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
+// Settings rows carry their text in label/detail/value/message props.
 const words = (n: any): string =>
   typeof n === "string" || typeof n === "number"
     ? String(n)
     : n?.props
-      ? [n.props.children].flat(Infinity).map(words).join(" ")
+      ? [
+          n.props.label,
+          n.props.detail,
+          n.props.value,
+          n.props.message,
+          n.props.children,
+        ]
+          .flat(Infinity)
+          .map(words)
+          .join(" ")
       : "";
 const jsx = {
   Fragment: "Fragment",
@@ -35,6 +45,7 @@ function setup(
     "../../components/workspace/WorkspaceUI": {
       Card: "Card",
       Label: "Label",
+      Notice: "Notice",
       ActionButton: "Button",
     },
     ...mocks,
@@ -57,6 +68,18 @@ function setup(
     },
   };
 }
+// The machine receipt renders Settings rows; their text lives in props.
+const toolCardMocks = {
+  "../../components/settings/SettingsList": {
+    SettingsGroup: "Group",
+    SettingsRow: "Row",
+  },
+  "../../theme/ThemeContext": {
+    useTheme: () => ({ colors: { textMuted: "#999" } }),
+  },
+  "../../theme/designTokens": { spacing: { sm: 8 } },
+  "lucide-react-native": { ChevronDown: "Down", ChevronRight: "Right" },
+};
 const at = "2026-10-28T00:00:00Z";
 const activity = activitySchema.parse({
   id: "tool",
@@ -93,6 +116,7 @@ test("real machine receipt renders correlation, metrics, screenshot and lazy exc
       onOpenDesktop: () => {},
     },
     {
+      ...toolCardMocks,
       "./MachineUI": { useMachineRuntime: () => ({ epoch: 1, active: true }) },
       "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
       "./MachineDesktopEntries": { MachineDesktopEntries: "Desktop" },
@@ -150,6 +174,7 @@ test("real excerpt is authenticated, bounded, retention aware and cancels on clo
       "CommandExcerpt",
       { endpoint: "/private/excerpt", active: true },
       {
+        ...toolCardMocks,
         "./MachineUI": {},
         "./MachineDesktopEntries": {},
         "../assistant/AssistantAttachmentView": {},
@@ -207,6 +232,7 @@ function imageHarness(captionColor?: string) {
   const requests: any[] = [];
   let background: (s: string) => void = () => {};
   const pending = deferred<Uint8Array>();
+  const reload = deferred<Uint8Array>();
   class Dir {
     exists = true;
     create() {}
@@ -255,7 +281,7 @@ function imageHarness(captionColor?: string) {
         },
       },
       "@react-navigation/native": { useIsFocused: () => focused },
-      "react-native-safe-area-context": { SafeAreaView: "Safe" },
+      "./AssistantImagePreview": { AssistantImagePreview: "ImagePreview" },
       "expo-file-system": { Directory: Dir, File, Paths: { cache: "cache" } },
       "expo-sharing": {},
       "lucide-react-native": {
@@ -272,9 +298,7 @@ function imageHarness(captionColor?: string) {
       "../../lib/api/http": {
         requestAuthenticatedBytes: (path: string, signal: AbortSignal) => {
           requests.push({ path, signal });
-          return requests.length === 1
-            ? pending.promise
-            : new Promise<Uint8Array>(() => {});
+          return requests.length === 1 ? pending.promise : reload.promise;
         },
       },
     },
@@ -282,6 +306,7 @@ function imageHarness(captionColor?: string) {
   return {
     ...x,
     pending,
+    reload,
     requests,
     deleted: () => deleted,
     writes: () => writes,
@@ -295,6 +320,10 @@ function imageHarness(captionColor?: string) {
     },
     background: () => {
       background("background");
+      x.h.flush();
+    },
+    foreground: () => {
+      background("active");
       x.h.flush();
     },
   };
@@ -317,10 +346,24 @@ test("visible tool images use authenticated bytes inline, preserve the viewer, a
       ),
   );
   assert.match(x.text(), /agent couldn't view this image/);
-  assert.equal(x.nodes().find((n) => n.type === "Modal")?.props.visible, false);
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
   x.press("Image from Browser screen");
-  assert.equal(x.nodes().find((n) => n.type === "Modal")?.props.visible, true);
-  x.press("Close attachment preview");
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    "file:///private/image.png",
+  );
+  x.nodes()
+    .find((n) => n.type === "ImagePreview")!
+    .props.onClose();
+  x.h.flush();
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
+  assert.equal(x.requests.length, 1);
   assert.equal(x.deleted(), 0);
   x.background();
   assert.equal(x.deleted(), 1);
@@ -340,9 +383,44 @@ test("late inline image reads cannot write files after blur or account switch", 
 
 test("attachment captions on a user bubble retain the chosen foreground", () => {
   const x = imageHarness("#FFFFFF");
-  const caption = x.nodes().find((node) => node.type === "Label" && words(node).includes("agent couldn't view"));
+  const caption = x
+    .nodes()
+    .find(
+      (node) =>
+        node.type === "Label" && words(node).includes("agent couldn't view"),
+    );
   assert.ok(caption);
-  assert.equal(Object.assign({}, ...[caption.props.style].flat()).color, "#FFFFFF");
+  assert.equal(
+    Object.assign({}, ...[caption.props.style].flat()).color,
+    "#FFFFFF",
+  );
+  x.h.unmount();
+});
+
+test("backgrounding closes the image overlay and a foreground reload cannot reopen it", async () => {
+  const x = imageHarness();
+  x.pending.resolve(new Uint8Array([1, 2, 3]));
+  await x.h.settle();
+  x.press("Image from Browser screen");
+  assert.ok(x.nodes().find((n) => n.type === "ImagePreview")?.props.uri);
+  x.background();
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
+  x.foreground();
+  x.reload.resolve(new Uint8Array([1, 2, 3]));
+  await x.h.settle();
+  assert.equal(x.requests.length, 2);
+  assert.equal(
+    x.nodes().find((n) => n.type === "ImagePreview")?.props.uri,
+    undefined,
+  );
+  assert.ok(
+    x
+      .nodes()
+      .some((n) => n.props.accessibilityLabel === "Image from Browser screen"),
+  );
   x.h.unmount();
 });
 

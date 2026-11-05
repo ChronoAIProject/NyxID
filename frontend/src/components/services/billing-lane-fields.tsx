@@ -67,16 +67,16 @@ export function BillingLaneFields({
   };
   return (
     <section className="space-y-3">
-      <h3 className="text-13 font-semibold">Billing lanes</h3>
+      <h3 className="type-card-title">Billing lanes</h3>
       {service?.x_channel_billing && (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           X channels bill through the {service.x_channel_billing.lane} lane.
           Configure a synced Requests price on that lane to enable paid X
           channels.
         </p>
       )}
       {!form.watch("byok_pricing") && !form.watch("platform_key_pricing") && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No lane prices are configured. Legacy billing below still applies.
         </p>
       )}
@@ -94,7 +94,7 @@ export function BillingLaneFields({
               key={field}
               className="space-y-3 rounded-lg border border-border/50 p-3"
             >
-              <div className="text-xs font-medium">
+              <div className="type-secondary-emphasis">
                 {field === "byok_pricing"
                   ? "Your own key"
                   : "NyxID platform key"}
@@ -304,7 +304,7 @@ export function BillingLaneFields({
                   >
                     Add component
                   </Button>
-                  <p className="text-11 text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Prices support up to 12 decimal places. Each unit is charged
                     separately.
                   </p>
@@ -315,7 +315,7 @@ export function BillingLaneFields({
         })}
       </div>
       {(form.watch("byok_pricing") || form.watch("platform_key_pricing")) && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Billing lanes supersede legacy platform billing below. A lane set to
           Free has no lane charge. Resale billing remains separate.
         </p>
@@ -350,8 +350,8 @@ function OperationPrices({
   if (!operations.length) return null;
   return (
     <div className="space-y-2 border-t border-border/50 pt-3">
-      <div className="text-12 font-medium">Operation prices</div>
-      <p className="text-11 text-muted-foreground">
+      <div className="type-row-title">Operation prices</div>
+      <p className="text-13 text-muted-foreground">
         A synced operation price replaces the base Requests price. Leave an
         operation empty to use the base price.
       </p>
@@ -369,9 +369,9 @@ function OperationPrices({
             key={operation}
             className="grid grid-cols-[1fr_8rem_4.5rem] items-center gap-2"
           >
-            <span className="truncate text-12" title={operation}>
+            <Label asChild><span className="truncate" title={operation}>
               {label}
-            </span>
+            </span></Label>
             <Input
               aria-label={`${label} operation price`}
               aria-invalid={Boolean(error)}
@@ -402,7 +402,7 @@ function OperationPrices({
               <span />
             )}
             {error && (
-              <p className="col-span-3 text-11 font-medium text-destructive">
+              <p className="col-span-3 type-secondary-emphasis text-destructive">
                 {error}
               </p>
             )}

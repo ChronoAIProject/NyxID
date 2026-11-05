@@ -43,7 +43,7 @@ function composerHeightLimit(
   const viewport = window.visualViewport;
   const viewportHeight = viewport?.height ?? window.innerHeight;
   const chromeHeight = surface && editor
-    ? surface.offsetHeight - editor.offsetHeight
+    ? Math.ceil(surface.getBoundingClientRect().height - editor.getBoundingClientRect().height)
     : 0;
   // Keep the grip below the chat header, including on short/mobile viewports.
   const visibleTop = Math.max(
@@ -973,7 +973,7 @@ function DraftedChatComposer({
           {active && allowActiveInput ? (
             <p
               data-steering-hint
-              className="mb-1.5 text-11 text-muted-foreground"
+              className="mb-1.5 text-13 text-muted-foreground"
             >
               Still replying. What you send now steers this reply; Stop ends it.
             </p>
@@ -1125,7 +1125,7 @@ function DraftedChatComposer({
             {dragging && (
               <div
                 role="status"
-                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 text-12 font-medium"
+                className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center rounded-xl bg-card/95 type-row-title"
               >
                 Drop files to attach
               </div>
@@ -1177,7 +1177,7 @@ function DraftedChatComposer({
                           onMouseDown={(event) => event.preventDefault()}
                           onClick={() => chooseMention(option.name)}
                           className={cn(
-                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-12 text-foreground",
+                            "flex cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-14 text-foreground",
                             selected ? "bg-overlay-strong" : "hover:bg-overlay",
                           )}
                         >
@@ -1187,12 +1187,12 @@ function DraftedChatComposer({
                               <span className="min-w-0 flex-1 truncate">
                                 {option.agent.display_name?.trim() || option.name}
                                 {option.agent.display_name?.trim() ? (
-                                  <span className="ml-1.5 text-11 text-text-tertiary">
+                                  <span className="ml-1.5 text-13 text-text-tertiary">
                                     @{option.name}
                                   </span>
                                 ) : null}
                               </span>
-                              <span className="shrink-0 text-10 text-text-tertiary">
+                              <span className="shrink-0 text-12 text-text-tertiary">
                                 {option.agent.kind === "person" ? "Person" : option.agent.shared ? `Shared agent${option.agent.owner_name ? ` · ${option.agent.owner_name}` : ""}` : option.agent.kind === "nyxbot"
                                   ? "Personal agent"
                                   : "Specialist"}
@@ -1213,7 +1213,7 @@ function DraftedChatComposer({
                               )}
                               <span className="min-w-0 flex-1 truncate">
                                 <span className="font-mono">@{option.name}</span>
-                                <span className="ml-1.5 text-11 text-text-tertiary">
+                                <span className="ml-1.5 text-13 text-text-tertiary">
                                   {option.attachment.label}
                                 </span>
                               </span>
@@ -1228,7 +1228,7 @@ function DraftedChatComposer({
                   ref={textMeasureRef}
                   data-composer-text-measure
                   aria-hidden
-                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre text-16 leading-relaxed"
+                  className="pointer-events-none absolute invisible inline-block w-max whitespace-pre type-composer"
                 >
                   {tokenSegments(content, tokens).map((part, index) =>
                     part.token ? (
@@ -1300,7 +1300,7 @@ function DraftedChatComposer({
                             ? (activePlaceholder ?? "Steer active task...")
                             : (placeholder ?? "Message NyxID Assistant...")
                     }
-                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 text-16 leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
+                    className="assistant-scrollbar composer-scrollbar block min-h-8 w-full resize-none overflow-hidden overscroll-contain bg-transparent px-0 py-1 type-composer text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
                   />
                   <div
                     aria-hidden
@@ -1373,7 +1373,7 @@ function DraftedChatComposer({
                   )}
                   <div
                     ref={controlsRef}
-                    className={`flex shrink-0 items-center gap-1.5 ${expanded ? "self-end" : ""}`}
+                    className="flex shrink-0 items-center gap-1.5"
                   >
                     {dictation.button}
                     {showVoice && (

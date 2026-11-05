@@ -75,8 +75,10 @@ pub struct IdentityConfig {
 }
 
 fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
-    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
-        || service.credential_binding.as_deref() == Some("platform")
+    if matches!(
+        service.source.as_deref(),
+        Some(AUTO_PROVISION_SOURCE | crate::services::voice::access::BOUND_SOURCE)
+    ) || service.credential_binding.as_deref() == Some("platform")
     {
         return Err(AppError::Forbidden(
             "Auto-connected services are platform managed and cannot be modified".to_string(),
@@ -91,6 +93,15 @@ pub fn ensure_service_fields_editable(
     service: &UserService,
     routing_fields: &[(&str, bool)],
 ) -> AppResult<()> {
+    if service.source.as_deref() == Some(crate::services::voice::access::BOUND_SOURCE) {
+        if let Some((field, _)) = routing_fields.iter().find(|(_, present)| *present) {
+            return Err(AppError::Forbidden(format!(
+                "Bot voice connections have a fixed binding; cannot change {field}"
+            )));
+        }
+        // Owners may disable/delete a connection normally. This is not auto-provisioned.
+        return Ok(());
+    }
     if service.credential_binding.as_deref() == Some("platform")
         && service.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
     {
@@ -147,7 +158,7 @@ pub async fn auto_connected_endpoint_ids(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
-            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .with_options(
             FindOptions::builder()
@@ -184,7 +195,7 @@ pub async fn ensure_user_managed_endpoint(
         .count_documents(doc! {
             "user_id": user_id,
             "endpoint_id": endpoint_id,
-            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
+            "$or": [{ "source": {"$in":[AUTO_PROVISION_SOURCE, crate::services::voice::access::BOUND_SOURCE]} }, { "credential_binding": "platform" }],
         })
         .await?;
     if count > 0 {

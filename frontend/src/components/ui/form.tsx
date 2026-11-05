@@ -1,3 +1,4 @@
+import { TEXT_STYLES } from "@/lib/typography";
 import * as React from "react";
 import type * as LabelPrimitive from "@radix-ui/react-label";
 import { Slot } from "@radix-ui/react-slot";
@@ -80,7 +81,7 @@ function FormSubmitErrors({ className }: { readonly className?: string }) {
   const first = firstNestedErrorMessage(Object.fromEntries(fieldErrors));
   const count = fieldErrors.length;
   return (
-    <p role="alert" className={cn("text-xs text-destructive", className)}>
+    <p role="alert" className={cn(`${TEXT_STYLES.validationError} text-destructive unthemed:text-xs`, className)}>
       Cannot save — {count} {count === 1 ? "field needs" : "fields need"}{" "}
       attention{first ? `: ${first}` : "."}
     </p>
@@ -206,7 +207,7 @@ const FormDescription = React.forwardRef<
     <p
       ref={ref}
       id={formDescriptionId}
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn(`${TEXT_STYLES.secondary} text-muted-foreground unthemed:text-sm`, className)}
       {...props}
     />
   );
@@ -230,7 +231,7 @@ const FormMessage = React.forwardRef<
     <p
       ref={ref}
       id={formMessageId}
-      className={cn("text-sm font-medium text-destructive", className)}
+      className={cn(`${TEXT_STYLES.validationError} text-destructive unthemed:text-sm`, className)}
       {...props}
     >
       {body}

@@ -143,16 +143,16 @@ export function AssistantNodeRegisterTokenDialog({
                   id="assistant-node-registration-token"
                   readOnly
                   value={result.token}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
             {result.expiresAt ? (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Expires {result.expiresAt}
               </p>
             ) : null}
-            <p className="break-all font-mono text-11 text-muted-foreground">
+            <p className="break-all font-mono text-13 text-muted-foreground">
               {result.id}
             </p>
           </div>
@@ -184,7 +184,7 @@ export function AssistantNodeRegisterTokenDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

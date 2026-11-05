@@ -442,7 +442,7 @@ async fn specialist_voice_discovery_enforces_operation_denial_and_openai_origin(
             flags::set_platform_override(&f.state.db, flag, &flags::FlagTarget::Global, true, &f.owner).await.unwrap();
         }
         f.state.db.collection::<bson::Document>(SERVICES).update_one(doc! {"_id":&service.id},
-            doc! {"$set":{"base_url":"https://api.x.ai/v1","inference.voice.protocol":"xai_realtime","inference.voice.usage_source":"server_measured"}}).await.unwrap();
+            doc! {"$set":{"base_url":"https://api.x.ai/v1","inference.voice.protocol":"xai_realtime","inference.voice.usage_source":"server_measured"},"$unset":{"inference.voice.delegation_model":""}}).await.unwrap();
         f.state.db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
             .update_many(doc! {"catalog_service_id":&service.id},doc! {"$set":{"url":"https://api.x.ai/v1"}}).await.unwrap();
         let grok = options(&f).await;
@@ -826,6 +826,9 @@ async fn specialist_platform_voice_live_revalidation_closes_revoked_key_and_bill
                     while let Some(Ok(message)) = socket.recv().await {
                         if let Message::Text(text)=message {
                             let event:Value=serde_json::from_str(&text).unwrap();
+                            if event["type"]=="session.commentary.append" {
+                                socket.send(Message::Text(json!({"type":"session.commentary.appended","client_event_id":event["event_id"]}).to_string().into())).await.unwrap();
+                            }
                             if event["type"]=="session.close" {
                                 socket.send(Message::Text(json!({"type":"session.closed","usage":{"seconds":18.2}}).to_string().into())).await.unwrap();
                                 closed.notify_one();
@@ -839,11 +842,24 @@ async fn specialist_platform_voice_live_revalidation_closes_revoked_key_and_bill
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap()});
         let started = super::runtime::start_with_provider(&f.state,
-            super::runtime::StartInput { user:&f.owner, conversation:&f.row.id, client_request_id:&Uuid::new_v4().to_string(), preferences:p,
+            super::runtime::StartInput { execution_enrolled: false, responses_billing: None,
+                client_key: None, user:&f.owner, conversation:&f.row.id, client_request_id:&Uuid::new_v4().to_string(), preferences:p,
                 sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" },
             resolved.identity, resolved.billing,
             super::openai::OpenAi::fixture(resolved.key,address),None).await.unwrap();
         assert_eq!(started.session.state, crate::models::assistant_voice_session::SessionState::Active);
+        assert_eq!(started.session.protocol, Some(crate::models::downstream_service::VoiceProtocol::OpenaiLive));
+        let notice = super::announcements::enqueue(
+            &f.state.db, &started.session, &Uuid::new_v4().to_string(), "远程通话已接通",
+        ).await.expect("a real admitted OpenAI call must support notifications");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let row = f.state.db.collection::<super::announcements::Announcement>(super::announcements::COLLECTION)
+                    .find_one(doc! {"_id":&notice.id}).await.unwrap().unwrap();
+                if row.state == "accepted" {break;}
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        }).await.expect("the real sideband must dispatch and acknowledge notifications");
         let initial = f.state.db.collection::<UsageMeterRow>(USAGE)
             .find_one(doc!{"billing_request_id":format!("voice:{}:0",started.session.id),"metric":"voice_seconds"}).await.unwrap().unwrap();
         assert_eq!(initial.billing_owner_id, f.owner);
@@ -925,7 +941,8 @@ async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let rejected_request = Uuid::new_v4().to_string();
-        let rejected = super::runtime::start_with_provider(&f.state, super::runtime::StartInput {
+        let rejected = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { execution_enrolled: false, responses_billing: None,
+                client_key: None,
             user:&f.owner, conversation:&f.row.id, client_request_id:&rejected_request,
             preferences:p.clone(), sdp:"v=0\r\nm=audio",
         }, resolved.identity, resolved.billing, super::openai::OpenAi::fixture(resolved.key,address), None).await;
@@ -956,7 +973,8 @@ async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows
             doc! {"dedupe_key":format!("grant-issued:{}",grant.id)}).await.unwrap(), 1);
         // No reconcile, TTL wait, cache invalidation or BillingService rebuild.
         let resolved = credentials::resolve(&f.state, &f.owner, &f.row.id, &p).await.unwrap();
-        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput {
+        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { execution_enrolled: false, responses_billing: None,
+                client_key: None,
             user:&f.owner, conversation:&f.row.id, client_request_id:&Uuid::new_v4().to_string(),
             preferences:p, sdp:"v=0\r\nm=audio",
         }, resolved.identity, resolved.billing, super::openai::OpenAi::fixture(resolved.key,address), None).await.unwrap();
@@ -1147,6 +1165,9 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
         let started = super::runtime::start_with_provider(
             &f.state,
             super::runtime::StartInput {
+                execution_enrolled: false,
+                responses_billing: None,
+                client_key: None,
                 user: &f.owner,
                 conversation: &f.row.id,
                 client_request_id: &request,
@@ -1222,4 +1243,51 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
         server.abort();
         f.state.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn missing_task_model_is_dictation_only_and_discovery_matches_admission() {
+    Box::pin(async {
+        let (f, provider) = fixture("voice_missing_task_model").await;
+        f.state
+            .db
+            .collection::<bson::Document>(SERVICES)
+            .update_one(
+                doc! {"_id":&provider.id},
+                doc! {"$set":{"inference.voice.delegation_model":bson::Bson::Null}},
+            )
+            .await
+            .unwrap();
+        let choices = options(&f).await;
+        assert!(!choices.as_array().unwrap().is_empty());
+        for choice in choices.as_array().unwrap() {
+            assert_eq!(choice["available"], false);
+            assert_eq!(choice["unavailable_reason"], "delegation_model_required");
+        }
+        assert!(
+            credentials::resolve(&f.state, &f.owner, &f.row.id, &platform(&provider))
+                .await
+                .is_err()
+        );
+        let thread = assistant_voice::thread(&f.state.db, &f.owner, &f.row.id)
+            .await
+            .unwrap();
+        let dictation =
+            assistant_voice::dictation_options(&f.state.db, &f.state.encryption_keys, &thread)
+                .await
+                .unwrap();
+        let dictation = serde_json::to_value(dictation).unwrap();
+        assert!(
+            dictation
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|choice| choice["available"] == true)
+        );
+        credentials::resolve_audio(&f.state, &f.owner, &f.row.id, &platform(&provider), true)
+            .await
+            .unwrap();
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
 }

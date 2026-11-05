@@ -35,6 +35,18 @@ export type ThemeColors = {
   danger: string;        // expired, failed, denied
   dangerSoft: string;
   dangerSoftBg: string;
+  /** Solid destructive fill (Delete Account); white labels meet AA in both themes. */
+  dangerSolid: string;
+  /** Inset-grouped list fill that stands apart from the page in both themes. */
+  groupedFill: string;
+  /** iOS segmented control: the track and the raised selected segment. */
+  segmentTrack: string;
+  segmentSelected: string;
+  /** Floating pop-up menus: a step above the grouped rows they open from. */
+  menuFill: string;
+  /** Placeholder bars of skeleton loaders, on grouped fills in both themes. */
+  skeleton: string;
+  dangerSolidPressed: string;
   primary: string;       // warm violet — identity + interaction only
   primaryDim: string;    // pressed states, hover deep
   primaryLight: string;  // logo wordmark tones, light text on accent
@@ -133,6 +145,13 @@ export const darkColors: ThemeColors = {
   danger: "#FCA5A5",
   dangerSoft: "#fca5a5",
   dangerSoftBg: "rgba(248, 113, 113, 0.10)",
+  dangerSolid: DANGER_LIGHT,
+  groupedFill: "#222225",
+  segmentTrack: "rgba(118, 118, 128, 0.24)",
+  segmentSelected: "#5A5A60",
+  menuFill: "#303034",
+  skeleton: "rgba(255, 255, 255, 0.10)",
+  dangerSolidPressed: "#991B1B",
   // Brand
   primary: "#C6B3FC",
   primaryDim: PRIMARY_DEEP,
@@ -191,6 +210,13 @@ export const lightColors: ThemeColors = {
   danger: DANGER_LIGHT,
   dangerSoft: DANGER_LIGHT,
   dangerSoftBg: "rgba(220, 38, 38, 0.06)",
+  dangerSolid: DANGER_LIGHT,
+  groupedFill: "#F2F2F4",
+  segmentTrack: "rgba(118, 118, 128, 0.12)",
+  segmentSelected: "#FFFFFF",
+  menuFill: "#FFFFFF",
+  skeleton: "rgba(118, 118, 128, 0.18)",
+  dangerSolidPressed: "#991B1B",
   primary: "#7049C6",
   primaryDim: "#6240B0",
   primaryLight: PRIMARY_LIGHT,
@@ -243,11 +269,14 @@ export const darkSheetColors: ThemeColors = {
   navActive: "rgba(255, 255, 255, 0.08)",
 };
 
+/** Light drawer is an iOS grouped surface: zinc page, white borderless cards. */
 export const lightSheetColors: ThemeColors = {
   ...lightColors,
-  bg: "#FFFFFF",
-  card: "#F4F4F5",
+  bg: "#F4F4F5",
+  card: "#FFFFFF",
   cardSoft: "#FFFFFF",
+  // The drawer page is already grey, so its groups are the white cards.
+  groupedFill: "#FFFFFF",
 };
 
 /** @deprecated Use `useTheme()` from ThemeContext instead. */

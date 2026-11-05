@@ -72,19 +72,19 @@ export function MemberRow({
     <TableRow>
       <TableCell>
         <div className="flex flex-col gap-0.5">
-          <span className="text-12 font-medium text-foreground">
+          <span className="type-row-title text-foreground">
             {displayName}
             {isSelf && (
-              <span className="ml-2 text-xs text-muted-foreground">(you)</span>
+              <span className="ml-2 text-13 text-muted-foreground">(you)</span>
             )}
             {hasCustomScope && (
-              <Badge variant="info" className="ml-2 align-middle text-11">
+              <Badge variant="info" className="ml-2 align-middle text-12">
                 Custom scope
               </Badge>
             )}
           </span>
           {member.email && member.display_name && (
-            <span className="text-xs text-muted-foreground">
+            <span className="text-13 text-muted-foreground">
               {member.email}
             </span>
           )}
@@ -105,7 +105,7 @@ export function MemberRow({
                   </SelectTrigger>
                 </span>
               </TooltipTrigger>
-              <TooltipContent className="max-w-[260px] text-xs">
+              <TooltipContent className="max-w-[260px] text-13">
                 {LAST_ACTIVE_ADMIN_TOOLTIP}
               </TooltipContent>
             </Tooltip>
@@ -141,7 +141,7 @@ export function MemberRow({
       <TableCell>
         <Badge
           variant={isScopeRestricted ? "info" : "secondary"}
-          className="text-xs"
+          className="text-12"
         >
           {scopeLabel}
         </Badge>
@@ -192,7 +192,7 @@ export function MemberRow({
                     </Button>
                   </span>
                 </TooltipTrigger>
-                <TooltipContent className="max-w-[260px] text-xs">
+                <TooltipContent className="max-w-[260px] text-13">
                   {LAST_ACTIVE_ADMIN_TOOLTIP}
                 </TooltipContent>
               </Tooltip>

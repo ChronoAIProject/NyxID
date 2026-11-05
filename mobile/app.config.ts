@@ -14,14 +14,17 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   // Keep public env inputs covered by the profile/identity cache key in metro.config.js.
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
   process.env.EXPO_PUBLIC_FRONTEND_URL = r.frontendUrl;
-  process.env.EXPO_PUBLIC_LEGACY_FRONTEND_URL = r.legacyFrontendUrl;
+  process.env.EXPO_PUBLIC_LEGAL_BASE_URL = r.legalBaseUrl;
+  process.env.EXPO_PUBLIC_NEW_API_BASE_URL = r.newApiBaseUrl;
+  process.env.EXPO_PUBLIC_NEW_FRONTEND_URL = r.newFrontendUrl;
+  process.env.EXPO_PUBLIC_NEW_LEGAL_BASE_URL = r.newLegalBaseUrl;
   process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST = r.universalLinkHost;
   process.env.EXPO_PUBLIC_APP_SCHEME = ident.scheme;
   process.env.EXPO_PUBLIC_ALLOWED_EMAILS = r.allowedEmails;
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
-    apiBaseUrl: r.apiBaseUrl,
+    apiBaseUrls: [r.apiBaseUrl, r.newApiBaseUrl],
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,
     scheme: ident.scheme,
@@ -78,7 +81,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       [
         "expo-image-picker",
         {
-          photosPermission: false,
+          photosPermission:
+            "Allow NyxID to attach photos you choose from your library to chats.",
           cameraPermission: "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
           microphonePermission:
             "Allow NyxID to use your microphone for dictation and voice conversations.",
@@ -108,6 +112,15 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       "expo-web-browser",
       "expo-sharing",
       [
+        "expo-speech-recognition",
+        {
+          microphonePermission:
+            "Allow NyxID to use your microphone for dictation and voice conversations.",
+          speechRecognitionPermission:
+            "Allow NyxID to turn your speech into text for messages. Recognition runs on your iPhone when available.",
+        },
+      ],
+      [
         "expo-camera",
         {
           cameraPermission: "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
@@ -122,7 +135,6 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       TELEMETRY_DSN: r.telemetryDsn,
       TELEMETRY_HOST: r.telemetryHost,
       NYXID_SHARE_ANALYTICS: r.shareAnalytics,
-      LEGAL_BASE_URL: r.legalBaseUrl,
     },
   };
 };

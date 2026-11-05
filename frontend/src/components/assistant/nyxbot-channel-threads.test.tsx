@@ -52,7 +52,7 @@ it("loads on expansion, pages history independently, and retains the transcript 
   await user.click(screen.getAllByRole("button", { name: "Stop following" })[0]!);
   await screen.findByText("No active threads.");
   expect(requests).toContain("/assistant/nyxagent/channels/bot/chats/parent/threads/child/stop");
-  await user.click(screen.getByRole("checkbox", { name: "Include stopped and expired threads" }));
+  await user.click(screen.getByRole("switch", { name: "Include stopped and expired threads" }));
   expect(await screen.findByText("Stopped")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Topic · Today" })).toHaveAttribute("href", "/assistant?c=branch");
 });

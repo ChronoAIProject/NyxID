@@ -81,13 +81,22 @@ function setup() {
       Fragment: "Fragment",
     },
     "react-native": {
+      Pressable: "Pressable",
       ScrollView: "ScrollView",
       View: "View",
       StyleSheet: { create: (value: unknown) => value, hairlineWidth: 1 },
     },
-    "lucide-react-native": { Bot: "Bot", Users: "Users" },
+    "lucide-react-native": {
+      Bot: "Bot",
+      Users: "Users",
+      ChevronRight: "ChevronRight",
+      Plus: "Plus",
+    },
     "@tanstack/react-query": {
+      useQueryClient: () => ({ setQueryData: () => undefined }),
+      useMutation: () => ({ mutate: () => undefined }),
       useQuery: (options: Record<string, any>) => {
+        if (options.queryKey.includes("onboarding")) return { data: undefined };
         const name = options.queryKey.includes("agents")
           ? "agents"
           : options.queryKey.includes("groups")
@@ -131,6 +140,10 @@ function setup() {
         list: (signal: AbortSignal) => calls.push(["crews-api", signal]),
       },
     },
+    "../../lib/api/onboardingApi": { onboardingApi: {} },
+    "../onboarding/FirstRunIntro": { FirstRunIntro: "FirstRunIntro" },
+    "../onboarding/NextStepList": { NextStepList: "NextStepList" },
+    "../onboarding/onboardingContracts": { onboardingKey: ["assistant", "onboarding"] },
     "../../lib/api/http": {
       getCurrentUserProfileRequest: (signal: AbortSignal) =>
         calls.push(["profile-api", signal]),
@@ -182,11 +195,18 @@ function setup() {
       .flatMap((node) => [node.props.children].flat(Infinity))
       .filter((part) => typeof part === "string")
       .join(" ");
+  const labelText = (node: Element) =>
+    elements(node)
+      .filter((child) => child.type === "Label")
+      .flatMap((child) => [child.props.children].flat(Infinity))
+      .filter((part) => typeof part === "string")
+      .join("");
+  /** Rows and actions are pressables named by their label or visible text. */
   const button = (name: string) => {
     const found = all().find(
       (node) =>
-        node.type === "ActionButton" &&
-        (node.props.accessibilityLabel ?? node.props.label) === name,
+        node.type === "Pressable" &&
+        (node.props.accessibilityLabel === name || labelText(node) === name),
     );
     assert.ok(found, `Expected ${name}`);
     return found.props;
@@ -255,12 +275,16 @@ test("Show more reveals real additional work and Show less restores six rows", (
     h
       .all()
       .filter(
-        (node) => node.type === "ActionButton" && node.props.label === "Review",
+        (node) =>
+          node.type === "Pressable" &&
+          String(node.props.accessibilityLabel).startsWith(
+            "Review waiting's request",
+          ),
       );
   assert.equal(reviews().length, 6);
-  h.button("Show more (2)").onPress();
+  h.button("Show More (2)").onPress();
   assert.equal(reviews().length, 8);
-  h.button("Show less").onPress();
+  h.button("Show Less").onPress();
   assert.equal(reviews().length, 6);
   h.harness.unmount();
 });
@@ -277,7 +301,9 @@ test("empty, loading and failed reads remain honest without synthetic rows", () 
     h
       .all()
       .filter(
-        (node) => node.type === "ActionButton" && node.props.label === "Chat",
+        (node) =>
+          node.type === "Pressable" &&
+          String(node.props.accessibilityLabel).startsWith("Chat with"),
       ).length,
     0,
   );
@@ -292,8 +318,8 @@ test("empty, loading and failed reads remain honest without synthetic rows", () 
   h.state.crewsError = true;
   h.harness.render();
   assert.doesNotMatch(h.text(), /All caught up|No agents yet/);
-  h.button("Retry agents").onPress();
-  h.button("Retry crews").onPress();
+  h.button("Couldn’t refresh your agents. Tap to retry.").onPress();
+  h.button("Couldn’t refresh your crews. Tap to retry.").onPress();
   assert.deepEqual(h.calls, [
     ["refetch", "agents"],
     ["refetch", "crews"],

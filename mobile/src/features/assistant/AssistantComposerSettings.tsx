@@ -1,5 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Modal, Pressable, ScrollView, View } from "react-native";
+import {
+  ActivityIndicator,
+  Modal,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, X } from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
@@ -84,7 +91,11 @@ export function AssistantComposerSettings(props: Props) {
     try {
       // The web composer updates directly, including Full access (no confirmation).
       const result = await assistantApi.updateAccessMode(value);
-      if (current()) queryClient.setQueryData(settingsKey, result);
+      if (current()) {
+        queryClient.setQueryData(settingsKey, result);
+        if (latest.current.props.visible)
+          latest.current.props.onOpenChange(false);
+      }
     } catch (cause) {
       if (current())
         setError(
@@ -96,6 +107,10 @@ export function AssistantComposerSettings(props: Props) {
       lock.current = false;
       if (mounted.current) setPending(false);
     }
+  }
+  function close() {
+    // Local dismissal must remain available even if a settings request stalls.
+    props.onOpenChange(false);
   }
   function row(
     value: ComposerAccessMode,
@@ -173,7 +188,7 @@ export function AssistantComposerSettings(props: Props) {
         }
         transparent
         animationType="fade"
-        onRequestClose={() => props.onOpenChange(false)}
+        onRequestClose={close}
       >
         <View
           style={{
@@ -183,7 +198,14 @@ export function AssistantComposerSettings(props: Props) {
             backgroundColor: colors.sheetScrim,
           }}
           accessibilityViewIsModal
+          onAccessibilityEscape={close}
         >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss permissions"
+            onPress={close}
+            style={StyleSheet.absoluteFill}
+          />
           <View
             style={{
               backgroundColor: colors.card,
@@ -217,7 +239,7 @@ export function AssistantComposerSettings(props: Props) {
                 accessibilityRole="button"
                 accessibilityLabel={`Close ${title.toLowerCase()}`}
                 style={workspaceCloseControlStyle(colors.cardSoft)}
-                onPress={() => props.onOpenChange(false)}
+                onPress={close}
               >
                 <X
                   size={WORKSPACE_CLOSE_ICON_SIZE}
@@ -229,6 +251,16 @@ export function AssistantComposerSettings(props: Props) {
               contentContainerStyle={{ padding: 12, gap: 4 }}
               keyboardShouldPersistTaps="handled"
             >
+              {pending ? (
+                <View
+                  style={{ flexDirection: "row", gap: 8, alignItems: "center" }}
+                >
+                  <ActivityIndicator size="small" color={colors.primary} />
+                  <Label muted accessibilityLiveRegion="polite">
+                    Saving permissions…
+                  </Label>
+                </View>
+              ) : null}
               {error ? (
                 <Label
                   accessibilityRole="alert"

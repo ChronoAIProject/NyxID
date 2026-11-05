@@ -64,7 +64,7 @@ export function RemoteMachineUsage({
   return (
     <section
       aria-label="Observed storage usage"
-      className="space-y-3 px-4 py-3 text-12"
+      className="space-y-3 px-4 py-3 text-14"
     >
       {query.isPending ? (
         <p role="status">Loading storage observations…</p>

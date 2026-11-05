@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
-import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 import {
   inviteToken,
   invitationLink,
@@ -82,10 +82,16 @@ function setup(
     buttons: Array<{ text: string; onPress?: () => void }>;
   }> = [];
   const changes: unknown[] = [];
+  const query = {
+    fetching: false,
+    error: false,
+    refetch: async (): Promise<unknown> => undefined,
+  };
   session.clearError = () => {
     session.error = undefined;
   };
-  const harness = hookHarness<Element>({
+  const mocks: Record<string, unknown> = {
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
@@ -108,10 +114,10 @@ function setup(
           : options.queryKey.includes("agents")
             ? { agents: [] }
             : [],
-        isError: false,
-        isFetching: false,
+        isError: options.queryKey.includes("group") && query.error,
+        isFetching: options.queryKey.includes("group") && query.fetching,
         dataUpdatedAt: 100,
-        refetch: async () => {},
+        refetch: () => query.refetch(),
       }),
     },
     "../../components/workspace/WorkspaceUI": {
@@ -156,9 +162,13 @@ function setup(
       },
     },
     "../../lib/api/collaborationTransport": { inviteToken, invitationLink },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.ai" },
+    "../../lib/env": { getFrontendUrl: () => "https://nyxid.ai" },
     "./useCollaborationSession": { useCollaborationSession: () => session },
-  });
+  };
+  const harness = hookHarness<Element>(mocks);
+  mocks["../../hooks/usePullRefresh"] = harness.load(
+    fileURLToPath(new URL("../../hooks/usePullRefresh.ts", import.meta.url)),
+  );
   const module = harness.load(
     fileURLToPath(new URL("./CollaborationGroupControls.tsx", import.meta.url)),
   ) as any;
@@ -184,6 +194,8 @@ function setup(
     find,
     alerts,
     changes,
+    query,
+    all: () => elements(harness.flush()),
     setActive: (active: boolean) => {
       session.active = active;
       session.readable = active;
@@ -333,4 +345,36 @@ test("participants can ask an agent's owner for access and cancel a pending requ
   assert.deepEqual(JSON.parse(JSON.stringify(cancel.changes)), [
     { cancel: "agent-1", request: "req" },
   ]);
+});
+
+test("group settings refresh spins only for a pull and first load shows a skeleton", async () => {
+  const env = setup("CollaborationGroupControls");
+  const page = () => env.all().find((row) => row.type === "WorkspacePage")!;
+  env.query.fetching = true;
+  env.harness.render();
+  assert.equal(page().props.refreshing, false, "the 30s poll stays silent");
+  const pending = deferred<void>();
+  env.query.refetch = () => pending.promise;
+  env.session.identity.refetch = async () => {};
+  page().props.onRefresh();
+  env.harness.flush();
+  assert.equal(page().props.refreshing, true);
+  pending.resolve();
+  await env.harness.settle();
+  assert.equal(page().props.refreshing, false);
+  env.session.readable = false;
+  env.harness.render();
+  const skeleton = env.all().find((row) => row.type === "SkeletonRows");
+  assert.equal(
+    skeleton?.props.accessibilityLabel,
+    "Loading current group rights",
+  );
+  env.query.error = true;
+  env.harness.render();
+  assert.equal(
+    env.all().some((row) => row.type === "SkeletonRows"),
+    false,
+    "a failed load shows its error, not a loader",
+  );
+  env.harness.unmount();
 });

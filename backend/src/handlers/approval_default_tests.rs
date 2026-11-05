@@ -152,6 +152,7 @@ impl Fixture {
             test_auth_user(&self.owner),
             Json(
                 crate::handlers::notifications::UpdateNotificationSettingsRequest {
+                    group_mentions_enabled: None,
                     telegram_enabled: None,
                     push_enabled: None,
                     approval_required: None,

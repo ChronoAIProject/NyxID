@@ -1,4 +1,7 @@
-use super::{arbiter::Arbiter, protocol};
+use super::{
+    arbiter::{Arbiter, Speech},
+    protocol,
+};
 use serde_json::json;
 
 #[test]
@@ -38,7 +41,7 @@ fn grok_delegate_is_closed_and_never_carries_action_authority() {
 fn grok_arbiter_waits_for_all_receipts_and_playback_and_coalesces_responses() {
     let mut arbiter = Arbiter::default();
     arbiter.respond();
-    assert_eq!(arbiter.take_next(), Some(None));
+    assert_eq!(arbiter.take_next(), Some(Speech::Natural));
     assert!(arbiter.take_next().is_none());
     arbiter.created("response".into()).unwrap();
     arbiter.playback_end_ms = 500;
@@ -54,7 +57,7 @@ fn grok_arbiter_waits_for_all_receipts_and_playback_and_coalesces_responses() {
     arbiter.playback_ms = 499;
     assert!(arbiter.take_next().is_none());
     arbiter.playback_ms = 500;
-    assert_eq!(arbiter.take_next(), Some(None));
+    assert_eq!(arbiter.take_next(), Some(Speech::Natural));
     assert!(arbiter.take_next().is_none());
 }
 
@@ -64,7 +67,7 @@ fn grok_force_message_owns_one_response_lifecycle() {
     arbiter.line("Exact server question".into()).unwrap();
     assert_eq!(
         arbiter.take_next(),
-        Some(Some("Exact server question".into()))
+        Some(Speech::Exact("Exact server question".into()))
     );
     arbiter.created("forced".into()).unwrap();
     arbiter.done("forced").unwrap();
@@ -284,4 +287,208 @@ async fn grok_start_rejections_preserve_status_or_safe_frame_identifiers() {
         assert!(!rendered.contains("DO-NOT-EXPOSE") && !rendered.contains("sk-secret"));
         server.abort();
     }
+}
+
+#[test]
+fn grok_context_preserves_pending_user_response_and_waits_for_playback() {
+    let mut arbiter = Arbiter::default();
+    arbiter.respond();
+    arbiter.context("quoted facts".into()).unwrap();
+    arbiter.playback_end_ms = 500;
+    assert!(arbiter.take_next().is_none());
+    arbiter.playback_ms = 500;
+    assert_eq!(
+        arbiter.take_next(),
+        Some(Speech::Context("quoted facts".into()))
+    );
+    assert!(arbiter.presentation());
+    arbiter.created("presentation".into()).unwrap();
+    arbiter.done("presentation").unwrap();
+    assert!(!arbiter.presentation());
+    assert_eq!(
+        arbiter.take_next(),
+        Some(Speech::Natural),
+        "Presentation cannot consume the user's pending response"
+    );
+}
+
+#[tokio::test]
+async fn grok_fixture_context_cannot_delegate_or_retry_and_keeps_exact_readbacks() {
+    Box::pin(async {
+        use super::relay::{ClientInput, Grok, Output};
+        use crate::services::voice::transcript::Segment;
+        use axum::{
+            Router,
+            extract::{WebSocketUpgrade, ws::Message},
+            routing::get,
+        };
+        use base64::Engine;
+        use serde_json::Value;
+        use std::time::Duration;
+
+        async fn next(received: &mut tokio::sync::mpsc::Receiver<Value>) -> Value {
+            tokio::time::timeout(Duration::from_secs(2), received.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        async fn quiet(received: &mut tokio::sync::mpsc::Receiver<Value>) {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), received.recv())
+                    .await
+                    .is_err()
+            );
+        }
+        fn done(id: &str) -> Value {
+            json!({"type":"response.done","response":{"id":id,"status":"completed",
+                "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}})
+        }
+
+        let (sent, mut received) = tokio::sync::mpsc::channel(64);
+        let app = Router::new().route(
+            "/v1/realtime",
+            get(move |ws: WebSocketUpgrade| {
+                let sent = sent.clone();
+                async move {
+                    ws.on_upgrade(move |mut socket| async move {
+                        socket
+                            .send(Message::Text(json!({"type":"session.created"}).to_string().into()))
+                            .await
+                            .unwrap();
+                        let Some(Ok(Message::Text(text))) = socket.recv().await else {
+                            panic!("configuration required")
+                        };
+                        let config: Value = serde_json::from_str(&text).unwrap();
+                        socket
+                            .send(Message::Text(
+                                json!({"type":"session.updated","session":config["session"]})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
+                        while let Some(Ok(Message::Text(text))) = socket.recv().await {
+                            if sent.send(serde_json::from_str(&text).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket = protocol::fixture(listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let socket = socket.await.unwrap();
+        let (state, _, call) = super::super::tests::setup("grok_presentation_authority").await;
+        let db = state.db.clone();
+        let (_input_tx, input) = tokio::sync::mpsc::channel(64);
+        let (output, mut audio) = tokio::sync::mpsc::channel(64);
+        let billing = crate::services::billing::BillingRouteContext::new(
+            crate::services::billing::BillingIngress::LlmProvider,
+            "fixture".into(),
+            call.user_id.clone(),
+            call.user_id.clone(),
+            None, None, None, None,
+            crate::services::billing::NodeIntent::Direct,
+            "bearer".into(),
+            crate::models::usage_meter::CredentialClass::UserOwned,
+            crate::models::service_billing::BillingMetric::Tokens,
+            None,
+            false,
+        );
+        let mut grok = Grok::new(socket, input, output, state, call, billing);
+
+        // Register and accept a genuine server-issued input ID. A presentation
+        // must reject it even though a natural response can use this exact ID.
+        grok.client(ClientInput::Begin).await.unwrap();
+        for _ in 0..10 {
+            grok.client(ClientInput::Pcm([32, 16].repeat(480))).await.unwrap();
+        }
+        grok.client(ClientInput::Commit).await.unwrap();
+        grok.provider(json!({"type":"input_audio_buffer.committed","item_id":"user1"})).await.unwrap();
+        grok.provider(json!({"type":"conversation.item.input_audio_transcription.completed",
+            "item_id":"user1","transcript":"Show my device status"})).await.unwrap();
+        let segment: Segment = serde_json::from_value(grok.events.pop_front().unwrap()["segment"].clone()).unwrap();
+        for _ in 0..11 {
+            let event = next(&mut received).await;
+            assert!(matches!(event["type"].as_str(), Some("input_audio_buffer.append" | "input_audio_buffer.commit")));
+        }
+        grok.send(json!({"type":"nyx.input.accepted","id":segment.id})).await.unwrap();
+        assert_eq!(next(&mut received).await["item"]["role"], "system");
+        assert_eq!(next(&mut received).await, json!({"type":"response.create"}));
+        grok.provider(json!({"type":"response.created","response":{"id":"initial"}})).await.unwrap();
+        grok.provider(done("initial")).await.unwrap();
+        grok.pump().await.unwrap();
+        quiet(&mut received).await;
+
+        let facts = json!({"type":"task_result","state":"failed","presentation":"unavailable","error_code":12501});
+        grok.send(json!({"type":"nyx.presentation_context","facts":facts})).await.unwrap();
+        let context = next(&mut received).await;
+        assert_eq!(context["type"], "response.create");
+        assert_eq!(context["response"].as_object().unwrap().len(), 1);
+        assert!(context["response"]["instructions"].as_str().unwrap().contains(&facts.to_string()));
+        assert!(context.get("item").is_none(), "Context is per response, never a persistent system item or forced JSON readback");
+        grok.provider(json!({"type":"response.created","response":{"id":"presentation"}})).await.unwrap();
+        grok.send(json!({"type":"session.commentary.append","content":"Exact result"})).await.unwrap();
+        grok.send(json!({"type":"nyx.readback","question":"Exact owner question?"})).await.unwrap();
+        quiet(&mut received).await;
+
+        let malicious = json!({"type":"response.function_call_arguments.done","response_id":"presentation",
+            "call_id":"presentation-tool","name":"delegate_to_agent",
+            "arguments":json!({"utterance_id":segment.id,"intent_hint":"Show device status"}).to_string()});
+        grok.provider(malicious.clone()).await.unwrap();
+        grok.provider(malicious.clone()).await.unwrap();
+        let refusal = next(&mut received).await;
+        assert_eq!(refusal["item"]["type"], "function_call_output");
+        assert_eq!(refusal["item"]["call_id"], "presentation-tool");
+        let refusal: Value = serde_json::from_str(refusal["item"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(refusal, json!({"status":"refused","reason":"presentation_only"}));
+        assert!(grok.events.is_empty(), "Presentation cannot emit a delegation");
+        assert!(grok.arbiter.unresolved.is_empty());
+
+        grok.provider(json!({"type":"response.audio.delta","response_id":"presentation","item_id":"presentation-audio",
+            "delta":base64::engine::general_purpose::STANDARD.encode([0;960])})).await.unwrap();
+        assert!(matches!(audio.recv().await, Some(Output::Audio { .. })));
+        grok.arbiter.cancelled.insert("presentation".into());
+        let mut late_function = malicious;
+        late_function["call_id"] = "cancelled-presentation-tool".into();
+        grok.provider(late_function).await.unwrap();
+        let refusal = next(&mut received).await;
+        assert_eq!(refusal["item"]["call_id"], "cancelled-presentation-tool");
+        assert!(grok.events.is_empty(), "Cancellation cannot turn late presentation output into delegation authority");
+        assert!(grok.arbiter.unresolved.is_empty());
+        grok.provider(done("presentation")).await.unwrap();
+        grok.events.clear();
+        grok.pump().await.unwrap();
+        quiet(&mut received).await; // Provider completion does not drain playback.
+        grok.client(ClientInput::Playback { ms: 0, audible: false }).await.unwrap();
+        grok.pump().await.unwrap();
+
+        for (id, expected) in [("exact", "Exact result"), ("readback", "Exact owner question?")] {
+            let forced = next(&mut received).await;
+            assert_eq!(forced["type"], "conversation.item.create");
+            assert_eq!(forced["item"]["type"], "force_message");
+            assert_eq!(forced["item"]["content"][0]["text"], expected);
+            grok.provider(json!({"type":"response.created","response":{"id":id}})).await.unwrap();
+            grok.provider(done(id)).await.unwrap();
+            grok.pump().await.unwrap();
+        }
+        quiet(&mut received).await; // Rejected presentation tools never schedule a retry.
+
+        grok.send(json!({"type":"nyx.input.accepted","id":segment.id})).await.unwrap();
+        assert_eq!(next(&mut received).await["item"]["role"], "system");
+        assert_eq!(next(&mut received).await, json!({"type":"response.create"}));
+        grok.provider(json!({"type":"response.created","response":{"id":"natural"}})).await.unwrap();
+        grok.provider(json!({"type":"response.function_call_arguments.done","response_id":"natural",
+            "call_id":"user-tool","name":"delegate_to_agent",
+            "arguments":json!({"utterance_id":segment.id,"intent_hint":"Show device status"}).to_string()})).await.unwrap();
+        let delegation = grok.events.pop_front().unwrap();
+        assert_eq!(delegation["type"], "session.delegation.created");
+        assert_eq!(delegation["utterance_id"], segment.id);
+        assert!(grok.events.is_empty());
+        grok.close().await.unwrap();
+        db.drop().await.unwrap();
+        server.abort();
+    }).await;
 }

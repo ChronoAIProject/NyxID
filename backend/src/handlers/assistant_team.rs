@@ -48,6 +48,8 @@ pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
     let user_id =
         Uuid::parse_str(owner).map_err(|_| AppError::NotFound("Conversation not found".into()))?;
     Ok(AuthUser {
+        execution_enrolled: false,
+        execution_permission: None,
         mfa_assured: false,
         mfa_enabled: None,
         org_agent_access: None,
@@ -167,6 +169,9 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        execution_enrollment: false,
+        execution_parent: None,
+        channel_context: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -346,7 +351,7 @@ pub(crate) async fn owner_denial_decided(
     {
         return;
     }
-    let event = crate::models::assistant_acknowledgement::bind_continuation(
+    let mut event = crate::models::assistant_acknowledgement::bind_continuation(
         row.routing.as_ref(),
         team::event(
             "action_denied",
@@ -358,6 +363,7 @@ pub(crate) async fn owner_denial_decided(
             None,
         ),
     );
+    event.execution_task = row.execution_task.clone();
     notify(state, owner, &row.conversation_id, vec![event]).await;
 }
 
@@ -501,20 +507,14 @@ pub(crate) async fn after_turn(
             excerpt(text, 1200).replace('"', "'"),
             agent.id
         );
+        let mut completion_event = team::event("subagent_settled", note, Some(&agent.id))
+            .for_invocation(turn.invocation_id.as_deref());
+        completion_event.execution_task = turn.execution_task.clone();
         let queued = if published_assignment {
             // The exact assignment result was queued in the settlement transaction.
             Ok(None)
         } else {
-            engine::push_events(
-                &state.db,
-                owner,
-                &target,
-                vec![
-                    team::event("subagent_settled", note, Some(&agent.id))
-                        .for_invocation(turn.invocation_id.as_deref()),
-                ],
-            )
-            .await
+            engine::push_events(&state.db, owner, &target, vec![completion_event]).await
         };
         if queued.is_err() {
             if turn.delegated_images.assignment.is_some() {
@@ -680,8 +680,13 @@ pub(crate) async fn permission_requested(
         ),
         _ => "read-only account access".into(),
     };
+    let review = crate::services::assistant_links::AssistantPage::ReviewCard {
+        conversation: &request.conversation_id,
+        card: &request.id,
+    }
+    .url(&state.config.frontend_url);
     let note = format!(
-        "Specialist {} requests {target_name} (request_id {}). It was working on: {} \
+        "Specialist {} requested {target_name} (request_id {}). Owner review: {review}. This notice records creation, not current pending status; check pending_requests before describing it as waiting. It was working on: {} \
         Decide with nyxid__decide_permission: allow only what the user's request needs.",
         identifier(&chat.agent_name),
         request.id,
@@ -748,10 +753,11 @@ pub(crate) async fn permission_decided(
     note.push(' ');
     note.push_str(acks::DECISION_NARRATION);
     if request.trigger_run_id.is_none() && request.invocation_id.is_none() {
-        let event = crate::models::assistant_acknowledgement::bind_continuation(
+        let mut event = crate::models::assistant_acknowledgement::bind_continuation(
             request.routing.as_ref(),
             team::event("permission_decided", note, None),
         );
+        event.execution_task = request.execution_task.clone();
         Box::pin(notify(state, owner, &request.conversation_id, vec![event])).await;
     }
     if allowed
@@ -956,6 +962,7 @@ pub(crate) async fn assign(
     text: &str,
     report_to: Option<&str>,
     invocation_id: Option<&str>,
+    execution_parent: Option<&acks::ChatAuthority>,
 ) -> AppResult<Started> {
     if agent.user_id != owner {
         crate::services::org_agent_service::require_creation_enabled(&state.db, owner).await?;
@@ -976,6 +983,10 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: execution_parent
+                .and_then(crate::services::execution_permission_dispatch::tasks::parent),
+            channel_context: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -1023,9 +1034,8 @@ pub(crate) async fn target_agent(
     }
 }
 
-/// Resolve NyxBot or a personal specialist for a channel target. Readable
-/// organization names are refused without ambiguity selection; organization
-/// profiles resolved by ID are still rejected by the caller's ownership check.
+/// Resolve NyxBot or a specialist ID for a channel target. Org profiles require
+/// an explicit ID, the rollout gate and same-org admin checks at connection.
 pub(crate) async fn channel_target_agent(
     state: &AppState,
     owner: &str,
@@ -1083,9 +1093,10 @@ async fn preflight_channel_target(
     if agent.destroyed_at.is_some() {
         return Err(AppError::Conflict("That agent was destroyed".into()));
     }
-    if agent.user_id != owner {
+    if agent.user_id != owner && name == "channel_bot_setup_link" {
         return Err(AppError::organization_agent_channel_unsupported());
     }
+    crate::services::org_channel_service::require_target(&state.db, owner, &agent).await?;
     Ok(())
 }
 
@@ -1125,6 +1136,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "connect_channel_bot" => "Connect a channel bot",
         "link_channel_bot" => "Change which agent a channel bot reaches",
         "disconnect_channel_bot" => "Disconnect a channel bot",
+        "retry_channel_gateway" => "Retry native Discord gateway activation",
         "update_channel_chat" => "Change who may talk in a channel chat",
         "update_channel_access" => "Change private chat access and posting defaults",
         "stop_following_thread" => "Stop following a channel thread",
@@ -1548,6 +1560,7 @@ fn dispatch<'a>(
         "channel_setup_guide"
         | "channel_bot_setup_link"
         | "connect_channel_bot"
+        | "retry_channel_gateway"
         | "link_channel_bot"
         | "list_channel_agents"
         | "list_channel_chats"
@@ -1708,6 +1721,7 @@ async fn dispatch_specialists(
                                 task,
                                 Some(caller),
                                 chat.invocation_id.as_deref(),
+                                Some(chat),
                             ))
                             .await?,
                         ),
@@ -1734,6 +1748,7 @@ async fn dispatch_specialists(
                         text_arg(args, "text"),
                         Some(caller),
                         chat.invocation_id.as_deref(),
+                        Some(chat),
                     ))
                     .await?,
                 ),
@@ -2572,10 +2587,10 @@ async fn dispatch_groups(
                 let id = target_agent(state, owner, Some(&name)).await?.id;
                 ids.retain(|member| member != &id);
             }
-            let group = crate::services::assistant_group_service::update(
+            let group = crate::services::assistant_group_service::update_from_snapshot(
                 db,
                 owner,
-                &group.id,
+                &group,
                 args["name"].as_str(),
                 Some(&ids),
             )
@@ -2795,7 +2810,16 @@ async fn dispatch_settings(
                 .await?;
                 return Ok((
                     json!({"area":area,"action":"connect_service","catalog_service_id":catalog.id,"service_slug":catalog.slug,
-                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug; give the owner its hosted link. Never use /keys for connecting an account."}),
+                    "instructions":"Call nyx__connect_service with this catalog_service_id as service_id or service_slug immediately. Give any returned hosted link immediately and mention existing connections in one short line; honor one-step success or explain an unavailable result. Never ask whether to proceed or suggest reusing an existing connection instead. Never send a page link (/keys or Plugins) for connecting an account."}),
+                    false,
+                ));
+            }
+            if area == "add_service" {
+                // Connecting is never a page link: name the service and use
+                // the hosted connect tool instead.
+                return Ok((
+                    json!({"area":area,"action":"connect_service",
+                    "instructions":"Identify which service to connect (use nyx__discover_services), then call nyx__connect_service immediately. Give any returned hosted link immediately and mention existing connections in one short line; honor one-step success or explain an unavailable result. Never ask whether to proceed or suggest reusing an existing connection instead. Never send a page link (/keys or Plugins) for connecting an account."}),
                     false,
                 ));
             }
@@ -2971,6 +2995,15 @@ async fn dispatch_channels(
         }
         "disconnect_channel_bot" => (
             super::nyxbot::disconnect(state, owner, text_arg(args, "channel_agent_id")).await?,
+            false,
+        ),
+        "retry_channel_gateway" => (
+            Box::pin(super::nyxbot::gateway_retry::retry(
+                state,
+                owner,
+                text_arg(args, "channel_agent_id"),
+            ))
+            .await?,
             false,
         ),
         _ => return Err(AppError::NotFound("NyxBot tool not found".into())),
@@ -3851,6 +3884,12 @@ pub fn spawn_sweeps(state: AppState) {
                     }
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
+            }
+            if crate::services::execution_permission_dispatch::proposals::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Execution permission recovery deferred");
             }
             // Things the owner finished outside the chat queue events first.
             if let Err(error) = super::nyxbot::process_watches(&state).await {

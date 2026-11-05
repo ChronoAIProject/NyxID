@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import type { ReactNode } from "react";
 import { Folder, Search, SlidersHorizontal, Tag } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -47,7 +48,7 @@ export function FlagBrowserControls({
             value={search}
             onChange={(e) => onChange({ search: e.target.value })}
             placeholder="Search flags, groups, tags or owners"
-            className="h-8 pl-9 text-12"
+            className="h-8 pl-9 text-14"
             aria-label="Search feature flags"
           />
         </div>
@@ -94,7 +95,7 @@ export function FlagBrowserControls({
           </FilterSelect>
         </div>
       </div>
-      <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-11 text-text-tertiary">
+      <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-13 text-text-tertiary">
         <span>
           {visibleCount} of {totalCount} flags
           {lifecycle === "active" && sunsetCount > 0
@@ -131,17 +132,17 @@ function FilterSelect({
   children: ReactNode;
 }) {
   return (
-    <label className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-hairline px-2.5 text-text-tertiary transition-colors hover:border-hairline-strong has-[select:focus-visible]:ring-2 has-[select:focus-visible]:ring-ring">
+    <Label className="flex h-8 min-w-0 items-center gap-1.5 rounded-lg border border-hairline px-2.5 text-text-tertiary transition-colors hover:border-hairline-strong has-[select:focus-visible]:ring-2 has-[select:focus-visible]:ring-ring">
       {icon}
       <span className="sr-only">{label}</span>
       <select
         aria-label={label}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="h-full min-w-0 max-w-44 bg-transparent text-12 text-foreground focus-visible:outline-none"
+        className="h-full min-w-0 max-w-44 bg-transparent text-14 text-foreground focus-visible:outline-none"
       >
         {children}
       </select>
-    </label>
+    </Label>
   );
 }

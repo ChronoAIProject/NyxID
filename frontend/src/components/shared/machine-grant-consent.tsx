@@ -32,10 +32,10 @@ export function MachineGrantConsent({ consentRequest, onPrepared, onSelectionReq
     return () => window.clearTimeout(timer);
   }, [approvedExpiry, onPrepared]);
   return <section aria-labelledby="machine-consent-heading" className="space-y-4 border-t border-border py-5">
-    <h2 id="machine-consent-heading" className="text-15 font-semibold">Machine access (optional)</h2>
-    <p className="break-all text-11 text-muted-foreground">Protected OAuth client: {signed?.clientId ?? "Unavailable"}</p>
-    <p className="text-12 text-muted-foreground">Leave all Machines unselected to allow the other permissions without Machine access. To share Machines, save the selection before allowing access; the server binds it to this one-time consent request. Machine access does not allow purchases, top-ups, pause, resume or deletion.</p>
-    {!hasSelection && <p role="status" className="text-12 text-muted-foreground">No Machines will be shared. You can allow access without saving a Machine selection.</p>}
+    <h2 id="machine-consent-heading" className="type-card-title">Machine access (optional)</h2>
+    <p className="break-all text-13 text-muted-foreground">Protected OAuth client: {signed?.clientId ?? "Unavailable"}</p>
+    <p className="text-14 text-muted-foreground">Leave all Machines unselected to allow the other permissions without Machine access. To share Machines, save the selection before allowing access; the server binds it to this one-time consent request. Machine access does not allow purchases, top-ups, pause, resume or deletion.</p>
+    {!hasSelection && <p role="status" className="text-14 text-muted-foreground">No Machines will be shared. You can allow access without saving a Machine selection.</p>}
     {!requestValid ? <ErrorBanner message="The protected Machine consent request is missing or expired. Restart authorization from the application." /> : <MachineGrantEditor optional allowedServiceIds={allowedServiceIds} disabled={disabled} submitting={pending} submitLabel="Save Machine selection" onSelectionChange={(selected) => { selectionRevision.current++; setHasSelection(selected); onSelectionRequired?.(selected); onPrepared(null); setPrepared(false); setApprovedExpiry(undefined); setError(undefined); }} onSubmit={async (selection) => {
       const revision = ++selectionRevision.current;
       setError(undefined); onPrepared(null); setPrepared(false); setPending(true);
@@ -48,7 +48,7 @@ export function MachineGrantConsent({ consentRequest, onPrepared, onSelectionReq
       } catch (err) { if (revision !== selectionRevision.current) return; setError(machineGrantUnavailable(err) ? "Machine consent is not available on this server yet. Clear the Machine selection to allow other permissions, or try saving it again later." : err instanceof Error ? err.message : "Could not save the protected Machine selection."); }
       finally { setPending(false); }
     }} />}
-    {prepared && <p role="status" className="text-12 text-success">Machine selection saved. Review the remaining permissions and allow access below.</p>}
+    {prepared && <p role="status" className="text-14 text-success">Machine selection saved. Review the remaining permissions and allow access below.</p>}
     {error && <ErrorBanner message={error} />}
   </section>;
 }

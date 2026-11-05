@@ -236,7 +236,7 @@ export function CreditGrantsRow({
                     {amount(grantPico(grant, "remaining"))} of{" "}
                     {amount(grantPico(grant, "amount"))}
                     {grantPico(grant, "reserved") > 0n && (
-                      <span className="block text-11 text-muted-foreground">
+                      <span className="block text-13 text-muted-foreground">
                         {amount(grantPico(grant, "reserved"))} reserved
                       </span>
                     )}

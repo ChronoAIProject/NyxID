@@ -149,6 +149,44 @@ pub(crate) async fn fence_shared_group(
     Ok(())
 }
 
+/// Personal crew admission and credential minting serialize with roster edits.
+/// Shared crews already use the stricter fence above; this also covers owned
+/// and org-owned agents participating in a person's legacy crew.
+pub(crate) async fn fence_member_thread(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let Some(id) = row.group_id.as_deref() else {
+        return Ok(());
+    };
+    if row.collaboration.is_some() {
+        return Ok(());
+    }
+    let group = db
+        .collection::<AssistantGroup>(GROUPS)
+        .find_one(doc! {"_id":id})
+        .session(&mut *session)
+        .await?
+        .ok_or_else(not_found)?;
+    if super::org_group_service::is_org(&group) {
+        return Ok(());
+    }
+    let result = db
+        .collection::<AssistantGroup>(GROUPS)
+        .update_one(
+            doc! {"_id":id,"user_id":&row.user_id,"created_by_user_id":null,"collaboration":null,
+            "member_agent_ids":row.agent_id.as_deref().unwrap_or_default()},
+            doc! {"$inc":{"member_thread_fence":1_i64}},
+        )
+        .session(session)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
 fn not_found() -> AppError {
     AppError::NotFound("Group not found".into())
 }
@@ -429,51 +467,179 @@ pub async fn update(
     member_ids: Option<&[String]>,
 ) -> AppResult<AssistantGroup> {
     let group = get(db, owner, id).await?;
-    let mut set = doc! {"updated_at": bson::DateTime::now()};
-    if let Some(name) = name {
-        set.insert("name", valid_name(name)?);
+    update_from_snapshot(db, owner, &group, name, member_ids).await
+}
+
+/// Incremental callers must pass the same snapshot they used to build the
+/// proposed member list, rather than silently rebasing it over a removal.
+pub(crate) async fn update_from_snapshot(
+    db: &Database,
+    owner: &str,
+    group: &AssistantGroup,
+    name: Option<&str>,
+    member_ids: Option<&[String]>,
+) -> AppResult<AssistantGroup> {
+    let name = name.map(valid_name).transpose()?;
+    let members = match member_ids {
+        Some(ids) => Some(resolve_members(db, owner, ids).await?),
+        None => None,
+    };
+    update_prepared(db, owner, group, name, members).await
+}
+
+/// Keep the observed roster fixed across transaction retries: a competing edit
+/// must conflict rather than replay an old member list over a newer removal.
+pub(crate) async fn update_prepared(
+    db: &Database,
+    owner: &str,
+    before: &AssistantGroup,
+    name: Option<String>,
+    members: Option<Vec<AssistantAgent>>,
+) -> AppResult<AssistantGroup> {
+    if super::org_group_service::is_org(before) || before.collaboration.is_some() {
+        return Err(AppError::ValidationError(
+            "Use the group's membership settings".into(),
+        ));
     }
-    let mut notice = None;
-    if let Some(member_ids) = member_ids {
-        let members = resolve_members(db, owner, member_ids).await?;
-        let ids: Vec<String> = members.iter().map(|member| member.id.clone()).collect();
-        let before = self::members(db, owner, &group).await?;
-        let joined: Vec<AssistantAgent> = members
+    let ids: Vec<String> = members.as_ref().map_or_else(
+        || before.member_agent_ids.clone(),
+        |members| members.iter().map(|a| a.id.clone()).collect(),
+    );
+    let removed: Vec<String> = before
+        .member_agent_ids
+        .iter()
+        .filter(|id| !ids.contains(id))
+        .cloned()
+        .collect();
+    let threads = if removed.is_empty() {
+        Vec::new()
+    } else {
+        member_threads(db, owner, &before.id).await?
+    };
+    // Settle through the normal Stop path before deleting any authority. The
+    // transaction below rejects a replacement turn that raced this preparation.
+    for row in threads
+        .iter()
+        .filter(|r| r.agent_id.as_ref().is_some_and(|id| removed.contains(id)))
+    {
+        match engine::request_stop_row(db, row).await {
+            Ok(()) | Err(AppError::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(turn) = &row.active_turn {
+            match engine::force_stop(db, owner, &row.id, &turn.turn_id).await {
+                Ok(_) | Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    let previous_members = if members.is_some() {
+        self::members(db, owner, before).await?
+    } else {
+        Vec::new()
+    };
+    let mut parts = Vec::new();
+    if let Some(members) = &members {
+        let joined: Vec<_> = members
             .iter()
-            .filter(|member| !group.member_agent_ids.contains(&member.id))
+            .filter(|a| !before.member_agent_ids.contains(&a.id))
             .cloned()
             .collect();
-        let left: Vec<AssistantAgent> = before
-            .into_iter()
-            .filter(|member| !ids.contains(&member.id))
-            .map(|member| member.agent)
+        let left: Vec<_> = previous_members
+            .iter()
+            .filter(|a| removed.contains(&a.id))
+            .map(|a| a.agent.clone())
             .collect();
-        let mut parts = Vec::new();
         if !joined.is_empty() {
             parts.push(format!("{} joined.", names(&joined)));
         }
         if !left.is_empty() {
             parts.push(format!("{} left.", names(&left)));
         }
-        if !parts.is_empty() {
-            notice = Some(parts.join(" "));
-        }
-        set.insert("lead_agent_id", lead_of(&members));
-        set.insert("member_agent_ids", ids.clone());
-        db.collection::<AssistantGroup>(GROUPS)
-            .update_one(
-                owner_filter(owner, id)?,
-                doc! {"$pull": {"pending_agent_ids": {"$nin": &ids}, "last_recipient_ids": {"$nin": &ids}}},
-            )
-            .await?;
     }
-    db.collection::<AssistantGroup>(GROUPS)
-        .update_one(owner_filter(owner, id)?, doc! {"$set": set})
+    let mut session = db.client().start_session().await?;
+    let (group, children, retired) = session.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .and_run((db.clone(), owner.to_owned(), before.clone(), name, members, ids, removed), |session, context| {
+            let (db, owner, before, name, members, ids, removed) = &*context;
+            Box::pin(async move {
+                let result: AppResult<_> = async {
+                    let mut filter = owner_filter(owner, &before.id)?;
+                    filter.insert("created_by_user_id", bson::Bson::Null);
+                    filter.insert("member_agent_ids", bson::to_bson(&before.member_agent_ids).map_err(|e| AppError::Internal(e.to_string()))?);
+                    filter.insert("name", &before.name);
+                    let mut set = doc! {"updated_at": bson::DateTime::now()};
+                    if let Some(name) = name { set.insert("name", name); }
+                    if let Some(members) = members {
+                        set.insert("member_agent_ids", ids.clone());
+                        set.insert("lead_agent_id", lead_of(members));
+                    }
+                    let group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(filter,
+                        doc! {"$set":set,"$pull":{"pending_agent_ids":{"$nin":ids},"last_recipient_ids":{"$nin":ids}}})
+                        .return_document(ReturnDocument::After).session(&mut *session).await?
+                        .ok_or_else(|| AppError::Conflict("The crew changed; reload it before saving".into()))?;
+                    let mut cursor = db.collection::<AssistantConversation>(CONVERSATIONS)
+                        .find(doc! {"user_id":owner,"group_id":&before.id,"agent_id":{"$in":removed}})
+                        .session(&mut *session).await?;
+                    let rows: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
+                    // Admission writes the same parent in its transaction. A new
+                    // turn wins before us or is refused after us, never orphaned.
+                    if rows.iter().any(|r| r.active_turn.is_some()) {
+                        return Err(AppError::AssistantTurnActive);
+                    }
+                    let mut children = Vec::new();
+                    let mut retired = Vec::new();
+                    for row in rows {
+                        db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+                            .update_many(doc! {"$or":[{"assistant_group.conversation_id":&row.id},{"requester_type":"api_key","requester_id":&row.credential_api_key_id}],"status":{"$in":["pending","approved"]}},
+                                doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+                        db.collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
+                            .update_many(doc! {"requester_type":"api_key","requester_id":&row.credential_api_key_id,"org_scoped":{"$ne":true}},
+                                super::approval_service::revoke_grant_update(Utc::now())).session(&mut *session).await?;
+                        let (_, revoked) = engine::delete_in_session(db, owner, &row.id, session).await?;
+                        children.extend(revoked);
+                        retired.push((row.id, row.agent_id));
+                    }
+                    Ok((group, children, retired))
+                }.await;
+                transactions::transaction_result(result)
+            })
+        }).await.map_err(transactions::map_transaction_error)?;
+    super::api_key_credential_service::audit_revocations(
+        db,
+        &children,
+        crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
+    );
+    for (conversation_id, agent_id) in retired {
+        let _ = super::audit_service::log_actor_event(
+            db.clone(),
+            &super::audit_service::AuditActor {
+                user_id: owner.into(),
+                ip_address: None,
+                user_agent: None,
+                api_key_id: None,
+                api_key_name: None,
+            },
+            "assistant_crew_member_thread_retired",
+            Some(serde_json::json!({
+                "group_id":group.id,"conversation_id":conversation_id,"agent_id":agent_id
+            })),
+        )
+        .await;
+    }
+    if !parts.is_empty() {
+        append(
+            db,
+            owner,
+            &group.id,
+            "notice",
+            None,
+            &parts.join(" "),
+            Vec::new(),
+        )
         .await?;
-    if let Some(notice) = notice {
-        append(db, owner, id, "notice", None, &notice, Vec::new()).await?;
     }
-    get(db, owner, id).await
+    get(db, owner, &group.id).await
 }
 
 /// Delete a group, its transcript and its members' hidden threads (and their
@@ -603,6 +769,58 @@ pub async fn append_following(
     extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
     follower: Option<&str>,
 ) -> AppResult<GroupMessage> {
+    append_following_bound(
+        db,
+        owner,
+        group_id,
+        role,
+        agent,
+        text,
+        recipients,
+        extra_attachments,
+        follower,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn append_member_reply(
+    db: &Database,
+    row: &AssistantConversation,
+    role: &str,
+    agent: &AssistantAgent,
+    text: &str,
+    attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+) -> AppResult<GroupMessage> {
+    append_following_bound(
+        db,
+        &row.user_id,
+        row.group_id.as_deref().ok_or_else(not_found)?,
+        role,
+        Some(agent),
+        text,
+        &[],
+        attachments,
+        None,
+        Some(&row.id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn append_following_bound(
+    db: &Database,
+    owner: &str,
+    group_id: &str,
+    role: &str,
+    agent: Option<&AssistantAgent>,
+    text: &str,
+    recipients: &[String],
+    extra_attachments: Vec<crate::models::assistant_conversation::TurnAttachment>,
+    follower: Option<&str>,
+    source_thread: Option<&str>,
+) -> AppResult<GroupMessage> {
+    let source_thread = source_thread.map(str::to_owned);
     let filter = owner_filter(owner, group_id)?;
     let db = db.clone();
     let owner = owner.to_owned();
@@ -632,6 +850,16 @@ pub async fn append_following(
                     .session(&mut *session)
                     .await?
                     .ok_or_else(not_found)?;
+                if let Some(thread_id) = &source_thread {
+                    if agent_id.as_ref().is_none_or(|id| !group.member_agent_ids.contains(id)) {
+                        return Err(not_found());
+                    }
+                    let thread = db.collection::<AssistantConversation>(CONVERSATIONS).update_one(
+                        doc! {"_id":thread_id,"user_id":&owner,"group_id":&group_id,"agent_id":&agent_id},
+                        doc! {"$inc":{"group_reply_fence":1_i64}},
+                    ).session(&mut *session).await?;
+                    if thread.matched_count != 1 { return Err(not_found()); }
+                }
                 let message = GroupMessage {
                     crm_artifacts: Vec::new(),
                     collaboration: None,

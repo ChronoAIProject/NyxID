@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
-import { nyxBotQueryKeys, useConnectNyxBotChannel, useCreateNyxBotAgent } from "./use-nyxbot-agents";
+import { nyxBotQueryKeys, useConnectNyxBotChannel, useCreateNyxBotAgent, useRetryNyxBotChannelGateway } from "./use-nyxbot-agents";
 
 const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
 function wrapper({ children }: { children: ReactNode }) {
@@ -50,4 +50,14 @@ it("omits CRM grants from agent creation when the CMS flag is off", async () => 
     services: [],
     account_read: false,
   });
+});
+
+it("2183 refreshes actual transport and activation after a retry", async () => {
+  vi.spyOn(nyxBotApi, "retryChannelGateway").mockResolvedValue({ code: "gateway_rejected_request" });
+  const invalidate = vi.spyOn(client, "invalidateQueries");
+  const { result, unmount } = renderHook(useRetryNyxBotChannelGateway, { wrapper });
+  await act(async () => { await result.current.mutateAsync({ channelAgentId: "channel" }); });
+  expect(nyxBotApi.retryChannelGateway).toHaveBeenCalledWith("channel");
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: nyxBotQueryKeys.channels(undefined) });
+  unmount();
 });

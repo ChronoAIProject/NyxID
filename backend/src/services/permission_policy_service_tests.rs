@@ -808,3 +808,286 @@ async fn permission_keys_google_native_engine_retains_live_pause_hooks() {
     ));
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn execution_permission_native_verified_plan_separates_primary_claim_from_verification() {
+    for global in [false, true] {
+        use crate::services::execution_permission_dispatch::{self as dispatch, phase_b_tests};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Native {
+            state: crate::AppState,
+            auth: crate::mw::auth::AuthUser,
+            binding: PermissionPolicy,
+            drive: MockDrive,
+            primary: AtomicUsize,
+            verification: AtomicUsize,
+        }
+        #[async_trait]
+        impl Transport for Native {
+            async fn send(
+                &self,
+                request: &nyxid_permissions::Request,
+            ) -> Result<nyxid_permissions::Response, Error> {
+                self.verification.fetch_add(1, Ordering::SeqCst);
+                assert_ne!(request.method, axum::http::Method::PATCH);
+                self.drive.send(request).await
+            }
+            async fn send_verified(
+                &self,
+                verified: nyxid_permissions::VerifiedPlan<'_>,
+                mark: nyxid_permissions::DispatchMark,
+            ) -> Result<nyxid_permissions::Response, Error> {
+                let mut auth = self.auth.clone();
+                auth.execution_permission = Some(
+                    auth.execution_permission
+                        .as_ref()
+                        .unwrap()
+                        .for_native(&self.binding, &verified, mark.clone())
+                        .unwrap(),
+                );
+                let request = &verified.plan().request;
+                // Drive adds its response-fields restriction to the verified plan.
+                // Pass those exact query bytes just as BackendTransport does.
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(&request.query)
+                    .finish();
+                let query = (!query.is_empty()).then_some(query.as_str());
+                let mut target = proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+                    &self.state.db,
+                    &self.state.encryption_keys,
+                    &self.binding.user_id,
+                    &self.binding.user_service_id,
+                    None,
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .target;
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(
+                    "content-type",
+                    request.content_type.as_ref().unwrap().parse().unwrap(),
+                );
+                let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+                    request.method.as_str(),
+                    request.path.trim_start_matches('/'),
+                    Some(request.body.as_ref()),
+                );
+                dispatch::admit_http(
+                    &self.state,
+                    &auth,
+                    Some(&self.binding.user_service_id),
+                    Some(&self.binding.user_id),
+                    &mut target,
+                    request.method.as_str(),
+                    request.path.trim_start_matches('/'),
+                    query,
+                    &request.body,
+                    &headers,
+                    None,
+                    &descriptor,
+                    false,
+                    None,
+                )
+                .await
+                .map_err(|_| Error::Denied("execution refused"))?;
+                // A gap uses the legacy personal review, not a new proposal or send.
+                let Some(permit) = &target.execution_permission else {
+                    return Err(Error::Denied("legacy review required"));
+                };
+                permit
+                    .before_send(&target)
+                    .await
+                    .map_err(|_| Error::Denied("live admission refused"))?;
+                auth.execution_permission
+                    .as_ref()
+                    .unwrap()
+                    .native_dispatched();
+                self.primary.fetch_add(1, Ordering::SeqCst);
+                let response = self.drive.send(request).await;
+                permit.complete(response.is_ok()).await.unwrap();
+                response
+            }
+        }
+        for outcome in ["covered", "gap", "prohibited"] {
+            let (state, owner, connection) = fixture().await;
+            let (key, binding) = issue(&state, &owner, &connection).await;
+            phase_b_tests::enroll_cohort(&state.db, &owner, global).await;
+            let (_, key, _) = key_service::validate_api_key(&state.db, &key.full_key)
+                .await
+                .unwrap();
+            let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None)
+                .await
+                .unwrap();
+            state.db.collection::<Document>("service_approval_configs").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"service_id":&binding.catalog_service_id,"service_name":"Drive","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+            if outcome != "gap" {
+                let mut grant = phase_b_tests::grant(
+                    &state,
+                    &auth,
+                    &connection,
+                    "PATCH",
+                    "/drive/v3/files/report",
+                )
+                .await;
+                let execution = grant.execution.as_mut().unwrap();
+                execution.v1.as_mut().unwrap().resource_policy = Some(binding.policy.clone());
+                if outcome == "prohibited" {
+                    execution.version = 99;
+                }
+                state
+                    .db
+                    .collection("approval_grants")
+                    .insert_one(grant)
+                    .await
+                    .unwrap();
+            }
+            let native = Arc::new(Native {
+                state: state.clone(),
+                auth,
+                binding: binding.clone(),
+                drive: MockDrive::default(),
+                primary: AtomicUsize::new(0),
+                verification: AtomicUsize::new(0),
+            });
+            let engine = engine(state.db.clone(), binding, native.clone()).unwrap();
+            let result = engine
+                .execute(nyxid_permissions::Request {
+                    method: axum::http::Method::PATCH,
+                    path: "/drive/v3/files/report".into(),
+                    query: Default::default(),
+                    body: serde_json::to_vec(&serde_json::json!({"name":"Reviewed"}))
+                        .unwrap()
+                        .into(),
+                    content_type: Some("application/json".into()),
+                })
+                .await;
+            if outcome == "covered" {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                assert!(matches!(result, Err(Error::Denied(_))), "{result:?}");
+            }
+            assert_eq!(
+                native.primary.load(Ordering::SeqCst),
+                usize::from(outcome == "covered")
+            );
+            assert!(native.verification.load(Ordering::SeqCst) > 0);
+            assert_eq!(
+                state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            state.db.drop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn execution_permission_native_rest_and_mcp_gaps_and_denials_exit_before_primary_send() {
+    for global in [false, true] {
+        use crate::services::execution_permission_dispatch::phase_b_tests;
+        for denied in [false, true] {
+            let (mut state, owner, connection) = fixture().await;
+            let upstream = wiremock::MockServer::start().await;
+            // All attempted network traffic is observable; no real Google traffic.
+            state.http_client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(upstream.uri()).unwrap())
+                .build()
+                .unwrap();
+            let (key, binding) = create(
+                &state.db,
+                &state.encryption_keys,
+                &owner,
+                "One video",
+                &connection,
+                Utc::now() + chrono::Duration::days(1),
+                serde_json::from_str(include_str!(
+                    "../../../permissions/examples/google-youtube-policy.json"
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            phase_b_tests::enroll_cohort(&state.db, &owner, global).await;
+            state.db.collection::<Document>("service_approval_configs").insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"service_id":&binding.catalog_service_id,
+            "service_name":"Google","approval_required":true,"approval_mode":"per_request","rules":[],
+            "default_effect":if denied {"deny"} else {"require_approval"},
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        }).await.unwrap();
+            let channel =
+                crate::services::notification_service::get_or_create_channel(&state.db, &owner)
+                    .await
+                    .unwrap();
+            state
+                .db
+                .collection::<Document>("notification_channels")
+                .update_one(
+                    doc! {"_id":channel.id},
+                    doc! {"$set":{"approval_timeout_secs":1}},
+                )
+                .await
+                .unwrap();
+            let billing = axum::Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            );
+            let router = Router::new()
+                .route(
+                    "/api/v1/permission-execution/rest/{*path}",
+                    any(crate::handlers::permission_keys::rest).layer(billing),
+                )
+                .route(
+                    "/api/v1/permission-execution/mcp",
+                    post(crate::handlers::permission_keys::mcp).layer(billing),
+                )
+                .with_state(state.clone());
+            let rest = router.clone().oneshot(Request::builder().uri("/api/v1/permission-execution/rest/youtube/v3/videos?id=VIDEO_ID&part=snippet%2Cstatistics")
+            .header("authorization",format!("Bearer {}",key.full_key)).body(Body::empty()).unwrap()).await.unwrap();
+            let status = rest.status();
+            let text = String::from_utf8(
+                to_bytes(rest.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+            assert!(!text.contains("uncertain"), "{text}");
+            let response = router.oneshot(Request::builder().method("POST").uri("/api/v1/permission-execution/mcp")
+            .header("authorization",format!("Bearer {}",key.full_key)).header("content-type","application/json")
+            .body(Body::from(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"google_request","arguments":{"method":"GET","path":"/youtube/v3/videos","query":{"id":"VIDEO_ID","part":"snippet,statistics"}}}}).to_string())).unwrap()).await.unwrap();
+            let value: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(value["result"]["isError"], true, "{value}");
+            assert!(!value.to_string().contains("uncertain"));
+            assert!(upstream.received_requests().await.unwrap().is_empty());
+            assert_eq!(
+                state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                    .await
+                    .unwrap(),
+                0
+            );
+            if denied {
+                assert_eq!(
+                    state
+                        .db
+                        .collection::<Document>("approval_requests")
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+            state.db.drop().await.unwrap();
+        }
+    }
+}

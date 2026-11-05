@@ -679,6 +679,8 @@ async fn channel_model_turns_for(
         ))
         .with_state(state.clone());
     let seen: Calls = Default::default();
+    let callback_tasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let retained_callbacks = callback_tasks.clone();
     let mapping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let source_mapping = mapping.clone();
     let sink = seen.clone();
@@ -686,9 +688,13 @@ async fn channel_model_turns_for(
     // finish from model acceptance even when NyxAgent never completes its reply.
     let (release_setup_responses, setup_responses_released) = tokio::sync::watch::channel(false);
     let db = state.db.clone();
+    let expected_bot_id = channel.channel_bot_id.clone();
+    let expected_platform = canonical_platform(platform).to_owned();
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
         let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let mapping=source_mapping.clone();
+        let expected_bot_id=expected_bot_id.clone();let expected_platform=expected_platform.clone();
         let mut setup_responses_released=setup_responses_released.clone();
+        let callback_tasks=retained_callbacks.clone();
         async move {
             if matches!(scenario,Scenario::FailedSetup) {
                 return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":{"code":"model_unavailable","message":"private provider detail"}}))).into_response();
@@ -708,6 +714,17 @@ async fn channel_model_turns_for(
                 assert!(db.collection::<AssistantConversation>(CONVERSATIONS).count_documents(doc!{"guest_model_setup":true}).await.unwrap()<=1);
             }
             let turn=row.active_turn.as_ref().unwrap();
+            if !row.guest_model_setup {
+                let persisted = turn.channel_context.as_ref().expect("persisted authenticated context, including setup resumption");
+                assert_eq!(persisted.channel_bot_id, expected_bot_id);
+                assert_eq!(persisted.guest, row.guest_turn);
+                let contexts = turn_context_tests::contexts(&body);
+                assert_eq!(contexts.len(), 1);
+                assert_eq!(contexts[0]["identity"]["channel_bot_id"], expected_bot_id);
+                assert_eq!(contexts[0]["identity"]["platform"], expected_platform);
+                assert_eq!(contexts[0]["sender"]["classification"], if row.guest_turn {"guest"} else {"owner"});
+                assert_eq!(contexts[0]["conversation"]["kind"], if group {"group"} else {"private"});
+            }
             for kind in ["input_admission","model_attempt"] {
                 let mut filter=doc!{"conversation_id":&row.id,"turn_id":&turn.turn_id,"api_key_id":&key.id,"kind":kind};
                 if kind=="model_attempt" {filter.insert("active",true);}
@@ -731,10 +748,23 @@ async fn channel_model_turns_for(
                 calls.push(json!({"status":null,"body":null,"guest":row.guest_turn,"setup":row.guest_model_setup,"conversation":row.id,"key":key.id,"model":selected_model}));
                 index
             };
-            let response=callbacks.clone().oneshot(Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{slug}/responses"))
+            // A model callback is an independently owned request. Stopping
+            // the fake engine response must not drop its in-process proxy work.
+            let request=Request::builder().method("POST").uri(format!("/api/v1/proxy/s/{slug}/responses"))
                 .header("authorization",headers["authorization"].clone()).header("content-type","application/json").header("accept","*/*")
-                .body(Body::from(generation.to_string())).unwrap()).await.unwrap();
-            let status=response.status().as_u16();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+                .body(Body::from(generation.to_string())).unwrap();
+            let (finished, response)=tokio::sync::oneshot::channel();
+            {
+                let mut tasks=callback_tasks.lock().await;
+                let callbacks=callbacks.clone();
+                tasks.push(tokio::spawn(async move {
+                    let response=callbacks.oneshot(request).await.unwrap();
+                    let status=response.status().as_u16();
+                    let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+                    let _=finished.send((status,bytes));
+                }));
+            }
+            let (status,bytes)=response.await.unwrap();
             if row.guest_model_setup && matches!(scenario,Scenario::MappingChange) {
                 drop(setup_responses_released.wait_for(|released| *released).await.unwrap());
             }
@@ -1453,6 +1483,12 @@ async fn channel_model_turns_for(
                 .unwrap(),
             0
         );
+    }
+    for task in std::mem::take(&mut *callback_tasks.lock().await) {
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("authenticated model callback must finish")
+            .expect("authenticated model callback panicked");
     }
     let requests = provider.received_requests().await.unwrap();
     let restricted: Vec<Value> = requests

@@ -76,6 +76,18 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
     let mut removed = Vec::<(&str, bson::Bson)>::new();
     for (collection, mut row) in [
         (
+            "async_service_operation_artifacts",
+            doc! {"_id":"pending-file","user_id":&owner,"conversation_id":"deleted-thread","data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}},
+        ),
+        (
+            "assistant_artifact_deliveries",
+            doc! {"_id":"delivery","user_id":&owner,"conversation_id":"deleted-thread"},
+        ),
+        (
+            "generated_artifact_content_series",
+            doc! {"_id":"series","user_id":&owner,"conversation_id":"deleted-thread"},
+        ),
+        (
             "service_preferences",
             doc! {"_id":&owner,"ordered":["catalog-a"]},
         ),
@@ -122,6 +134,20 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_resources",
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
+        ),
+        // An older replica may have deleted the group before it knew these
+        // additive collections. Erasure must not depend on a surviving parent.
+        (
+            "assistant_group_read_states",
+            doc! {"_id":"read-state","user_id":&owner,"group_id":"deleted-group","last_seen_seq":42_i64},
+        ),
+        (
+            "assistant_group_mention_notifications",
+            doc! {"_id":"pending-mention","user_id":&owner,"group_id":"deleted-group"},
+        ),
+        (
+            "assistant_voice_announcements",
+            doc! {"_id":"private-notice","user_id":&owner,"conversation_id":"private-chat","text":"Private notification"},
         ),
         (
             "assistant_agent_learning_members",
@@ -213,6 +239,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_resources",
             doc! {"_id":"org-resource","user_id":&other,"created_by":&owner},
+        ),
+        (
+            "assistant_voice_announcements",
+            doc! {"_id":"other-notice","user_id":&other,"conversation_id":"other-chat","text":"Other notification"},
         ),
         (
             "channel_conversations",

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -272,7 +273,7 @@ export function ManagedWhatsApp({
         </Button>
       )}
       <fieldset className="space-y-3" disabled={stage !== null}>
-        <legend className="mb-3 text-xs font-medium">WhatsApp number</legend>
+        <Label asChild><legend className="mb-3">WhatsApp number</legend></Label>
         {[
           { value: "", label: "New or existing Cloud API number" },
           {
@@ -282,9 +283,9 @@ export function ManagedWhatsApp({
         ]
           .filter((choice) => bootstrap.feature_types.includes(choice.value))
           .map((choice) => (
-            <label
+            <Label
               key={choice.value}
-              className="flex items-start gap-2 text-xs"
+              className="flex items-start gap-2"
             >
               <input
                 type="radio"
@@ -295,20 +296,20 @@ export function ManagedWhatsApp({
                 className="mt-0.5 accent-primary"
               />
               <span>{choice.label}</span>
-            </label>
+            </Label>
           ))}
       </fieldset>
       {stage && (
         <div
           role="status"
-          className="flex items-center gap-2 text-xs text-muted-foreground"
+          className="flex items-center gap-2 text-13 text-muted-foreground"
         >
           <Loader2 className="size-3 animate-spin" />
           {stageLabels[stage] ?? "Waiting for Meta..."}
         </div>
       )}
       {popupHint && stage === "popup" && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Complete signup in the Meta window. If no window opened, allow popups
           for this site.
         </p>

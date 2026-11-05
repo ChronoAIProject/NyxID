@@ -103,6 +103,14 @@ function images(
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
       label: attachment.label,
+      ...(attachment.origin === "generated_artifact" ? {
+        filename: attachment.filename ?? undefined,
+        source: attachment.source ?? undefined,
+        resultVersion: attachment.result_version ?? undefined,
+        previewKind: attachment.preview_kind ?? undefined,
+        size: attachment.size,
+        expiresAt: attachment.expires_at ?? undefined,
+      } : {}),
       origin: attachment.origin || undefined,
       ...(attachment.image_input ? { imageInput: attachment.image_input } : {}),
       ...(attachment.image_input_reason ? { imageInputReason: attachment.image_input_reason } : {}),
@@ -404,6 +412,8 @@ export class NyxAgentTransport {
       this.requests.delete(controller);
     }
     const page = nyxAgentHistorySchema.parse(response);
+    // New servers keep `approvals` pending-only for older clients.
+    page.approvals = page.approval_history ?? page.approvals;
     this.current(generation);
     if (rowRevision !== this.rowRevisions.get(id) || card !== this.reviewCards.get(id)) {
       throw new DOMException("Conversation changed", "AbortError");
@@ -613,7 +623,9 @@ export class NyxAgentTransport {
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
         crmArtifacts: message.crm_artifacts,
+        actionOutcome: message.action_outcome,
         recovery: message.recovery,
+        artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,rejected: message.artifact_delivery.rejected,recoveryAvailable: message.artifact_delivery.recovery_available,messageSeq: message.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
         id: message.id,
         feedback: message.feedback ?? undefined,
         role: message.role,
@@ -657,7 +669,7 @@ export class NyxAgentTransport {
           live: Boolean(live),
           pendingApproval: Boolean(
             (history?.acknowledgements ?? []).some((row) => row.status === "pending")
-            || (history?.approvals ?? []).length,
+            || (history?.approvals ?? []).some((row) => !row.status || row.status === "pending"),
           ),
           retrying: Boolean(live?.retrying),
           interrupted: this.interrupted.has(id ?? "draft"),
@@ -677,7 +689,9 @@ export class NyxAgentTransport {
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
           crmArtifacts: settled?.crm_artifacts ?? (streaming ? live.state.activeTurn?.crmArtifacts : undefined),
+          actionOutcome: settled?.action_outcome,
           recovery: settled?.recovery,
+          artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,rejected: settled.artifact_delivery.rejected,recoveryAvailable: settled.artifact_delivery.recovery_available,messageSeq: settled.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,
           id: message.id,
           role: settled?.role ?? message.role,
           feedback: settled?.feedback ?? undefined,
@@ -758,7 +772,7 @@ export class NyxAgentTransport {
     }
     // Build a linear, exact-turn join. A settled decision folds into its
     // reply's turn summary (beside the tool call that raised it); pending
-    // cards and authored-skill reviews keep their own virtual row and stable
+    // cards, expired requests and authored-skill reviews keep their own virtual row and stable
     // card ID, so deep links and offscreen focusing keep working.
     const replies = new Map(messages.filter((m) => m.role === "assistant" && m.turnId)
       .map((m) => [m.turnId!, m.id]));
@@ -771,7 +785,7 @@ export class NyxAgentTransport {
         role: "system", content: acknowledgement.summary, timestamp, status: "complete",
       };
       const reply = acknowledgement.creation_turn_id && replies.get(acknowledgement.creation_turn_id);
-      if (acknowledgement.status !== "pending" && reply && !acknowledgement.authored_skill) {
+      if (acknowledgement.status !== "pending" && acknowledgement.status !== "expired" && reply && !acknowledgement.authored_skill) {
         folded.set(reply, [...(folded.get(reply) ?? []), acknowledgement]);
       } else if (acknowledgement.status !== "pending" && reply) {
         const rows = footers.get(reply) ?? [];

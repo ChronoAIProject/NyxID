@@ -28,6 +28,10 @@ export function useHostedConnect(
   const [preview, setPreview] = useState<ConnectLinkPreview>();
   const [platformAvailable, setPlatformAvailable] = useState(false);
   const [iconUrl, setIconUrl] = useState<string | null>();
+  /** Declared token-exchange fields (e.g. App ID + App Secret). */
+  const [credentialFields, setCredentialFields] = useState<
+    readonly { name: string; label: string; secret: boolean }[]
+  >([]);
   const [platformChoice, setPlatformChoice] = useState<boolean | null>(null);
   const [device, setDevice] = useState<ConnectDeviceChallenge>();
   const [oauth, setOAuth] = useState<{
@@ -110,6 +114,7 @@ export function useHostedConnect(
         previous && previous.status !== "pending" ? previous : value,
       );
       setError(undefined);
+      setCredentialFields(value.token_exchange_credential_fields ?? []);
       if (value.status !== "pending") {
         terminal(value.status);
         return;
@@ -120,6 +125,11 @@ export function useHostedConnect(
         );
         if (current()) {
           setIconUrl(entry.icon_url);
+          setCredentialFields(
+            value.token_exchange_credential_fields ??
+              entry.token_exchange_credential_fields ??
+              [],
+          );
           setPlatformAvailable(
             !!entry.platform_key?.available && value.scopes.length === 0,
           );
@@ -365,6 +375,7 @@ export function useHostedConnect(
     setError,
     platformAvailable,
     iconUrl,
+    credentialFields,
     usePlatformKey,
     setPlatformChoice,
     device,

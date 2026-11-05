@@ -156,12 +156,23 @@ pub async fn reserve(
     reserve_with_arguments(db, chat, service, endpoint, &Value::Null).await
 }
 
+#[cfg(test)]
 pub async fn reserve_with_arguments(
     db: &Database,
     chat: &super::assistant_acknowledgement_service::ChatAuthority,
     service: &super::mcp_service::McpToolService,
     endpoint: &super::mcp_service::McpToolEndpoint,
     args: &Value,
+) -> AppResult<AsyncServiceOperation> {
+    reserve_with_artifacts(db, chat, service, endpoint, args, false).await
+}
+pub async fn reserve_with_artifacts(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    service: &super::mcp_service::McpToolService,
+    endpoint: &super::mcp_service::McpToolEndpoint,
+    args: &Value,
+    artifacts_enabled: bool,
 ) -> AppResult<AsyncServiceOperation> {
     if chat.guest {
         return Err(AppError::Forbidden(
@@ -177,6 +188,15 @@ pub async fn reserve_with_arguments(
     }
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
+    let artifact_catalog = if artifacts_enabled
+        && super::generated_artifacts::eligible(chat)
+        && super::generated_artifacts::sandbox_contract(service, endpoint)
+    {
+        super::security_readiness_service::require(db, "assistant:generated-artifacts").await?;
+        super::generated_artifacts::trusted_sandbox_catalog(db, service, endpoint).await?
+    } else {
+        None
+    };
     let cma = super::cma_operation::metadata(&contract, args);
     let db_ref_for_audit = db;
     let db = db.clone();
@@ -204,6 +224,7 @@ pub async fn reserve_with_arguments(
                 return Err(AppError::Conflict("Async operation watch limit reached".into()));
             }
             let turn=row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?;
+            if let Some(task)=&chat.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
@@ -225,7 +246,12 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation { instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let watch=AsyncServiceOperation {
+            execution_task: super::execution_permission_dispatch::tasks::child(&chat),
+            artifact_catalog_service_id: artifact_catalog.clone().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()),
+            artifact_mode: artifact_catalog.as_ref().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()).map(|_|super::generated_artifacts::sandbox::MODE.to_owned()),
+            artifact_result: None,
+            artifact_event_turn_id: None, instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
@@ -309,10 +335,48 @@ pub async fn submitted(
     let operation_id = (!agent_input).then_some(&id);
     // Replayed idempotent submissions reuse the existing watch, never queue a
     // second completion. Do not change another thread's existing destination.
-    let result=db.collection::<bson::Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},vec![doc!{"$set":{
-        "operation_id":{"$literal":operation_id},"cma":{"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},"state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},"poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5))}}]).await;
+    let cma_value = if cma.is_some() {
+        bson::Bson::Document(doc! {"$mergeObjects":[
+            {"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},
+            {"observer_binding":"$cma.observer_binding"},
+        ]})
+    } else {
+        bson::Bson::Null
+    };
+    let result = db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},
+            vec![doc! {"$set":{
+                "operation_id":{"$literal":operation_id},"cma":cma_value,
+                "state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},
+                "poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5)),
+            }}],
+        )
+        .await;
     match result {
-        Ok(_) => Ok(()),
+        Ok(updated) => {
+            if updated.matched_count == 1 && cma.is_some() {
+                // This read is optional and happens after provider success. Missing
+                // watches (deletion) and projection failures cannot trigger retry.
+                let observation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    db.collection::<AsyncServiceOperation>(WATCHES)
+                        .find_one(doc! {"_id":&watch.id,"user_id":&watch.user_id})
+                        .await
+                })
+                .await;
+                match observation {
+                    Ok(Ok(Some(admitted))) => {
+                        if let Some(cma) = &admitted.cma {
+                            super::cma_session_origin::record_best_effort(db, &admitted, cma).await;
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    _ => super::cma_session_origin::metadata_unavailable(),
+                }
+            }
+            Ok(())
+        }
         Err(e) if matches!(e.kind.as_ref(),mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) if w.code==11000) =>
         {
             db.collection::<bson::Document>(WATCHES)
@@ -536,7 +600,10 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
+            if let Some(task) = &w.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let event = AgentEvent {
+                execution_task: w.execution_task.clone(),
+                channel_contexts: Vec::new(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,
@@ -571,6 +638,7 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
         // scheduler -> assistant tool -> Stop path.
         let result:AppResult<()>=Box::pin(async {
             db.collection::<bson::Document>(WATCHES).update_many(doc!{"user_id":&user,"conversation_id":&id,"state":{"$in":["submitting","waiting","ready","queued"]}},doc!{"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling","result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
+            super::generated_artifacts::discard_in_session(&db,doc!{"user_id":&user,"conversation_id":&id,"state":"pending"},session).await?;
             db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&id,"user_id":&user},doc!{"$pull":{"pending_events":{"kind":EVENT_KIND}}}).session(&mut *session).await?;
             Ok(())
         }).await;transactions::transaction_result(result)
@@ -788,6 +856,10 @@ pub async fn input_context(
         operation_id: Option<&'a str>,
         originating_turn_id: &'a str,
         reason: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_delivery: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verified_file_count: Option<usize>,
         data: &'a str,
     }
     let quoted = crate::crypto::secret_json::to_secret_string(&QuotedResult {
@@ -800,6 +872,11 @@ pub async fn input_context(
         } else {
             w.reason.as_deref()
         },
+        artifact_delivery: w
+            .artifact_result
+            .as_ref()
+            .map(|m| m.delivery_reason.as_str()),
+        verified_file_count: w.artifact_result.as_ref().map(|m| m.count),
         data: &data,
     })
     .map_err(|_| invalid())?;
@@ -845,8 +922,10 @@ pub async fn claim_cancel(
 /// Attach the saved task identity to its event turn inside admission's transaction.
 pub async fn bind_in_session(
     db: &Database,
+    keys: &EncryptionKeys,
     row: &mut AssistantConversation,
     session: &mut ClientSession,
+    reservation: Option<&super::assistant_upload_service::byte_budget::ByteReservation>,
 ) -> AppResult<()> {
     let Some(id) = event_id(row).map(str::to_owned) else {
         return Ok(());
@@ -912,6 +991,7 @@ pub async fn bind_in_session(
             .session(&mut *session)
             .await?;
     }
+    super::generated_artifacts::bind_in_session(db, keys, row, &w, session, reservation).await?;
     Ok(())
 }
 

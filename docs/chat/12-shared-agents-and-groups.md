@@ -1045,10 +1045,54 @@ or participant private notes are added. Legacy crews and private prompts are
 unchanged. The collaboration-only note bound accommodates all 16 participants
 and eight agents; private-thread note limits stay unchanged.
 
-Notifications reuse the existing group change stream: only group IDs fan out to
-live participants, driving transcript/list refresh. There is currently no
-per-person mention badge, group unread counter, or group-activity web/mobile
-push delivery to extend. No external channel, bot post or email is introduced.
+Mentions render once, inline in the message text; the resolved participant IDs
+are an index for counts and delivery, not a second chip row. All supported
+mention producers resolve the message text, so there is no separate-row fallback.
+Metadata left behind by hidden tool-call markup does not create a visible chip.
+Copy continues to use the clean, name-based text projection.
+
+Each current participant has an additive `assistant_group_read_states` row
+(unique group/person) with `last_seen_seq` and optional `last_push_at`. Group
+responses add `collaboration.last_seen_seq`, `unread_count`, and `mention_count`.
+Counts include retained human and agent posts after the marker, exclude the
+person's own human posts and system notices, and require live participation.
+The sidebar shows an unread dot and an @ count. Opening a visible transcript
+posts its last received sequence to the first-party-human-only
+`POST /assistant/nyxagent/groups/{id}/read`; `$max` prevents older tabs moving
+backwards, and the server clamps to the current public sequence. Background
+polling and older-page loading do not clear unseen messages. The existing live
+stream still carries group IDs only and refreshes the transcript/list.
+
+Public human posts and published agent replies transactionally enqueue
+text-free `assistant_group_mention_notifications`. A bounded sweep and immediate
+post/settlement dispatch reuse `notification_service`'s registered FCM/APNs
+push devices. `notifications/settings.group_mentions_enabled` is additive,
+default-on (including legacy absent fields), and exposed as **Mentions in groups**;
+`push_enabled` and registered/configured devices are also required. No browser
+Web Push subscription path exists; unconfigured platforms are skipped. No
+Telegram/bot post or email is sent. Pushes include bounded, sanitized sender
+and group labels and an `AssistantPage::Group` canonical link. Like approval
+pushes, they omit message previews and private content entirely.
+
+A transaction claims each notification once and coalesces human and agent
+mentions together to at most one push per person/group per five minutes.
+Further mentions still increase the count; already-read messages do not push.
+The sharing flag, collaboration readiness, live membership, message readability
+and preferences are checked before dispatch. A claim is never retried after an
+ambiguous external send, so delivery is best-effort; the in-app counts are the
+durable record. Audits/logs contain identifiers and delivery status only.
+Departure removes pending delivery, so rejoining cannot revive an old
+notification. Private read/coalescing markers survive departure (without any
+read access) so leave/rejoin cannot bypass the five-minute limit. Group deletion
+and personal erasure remove both collections, including orphan personal rows.
+Claimed orphan intents expire after seven days. Agent mentions cannot bypass the shared rate limit or notify nonmembers.
+
+Older replicas ignore these fields/collections and do not produce pushes or
+read markers; new UI tolerates absent counts. Settings saves omit an absent,
+untouched mention preference so an older response cannot overwrite an opt-out
+on a newer writer. Upgrade all writers/workers for
+complete notification coverage. The existing sharing and collaboration readiness
+gates remain authoritative; legacy personal crews/org groups are unchanged.
 
 People-only routing uses the existing `assistant:collaboration-groups-v1`
 readiness gate and sharing flag. This is additive reader compatibility, not a
@@ -1096,3 +1140,12 @@ agent owner, including `images_delete_after_turn`. Channel/platform guests still
 never ingest or download user media. NyxAgent's configured-origin check is
 unchanged; operations must keep its `NYXID_BASE_URL` aligned with NyxID's
 canonical `BASE_URL`.
+
+### Separate org-specialist channel authority
+
+The default-off org-specialist channel feature reuses the public-transcript /
+per-actor execution pattern, without allowing org agents to be shared or
+allowing guests in org collaboration groups. Its explicitly enabled channel
+guest lane is a separate, budgeted org-wallet authority, including platform
+keys. None of the personal shared-agent or org-group billing rules changes.
+See [organization specialists on bots](09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).

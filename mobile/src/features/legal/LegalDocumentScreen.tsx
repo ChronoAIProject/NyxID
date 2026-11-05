@@ -1,8 +1,6 @@
-import Constants from "expo-constants";
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { useEffect, useMemo, useState } from "react";
 import {
-  ActivityIndicator,
   ScrollView,
   StyleSheet,
   Text,
@@ -13,6 +11,9 @@ import Markdown from "react-native-markdown-display";
 
 import { BlurBackButton } from "../../components/BlurBackButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { SkeletonRows } from "../../components/Skeleton";
+import { resolveLegalDocumentUrl } from "./legalDocumentUrl";
+import { createLegalMarkdownStyles } from "./legalMarkdownStyles";
 import { capture } from "../../lib/telemetry";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -27,7 +28,8 @@ import { spacing, typeScale } from "../../theme/designTokens";
  * Source of truth: frontend/public/legal/{privacy,terms}.md
  * Served at: <LEGAL_BASE_URL>/legal/<doc>.md
  *
- * `LEGAL_BASE_URL` is per-profile (DEV_/PROD_) in mobile/.env.*.
+ * `LEGAL_BASE_URL` is per-profile (DEV_/PROD_) in mobile/.env.*; production builds
+ * with a second domain set use the one selected at launch (see `lib/domains.ts`).
  */
 type Props = {
   title: string;
@@ -50,16 +52,6 @@ function stripFrontMatter(md: string): {
   return { content: body, effectiveDate: dateMatch?.[1] ?? null };
 }
 
-function resolveDocUrl(docKey: "privacy" | "terms"): string | null {
-  const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, unknown>;
-  const baseUrl =
-    typeof extra.LEGAL_BASE_URL === "string"
-      ? extra.LEGAL_BASE_URL.replace(/\/$/, "")
-      : "";
-  if (!baseUrl) return null;
-  return `${baseUrl}/legal/${docKey}.md`;
-}
-
 export function LegalDocumentScreen({
   title,
   docKey,
@@ -70,14 +62,19 @@ export function LegalDocumentScreen({
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
-  const markdownStyles = useMemo(() => createMarkdownStyles(colors), [colors]);
+  const markdownStyles = useMemo(() => createLegalMarkdownStyles(colors), [colors]);
 
-  const url = useMemo(() => resolveDocUrl(docKey), [docKey]);
+  const [url, setUrl] = useState<string | null>(null);
   const [content, setContent] = useState<string>("");
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const url = resolveLegalDocumentUrl(docKey);
+    setUrl(url);
+    setContent("");
+    setEffectiveDate(null);
+    setError(null);
     if (!url) {
       setError("Legal document URL is not configured (LEGAL_BASE_URL).");
       return;
@@ -105,7 +102,7 @@ export function LegalDocumentScreen({
     return () => {
       cancelled = true;
     };
-  }, [url]);
+  }, [docKey]);
 
   return (
     <ScreenContainer>
@@ -155,9 +152,11 @@ export function LegalDocumentScreen({
           ) : content ? (
             <Markdown style={markdownStyles}>{content}</Markdown>
           ) : (
-            <View style={styles.loading}>
-              <ActivityIndicator color={colors.textSecondary} />
-            </View>
+            <SkeletonRows
+              rows={6}
+              icon={false}
+              accessibilityLabel={`Loading ${title.toLowerCase()}`}
+            />
           )}
         </View>
       </ScrollView>
@@ -177,10 +176,6 @@ const createStyles = (c: ThemeColors) =>
       paddingTop: 64,
       paddingBottom: spacing.xxxl,
     },
-    loading: {
-      paddingVertical: spacing.xxl,
-      alignItems: "center",
-    },
     errorTitle: {
       color: c.textPrimary,
       ...typeScale.bodyStrong,
@@ -193,59 +188,3 @@ const createStyles = (c: ThemeColors) =>
       marginBottom: spacing.xs,
     },
   });
-
-const createMarkdownStyles = (c: ThemeColors) => ({
-  body: {
-    color: c.textSecondary,
-    ...typeScale.caption,
-    lineHeight: 20,
-  },
-  heading1: {
-    color: c.textPrimary,
-    ...typeScale.h2,
-    marginTop: spacing.lg,
-    marginBottom: spacing.sm,
-  },
-  heading2: {
-    color: c.textPrimary,
-    ...typeScale.bodyStrong,
-    marginTop: spacing.lg,
-    marginBottom: spacing.sm,
-  },
-  heading3: {
-    color: c.textPrimary,
-    ...typeScale.bodyStrong,
-    marginTop: spacing.md,
-    marginBottom: spacing.xs,
-  },
-  paragraph: {
-    color: c.textSecondary,
-    ...typeScale.caption,
-    lineHeight: 20,
-    marginBottom: spacing.sm,
-  },
-  bullet_list: {
-    marginBottom: spacing.sm,
-  },
-  list_item: {
-    marginBottom: spacing.xs,
-  },
-  strong: {
-    color: c.textPrimary,
-  },
-  link: {
-    color: c.primaryOnTint,
-  },
-  code_inline: {
-    color: c.textPrimary,
-    ...typeScale.mono,
-    backgroundColor: c.cardSoft,
-    paddingHorizontal: 4,
-    borderRadius: 4,
-  },
-  hr: {
-    backgroundColor: c.borderSoft,
-    height: 1,
-    marginVertical: spacing.md,
-  },
-});

@@ -28,10 +28,16 @@ pub struct Permit {
 }
 
 pub fn behavior(access: &RequestAccess) -> String {
-    let a = access.agent();
+    behavior_for_agent(access.agent(), access.revision())
+}
+
+pub(crate) fn behavior_for_agent(
+    a: &crate::models::assistant_agent::AssistantAgent,
+    revision: i64,
+) -> String {
     super::mcp_service::canonical_sha256(json!({"persona": a.persona, "description": a.description,
         "model": a.model, "skills": a.skills, "skills_revision": a.skills_revision, "grants": a.grants, "operations": a.operation_scopes,
-        "sharing_revision": access.revision()}))
+        "sharing_revision": revision}))
 }
 
 /// A refusal is a structured, actor-only consent card. No credential values,
@@ -62,6 +68,37 @@ pub async fn prompt(
             .await?
             .err(),
     )
+}
+
+/// Read-only observation for the dispatch coordinator. Once still needs its own
+/// claim; it is never turned into reusable execution authority.
+pub(crate) async fn always_covers(
+    db: &Database,
+    chat: &ChatAuthority,
+    access: &RequestAccess,
+    service: &UserService,
+    binding: &str,
+    operation: &Value,
+) -> AppResult<bool> {
+    let mut operation = operation.clone();
+    if operation["kind"] == "raw_inference" && operation["transport"].is_null() {
+        operation
+            .as_object_mut()
+            .expect("operation")
+            .remove("input_admission");
+    }
+    let filter = doc! {"actor_user_id":&chat.user_id,"agent_id":&chat.agent_id,
+    "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
+    "connection_id":&service.id,"policy_revision":access.revision(),
+    "behavior_digest":behavior(access),"authority_digest":binding,
+    "operation_digest":super::mcp_service::canonical_sha256(operation),"decision":"always",
+    "$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]};
+    Ok(db
+        .collection::<bson::Document>(CONSENTS_COLLECTION_NAME)
+        .find_one(filter)
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some())
 }
 
 #[allow(clippy::too_many_arguments)]

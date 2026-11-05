@@ -13,6 +13,7 @@ mod image_delivery_tests;
 mod source_queue_tests;
 
 struct Fixture {
+    calls: Calls,
     state: AppState,
     channel: NyxbotChannel,
     key: String,
@@ -27,7 +28,7 @@ impl Drop for Fixture {
 }
 
 async fn fixture(name: &str) -> Fixture {
-    let (state, _, upstream) = setup(name).await;
+    let (state, calls, upstream) = setup(name).await;
     let (mut channel, key) = channel(&state, "gateway").await;
     channel.owner_sender_ids = vec!["7".into()];
     state
@@ -100,6 +101,7 @@ async fn fixture(name: &str) -> Fixture {
         version: 1,
         state: "waiting".into(),
         origin: ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             nyxbot_channel_id: channel.id.clone(),
             partition: PARTITION.into(),
@@ -128,6 +130,7 @@ async fn fixture(name: &str) -> Fixture {
         .await
         .unwrap();
     Fixture {
+        calls,
         state,
         channel,
         key,
@@ -916,6 +919,8 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                artifact_recovery_target: None,
+                artifact_delivery: None,
                 failure_reason: reason.map(|reason| {
                     Box::new(crate::models::assistant_message::TurnFailureReason {
                         source: "nyxid".into(),

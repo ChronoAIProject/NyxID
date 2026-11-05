@@ -214,6 +214,8 @@ async fn mcp_echo(f: &Fixture) -> serde_json::Value {
         &f.state.token_exchange_cache,
         &f.state.cloud_response_cache,
         &McpExecContext {
+ strict_response_utf8: false,
+            execution_permission: None,
             assistant_chat: None,
             response_body_limit: None,
             actor_user_id: None,

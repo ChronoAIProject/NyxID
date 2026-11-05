@@ -688,11 +688,15 @@ async fn check_http_projected_inner(
         super::bootstrap::observe_model_callback(&state.db, chat, decision.refusal.as_ref())
             .await?;
     }
-    if let Some(admission) = decision
-        .admission
-        .as_ref()
-        .filter(|_| raw_inference && !model_consent)
-    {
+    if let Some(admission) = decision.admission.as_ref().filter(|_| {
+        raw_inference
+            && !model_consent
+            && chat
+                .execution_permission
+                .as_ref()
+                .and_then(|c| c.permit())
+                .is_none()
+    }) {
         persist_model_consent(&state.db, chat, admission, target, &operation).await?;
     }
     if let Some(admission) = decision.admission.as_ref() {

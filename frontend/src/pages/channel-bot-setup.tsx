@@ -69,7 +69,7 @@ export function ChannelBotSetupLinksPage() {
           onRetry={catalog.refetch}
         />
       ) : platforms.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           No channels are currently available for setup.
         </p>
       ) : (
@@ -79,7 +79,7 @@ export function ChannelBotSetupLinksPage() {
               key={platform.platform}
               className="flex min-w-0 flex-col gap-4 rounded-xl border border-border/50 bg-card p-4"
             >
-              <h3 className="text-15 font-semibold">
+              <h3 className="type-card-title">
                 {platform.display_name}
               </h3>
               <CopyableUrlCallout
@@ -152,7 +152,7 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
         />
       ) : !descriptor?.enabled ? (
         <div className="space-y-4 text-center">
-          <p role="status" className="text-xs text-muted-foreground">
+          <p role="status" className="text-13 text-muted-foreground">
             {descriptor
               ? `${descriptor.display_name} setup is currently unavailable.`
               : "This channel is not supported."}

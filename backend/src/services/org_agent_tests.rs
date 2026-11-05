@@ -1656,7 +1656,7 @@ async fn org_agent_platform_billing_uses_acting_person() {
         .await
         .unwrap();
     let payer = super::billing::owner_resolver::BillingOwnerResolver::new(f.state.db.clone())
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             &auth.user_id.to_string(),
             &f.org,
             crate::models::usage_meter::CredentialClass::NyxidManagedMaster,

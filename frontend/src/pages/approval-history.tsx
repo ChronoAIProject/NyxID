@@ -10,6 +10,7 @@ import {
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
+import { ApprovalAction, ApprovalIdentity } from "@/components/shared/approval-history-fields";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -117,7 +118,7 @@ export function ApprovalHistoryPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="shell-page-stack">
       <PageHeader
         title="Approval History"
         description="Review pending requests before they expire. Refresh to discover new requests or decisions."
@@ -160,8 +161,8 @@ export function ApprovalHistoryPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SeoKeywordIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No Approval Requests</p>
-            <p className="text-12 text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">No Approval Requests</p>
+            <p className="text-14 text-muted-foreground">
               No approval requests match the current filter.
             </p>
           </div>
@@ -177,31 +178,31 @@ export function ApprovalHistoryPage() {
                     {isToolApproval(request) ? (
                       <div className="flex items-center gap-1.5">
                         <Wrench className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <p className="text-13 font-semibold text-foreground truncate">{request.tool_name}</p>
+                        <ApprovalIdentity className="truncate">{request.tool_name}</ApprovalIdentity>
                       </div>
                     ) : (
-                      <p className="text-13 font-semibold text-foreground truncate">{request.service_name}</p>
+                      <ApprovalIdentity className="block truncate">{request.service_name}</ApprovalIdentity>
                     )}
-                    <p className="text-11 text-muted-foreground truncate">
+                    <p className="text-13 text-muted-foreground truncate">
                       {request.requester_label ?? request.requester_type}
                     </p>
                   </div>
                   {getStatusBadge(request.status)}
                 </div>
-                <p className="mt-1.5 text-11 text-muted-foreground line-clamp-2">
+                <ApprovalAction className="mt-1.5 line-clamp-2">
                   {isToolApproval(request)
                     ? request.tool_arguments ?? "Tool execution approval"
                     : primaryActionLabel(request)}
-                </p>
+                </ApprovalAction>
                 {shouldShowRawIdentityLine(request) && (
-                  <p className="mt-1 text-11 text-muted-foreground">
+                  <p className="mt-1 text-13 text-muted-foreground">
                     {operationIdentityLabel(request)}
                   </p>
                 )}
                 {request.is_destructive && (
                   <Badge variant="destructive" className="mt-1.5">Destructive</Badge>
                 )}
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                   <span>{formatDate(request.created_at)}</span>
                   {request.decided_at && <span>Decided {formatDate(request.decided_at)}</span>}
                 </div>
@@ -210,7 +211,7 @@ export function ApprovalHistoryPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="flex-1 h-8 text-xs"
+                      className="flex-1 h-8 text-14"
                       onClick={() =>
                         setDecideTarget({
                           id: request.id,
@@ -226,7 +227,7 @@ export function ApprovalHistoryPage() {
                     <Button
                       variant="outline"
                       size="sm"
-                      className="flex-1 h-8 text-xs"
+                      className="flex-1 h-8 text-14"
                       onClick={() =>
                         setDecideTarget({
                           id: request.id,
@@ -269,9 +270,9 @@ export function ApprovalHistoryPage() {
                         <div className="flex flex-col gap-1">
                           <div className="flex items-center gap-1.5">
                             <Wrench className="h-3.5 w-3.5 text-muted-foreground" />
-                            <span className="font-medium">
+                            <ApprovalIdentity>
                               {request.tool_name}
-                            </span>
+                            </ApprovalIdentity>
                           </div>
                           {request.is_destructive && (
                             <Badge variant="destructive">Destructive</Badge>
@@ -279,10 +280,10 @@ export function ApprovalHistoryPage() {
                         </div>
                       ) : (
                         <div className="flex flex-col gap-0.5">
-                          <span className="font-medium">
+                          <ApprovalIdentity>
                             {request.service_name}
-                          </span>
-                          <span className="text-11 text-muted-foreground">
+                          </ApprovalIdentity>
+                          <span className="text-13 text-muted-foreground">
                             {request.service_slug}
                           </span>
                         </div>
@@ -293,7 +294,7 @@ export function ApprovalHistoryPage() {
                         <span>
                           {request.requester_label ?? request.requester_type}
                         </span>
-                        <span className="text-11 text-muted-foreground">
+                        <span className="text-13 text-muted-foreground">
                           {request.requester_type}
                         </span>
                       </div>
@@ -302,28 +303,28 @@ export function ApprovalHistoryPage() {
                       <div className="flex flex-col gap-0.5">
                         {isToolApproval(request) ? (
                           <>
-                            <span>
+                            <ApprovalAction>
                               Tool execution approval
-                            </span>
+                            </ApprovalAction>
                             {request.tool_arguments && (
-                              <span className="max-w-[300px] truncate text-11 text-muted-foreground">
+                              <span className="max-w-[300px] truncate text-13 text-muted-foreground">
                                 {request.tool_arguments}
                               </span>
                             )}
                           </>
                         ) : (
                           <>
-                            <span>
+                            <ApprovalAction>
                               {primaryActionLabel(request)}
-                            </span>
+                            </ApprovalAction>
                             {request.action_description &&
                               request.operation_summary && (
-                                <span className="text-11 text-muted-foreground">
+                                <span className="text-13 text-muted-foreground">
                                   {request.operation_summary}
                                 </span>
                               )}
                             {shouldShowRawIdentityLine(request) && (
-                              <span className="text-11 text-muted-foreground">
+                              <span className="text-13 text-muted-foreground">
                                 {operationIdentityLabel(request)}
                               </span>
                             )}
@@ -346,7 +347,7 @@ export function ApprovalHistoryPage() {
                           <div className="flex justify-end gap-1">
                             <Button
                               variant="ghost"
-                              className="h-7 text-xs"
+                              className="h-7 text-14"
                               onClick={() =>
                                 setDecideTarget({
                                   id: request.id,
@@ -361,7 +362,7 @@ export function ApprovalHistoryPage() {
                             </Button>
                             <Button
                               variant="ghost"
-                              className="h-7 text-xs"
+                              className="h-7 text-14"
                               onClick={() =>
                                 setDecideTarget({
                                   id: request.id,
@@ -387,7 +388,7 @@ export function ApprovalHistoryPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-11 text-text-tertiary">
+              <p className="text-13 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -401,7 +402,7 @@ export function ApprovalHistoryPage() {
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-11 text-text-tertiary">
+                <span className="text-13 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

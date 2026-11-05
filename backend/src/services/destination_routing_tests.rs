@@ -527,6 +527,8 @@ pub(crate) async fn mcp_call(
         &state.token_exchange_cache,
         &state.cloud_response_cache,
         &mcp_service::McpExecContext {
+            strict_response_utf8: false,
+            execution_permission: None,
             assistant_chat: None,
             response_body_limit: None,
             actor_user_id: None,
@@ -1628,6 +1630,8 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
         assert!(matches!(effective_catalog_auth(&db, &service).await,
             Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys"));
         let mut target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -1685,6 +1689,8 @@ fn user_owned_bearer_target_does_not_become_platform_by_catalog_category() {
     // master material. Catalog category/requirement flags alone do not select a key.
     assert!(service.credential_encrypted.is_empty());
     let mut target = ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,

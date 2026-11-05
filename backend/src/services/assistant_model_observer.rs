@@ -190,6 +190,10 @@ impl ModelRequest {
         self.completion.finish().await
     }
 
+    pub(super) fn is_setup(&self) -> bool {
+        self.setup
+    }
+
     pub async fn accepted(&self) -> AppResult<()> {
         if self.setup {
             self.db.collection::<bson::Document>(super::assistant_service_execution::COLLECTION).update_one(

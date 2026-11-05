@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -16,9 +17,9 @@ const emptyPolicy: ConcurrencyPolicy = { default_limit: null, users: [], orgs: [
 export function ServiceConcurrency({ serviceId }: { readonly serviceId: string }) {
   const query = useServiceConcurrency(serviceId);
   return <section className="mt-6 rounded-lg border border-border p-4">
-    <h2 className="text-sm font-medium">Concurrency limits</h2>
-    <p className="mt-1 text-xs text-muted-foreground">Limit simultaneous requests per person across all connections and replicas. Streams and WebSockets count until they close. Service accounts count separately.</p>
-    {query.isPending ? <p className="mt-3 text-xs">Loading limits…</p> : query.isError ? <p role="alert" className="mt-3 text-xs text-destructive">Could not load concurrency limits. <Button variant="outline" onClick={() => void query.refetch()}>Retry</Button></p> : <PolicyEditor serviceId={serviceId} policy={query.data.policy} />}
+    <h2 className="type-row-title">Concurrency limits</h2>
+    <p className="mt-1 text-13 text-muted-foreground">Limit simultaneous requests per person across all connections and replicas. Streams and WebSockets count until they close. Service accounts count separately.</p>
+    {query.isPending ? <p className="mt-3 text-13">Loading limits…</p> : query.isError ? <p role="alert" className="mt-3 text-13 text-destructive">Could not load concurrency limits. <Button variant="outline" onClick={() => void query.refetch()}>Retry</Button></p> : <PolicyEditor serviceId={serviceId} policy={query.data.policy} />}
   </section>;
 }
 
@@ -27,12 +28,12 @@ function LimitInput({ label, value, onChange }: {
   readonly value: number | null;
   readonly onChange: (value: number | null) => void;
 }) {
-  return <label className="flex flex-wrap items-center gap-3 text-xs">
+  return <Label className="flex flex-wrap items-center gap-3">
     <span className="min-w-32 flex-1 break-all">{label}</span>
     <Input className="h-8 w-28" aria-label={label} type="number" min={1} max={10000} step={1} placeholder="Unlimited"
       value={value ?? ""} onChange={(event) => onChange(event.target.value === "" ? null : Number(event.target.value))} />
     <span className="w-16 text-muted-foreground">{value === null ? "Unlimited" : "requests"}</span>
-  </label>;
+  </Label>;
 }
 
 export function PolicyEditor({ serviceId, policy }: { readonly serviceId: string; readonly policy: ConcurrencyPolicy | null }) {
@@ -64,17 +65,17 @@ export function PolicyEditor({ serviceId, policy }: { readonly serviceId: string
   }
   return <Form {...form}><form className="mt-4 space-y-4" onSubmit={form.handleSubmit(save)}>
     {stale && <StaleFormNotice onReload={() => { setBaseline(policy); form.reset({ enabled: policy !== null, policy: policy ?? emptyPolicy }); }} />}
-    <label className="flex items-center gap-2 text-xs"><Switch aria-label="Enable concurrency limits" checked={enabled} onCheckedChange={(value) => form.setValue("enabled", value)} />Enable concurrency limits</label>
-    <p className="text-xs text-muted-foreground">Disabled means unlimited for everyone. Leave a limit blank for unlimited. Changes apply to new requests; running requests are allowed to finish.</p>
+    <Label className="flex items-center gap-2"><Switch aria-label="Enable concurrency limits" checked={enabled} onCheckedChange={(value) => form.setValue("enabled", value)} />Enable concurrency limits</Label>
+    <p className="text-13 text-muted-foreground">Disabled means unlimited for everyone. Leave a limit blank for unlimited. Changes apply to new requests; running requests are allowed to finish.</p>
     {enabled && <>
       <LimitInput label="Default per-person limit" value={current.default_limit} onChange={(value) => form.setValue("policy.default_limit", value)} />
-      <p className="text-xs text-muted-foreground">A user override wins. Otherwise, the highest limit among active organization memberships wins, with unlimited highest. Without an override, the default applies.</p>
-      <p className="text-xs text-muted-foreground">{count}/500 override targets. New overrides start unlimited.</p>
+      <p className="text-13 text-muted-foreground">A user override wins. Otherwise, the highest limit among active organization memberships wins, with unlimited highest. Without an override, the default applies.</p>
+      <p className="text-13 text-muted-foreground">{count}/500 override targets. New overrides start unlimited.</p>
       {(["users", "orgs"] as const).map((kind) => {
         const Picker = kind === "users" ? PersonPicker : OrgPicker;
         const names = kind === "users" ? people.data?.users : orgs.data?.users;
         return <div key={kind} className="space-y-3">
-          <h3 className="text-xs font-medium">{kind === "users" ? "User overrides" : "Organization overrides"}</h3>
+          <h3 className="type-secondary-emphasis">{kind === "users" ? "User overrides" : "Organization overrides"}</h3>
           <Picker selected={current[kind].map((row) => row.id)} onChange={(ids) => select(kind, ids)} />
           {current[kind].map((row, index) => {
             const user = names?.find((u) => u.id === row.id);
@@ -85,7 +86,7 @@ export function PolicyEditor({ serviceId, policy }: { readonly serviceId: string
         </div>;
       })}
     </>}
-    {form.formState.errors.root && <p role="alert" className="text-xs text-destructive">{form.formState.errors.root.message}</p>}
+    {form.formState.errors.root && <p role="alert" className="text-13 text-destructive">{form.formState.errors.root.message}</p>}
     <FormSubmitErrors />
     <Button type="submit" disabled={!form.formState.isDirty || mutation.isPending || stale}>{mutation.isPending ? "Saving…" : "Save concurrency limits"}</Button>
   </form></Form>;

@@ -230,7 +230,7 @@ export function CreateServiceDialog({
                   <FormLabel>Description</FormLabel>
                   <FormControl>
                     <textarea
-                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                      className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                       placeholder="Optional description"
                       {...field}
                     />
@@ -278,7 +278,6 @@ export function CreateServiceDialog({
                 <div className="flex items-center justify-between rounded-lg border border-border p-3">
                   <Label
                     htmlFor="create-ssh-cert-auth"
-                    className="text-12 font-normal"
                   >
                     Enable short-lived SSH certificates
                   </Label>
@@ -316,7 +315,7 @@ export function CreateServiceDialog({
                           <FormControl>
                             <Input placeholder="ubuntu, deploy" {...field} />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Comma-separated SSH usernames NyxID is allowed to
                             sign.
                           </p>
@@ -396,7 +395,7 @@ export function CreateServiceDialog({
                         </SelectContent>
                       </Select>
                       {authType === "body" && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           NyxID will merge{" "}
                           <code>{`{<field>: <credential>}`}</code> into the JSON
                           request body. Used for Lark/Feishu tenant token
@@ -405,7 +404,7 @@ export function CreateServiceDialog({
                         </p>
                       )}
                       {authType === "bot_bearer" && (
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Sends{" "}
                           <code>Authorization: Bot &lt;credential&gt;</code>{" "}
                           (Discord bot token format -- note the <code>Bot</code>{" "}
@@ -432,7 +431,7 @@ export function CreateServiceDialog({
                             maxLength={64}
                           />
                         </FormControl>
-                        <p className="text-12 text-muted-foreground">
+                        <p className="text-14 text-muted-foreground">
                           Leave blank for Bearer. Use the scheme documented by
                           the vendor.
                         </p>
@@ -456,7 +455,7 @@ export function CreateServiceDialog({
                             value={field.value ?? ""}
                           />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           The JSON field where the credential will be injected.
                           For Lark/Feishu use <code>app_secret</code>.
                         </p>
@@ -533,7 +532,7 @@ export function CreateServiceDialog({
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Private services are only visible to you.
                   </p>
                   <FormMessage />

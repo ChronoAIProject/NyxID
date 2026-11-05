@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ArrowLeft } from "lucide-react";
+import { publicUrl } from "./public-origin.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
@@ -43,7 +44,7 @@ for (const slug of ["privacy", "terms"]) {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="description" content="${escapeHtml(displayTitle)} for NyxID">
-    <link rel="canonical" href="https://nyx.chrono-ai.fun/${slug}">
+    <link rel="canonical" href="${publicUrl(`/${slug}`)}">
     <link rel="icon" type="image/svg+xml" href="/nyxid-coloured-icon.svg">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

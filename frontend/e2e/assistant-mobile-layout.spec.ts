@@ -62,12 +62,12 @@ for (const engine of ["actor", "NyxAgent", "group"] as const) {
     await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBe(150);
     await checkBounds(420);
     await scroller.evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")); });
-    const headerTop = (await page.locator("header").boundingBox())!.y;
+    const headerTop = (await page.getByRole("banner").boundingBox())!.y;
     await viewport(page, 844);
     await scroller.hover({ position: { x: 20, y: 20 } });
     await page.mouse.wheel(0, -1000);
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
-    expect((await page.locator("header").boundingBox())!.y).toBe(headerTop);
+    expect((await page.getByRole("banner").boundingBox())!.y).toBe(headerTop);
     await viewport(page, 844);
 
     await openAccountMenu(page);

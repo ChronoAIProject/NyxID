@@ -11,7 +11,7 @@ export function ConnectLinkDetailRow({
   readonly capitalizeValue?: boolean;
 }) {
   return (
-    <div className="flex justify-between gap-4 px-4 py-1 text-xs">
+    <div className="flex justify-between gap-4 px-4 py-1 text-13">
       <span className="text-muted-foreground">{label}</span>
       <span
         className={cn(

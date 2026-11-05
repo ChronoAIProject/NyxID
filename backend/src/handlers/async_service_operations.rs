@@ -4,7 +4,7 @@ use super::*;
 use crate::models::async_service_operation::AsyncServiceOperation;
 use crate::services::async_service_operation as watches;
 
-fn call<'a>(
+pub(super) fn call<'a>(
     state: &'a AppState,
     watch: &'a AsyncServiceOperation,
     name: &'a str,
@@ -38,7 +38,7 @@ async fn call_inner(
         "x-api-key",
         credential.raw_key.as_str().parse().map_err(|_| denied())?,
     );
-    let mut auth = if watch.shared_execution.is_some() {
+    let mut auth = if watch.shared_execution.is_some() || watch.execution_task.is_some() {
         let key =
             crate::services::key_service::get_api_key(&state.db, &watch.user_id, &watch.api_key_id)
                 .await?;
@@ -49,6 +49,13 @@ async fn call_inner(
             .await
             .map_err(|_| denied())?
     };
+    // Old watches never borrow a newer foreground turn's enrollment or task.
+    if watch.execution_task.is_none() {
+        auth.execution_permission = None;
+        if let Some(chat) = auth.chat.as_mut() {
+            chat.execution_permission = None;
+        }
+    }
     // This watch was admitted only for an owner turn. A later guest message
     // on the same thread neither owns nor changes this background request.
     if let Some(chat) = auth.chat.as_mut() {
@@ -99,6 +106,15 @@ async fn call_inner(
         return Err(denied());
     }
     watches::validate_endpoints(&watch.contract, service, submit).map_err(|_| denied())?;
+    if crate::services::generated_artifacts::admitted(watch) {
+        let trusted = crate::services::generated_artifacts::trusted_sandbox_catalog(
+            &state.db, service, submit,
+        )
+        .await?;
+        if trusted.is_none() || trusted != watch.artifact_catalog_service_id {
+            return Err(AppError::Conflict("artifact_source_changed".into()));
+        }
+    }
     let endpoint = service
         .endpoints
         .iter()
@@ -122,6 +138,12 @@ async fn call_inner(
             )?,
         );
     prepared.authorize_agent_operations(&auth.assistant_operation_scopes, service, endpoint)?;
+    if auth.execution_permission.is_some() {
+        let user = super::permission_dispatch_auth(&auth)?;
+        prepared
+            .admit_execution_permission(state, &user, service, endpoint)
+            .await?;
+    }
     authorize_mcp_tool_operation(
         state,
         &auth,
@@ -142,7 +164,19 @@ async fn call_inner(
         crate::services::billing::route_inventory::BillingIngress::Mcp,
     )?;
     let mut exec = mcp_exec_context(&auth);
-    exec.response_body_limit = Some(watches::RESULT_BYTES);
+    exec.response_body_limit = Some(
+        if crate::services::generated_artifacts::admitted(watch)
+            && name == watch.contract.result_operation
+        {
+            if !crate::services::generated_artifacts::sandbox_contract(service, submit) {
+                return Err(denied());
+            }
+            exec.strict_response_utf8 = true;
+            crate::services::generated_artifacts::sandbox::RESPONSE_BYTES
+        } else {
+            watches::RESULT_BYTES
+        },
+    );
     mcp_service::execute_tool_response(
         &state.http_client,
         &state.db,
@@ -281,6 +315,9 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         return watches::ready(&state.db, w, None, "submission_uncertain", None).await;
     }
     let status = call(state, w, &w.contract.status_operation).await?;
+    if status.status == 410 && crate::services::generated_artifacts::admitted(w) {
+        return watches::ready(&state.db, w, None, "result_expired", None).await;
+    }
     if matches!(status.status, 401 | 403 | 404 | 410) {
         return watches::ready(&state.db, w, None, "authority_lost", None).await;
     }
@@ -290,9 +327,21 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     if status.text.len() > watches::RESULT_BYTES {
         return watches::ready(&state.db, w, None, "result_too_large", None).await;
     }
-    let parsed: serde_json::Value = serde_json::from_str(&status.text).map_err(|_| {
-        crate::errors::AppError::ValidationError("Invalid async operation status".into())
-    })?;
+    let parsed: serde_json::Value = match serde_json::from_str(&status.text) {
+        Ok(value) => value,
+        Err(_) if crate::services::generated_artifacts::admitted(w) => {
+            // Generated-artifact status is a bounded, server-owned lifecycle
+            // contract. A successful response that is not JSON cannot become
+            // a retrying defer: settle it terminally before any result fetch.
+            return watches::ready(&state.db, w, None, "artifact_invalid", None).await;
+        }
+        Err(_) => {
+            // Preserve ordinary async operation behavior and error contract.
+            return Err(crate::errors::AppError::ValidationError(
+                "Invalid async operation status".into(),
+            ));
+        }
+    };
     // The result is a separate proxy call and must acquire its own slot.
     drop(status);
     let phase = parsed
@@ -302,6 +351,9 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     let agent_not_started =
         crate::services::cma_operation::record_observation(&state.db, w, &parsed).await?;
     if w.contract.failure_states.iter().any(|s| s == phase) {
+        if crate::services::generated_artifacts::admitted(w) {
+            return watches::ready(&state.db, w, None, "operation_failed", None).await;
+        }
         // Error payloads are equally untrusted; retain only bounded encrypted data.
         let detail = w
             .contract
@@ -320,6 +372,16 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
     }
     if agent_not_started || !w.contract.success_states.iter().any(|s| s == phase) {
         return watches::defer(&state.db, w).await;
+    }
+    if crate::services::generated_artifacts::admitted(w) {
+        return crate::services::generated_artifacts::acquisition::acquire(
+            &state.db,
+            &state.encryption_keys,
+            w,
+            &parsed,
+            |name| async move { call(state, w, &name).await },
+        )
+        .await;
     }
     let result = call(state, w, &w.contract.result_operation).await?;
     if !(200..300).contains(&result.status) {
@@ -356,6 +418,12 @@ async fn sweep_worker(state: &AppState) -> crate::errors::AppResult<()> {
         };
         match tokio::time::timeout(Duration::from_secs(45), Box::pin(step(state, &w))).await {
             Ok(Ok(())) => {}
+            Ok(Err(AppError::Conflict(reason)))
+                if crate::services::generated_artifacts::admitted(&w)
+                    && reason == "artifact_source_changed" =>
+            {
+                watches::ready(&state.db, &w, None, "artifact_source_changed", None).await?;
+            }
             Ok(Err(
                 AppError::Forbidden(_)
                 | AppError::Unauthorized(_)

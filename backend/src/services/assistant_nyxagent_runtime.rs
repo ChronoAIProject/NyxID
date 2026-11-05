@@ -516,10 +516,10 @@ async fn in_progress_note(
     note
 }
 
-/// Turn-scoped input context: drained events, a channel sender's context,
-/// and for NyxBot its roster, direct
-/// user chats with specialists and pending permission requests. NyxID-authored
-/// and bounded; lookup failures only omit a note.
+/// Optional turn hints: drained events, legacy prose notes, and for NyxBot its
+/// roster, direct user chats with specialists and pending permission requests.
+/// NyxID-authored and bounded; lookup failures only omit optional hints.
+/// Required channel provenance is rendered separately by `channel_turn_context`.
 pub(crate) async fn turn_notes(
     state: &AppState,
     row: &AssistantConversation,
@@ -905,7 +905,7 @@ pub(crate) async fn run_owner_turn(
                 let now = Utc::now();
                 engine::mark_queued(&state.db,&row,&turn_id,now,now+chrono::Duration::seconds(60)).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
-                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline)).await;
+                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline,super::org_channel_service::origin(&row))).await;
                 engine::mark_dequeued(&state.db,&row,&turn_id).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
                 if !ready.unwrap_or(false) {return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);}
@@ -936,7 +936,7 @@ pub(crate) async fn run_owner_turn(
                     .and_then(|r|r.get_str("claim").ok().map(str::to_owned));
                 // Another request may already have replaced the rejected generation.
                 let force = current==setup_generation;
-                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline)).await.unwrap_or(false) {
+                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline,super::org_channel_service::origin(&row))).await.unwrap_or(false) {
                     partial.clear();
                     instruction_context = None;
                     return execute_owner_turn(&state,egress.as_ref(),&authority,&row,&text,&mut credential,policy,&mut events,&block_id,&mut partial,&mut instruction_context).await;
@@ -1245,6 +1245,19 @@ pub(crate) async fn execute_owner_turn(
         )
         .await
         .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
+    }
+    if let Some(text) =
+        super::execution_permission_dispatch::proposals::resume_turn(state, egress, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
+    {
+        *partial = text.clone();
+        return Ok(TurnResult {
+            text,
+            session_id: row.nyxagent_session_id.clone(),
+            response_id: None,
+            error: None,
+        });
     }
     let attempt = super::assistant_service_execution::begin_model_attempt(&state.db, row)
         .await
@@ -1576,8 +1589,8 @@ async fn execute_turn_inner(
         }
         None => String::new(),
     };
-    // Turn-scoped NyxID notes: team state, direct chats, drained events and
-    // channel sender context. Lookup failures only omit a note.
+    // Optional turn hints: team state, direct chats and drained events.
+    // Required authenticated channel provenance is prepared separately below.
     let agent =
         match crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await
         {
@@ -1593,6 +1606,13 @@ async fn execute_turn_inner(
         .and_then(|_| egress.checking_notice(row))
         .map(AbortOnDropHandle::new);
     decisions.push_str(&turn_notes(state, row, agent.as_ref(), previous).await);
+    // Authenticated channel provenance is required, including every retained
+    // queued source. Never run with a partially rendered or omitted identity.
+    decisions.push_str(
+        &super::channel_turn_context::turn_notes(&state.db, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
+    );
     decisions.push_str(
         &crate::services::async_service_operation::input_context(
             &state.db,
@@ -1619,6 +1639,41 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
+    if !row.guest_model_setup
+        && !row.guest_turn
+        && row.group_id.is_none()
+        && row.collaboration.is_none()
+        && row.agent_owner_id.is_none()
+        && row.platform_thread.is_none()
+        && !row.invocation_controlled
+        && row.channel.is_none()
+        && row.reply_channel.is_none()
+        && row.group_request_id.is_none()
+        && row.active_turn.as_ref().is_some_and(|t| {
+            t.voice_request_id.is_none()
+                && t.trigger_run_id.is_none()
+                && t.invocation_id.is_none()
+                && t.platform_origin.is_none()
+                && t.channel_adapter_origin.is_none()
+                && t.asked_from.is_none()
+                && t.report_to.is_none()
+                && !t.with_nyxbot
+                && t.also_deliver.is_empty()
+        })
+        && crate::services::generated_artifacts::enabled(&state.db, &row.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        guidance.push_str(crate::services::generated_artifacts::GUIDANCE);
+    }
+
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.voice_request_id.is_some())
+    {
+        guidance.push_str(crate::services::voice::runtime::TASK_GUIDANCE);
+    }
     if !row.guest_model_setup
         && !row.guest_turn
         && crate::services::assistant_service_execution::instruction::prompt_applies(
@@ -1960,10 +2015,15 @@ async fn execute_turn_inner(
         } else {
             first_byte_deadline
         };
+        let mut first_byte = super::assistant_start_retry::FirstByteDeadline::new(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            bounds.no_progress,
+        );
         let response = acknowledgement
             .wait(
-                tokio::time::timeout_at(
-                    deadline,
+                first_byte.wait(
+                    &state.db,
+                    row,
                     request(
                         state,
                         egress,
@@ -1981,8 +2041,7 @@ async fn execute_turn_inner(
                 events,
                 egress,
             )
-            .await
-            .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?;
+            .await?;
         let response = match response {
             Ok(response) => response,
             Err(AppError::PoolAttemptTransport(
@@ -2196,7 +2255,6 @@ async fn execute_turn_inner(
                     .max(0) as u64,
             );
         }
-        let deadline = first_byte_deadline;
         if !response
             .headers()
             .get("content-type")
@@ -2218,26 +2276,24 @@ async fn execute_turn_inner(
         let mut running_response_id: Option<String> = None;
         let streamed: Result<(), TurnError> = async {
             loop {
-                let timeout = if received {
-                    stream_timeout(
+                let next = if received {
+                    let timeout = stream_timeout(
                         bounds,
                         last_transport_activity.elapsed(),
                         last_semantic_progress.elapsed(),
-                    )
+                    );
+                    tokio::time::timeout(timeout, body.next())
+                        .await
+                        .map_err(|_| {
+                            if last_semantic_progress.elapsed() >= bounds.no_progress {
+                                TurnError::internal("idle_timeout", "no_progress")
+                            } else {
+                                TurnError::internal("idle_timeout", "idle")
+                            }
+                        })?
                 } else {
-                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                    first_byte.wait(&state.db, row, body.next()).await?
                 };
-                let next = tokio::time::timeout(timeout, body.next())
-                    .await
-                    .map_err(|_| {
-                        if !received {
-                            TurnError::internal("first_byte_timeout", "first_byte")
-                        } else if last_semantic_progress.elapsed() >= bounds.no_progress {
-                            TurnError::internal("idle_timeout", "no_progress")
-                        } else {
-                            TurnError::internal("idle_timeout", "idle")
-                        }
-                    })?;
                 let Some(chunk) = next else {
                     break;
                 };

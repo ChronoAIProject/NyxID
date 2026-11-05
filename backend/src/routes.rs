@@ -94,6 +94,33 @@ macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/proxy/nyxbot-voice/{service_id}/{*path}",
+                "/api/v1/proxy/nyxbot-voice/{service_id}/{*path}",
+                "handlers::assistant_voice::internal::service_request",
+                axum::routing::any(handlers::assistant_voice::internal::service_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice runtime owns call usage and settlement"
+                )
+            ),
+            (
+                "/proxy/nyxbot-voice/{service_id}",
+                "/api/v1/proxy/nyxbot-voice/{service_id}",
+                "handlers::assistant_voice::internal::service_root",
+                axum::routing::any(handlers::assistant_voice::internal::service_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice service root has no operation"
+                )
+            ),
+            (
+                "/proxy/nyxbot-voice/{service_id}/",
+                "/api/v1/proxy/nyxbot-voice/{service_id}/",
+                "handlers::assistant_voice::internal::service_root",
+                axum::routing::any(handlers::assistant_voice::internal::service_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice service root has no operation"
+                )
+            ),
+            (
                 "/permission-execution/rest/{*path}",
                 "/api/v1/permission-execution/rest/{*path}",
                 "handlers::permission_keys::rest",
@@ -1210,6 +1237,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_nodes::admin_disconnect_node),
         )
         .route("/audit-log", get(handlers::admin::list_audit_log))
+        .route("/audit-log/count", get(handlers::admin::count_audit_log))
         .route(
             "/telegram-managers/clear",
             post(handlers::telegram_managers::clear),
@@ -1377,6 +1405,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
         .route(
+            "/billing/cma-rate-cards",
+            get(handlers::admin_sandbox_rates::list).post(handlers::admin_sandbox_rates::publish),
+        )
+        .route(
             "/remote-machines/platform",
             get(handlers::admin_remote_machine_platform::get),
         )
@@ -1403,6 +1435,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/billing/services/{id}/resync",
             post(handlers::admin_billing::resync_service),
+        )
+        .route(
+            "/billing/services/{id}/sandbox",
+            get(handlers::admin_sandbox_settings::get).put(handlers::admin_sandbox_settings::put),
         )
         .route(
             "/billing/services/{id}",
@@ -1625,6 +1661,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/requests/{request_id}/decide",
             post(handlers::approvals::decide_request),
+        )
+        .route(
+            "/requests/{request_id}/execution-decision",
+            post(handlers::approvals::decide_execution_request),
         )
         .route("/grants", get(handlers::approvals::list_grants))
         .route(
@@ -2593,6 +2633,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_desktop::contexts),
         )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
+        .route("/nyxagent/cma-sessions", get(handlers::cma_sessions::list))
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),
@@ -2604,6 +2645,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations/{id}/messages/{message_id}/recovery",
             get(handlers::assistant_nyxagent::recovery),
+        )
+        .route(
+            "/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery",
+            post(handlers::assistant_nyxagent::artifact_delivery)
+                .layer(axum::extract::DefaultBodyLimit::max(0)),
         )
         .route(
             "/nyxagent/conversations/{id}/model",
@@ -2784,6 +2830,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::update_settings),
         )
         .route(
+            "/nyxagent/onboarding",
+            get(handlers::assistant_onboarding::get_onboarding)
+                .put(handlers::assistant_onboarding::save_onboarding),
+        )
+        .route(
+            "/nyxagent/onboarding/suggestions/hide",
+            post(handlers::assistant_onboarding::hide_suggestions),
+        )
+        .route(
             "/nyxagent/channels",
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
@@ -2854,6 +2909,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             put(handlers::collaboration_group::guest_access),
         )
         .route(
+            "/nyxagent/groups/{id}/read",
+            post(handlers::collaboration_group::mark_read),
+        )
+        .route(
             "/nyxagent/groups/{id}/membership",
             post(handlers::collaboration_group::membership),
         )
@@ -2876,6 +2935,28 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/channels/{id}/org-specialist",
+            get(handlers::org_specialist_channels::get)
+                .put(handlers::org_specialist_channels::update),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link",
+            post(handlers::org_specialist_channels::issue)
+                .delete(handlers::org_specialist_channels::revoke_self),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link/{challenge}",
+            get(handlers::org_specialist_channels::challenge),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link/{challenge}/confirm",
+            post(handlers::org_specialist_channels::confirm),
+        )
+        .route(
+            "/nyxagent/channels/{id}/retry-native-gateway",
+            post(handlers::nyxbot::gateway_retry::retry_channel),
         )
         .route(
             "/nyxagent/channels/{id}/chats/{chat_id}/threads",
@@ -3154,6 +3235,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/machines/{node_id}/activity",
             get(handlers::machine_activity::list),
+        )
+        .route(
+            "/assistant/nyxagent/agents/{id}/voice-service",
+            get(handlers::assistant_voice::voice_service)
+                .put(handlers::assistant_voice::publish_voice_service),
         )
         .route(
             "/assistant/nyxagent/dictation/options",
@@ -3483,6 +3569,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let api_v1 = api_v1_public
+        .nest("/billing/sandboxes", handlers::sandbox_billing::router())
         .nest("/catalog-curation", handlers::catalog_curation::router())
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
@@ -3508,6 +3595,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/openai-apps-challenge",
             get(handlers::oidc_discovery::openai_apps_challenge),
+        )
+        .route(
+            "/apple-app-site-association",
+            get(handlers::oidc_discovery::apple_app_site_association),
         );
 
     let public_oauth = Router::new()

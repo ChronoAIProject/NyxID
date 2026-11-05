@@ -151,7 +151,7 @@ pub async fn list(
         "_id": 1, "user_id": 1, "channel_bot_id": 1, "conversation_id": 1,
         "direction": 1, "platform": 1, "platform_conversation_id": 1,
         "platform_message_id": 1, "sender_platform_id": 1, "content_type": 1,
-        "callback_status": 1, "created_at": 1, "activity": 1,
+        "callback_status": 1, "created_at": 1, "activity": 1, "nyxbot_admission": 1,
     }};
     let pipeline = vec![
         doc! {"$match": &filter},

@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::{
     api_key_mutation_service as key_mutations,
     audit_service::{self, AuditActor},
+    execution_permission_enrollment as enrollment,
     feature_flag_service::{self as flags, FlagDefinition},
     security_readiness_service,
 };
@@ -180,10 +181,17 @@ pub async fn mutate(
         ) {
             return Err(AppError::BadRequest("Unsupported rollout target".into()));
         }
-        if key == flags::INVITATION_CODE_FLAG_KEY && *kind != FlagTargetKind::Global {
-            return Err(AppError::BadRequest(
-                "invitation code flag supports only a global override".into(),
-            ));
+        if flags::is_global_only(key) && *kind != FlagTargetKind::Global {
+            return Err(AppError::BadRequest(format!(
+                "{key} supports only a global override"
+            )));
+        }
+        if key == flags::EXECUTION_PERMISSIONS_FLAG_KEY && *enabled == Some(true) {
+            if *kind != FlagTargetKind::User {
+                security_readiness_service::require(db, enrollment::READINESS).await?;
+            }
+            security_readiness_service::require(db, "permissions:execution-dispatch-v1").await?;
+            security_readiness_service::require(db, "permissions:execution-authoring-v1").await?;
         }
         if *kind != FlagTargetKind::Global {
             let id = target_id
@@ -345,7 +353,41 @@ async fn mutate_in_session(
                 .find_one(filter.clone())
                 .session(&mut *session)
                 .await?;
+            if key == enrollment::FLAG && *kind == FlagTargetKind::User && *enabled == Some(true) {
+                let person = target_id
+                    .as_deref()
+                    .ok_or_else(|| AppError::BadRequest("target_key is required".into()))?;
+                if db
+                    .collection::<User>(USERS)
+                    .find_one(doc! {"_id":person,"is_active":true,"user_type":"person"})
+                    .session(&mut *session)
+                    .await?
+                    .is_none()
+                {
+                    return Err(AppError::ValidationError(
+                        "Execution permissions require an active person account".into(),
+                    ));
+                }
+            }
             if before.as_ref().map(|row| row.enabled) == *enabled {
+                if key == enrollment::FLAG && *kind == FlagTargetKind::User {
+                    if *enabled == Some(false) {
+                        db.collection::<Document>(USERS)
+                            .update_one(
+                                doc! {"_id":target_id.as_deref().expect("validated target")},
+                                doc! {"$unset":{"execution_permission_enrollment":""}},
+                            )
+                            .session(&mut *session)
+                            .await?;
+                    } else {
+                        enrollment::recompute_in_session(
+                            db,
+                            target_id.as_deref().expect("validated target"),
+                            session,
+                        )
+                        .await?;
+                    }
+                }
                 output.override_row = before;
                 return Ok(output);
             }
@@ -361,6 +403,55 @@ async fn mutate_in_session(
                     .session(&mut *session)
                     .await?
             };
+            if key == enrollment::FLAG {
+                // A clear restores inheritance. Gate potential widening, while a
+                // disable stays available even if readiness or scope reads fail.
+                if enabled.is_none() && before.as_ref().is_some_and(|r| !r.enabled) {
+                    let widens = match kind {
+                        FlagTargetKind::User => enrollment::live_enabled(db, target_id.as_deref().expect("validated target"), Some(&mut *session)).await?,
+                        FlagTargetKind::Org => db.collection::<FeatureFlagOverride>(OVERRIDES).find_one(doc! {
+                            "flag_key":enrollment::FLAG,"definition_id":null,"enabled":true,
+                            "$or":[{"org_user_id":null,"target_kind":"global"},{"org_user_id":{"$ne":null}}]
+                        }).session(&mut *session).await?.is_some(),
+                        _ => false, // The compiled global default remains false.
+                    };
+                    if widens {
+                        for capability in [
+                            enrollment::FLAG,
+                            "permissions:execution-dispatch-v1",
+                            "permissions:execution-authoring-v1",
+                            enrollment::READINESS,
+                        ] {
+                            security_readiness_service::require(db, capability).await?;
+                        }
+                    }
+                }
+                match kind {
+                    FlagTargetKind::User => {
+                        let person = target_id.as_deref().expect("validated target");
+                        if *enabled == Some(false) {
+                            db.collection::<Document>(USERS)
+                                .update_one(
+                                    doc! {"_id":person},
+                                    doc! {"$unset":{"execution_permission_enrollment":""}},
+                                )
+                                .session(&mut *session)
+                                .await?;
+                        } else {
+                            enrollment::recompute_in_session(db, person, session).await?;
+                        }
+                    }
+                    FlagTargetKind::Org => {
+                        enrollment::jobs::enqueue(
+                            db,
+                            target_id.as_deref().expect("validated target"),
+                            session,
+                        )
+                        .await?
+                    }
+                    _ => {} // Global enrollment never writes population markers.
+                }
+            }
             (
                 if enabled.is_some() {
                     "admin_feature_flag_override_set"
@@ -556,6 +647,45 @@ mod tests {
             assert!(normalize_tags(&tags).is_err());
         }
         assert_eq!(normalize_tags(&vec!["a".into(); 13]).unwrap(), vec!["a"]);
+    }
+    #[tokio::test]
+    async fn global_only_flags_reject_scoped_overrides() {
+        let (db, actor) = setup("flag_global_only").await;
+        for key in [
+            flags::INVITATION_CODE_FLAG_KEY,
+            flags::MOBILE_NEW_DOMAINS_FLAG_KEY,
+            flags::CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
+        ] {
+            for kind in [FlagTargetKind::Org, FlagTargetKind::User] {
+                let refused = mutate(
+                    &db,
+                    key,
+                    Mutation::Override {
+                        kind,
+                        target_id: Some(actor.user_id.clone()),
+                        enabled: Some(true),
+                    },
+                    &actor,
+                )
+                .await;
+                assert!(
+                    matches!(&refused, Err(AppError::BadRequest(m)) if m.contains("supports only a global override")),
+                    "{key} must refuse a scoped override"
+                );
+            }
+        }
+        mutate(
+            &db,
+            flags::MOBILE_NEW_DOMAINS_FLAG_KEY,
+            Mutation::Override {
+                kind: FlagTargetKind::Global,
+                target_id: None,
+                enabled: Some(true),
+            },
+            &actor,
+        )
+        .await
+        .unwrap();
     }
     #[tokio::test]
     async fn sunset_is_metadata_only_and_sparse_writes_preserve_it() {
@@ -976,5 +1106,81 @@ mod tests {
             page.entries[0].event_data.as_ref().unwrap()["enabled"],
             false
         );
+    }
+    #[tokio::test]
+    async fn execution_enrollment_is_atomic_and_requires_readiness() {
+        let (db, actor) = setup("execution_enrollment").await;
+        let key = flags::EXECUTION_PERMISSIONS_FLAG_KEY;
+        for kind in [FlagTargetKind::Global, FlagTargetKind::Org] {
+            let error = mutate(
+                &db,
+                key,
+                Mutation::Override {
+                    kind,
+                    target_id: Some("nonexistent".into()),
+                    enabled: Some(true),
+                },
+                &actor,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(matches!(error, AppError::SecurityReadinessUnavailable));
+        }
+        let change = |enabled| Mutation::Override {
+            kind: FlagTargetKind::User,
+            target_id: Some(actor.user_id.clone()),
+            enabled,
+        };
+        assert!(mutate(&db, key, change(Some(true)), &actor).await.is_err());
+        assert!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&actor.user_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_permission_enrollment
+                .is_none()
+        );
+        security_readiness_service::ready_test_replica(&db).await;
+        mutate(&db, key, change(Some(true)), &actor).await.unwrap();
+        assert_eq!(
+            db.collection::<User>(USERS)
+                .find_one(doc! {"_id":&actor.user_id})
+                .await
+                .unwrap()
+                .unwrap()
+                .execution_permission_enrollment,
+            Some(1)
+        );
+        for enabled in [Some(false), None] {
+            mutate(&db, key, change(Some(true)), &actor).await.unwrap();
+            mutate(&db, key, change(enabled), &actor).await.unwrap();
+            assert!(
+                db.collection::<User>(USERS)
+                    .find_one(doc! {"_id":&actor.user_id})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .execution_permission_enrollment
+                    .is_none()
+            );
+        }
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id":&actor.user_id},
+                doc! {"$set":{"is_active":false}},
+            )
+            .await
+            .unwrap();
+        assert!(mutate(&db, key, change(Some(true)), &actor).await.is_err());
+        assert_eq!(
+            db.collection::<Document>("feature_flag_overrides")
+                .count_documents(doc! {"flag_key":key,"enabled":true})
+                .await
+                .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
     }
 }

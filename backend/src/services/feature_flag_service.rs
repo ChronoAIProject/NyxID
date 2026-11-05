@@ -74,6 +74,27 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// Per-person rollout for CMA's prepaid Sandbox allocation billing. This is
+/// deliberately separate from the general billing flag so operators can
+/// enable CMA for a pilot owner independently of other metered traffic.
+/// This is the sole CMA rollout gate for new Sandbox coverage; it resolves
+/// global, matching organization, then personal overrides.
+pub const CMA_SANDBOX_BILLING_FLAG_KEY: &str = "experimental:cma-sandbox-billing";
+
+const CMA_SANDBOX_BILLING_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMA_SANDBOX_BILLING_FLAG_KEY,
+    description: "Enable prepaid CMA Sandbox allocation billing for the selected global, organization, or personal rollout audience.",
+    default_enabled: false,
+};
+
+/// Lago plan writes are shared across owners and have an independent runtime gate.
+pub const CMA_SANDBOX_RATE_SYNC_FLAG_KEY: &str = "experimental:cma-sandbox-rate-sync";
+const CMA_SANDBOX_RATE_SYNC_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
+    description: "Synchronize CMA Sandbox rate cards to Lago (global only). Disabling preserves existing rates and does not change billing admission gates.",
+    default_enabled: true,
+};
+
 /// Personal rollout for new hosted Machine admission and runtime-rate writes.
 /// Existing management, runtime accounting and cleanup remain available.
 pub const REMOTE_MACHINES_FLAG_KEY: &str = "experimental:remote-machines";
@@ -130,6 +151,13 @@ pub const VOICE_OPENAI_PLATFORM_FLAG_KEY: &str = "assistant:voice-openai-platfor
 const VOICE_OPENAI_PLATFORM_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: VOICE_OPENAI_PLATFORM_FLAG_KEY,
     description: "Allows platform GPT-Live only after forced-close and invoice reconciliation validation.",
+    default_enabled: false,
+};
+
+pub const VOICE_AGENT_KEY_FLAG_KEY: &str = "assistant:voice-agent-key";
+const VOICE_AGENT_KEY_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: VOICE_AGENT_KEY_FLAG_KEY,
+    description: "Allow ordinary Agent Keys with an exact Bot Voice service grant to invoke personal Bots through realtime voice, preserving the Bot's existing permissions, tool confirmations and billing.",
     default_enabled: false,
 };
 
@@ -208,6 +236,12 @@ const SHARED_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+const ORG_SPECIALIST_CHANNELS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: "nyxbot:org-specialist-channels",
+    description: "Organization specialist channels with member identity and budgeted org-paid guests; requires all executing replicas upgraded and old workers drained.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
@@ -225,6 +259,13 @@ pub const AGENT_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:operation-scopes";
 const AGENT_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: AGENT_OPERATION_SCOPES_FLAG_KEY,
     description: "Allows configuring specialist operation scopes after every replica supports enforcement. Existing scopes are always enforced.",
+    default_enabled: false,
+};
+
+pub const ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY: &str = "assistant:generated-artifacts";
+const ASSISTANT_GENERATED_ARTIFACTS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
+    description: "Admit generated Sandbox files for Web user turns only after all API and async workers upgrade and old writers drain.",
     default_enabled: false,
 };
 
@@ -262,6 +303,12 @@ const MACHINE_CAPABILITIES_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 pub const ORG_INSTRUCTION_FLAG_KEY: &str = "assistant:org-instruction-v1";
+pub const EXECUTION_PERMISSIONS_FLAG_KEY: &str = "permissions:execution-v1";
+const EXECUTION_PERMISSIONS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: EXECUTION_PERMISSIONS_FLAG_KEY,
+    description: "Explicit execution permissions for assistant chats: one approval card can save a permission (one operation, task, window or until revoked) and resume the request; covered requests skip repeated prompts. Per-person enables only; requires the reader, dispatch and authoring readiness capabilities",
+    default_enabled: false,
+};
 const ORG_INSTRUCTION_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ORG_INSTRUCTION_FLAG_KEY,
     description: "Require exact owner instruction for organization connections in every access mode",
@@ -309,6 +356,28 @@ const INVITATION_CODE_FLAG: FeatureFlagDef = FeatureFlagDef {
     description: "Require an invitation code for new account registration (global only).",
     default_enabled: true,
 };
+
+/// Mobile builds that embed both production domain sets read this global flag
+/// from `/public/config` on both API hosts at launch and use the new API,
+/// frontend and legal domains while it is on. Global only: the app reads it
+/// before anyone signs in.
+pub const MOBILE_NEW_DOMAINS_FLAG_KEY: &str = "mobile:new-domains";
+const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: MOBILE_NEW_DOMAINS_FLAG_KEY,
+    description: "Mobile apps built with both production domain sets switch to the new API, frontend and legal domains on their next launch (global only).",
+    default_enabled: false,
+};
+
+/// Flags resolved without a user or organization; only a global override applies.
+const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
+    INVITATION_CODE_FLAG_KEY,
+    MOBILE_NEW_DOMAINS_FLAG_KEY,
+    CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
+];
+
+pub(crate) fn is_global_only(flag_key: &str) -> bool {
+    GLOBAL_ONLY_FLAG_KEYS.contains(&flag_key)
+}
 
 /// NyxBot reaches personal and org chat-app bots through the Agent Event
 /// Gateway (Telegram always does). Resolve each flag for the linking person,
@@ -377,6 +446,7 @@ const NYXBOT_GATEWAY_FLAG_DEFS: [FeatureFlagDef; 8] = [
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
@@ -388,6 +458,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
@@ -396,16 +467,21 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     ORG_INSTRUCTION_FLAG,
+    EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_AGENT_KEY_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
+    CMA_SANDBOX_BILLING_FLAG,
+    CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -425,6 +501,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
 #[cfg(test)]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     INVITATION_CODE_FLAG,
+    MOBILE_NEW_DOMAINS_FLAG,
     MOBILE_MFA_FLAG,
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
@@ -436,6 +513,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     DISCORD_GATEWAY_FLAG,
     NYXBOT_ADAPTERS_FLAG,
     AGENT_OPERATION_SCOPES_FLAG,
+    ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
@@ -444,16 +522,21 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MACHINE_CAPABILITIES_FLAG,
     MACHINE_CONTEXTS_FLAG,
     ORG_INSTRUCTION_FLAG,
+    EXECUTION_PERMISSIONS_FLAG,
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
+    VOICE_AGENT_KEY_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
     VOICE_GROK_FLAG,
     VOICE_GROK_PLATFORM_FLAG,
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
+    CMA_SANDBOX_BILLING_FLAG,
+    CMA_SANDBOX_RATE_SYNC_FLAG,
     REMOTE_MACHINES_FLAG,
     SERVICE_MONITORING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
@@ -963,11 +1046,25 @@ pub async fn resolve_personal_features(
 
 /// Signup has no user or organization yet, so only the global override applies.
 pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &INVITATION_CODE_FLAG).await
+}
+
+/// Read by unauthenticated mobile launches, so only the global override applies.
+pub async fn mobile_new_domains_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &MOBILE_NEW_DOMAINS_FLAG).await
+}
+
+/// Resolve live for each retry pass; turning off shared Lago writes needs no redeploy.
+pub async fn cma_sandbox_rate_sync_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &CMA_SANDBOX_RATE_SYNC_FLAG).await
+}
+
+async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
     let override_row = db
         .collection::<FeatureFlagOverride>(COLLECTION_NAME)
         .find_one(doc! {
             "org_user_id": bson::Bson::Null,
-            "flag_key": INVITATION_CODE_FLAG_KEY,
+            "flag_key": flag.key,
             "definition_id": null,
             "target_kind": FlagTargetKind::Global.as_str(),
             "target_key": bson::Bson::Null,
@@ -975,7 +1072,7 @@ pub async fn invitation_code_required(db: &mongodb::Database) -> AppResult<bool>
         .await?;
     Ok(override_row
         .map(|row| row.enabled)
-        .unwrap_or(INVITATION_CODE_FLAG.default_enabled))
+        .unwrap_or(flag.default_enabled))
 }
 
 /// Whether the billing rollout flag is enabled for a billing owner.
@@ -1371,10 +1468,10 @@ pub async fn set_platform_override(
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
     let definition = get_definition(db, flag_key).await?;
-    if flag_key == INVITATION_CODE_FLAG_KEY && !matches!(target, FlagTarget::Global) {
-        return Err(AppError::BadRequest(
-            "invitation code flag supports only a global override".to_string(),
-        ));
+    if is_global_only(flag_key) && !matches!(target, FlagTarget::Global) {
+        return Err(AppError::BadRequest(format!(
+            "{flag_key} supports only a global override"
+        )));
     }
     if matches!(target, FlagTarget::Org | FlagTarget::Role(_)) {
         return Err(AppError::BadRequest(
@@ -1479,10 +1576,10 @@ pub async fn set_platform_org_override(
     actor_id: &str,
 ) -> AppResult<FeatureFlagOverride> {
     get_definition(db, flag_key).await?;
-    if flag_key == INVITATION_CODE_FLAG_KEY {
-        return Err(AppError::BadRequest(
-            "invitation code flag supports only a global override".to_string(),
-        ));
+    if is_global_only(flag_key) {
+        return Err(AppError::BadRequest(format!(
+            "{flag_key} supports only a global override"
+        )));
     }
     ensure_org_exists(db, org_user_id).await?;
     if enabled {
@@ -2051,6 +2148,19 @@ mod tests {
     }
 
     #[test]
+    fn execution_permissions_are_default_off_and_readiness_gated() {
+        let flag = FEATURE_FLAGS
+            .iter()
+            .find(|flag| flag.key == EXECUTION_PERMISSIONS_FLAG_KEY)
+            .unwrap();
+        assert!(!flag.default_enabled);
+        assert!(
+            super::super::security_readiness_service::CAPABILITIES
+                .contains(&EXECUTION_PERMISSIONS_FLAG_KEY)
+        );
+    }
+
+    #[test]
     fn registry_keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for def in FEATURE_FLAGS {
@@ -2140,6 +2250,60 @@ mod tests {
         .await
         .expect("re-enable");
         assert!(invitation_code_required(&db).await.expect("enabled"));
+    }
+
+    #[tokio::test]
+    async fn mobile_new_domains_defaults_off_and_uses_only_global_override() {
+        let Some(db) = connect_test_database("mobile_new_domains_flag").await else {
+            eprintln!("skipping mobile domain flag test: no local MongoDB available");
+            return;
+        };
+
+        assert!(!mobile_new_domains_enabled(&db).await.expect("default"));
+        let user_target = FlagTarget::User(Uuid::new_v4().to_string());
+        assert!(matches!(
+            set_platform_override(
+                &db,
+                MOBILE_NEW_DOMAINS_FLAG_KEY,
+                &user_target,
+                true,
+                "actor"
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            set_platform_org_override(
+                &db,
+                &Uuid::new_v4().to_string(),
+                MOBILE_NEW_DOMAINS_FLAG_KEY,
+                true,
+                "actor",
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+
+        set_platform_override(
+            &db,
+            MOBILE_NEW_DOMAINS_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "actor",
+        )
+        .await
+        .expect("enable");
+        assert!(mobile_new_domains_enabled(&db).await.expect("enabled"));
+        set_platform_override(
+            &db,
+            MOBILE_NEW_DOMAINS_FLAG_KEY,
+            &FlagTarget::Global,
+            false,
+            "actor",
+        )
+        .await
+        .expect("disable");
+        assert!(!mobile_new_domains_enabled(&db).await.expect("disabled"));
     }
 
     #[test]
@@ -2964,6 +3128,7 @@ mod tests {
             shipped,
             vec![
                 "auth:invitation-code",
+                "mobile:new-domains",
                 "auth:mobile-mfa",
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
@@ -2975,6 +3140,7 @@ mod tests {
                 "channel:discord-gateway",
                 "nyxbot:service-adapters",
                 "assistant:operation-scopes",
+                "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
                 "assistant:attachment-writes",
@@ -2983,16 +3149,21 @@ mod tests {
                 "assistant:machine-capabilities",
                 "assistant:machine-contexts",
                 "assistant:org-instruction-v1",
+                "permissions:execution-v1",
                 "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
                 "assistant:org-agents",
+                "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",
                 "assistant:voice",
+                "assistant:voice-agent-key",
                 "assistant:voice-openai-platform",
                 "assistant:voice-grok",
                 "assistant:voice-grok-platform",
                 "experimental:ai-assistant",
                 "experimental:billing",
+                "experimental:cma-sandbox-billing",
+                "experimental:cma-sandbox-rate-sync",
                 "experimental:remote-machines",
                 "services:monitoring",
                 "experimental:aevatar-chat-wire-log",
@@ -3676,8 +3847,9 @@ mod tests {
     }
 
     #[test]
-    fn channel_media_and_attachment_writes_are_registered_default_off() {
+    fn channel_media_attachment_writes_and_generated_artifacts_are_registered_default_off() {
         for key in [
+            ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
             ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
             ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
         ] {

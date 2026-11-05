@@ -188,6 +188,20 @@ when present, and granted calls add no maintainer reads. Ordinary action
 confirmations still belong to the acting person and do not expand grants or
 allow an organization agent to access the person's account.
 
+Card locations and outcomes (#2072): a specialist, crew, collaboration member or
+channel assignment keeps the card in its source conversation. `report_to`
+routes the notification, not the card or authority. Request summaries (including
+`wait_for_subagents`) expose the current presentation `status`, stable `code`,
+and exact `review_path`; routed creation notices include the full owner-review
+URL and explicitly are not evidence that a request is still pending. The owner
+can open that link even when viewing NyxBot's receiving conversation. Existing
+history authorization, live routing/membership checks, guest restrictions,
+one-use consumption and Full-access receipts remain unchanged. If the request
+expired or failed, report that outcome and ask before creating a fresh one;
+never tell the owner to click an invisible or terminal Allow/Deny card. Proxy
+approvals link to `/assistant/approvals`, not to a specialist's owner-action
+card. See the engine's Acknowledgements section for history and expiry behavior.
+
 ### Specialist skill permission decisions
 
 Skill permission is advisory: allowing `request_agent_skills` does not attach
@@ -321,6 +335,19 @@ text without explicit recipients is refused; ambiguous handoff tokens are ignore
 Organization groups, automation and platform/channel threads still reject shared
 agents. Multi-person collaboration uses the explicit Phase 2 surface in
 [the shared-agent design](12-shared-agents-and-groups.md).
+
+Removing an agent from a personal crew settles its active turn through Stop,
+then removes its hidden conversation and revokes its Agent Key in the same
+transaction as the roster change. Encrypted credentials, session bindings and
+pending cards are removed; bound approvals expire. Previously published group
+messages stay. Re-adding the agent creates a new thread and key. Concurrent
+roster edits conflict rather than restoring an old roster; if a replacement
+turn wins admission while removal is being prepared, the save returns
+`turn_active` without changing membership and can be retried. Late workers
+cannot publish or hand off through a retired thread, even after re-addition.
+No persisted enum or index changes are required; the deleted conversation
+releases the existing unique member-thread slot. Upgrade every writer before
+relying on the new removal/admission transaction fences.
 
 Like Grok Bot's group chats: `assistant_groups` holds the owner plus 1–8 agents;
 `assistant_group_messages` holds the shared transcript (`user`, `agent`,
@@ -763,7 +790,7 @@ payload or, once, from the platform's chat lookup (Telegram `getChat`, Lark
 | `reply_mode` | `mention` (groups, channels) | Answer only when the bot is mentioned or a message replies to one of its messages; `all` answers every message. Private chats always answer. |
 | `members` | default: `everyone` once the owner has talked to the bot there, else `owner` (groups, channels) | Members other than the owner may talk to the agent as guests; `owner` answers only the owner; `default` returns to the default. A stranger who adds the bot to their own group gets nothing; a member who addresses it before the owner has talked there is told why, at most daily. |
 | `allow_posts` | off, or the private-chat default below | The chat's agent may post there without being asked (`nyxid__post_to_chat`, text and, with `include_images`, its own turn's images). |
-| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Organization specialists are refused under the [organization-agent channel contract](../ORG_AGENTS.md) because their conversations are private member threads. |
+| agent | the bot's agent | The chat reaches NyxBot or a personal specialist; it starts a new thread with it, and relinking the bot leaves such chats alone. Default-off org-specialist bindings allow same-org targets under the [channel contract](#organization-specialists-on-channel-bots), with hidden per-actor execution. |
 
 Per bot, `private_chats` (`nyxid__update_channel_access`) is `owner` (default)
 or `everyone`: anyone who messages the bot privately gets their own thread, as a
@@ -1629,8 +1656,12 @@ authorize execution or cause publication to rerun when a receipt is missing.
 Group review remains a full card without exposing hidden member context.
 
 Normal and group message renderers share an accessible Copy action. Assistants
-copy the sanitized Markdown displayed in the message; users copy the original
-body. Hidden tool markup, thinking, controls and receipts are excluded. Blank,
+copy readable text matching the rendered body, with rich HTML preserving emphasis,
+paragraphs and link labels/destinations when the clipboard supports it. Plain-text
+targets receive visible link labels without Markdown syntax or expanded URLs;
+code and literal content retain their text. Both formats use the message renderer's
+sanitization and link policy. Users copy the original body literally. Hidden tool
+markup, thinking, controls and receipts are excluded. Blank,
 image-only and streaming assistant messages have no Copy action. Clipboard
 success is reported only after the write resolves; a failure remains retryable.
 
@@ -1694,7 +1725,13 @@ After readiness activation of `assistant:org-instruction-v1`, NyxBot and persona
 
 Org cards persist reason `org_connection`, retain controls in Full and survive an Auto-to-Full mode switch. Admission precedes credential refresh/token exchange and is carried through final send revalidation. Machine declarations are checked per exact connection; new job/watch receipts cover only their bounded lifecycle. Legacy org jobs require a reviewed replacement command; unproven watches pause for an exact continuation card.
 
-“My account” requires the owner's personal connection; never describe org data as their personal data. Use `nyx__connect_service` with visible catalog UUID/slug and present the hosted link. Named `settings_link add_service` gives structured connect guidance; unnamed opens Plugins. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Specialist keys remain denied and direct the owner to NyxBot/Plugins, followed by a separate specialist grant. The server org acknowledgement carries Connect your own independently of model prose. Connection facts report self/shared-person/org ownership and unknown provider account identity.
+“My account” requires the owner's personal connection; never describe org data as their personal data. When the owner asks to connect a named service, call `nyx__connect_service` with a visible catalog UUID/slug immediately, even if connections exist. Give the hosted link immediately and mention the existing connections in one short line. Never ask whether to proceed, suggest reusing an existing connection instead, substitute `/keys` or Plugins, or infer a provider account identity from ownership/labels. Both named and unnamed `settings_link add_service` return structured connect guidance; unnamed requests first identify the catalog through discovery.
+
+Chat connect results include `existing_connections` and `existing_connections_truncated`: at most ten non-deleted connections for the exact catalog, newest first with UUID tie-breaking. Facts include connection ID/slug, label (up to 120 characters), `is_active`, self/shared-person/organization ownership, organization name (up to 120 characters), and `account.status: unknown`. Unified inventory comes from `user_services` through the shared service visibility resolver, which applies live memberships, inherited role scopes, and specialist connection IDs. Unscoped NyxBot inventory also includes the actor's own active `user_service_connections` row for this catalog, marked `source: "legacy_connection"`; its ID and credential label are metadata, and its connection slug is the catalog slug. Both sources share the ten-row bound and ordering. A retained unified row with `source: "migration_connection"` and `source_id` equal to the legacy ID represents that connection once; independent same-catalog connections remain separate. Specialists never receive legacy rows because their grants name unified connection IDs. Viewer and other `allowed: false` rows are excluded. Disabled connections remain metadata; explicit deleted markers and older tombstones without an endpoint are excluded. Unreadable/inactive owners are skipped through the batched ownership projection shared with `facts_for`. Labels are fetched by metadata-only projections; no credentials, provider tokens, or guessed provider account names are returned. An empty inventory is `[]`. These facts never grant execution authority.
+
+Personal credential catalogs, including OAuth/device-code/API-key providers with `requires_user_credential=false`, receive hosted links. Explicit platform-key requests create unified connections in one step. Other non-hosted requests retain the legacy one-step connector, including no-auth and internal master-credential catalogs. Its existing-active-connection conflict returns successful `status: already_connected`, catalog ID/slug, and existing facts: say it is already connected in one short line because there is no separate account to add. Repeated no-auth connects do not create duplicate unified connections. Unsupported SSH flows and inactive/unconfigured providers return a non-link `connect_unavailable` result with the same facts. A catalog without `provider_config_id` returns `provider_requirement_only` only when it has a `required: true` provider requirement and `requires_user_credential=false`; an admin must link that provider before hosted sign-in can work. Optional requirements do not block setup, and catalogs collecting their own credential keep the hosted API-key form. Other connect failures return sanitized `connect_failed` plus facts. External MCP clients retain their existing response and routing contract.
+
+Specialists never mint links, even in routed mode. Their refusal includes only same-catalog connection facts already within the key's effective grants (including active auto/platform rows only when authentication grants them) and asks the owner to have NyxBot perform setup, followed by a separate specialist grant; direct specialist work never transfers automatically to NyxBot. An org-owned specialist thread keeps the acting member as its key owner, while the owner-bound grant resolver limits its connection IDs to the agent organization's own rows; personal or other-organization rows are excluded. Guests receive no inventory. Organization cards retain exact operation approval and current connection facts; their `connect_own` is setup guidance, not a minted link or approval. When the owner requests personal setup, use the connect tool immediately with its existing-connection narration. Unsupported hosted card offers share the connect tool's reason codes; `no_separate_account` instead explains the one-step setup contract. Plugins Connect/Connect your own uses the existing hosted modal. Manage remains; Advanced setup handles SSH/custom/node routing. Hosted preview carries the declared credential fields so a failed catalog/pricing lookup cannot hide them (clients retain catalog fallback for older servers). Web and mobile hosted credential forms render declared token-exchange fields separately (for example, App ID and App Secret), then submit one JSON credential. Lark/Feishu startup corrects only exact prior system-seed instructions, preserving admin text and explicit clears.
 
 `assistant:hosted-connect-intent-v1` activates stored intent locks for assistant personal-credential links (MCP and Plugins Connect your own; plain Plugins Connect is an ordinary link). Platform-key and credential-free assistant connects stay one-step. Preview shows the lock, and completion/resume reject overrides. Legacy and non-assistant links retain their contract. Upgrade readers/UI first, drain all old writers/completers, then activate; old binaries must not rejoin. See [service execution](../NYXBOT_SERVICE_EXECUTION.md) and [rollout readiness](../SECURITY_ROLLOUT_READINESS.md).
 
@@ -1784,3 +1821,52 @@ home/report pointers, define the result.
 
 The storage and claim contract is in
 [Channel bot relay — assigned specialist images](../CHANNEL_BOT_RELAY.md#images-from-an-assigned-specialist-1897).
+
+## Organization specialists on channel bots
+
+With `nyxbot:org-specialist-channels` enabled after replica readiness, an org
+admin can connect an existing **same-org** bot to an org specialist in the
+Channel bots settings, REST connect/link routes, or their personal NyxBot's
+`connect_channel_bot` / `link_channel_bot` tools. Personal setup links still
+create personal bots. There is no org NyxBot, cross-org link, or personal fallback.
+
+Each Admin/Member with `can_proxy()` requests a verification code in their own
+first-party NyxID session, sends it privately to the bot, and confirms the
+observed chat account back in that session. Another member/admin cannot confirm
+it. Codes expire in ten minutes. “Owner only” means verified org members on this
+binding; only a verified admin sets “owner talked here”. Removed members are
+refused and their channel keys revoked; they do not become guests automatically.
+Person erasure removes the linked person ID and their transcript content, keeping
+a sender revocation tombstone until channel/org erasure to preserve that refusal.
+Member DMs continue their private org-agent home. Groups/topics publish one
+public transcript, with hidden execution and confirmation cards per actor.
+Private DM context, tool traces and another actor's approvals are never public.
+Queued questions enter that transcript atomically with source acceptance; queue
+instructions and unfinished/failed reply drafts remain private execution state.
+
+Guests are off by default. Only an admin can enable them, choose delegated HTTP
+services, and accept a positive daily exact-credit cap (1 credit suggested).
+Delegation intersects the specialist's grants, guest access levels and operation
+scopes; no services means model-only chat. The org wallet pays all guest model
+and tool usage, including platform keys. It must already be provisioned with a
+subscription. Each sender has a six-request/minute limit. Budget/rate failures
+produce a short refusal; verified members retain their own existing access and
+billing rules. Settings show today's spend/reservations and wallet readiness.
+Guest execution cannot use account tools, machines, saved logins or approvals.
+
+Binding metadata lives on `org_specialist`, sender verification in
+`org_channel_sender_links`; optional `org_execution` origins carry the exact
+actor/revision through queueing, thread follow, recovery and late delivery.
+First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
+`GET/PUT org-specialist`, `POST/DELETE member-link`,
+`GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.
+Other live org admins can manage/unlink the binding without reading member DMs
+or obtaining provider keys. Relinking resets verification and guest exposure;
+changing personal ↔ org target requires disconnect/reconnect. Loss of the
+transport admin, org/bot/agent authority, or feature readiness retires the link
+with `org_access_lost`. Guest-policy changes invalidate pending guest authority.
+Relay/native/gateway use the same local validator; CMA never decides membership
+or payer. A verified private chat moves between relay and gateway with its member
+home reply binding and guest execution lane; adoption is atomic and keeps the
+relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
+workers, then enable for an admin. Disable and retire before binary downgrade.

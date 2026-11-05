@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Admission {
+    pub(super) execution_enrolled: bool,
     slot: model::ExecutionSlot,
     actor: String,
     request_id: String,
@@ -191,6 +192,7 @@ pub(super) async fn enqueue_with_uploads_ready(
                 message.author_display_name=access.participants.iter().find(|p|p.id==actor).map(|p|p.display_name.clone());
                 message.attachments=svc::assistant_upload_service::bind(db,actor,group_id,&message.id,uploads,session).await?;
                 db.collection::<GroupMessage>(MESSAGES).update_one(doc! {"_id":&message.id},doc! {"$set":{"attachments":bson::to_bson(&message.attachments).map_err(|e|AppError::Internal(e.to_string()))?,"mentioned_participant_ids":&message.mentioned_participant_ids,"author_display_name":&message.author_display_name}}).session(&mut *session).await?;
+                notifications::enqueue(db, &access.group, &message, session).await?;
                 let mut authorities = BTreeMap::new();
                 // A recipient-picker edit does not make an unavailable mention
                 // disappear. Record its refusal without adding a recipient or
@@ -221,7 +223,13 @@ pub(super) async fn enqueue_with_uploads_ready(
                         .await?;
                     }
                 }
+                let participating = access.execution_enrolled && svc::execution_permission_enrollment::live_enabled(db, actor, Some(session)).await?;
                 let request = GroupRequest {
+                    execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
+                        version:1, task:crate::models::execution_permission::TaskRef {root_kind:crate::models::execution_permission::TaskRootKind::GroupRequest,root_id:id.clone()},
+                        actor_user_id:actor.into(),audience:crate::models::execution_permission::Audience::Group {group_id:group_id.into(),revision:access.membership_revision()},epoch:1,
+                        hard_deadline:Utc::now()+chrono::Duration::hours(24),cancelled:false,parent_turn_id:None,
+                    }),
                     collaboration: Some(model::RequestBinding {
                         version: model::VERSION,
                         membership_revision: access.membership_revision(),
@@ -352,6 +360,7 @@ pub(super) async fn admit_in_session(
     if db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":request_id,"pending_agent_ids":agent_id},
         doc! {"$pull":{"pending_agent_ids":agent_id},"$addToSet":{"collaboration.admitted_agent_ids":agent_id}}).session(session).await?.matched_count != 1 {return Err(stale());}
     Ok(Admission {
+        execution_enrolled: request.execution_task.is_some(),
         slot,
         actor: actor.into(),
         request_id: request_id.into(),
@@ -456,6 +465,7 @@ pub(crate) async fn settled_admission(
         return Err(stale());
     }
     Ok(Admission {
+        execution_enrolled: false,
         slot,
         actor: b.original_requester_id.clone(),
         request_id: b.request_id.clone(),

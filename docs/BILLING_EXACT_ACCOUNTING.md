@@ -478,3 +478,36 @@ is durable. Lago fee/tax cent rounding remains an ordinary provider-refresh
 `external:lago` adjustment. No ledger/hash encoding, dedupe key or checkpoint
 protocol changes. Legacy rows without tax fields settle pre-tax. Deploy all
 replicas before enabling Lago customer taxes; see [operations](BILLING_OPERATIONS.md).
+
+## Organization channel guest budgets
+
+Default-off `nyxbot:org-specialist-channels` adds one typed payer exception to
+`BillingOwnerResolver::resolve_for_execution`. A verified org-specialist channel
+**guest** with live admin-enabled exposure bills its organization's provisioned
+wallet for model and delegated tool usage, including platform keys. Members keep
+org BYOK → org and platform key → person. Ordinary platform-key execution keeps
+the billing principal and `PaysFrom::Personal` classification without an owner-type
+read, including org-owned API keys whose principal is the org. Those keys never
+enter the guest lane. No auto-provisioning or transport-admin sponsorship is used
+for guests.
+
+The admin must set a positive exact Credits cap per binding per UTC day (the UI
+suggests 1 credit before enabling). `org_channel_guest_budgets` and
+`org_channel_guest_holds` reserve the existing billing estimate in the same
+transaction as exact allowance/grant/wallet admission. Concurrent admissions
+cannot spend the same remaining budget. The hold includes allowance/grant value
+and the wallet's tax-inclusive reservation; benefits are not taxed. Usage-ID settlement/release is idempotent;
+crashes retain the reservation until the normal funding reconciler settles it.
+The admission day remains fixed across midnight. Actual consumed usage must still
+settle if a provider exceeds the estimate; the cap governs new billed admission,
+not cancellation of an already consumed provider effect. Lowering policy never
+resets today's spend or outstanding reservations. Guests receive a short
+unavailable reply when admission fails; members do not consume this cap.
+
+Usage retains org `billing_owner_id` and additive `org_channel_guest` metadata
+(binding ID and a scoped sender hash, never message text or credentials). The
+org's billing usage and bot settings show spend; settings also show reserved
+credits, exposure and delegated services. Financial rows follow accounting
+retention and are never discarded while unsettled. Every executing replica must
+support the typed lane before exposure is enabled; use the existing security
+readiness roster and drain controls, not a new environment variable.

@@ -1,4 +1,12 @@
-import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import { useState } from "react";
+import { Check } from "lucide-react";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+} from "@/components/ui/grouped-list";
 import { useNodes } from "@/hooks/use-nodes";
 import { useSavedLogins } from "@/hooks/use-saved-logins";
 
@@ -8,13 +16,16 @@ export function MachineGrantPicker({
   onChange,
   disabled,
   org,
+  footer,
 }: {
   readonly org?: string;
+  readonly footer?: React.ReactNode;
   readonly kind: "machines" | "logins";
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
   readonly disabled?: boolean;
 }) {
+  const [search, setSearch] = useState("");
   const nodes = useNodes();
   const logins = useSavedLogins("all");
   const rows =
@@ -26,7 +37,8 @@ export function MachineGrantPicker({
               node.machine &&
               (node.machine.shell ||
                 node.machine.files ||
-                node.machine.computer || node.machine.browser),
+                node.machine.computer ||
+                node.machine.browser),
           )
           .map((node) => ({ id: node.id, label: node.name }))
       : (logins.data ?? []).map((login) => ({
@@ -37,39 +49,91 @@ export function MachineGrantPicker({
     .filter((id) => !rows.some((row) => row.id === id))
     .map((id) => ({ id, label: `${id} (unavailable)` }));
   const error = kind === "machines" ? nodes.error : logins.error;
+  const allRows = [...rows, ...unknown];
+  useDrawerSearchEntries(allRows.map((row) => ({
+    id: `${kind}-${row.id}`, title: row.label,
+    breadcrumb: `Access › ${kind === "machines" ? "Machines" : "Saved logins"}`,
+    keywords: value.includes(row.id) ? "Granted" : "Available", reveal: () => setSearch(""),
+  })));
+  const filtered = allRows.filter((row) =>
+    row.label.toLowerCase().includes(search.toLowerCase()),
+  );
   return (
-    <fieldset disabled={disabled} className="space-y-2">
-      <legend className="mb-2 text-12 font-medium">
+    <fieldset disabled={disabled} className="min-w-0">
+      <Label asChild><legend className="sr-only">
         {kind === "machines" ? "Machines" : "Saved logins"}
-      </legend>
-      {error ? (
-        <p role="alert" className="text-12 text-destructive">
-          {error.message}
-        </p>
-      ) : null}
-      {[...rows, ...unknown].map((row) => (
-        <label key={row.id} className="flex items-center gap-2 text-12">
-          <Checkbox
-            checked={value.includes(row.id)}
-            onCheckedChange={(checked) =>
-              onChange(
-                checked
-                  ? [...value, row.id]
-                  : value.filter((id) => id !== row.id),
-              )
-            }
-          />
-          {row.label}
-        </label>
-      ))}
-      {!rows.length && !unknown.length ? (
-        <p className="text-12 text-muted-foreground">
-          None available.{" "}
-          {kind === "machines"
-            ? "Pair a machine first, then grant it here."
-            : "Save a login first, then grant it here."}
-        </p>
-      ) : null}
+      </legend></Label>
+      <GroupedList
+        title={kind === "machines" ? "Machines" : "Saved logins"}
+        footer={
+          <>
+            {footer}
+            {error ? (
+              <span role="alert" className="text-destructive">
+                {error.message}
+              </span>
+            ) : null}
+          </>
+        }
+      >
+        {allRows.length > 8 ? (
+          <GroupedRow>
+            <GroupedInput
+              aria-label={`Search ${kind === "machines" ? "machines" : "saved logins"}`}
+              placeholder="Search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </GroupedRow>
+        ) : null}
+        <div
+          className={
+            allRows.length > 12
+              ? "assistant-scrollbar max-h-80 overflow-y-auto"
+              : undefined
+          }
+        >
+          {filtered.map((row) => (
+            <GroupedRow data-drawer-search-target={`${kind}-${row.id}`} key={row.id} asChild interactive>
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={value.includes(row.id)}
+                disabled={disabled}
+                onClick={() =>
+                  onChange(
+                    value.includes(row.id)
+                      ? value.filter((id) => id !== row.id)
+                      : [...value, row.id],
+                  )
+                }
+              >
+                <span className="min-w-0 flex-1 break-words">{row.label}</span>
+                <Check
+                  aria-hidden
+                  className={
+                    value.includes(row.id)
+                      ? "size-[1.125em] shrink-0 text-primary"
+                      : "invisible size-[1.125em] shrink-0"
+                  }
+                />
+              </button>
+            </GroupedRow>
+          ))}
+          {!filtered.length ? (
+            <GroupedRow
+              title={search ? "No matches" : "None available."}
+              description={
+                search
+                  ? undefined
+                  : kind === "machines"
+                    ? "Pair a machine first, then grant it here."
+                    : "Save a login first, then grant it here."
+              }
+            />
+          ) : null}
+        </div>
+      </GroupedList>
     </fieldset>
   );
 }

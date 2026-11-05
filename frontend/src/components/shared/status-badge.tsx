@@ -64,11 +64,11 @@ export function StatusBadge({ domain, statusKey, className }: StatusBadgeProps) 
           </span>
         </TooltipTrigger>
         <TooltipContent className="max-w-xs space-y-1">
-          <p className="text-xs">{meta.tooltip}</p>
+          <p className="text-13">{meta.tooltip}</p>
           {meta.remediation ? (
             <Link
               to={meta.remediation.href}
-              className="inline-block text-11 text-primary-text underline"
+              className="inline-block type-row-title text-primary-text underline"
             >
               {meta.remediation.label} →
             </Link>

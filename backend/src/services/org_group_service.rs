@@ -106,6 +106,7 @@ pub fn is_org(group: &AssistantGroup) -> bool {
 /// Bound to one actor, owner and request; never stored on a group or reused
 /// across requests. The personal path does no membership reads.
 pub struct Access {
+    pub(crate) execution_enrolled: bool,
     pub group: AssistantGroup,
     pub actor: String,
     pub org: Option<Arc<org::RequestAccess>>,
@@ -141,6 +142,7 @@ pub async fn authorize(
             return Err(missing());
         }
         return Ok(Access {
+            execution_enrolled: false,
             group,
             actor: actor.into(),
             org: None,
@@ -149,15 +151,16 @@ pub async fn authorize(
     if !group.participant_user_ids.iter().any(|id| id == actor) {
         return Err(missing());
     }
-    if snapshot.is_none()
-        && db
+    let execution_enrolled = if snapshot.is_none() {
+        let person = db
             .collection::<User>(USERS)
             .find_one(doc! {"_id":actor,"is_active":true,"user_type":{"$ne":"org"}})
             .await?
-            .is_none()
-    {
-        return Err(missing());
-    }
+            .ok_or_else(missing)?;
+        super::execution_permission_enrollment::snapshot::candidate(db, &person, &[])
+    } else {
+        false
+    };
     let access = if let Some(snapshot) = snapshot {
         if !snapshot.matches(actor, &group.user_id) {
             return Err(missing());
@@ -173,6 +176,7 @@ pub async fn authorize(
             .ok_or_else(missing)?
     };
     Ok(Access {
+        execution_enrolled,
         group,
         actor: actor.into(),
         org: Some(access),
@@ -411,6 +415,7 @@ pub async fn create(
         .collect();
     let now = Utc::now();
     let access = Access {
+        execution_enrolled: false,
         actor: actor.into(),
         org: Some(snapshot),
         group: AssistantGroup {
@@ -856,6 +861,7 @@ pub(crate) async fn append_with_hook(
     let name = display_name(db, &access.actor).await?;
     let db = db.clone();
     let access = Access {
+        execution_enrolled: false,
         group: access.group.clone(),
         actor: access.actor.clone(),
         org: access.org.clone(),
@@ -1165,6 +1171,10 @@ pub async fn transcript(db: &Database, access: &Access, since: i64) -> AppResult
         personal::messages(db, &access.group.user_id, &access.group.id, 60, None).await?;
     rows.retain(|r| r.seq > since);
     let newest = rows.last().map_or(since, |r| r.seq);
+    Ok((render_transcript(&rows), newest))
+}
+
+pub(crate) fn render_transcript(rows: &[crate::models::assistant_group::GroupMessage]) -> String {
     let text = rows
         .iter()
         .map(|r| {
@@ -1187,7 +1197,7 @@ pub async fn transcript(db: &Database, access: &Access, since: i64) -> AppResult
         })
         .collect::<Vec<_>>()
         .join("\n");
-    Ok((super::assistant_nyxagent::excerpt(&text, 12000), newest))
+    super::assistant_nyxagent::excerpt(&text, 12000)
 }
 
 pub async fn note(db: &Database, access: &Access, agent: &AssistantAgent) -> AppResult<String> {

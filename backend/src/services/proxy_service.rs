@@ -67,6 +67,10 @@ impl ProxyBody {
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    pub(crate) execution_request:
+        Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
+    pub(crate) execution_permission:
+        Option<std::sync::Arc<super::execution_permission_dispatch::Permit>>,
     pub credential_deferred: bool,
     pub workspace_destinations_pending: bool,
     pub target_id: Option<String>,
@@ -1239,6 +1243,8 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1265,6 +1271,8 @@ pub async fn resolve_admin_proxy_target(
     let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -1356,6 +1364,8 @@ pub async fn resolve_curation_proxy_target(
     };
     Ok((
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1475,6 +1485,8 @@ pub async fn resolve_proxy_target(
             super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1527,6 +1539,8 @@ pub async fn resolve_proxy_target(
         super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -1556,6 +1570,8 @@ pub(crate) async fn resolve_catalog_platform_target(
     if super::platform_key_service::no_auth_platform_service(&service) {
         super::platform_key_service::require(db, &service, owner_id).await?;
         return Ok(ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -1586,6 +1602,8 @@ pub(crate) async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         workspace_destinations_pending: super::destination_routing::workspace_destinations_pending(
             &service,
@@ -1692,6 +1710,8 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                execution_request: None,
+                execution_permission: None,
                 credential_deferred: false,
                 workspace_destinations_pending:
                     super::destination_routing::workspace_destinations_pending(&service),
@@ -1766,6 +1786,8 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending:
                 super::destination_routing::workspace_destinations_pending(&service),
@@ -3245,6 +3267,8 @@ async fn finish_resolution(
         };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: !materialize_credentials,
                 base_url: catalog_service.base_url.clone(),
                 workspace_destinations_pending: catalog_proxy_authorization
@@ -3290,6 +3314,8 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
@@ -3396,6 +3422,8 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: !materialize_credentials,
                 workspace_destinations_pending: catalog_proxy_authorization
                     .workspace_destinations_pending,
@@ -3464,6 +3492,8 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: !materialize_credentials,
             workspace_destinations_pending: catalog_proxy_authorization
                 .workspace_destinations_pending,
@@ -4532,6 +4562,23 @@ async fn forward_request_with_egress_guard_inner(
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     target.require_credential_materialized()?;
+    if let Some(permit) = &target.execution_permission {
+        let ProxyBody::Buffered(bytes) = &body else {
+            return Err(ForwardRequestError::PreDispatchRejected(
+                AppError::Forbidden("Execution coverage requires a bounded HTTP request".into()),
+            ));
+        };
+        permit
+            .validate_effect(
+                target,
+                method.as_str(),
+                path,
+                query,
+                bytes.as_deref().unwrap_or_default(),
+                &headers,
+            )
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     super::lark_attachment_tool::refuse_reserved_path(path)?;
     if super::telnyx_platform_service::contract(&target.service).is_some() {
         let proof = billing_egress_permit.managed_proof().ok_or_else(|| {
@@ -4939,15 +4986,62 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
+    if let Some(context) = &target.execution_request {
+        context
+            .check_drain()
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
     let response = if let Some(proof) = resource_proof {
         let mut request = request.build()?;
         proof
             .attach(&mut request)
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
-        no_redirect_http_client().execute(request).await?
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .before_send(target)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        if let Some(context) = &target.execution_request {
+            context.native_dispatched();
+        }
+        let result = no_redirect_http_client().execute(request).await;
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .complete(result.is_ok())
+                .await
+                .map_err(ForwardRequestError::Application)?;
+        }
+        result?
     } else {
-        request.send().await?
+        let result = if let Some(permit) = &target.execution_permission {
+            // A local builder failure is not a provider attempt. Finish all
+            // request preparation before committing the one-use send barrier.
+            let request = request.build()?;
+            permit
+                .before_send(target)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+            if let Some(context) = &target.execution_request {
+                context.native_dispatched();
+            }
+            no_redirect_http_client().execute(request).await
+        } else {
+            let request = request.build()?;
+            if let Some(context) = &target.execution_request {
+                context.native_dispatched();
+            }
+            client.execute(request).await
+        };
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .complete(result.is_ok())
+                .await
+                .map_err(ForwardRequestError::Application)?;
+        }
+        result?
     };
 
     // Cache successful billing-API responses so a follow-up request
@@ -6540,6 +6634,7 @@ mod tests {
         // credential whose secret is envelope-encrypted with the test keys.
         db.collection::<ApiKey>(API_KEYS)
             .insert_one(ApiKey {
+                permission_policy_id: None,
                 id: api_key_id.clone(),
                 user_id: user_id.clone(),
                 name: "coding-agent".to_string(),
@@ -6779,6 +6874,8 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -8201,6 +8298,8 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -8605,6 +8704,8 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -8849,6 +8950,8 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9284,6 +9387,8 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9306,6 +9411,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9328,6 +9435,8 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9347,6 +9456,8 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9366,6 +9477,8 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9385,6 +9498,8 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9438,6 +9553,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9459,6 +9576,8 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -9683,6 +9802,8 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

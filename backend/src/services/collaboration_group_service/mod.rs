@@ -5,6 +5,7 @@ pub mod cleanup;
 pub mod guest_requests;
 pub mod identity;
 pub mod membership;
+pub mod notifications;
 pub mod participant_posts;
 pub(crate) mod people;
 pub mod requests;
@@ -210,6 +211,17 @@ pub async fn messages(
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
     for (collection, keys, unique) in [
+        (model::READ_STATES, doc! {"group_id":1,"user_id":1}, true),
+        (
+            model::MENTION_NOTIFICATIONS,
+            doc! {"group_id":1,"message_id":1,"user_id":1},
+            true,
+        ),
+        (
+            model::MENTION_NOTIFICATIONS,
+            doc! {"claimed":1,"created_at":1},
+            false,
+        ),
         (model::INVITES, doc! {"token_hash":1}, true),
         (
             model::INVITES,
@@ -262,6 +274,18 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             )
             .await?;
     }
+    db.collection::<bson::Document>(model::MENTION_NOTIFICATIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"created_at":1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     for collection in [model::INVITES, model::TRANSFERS, model::PROPOSALS] {
         db.collection::<bson::Document>(collection)
             .create_index(
@@ -351,6 +375,13 @@ async fn invalidate(db: &Database, group: &str, session: &mut ClientSession) -> 
         .await?;
     db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
         .update_many(doc! {"assistant_group.conversation_id":{"$in":&ids},"status":{"$in":["pending","approved"]}},doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
+    super::execution_permission_dispatch::proposals::cancel_in_session(
+        db,
+        session,
+        doc! {"execution_proposal.v1.conversation_id":{"$in":&ids}},
+        "group_authority_changed",
+    )
+    .await?;
     db.collection::<bson::Document>(shares::CONSENTS_COLLECTION_NAME)
         .update_many(
             doc! {"conversation_id":{"$in":&ids}},

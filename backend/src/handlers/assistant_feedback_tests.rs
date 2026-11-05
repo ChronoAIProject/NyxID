@@ -34,6 +34,7 @@ mod fixtures {
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -75,6 +76,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -145,6 +147,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -199,6 +202,7 @@ async fn feedback_concurrent_first_puts_share_one_row() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -383,6 +387,7 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -456,6 +461,7 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -513,6 +519,7 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -663,6 +670,7 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -746,6 +754,7 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
             &f,
             AssistantMessage {
                 crm_artifacts: Vec::new(),
+                execution_task: None,
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -1020,6 +1029,7 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1118,6 +1128,7 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1243,6 +1254,7 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
         &f,
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1462,6 +1474,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     for message in [
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1479,6 +1492,7 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
         },
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,

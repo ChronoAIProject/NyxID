@@ -344,12 +344,18 @@ impl NyxAgentEgress for Egress {
         // llm-nyx has auth_method=none and no catalog credential. Preserve the
         // ordinary NoAuth outer-hop lane; inner model calls meter independently.
         let class = CredentialClass::NoAuth;
+        let org_access = super::org_channel_service::conversation_access(&state.db, &row).await?;
         let payer = state
             .billing
             .owner_resolver()
-            .resolve_for_execution(user_id, user_id, class)
+            .resolve_for_assistant_execution(
+                user_id,
+                org_access.as_ref().map_or(user_id.as_str(), |a| a.owner()),
+                class,
+                org_access.as_deref(),
+            )
             .await?;
-        let context = BillingRouteContext::new(
+        let mut context = BillingRouteContext::new(
             BillingIngress::Proxy,
             uuid::Uuid::new_v4().to_string(),
             payer.owner_id,
@@ -365,6 +371,10 @@ impl NyxAgentEgress for Egress {
             target.service.billing.as_ref(),
             state.billing.resale_enabled(),
         );
+        context.org_channel_guest = org_access
+            .as_ref()
+            .and_then(|a| a.channel())
+            .and_then(|a| a.guest_payer());
         let priced_operation = state
             .billing
             .http_operation(&context, request.method.as_str(), &request.relative_path)

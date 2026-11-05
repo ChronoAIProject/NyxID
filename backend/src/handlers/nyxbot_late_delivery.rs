@@ -170,6 +170,14 @@ fn provider_stream_inner(
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
             Ok(outcome) => {
+                let (allowed,org_guest)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false));
+                if !allowed {
+                    let _=refuse(&state,&event_key).await;
+                    guard.disarm();
+                    for frame in message_frames(&response_id,None) {yield frame;}
+                    return;
+                }
+                let outcome=if org_guest {outcome.map_err(|_|Box::new(engine::TurnError::new("org_channel_guest_unavailable")))} else {outcome};
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
                 // A completed empty result still owns a terminal delivery
                 // decision. Never acquire the stream/send barrier for silence.
@@ -194,7 +202,7 @@ fn provider_stream_inner(
                             tokio::spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable") => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
                             tokio::spawn(async move { process(&wake_state, &wake_event).await; });
@@ -221,7 +229,7 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable") => {
+                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {
@@ -395,7 +403,12 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     if d.state == "waiting" {
         return Ok(());
     }
-    let conversation = engine::get(&state.db, &event.user_id, conversation_id).await?;
+    let conversation = engine::get(
+        &state.db,
+        crate::services::org_channel_service::event_actor(&event),
+        conversation_id,
+    )
+    .await?;
     let Some((channel, _)) = eligible(state, &event, &d, &conversation).await? else {
         refuse(state, event_id).await?;
         return Ok(());
@@ -409,7 +422,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     };
     let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
-        "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
+        "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation_id, "turn_id": turn_id, "role": "assistant",
     }).await? else { return Ok(()); };
     if successful_silence(&message) {
         if delivery::silence(&state.db, event_id).await? {
@@ -424,7 +437,9 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         return Ok(());
     }
     let text = if let Some(code) = message.error_code.as_deref() {
-        let failure = if code == "capacity_exceeded" {
+        let failure = if d.origin.org_execution.as_ref().is_some_and(|e| e.guest) {
+            crate::services::org_channel_service::UNAVAILABLE.into()
+        } else if code == "capacity_exceeded" {
             crate::services::assistant_turn_observability::capacity_message(
                 message
                     .error_detail
@@ -533,7 +548,7 @@ async fn event_images(
     report_or_failure(
         state,
         ImageSendContext {
-            owner: &event.user_id,
+            owner: crate::services::org_channel_service::event_actor(event),
             conversation_id: &conversation.id,
             turn_id: &message.turn_id,
             channel,
@@ -570,12 +585,12 @@ pub(super) async fn stream_images(
         let (Some(delivery), Some(conversation_id), Some(turn_id)) = (&event.delivery, &event.conversation_id, &event.turn_id) else {
             return Ok(bounded_reply(text));
         };
-        let conversation = engine::get(&state.db, &event.user_id, conversation_id).await?;
+        let conversation = engine::get(&state.db, crate::services::org_channel_service::event_actor(&event), conversation_id).await?;
         let Some((channel, thread)) = eligible(state, &event, delivery, &conversation).await? else {
             return Ok(bounded_reply(text));
         };
         let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
-            "user_id": &event.user_id, "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
+            "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
         }).await? else { return Ok(bounded_reply(text)); };
         let report = event_images(state, &event, delivery, &channel, &thread, &conversation, &message, Some(deadline)).await;
         let text = super::images::append_failure(&bounded_reply(text), &report);
@@ -610,7 +625,7 @@ pub(super) async fn eligible(
         // with the older answer or replace the answer's original source.
         let thread = crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
-            &event.user_id,
+            crate::services::org_channel_service::event_actor(event),
             &d.origin,
             &conversation.id,
         )
@@ -692,7 +707,41 @@ pub(super) async fn eligible(
     } else {
         false
     };
-    let admitted = if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
+    let admitted = if let Some(e) = &d.origin.org_execution {
+        crate::services::org_channel_service::validate(
+            &state.db,
+            &d.origin,
+            &conversation.user_id,
+            &e.agent_id,
+        )
+        .await?;
+        if e.guest != d.guest
+            || channel.route_id != d.source_route_id
+            || d.source_route_api_key_id.as_deref() != Some(channel.route_api_key_id.as_str())
+        {
+            return Ok(None);
+        }
+        let mut projected = channel.clone();
+        projected.owner_sender_ids = if e.guest {
+            Vec::new()
+        } else {
+            vec![d.sender_id.clone()]
+        };
+        if d.origin.thread.is_some() {
+            if e.guest {
+                chats::Admission::Guest
+            } else {
+                chats::Admission::Owner
+            }
+        } else {
+            if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot)
+                && !chats::bot_guest_allowed(&thread, Some(d.addressed))
+            {
+                return Ok(None);
+            }
+            chats::admission(&projected, &thread, &d.sender_id, Some(d.addressed))
+        }
+    } else if d.sender_kind == Some(crate::models::channel_thread::ThreadSenderKind::Bot) {
         // Followed children inherit live consent from their settings chat,
         // checked by validate_delivery above. Their own default member fields
         // are not that policy. Every bot answer still retains guest authority.
@@ -894,7 +943,7 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
         .db
         .collection::<AssistantMessage>(MESSAGES)
         .find_one(doc! {
-            "user_id": &event.user_id, "conversation_id": conversation,
+            "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation,
             "turn_id": turn, "role": "assistant",
         })
         .await?
@@ -905,4 +954,34 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
         return Ok(false);
     }
     delivery::silence(&state.db, event_id).await
+}
+
+// Ordinary channels retain their existing response path. Org channel answers
+// must recheck the original actor and source immediately before streaming.
+async fn org_stream_authority(state: &AppState, id: &str) -> AppResult<(bool, bool)> {
+    let Some(event) = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":id})
+        .await?
+    else {
+        return Ok((true, false));
+    };
+    let Some(d) = event
+        .delivery
+        .as_ref()
+        .filter(|d| d.origin.org_execution.is_some())
+    else {
+        return Ok((true, false));
+    };
+    let Some(conversation) = event.conversation_id.as_deref() else {
+        return Ok((false, d.guest));
+    };
+    let row = engine::get(
+        &state.db,
+        crate::services::org_channel_service::event_actor(&event),
+        conversation,
+    )
+    .await?;
+    Ok((eligible(state, &event, d, &row).await?.is_some(), d.guest))
 }

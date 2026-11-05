@@ -404,7 +404,7 @@ test("adding another service changes the new key draft without creating a servic
     .toISOString()
     .slice(0, 16);
   await page
-    .getByLabel("Login credential expiry (optional)")
+    .getByLabel("Login credential expiry (blank: 90 days, bounded by key expiry)")
     .fill(previousExpiry);
   await page.getByRole("button", { name: "Change key", exact: true }).click();
   await page
@@ -599,7 +599,7 @@ for (const grant of ["account", "agent-key"] as const) {
         new Date(Date.now() + 86400000).toISOString().slice(0, 16),
       );
       await page
-        .getByLabel("Login credential expiry (optional)")
+        .getByLabel("Login credential expiry (blank: 90 days, bounded by key expiry)")
         .fill(loginExpiry);
       await expect(review).toContainText(
         await page.evaluate(

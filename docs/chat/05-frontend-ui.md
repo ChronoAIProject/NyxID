@@ -426,6 +426,37 @@ orphan window. Device-code and token entry keep their existing setup behavior.
 
 ## Sidebar and history
 
+Verified CMA sessions appear automatically only in their source NyxID chat,
+with a CMA activity indicator beside the existing machine control. Each card
+links to that original conversation/specialist and optionally to CMA's validated
+supplied callback. Pinning makes a card available across chats and every page;
+unpinning restores source-only visibility. Account-bound pin/minimise preferences
+survive reload and clear on account changes. One app-level provider owns streams.
+
+Cards align left within their container and fill the available width up to
+500px. They reuse the shared resizable preview column alongside machine cards;
+on narrow screens they sit above chat while retaining composer space. Other pages
+show pinned cards in a bounded floating stack. Automatic discovery uses only
+server-verified personal connection receipts, never account inventory or the
+current route as origin evidence. Status-filtered active inventory is joined to
+exact receipts before the card limit; pins use a separate exact query. The
+compact card combines glyph/title and controls in its header, task/stream state
+on one line, and three recent actions with expandable history. Header icon
+controls have hover/focus tooltips, and the card has no internal horizontal
+dividers. Connection,
+session ID, and timestamp stay behind Session details. The root floating
+surface uses matched shell-route ownership, including global monitoring on
+standalone desktop and not-found pages. Retryable refresh outages retain the
+last valid observation for the same connection/account/source; one denied or
+unavailable connection cannot suppress healthy peers. Authorization and terminal
+detail clear the affected observation. Explicitly pinning a visible authorized
+session keeps its card and stream through navigation, including an older
+empty/error pin cache, while the pin receipt refresh is pending or retryably
+unavailable. A successful withdrawal or denial clears the promoted observation. The fixed header and internal scrolling recovery/activity
+body keep Reconnect accessible at short keyboard heights, even when minimised.
+See [CMA session status cards](12-cma-sessions.md)
+for attribution boundaries, scoped polling, preferences, and recovery.
+
 The sidebar has a primary New chat command, workspace destinations, and a Chats navigation list. The chat list is a semantic `nav`. Each conversation title is a button whose accessible name is the title.
 
 Conversation metadata comes from the fully drained NyxID index. The row displays the server title and preserves newest-first ordering from the backend. The active row remains selected across placeholder alias adoption by using the canonical history ID when available.
@@ -540,3 +571,22 @@ The page must not render incoherent overlaps or empty gaps during state handoff.
 - fixed message, card, toolbar, and composer dimensions prevent dynamic content from shifting controls.
 
 The Playwright continuity probe described in [Testing and gaps](07-testing-and-gaps.md) observes DOM mutations to catch transient states that ordinary final assertions would miss.
+
+
+## Generated file cards
+
+Generated attachments display their safe filename, verified type/size, revision
+and expiry. Known rasters open a full preview; supported MP4 uses native controls.
+Unknown MIME, origin or preview values use a download card. Browser decode failures
+keep the verified download available. The reader accepts future delivery states and
+rejection reasons without rejecting the whole conversation.
+
+A session-only cache shares authenticated fetches and object URLs across consumers
+and list remounts. It retains at most 32 MiB of payload and 64 resident files, fetches at
+most two concurrently, and bounds every response to 8 MiB and its reserved size.
+Canceled fetches retain their reservation until their response body settles.
+Known file sizes let all eight small files in one result fit together. Visible cards pin entries and release them on leaving the viewport, so later
+previews in the same reply can load. Idle LRU eviction, two-minute idle expiry, file expiry and account transitions
+revoke URLs. No file bytes enter persistent browser storage. Recovery refreshes the
+original reply's history page and invalidates the conversation query, preserving
+the draft and page state. Controls use the existing Button variants.

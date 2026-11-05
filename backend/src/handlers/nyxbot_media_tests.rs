@@ -779,6 +779,7 @@ async fn interrupted_media_case(rebuilt: bool) {
         "no duplicate resend/remedy advice"
     );
     let origin = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: row.id.clone(),
         partition: chat.partition.clone(),

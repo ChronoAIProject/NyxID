@@ -40,17 +40,17 @@ const paymentStatus = (status: string) => PAYMENT_STATUS[status] ?? "Unknown";
 const note =
   "Only wallet-funded usage appears on this bill. Usage covered by grants or allowances is excluded and is not taxed.";
 
-export function BillingBill({ enabled }: { enabled: boolean }) {
+export function BillingBill({ enabled, ownerId }: { enabled: boolean; ownerId?: string }) {
   const [page, setPage] = useState(1);
-  const bill = useCurrentBill(enabled);
+  const bill = useCurrentBill(enabled, ownerId);
   const currentBill = bill.data;
-  const history = useBillingInvoices(page, enabled);
+  const history = useBillingInvoices(page, enabled, ownerId);
   const [downloading, setDownloading] = useState<string | null>(null);
   if (!enabled) return null;
   async function receipt(invoice: UsageInvoice) {
     setDownloading(invoice.id);
     try {
-      await openInvoiceReceipt(invoice.id);
+      await openInvoiceReceipt(invoice.id, ownerId);
     } catch (error) {
       toast.error(
         error instanceof Error
@@ -67,7 +67,7 @@ export function BillingBill({ enabled }: { enabled: boolean }) {
         <CardHeader>
           <CardTitle>Current bill</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4 text-12">
+        <CardContent className="space-y-4 text-14">
           {bill.isLoading ? (
             <Skeleton className="h-40 w-full" />
           ) : bill.isError ? (
@@ -163,7 +163,7 @@ export function BillingBill({ enabled }: { enabled: boolean }) {
         <CardHeader>
           <CardTitle>Past usage invoices</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4 text-12">
+        <CardContent className="space-y-4 text-14">
           {history.isLoading ? (
             <Skeleton className="h-32 w-full" />
           ) : history.isError ? (
@@ -185,7 +185,7 @@ export function BillingBill({ enabled }: { enabled: boolean }) {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="font-medium">{invoice.number}</p>
-                    <p className="text-11 text-text-tertiary">
+                    <p className="text-13 text-text-tertiary">
                       {date(invoice.issuing_date)} ·{" "}
                       {paymentStatus(invoice.payment_status)}
                     </p>
@@ -241,7 +241,7 @@ export function BillingBill({ enabled }: { enabled: boolean }) {
           )}
           {history.data && history.data.total > BILLING_INVOICES_PAGE_SIZE && (
             <div className="flex items-center justify-end gap-3">
-              <span className="text-11 text-text-tertiary">
+              <span className="text-13 text-text-tertiary">
                 Page {page} of{" "}
                 {Math.ceil(history.data.total / BILLING_INVOICES_PAGE_SIZE)}
               </span>

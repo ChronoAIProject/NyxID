@@ -30,6 +30,7 @@ function setup(colors: ThemeColors = lightColors) {
     'react-native': {View:'View',KeyboardAvoidingView:'KeyboardAvoidingView',Platform:{OS:'ios'},Pressable:'Pressable',Text:'Text',TextInput:'TextInput',StatusBar:'StatusBar',AppState:appState,StyleSheet:{create:(v:unknown)=>v,absoluteFillObject:{}},Keyboard:{dismiss:()=>{}},Alert:{alert:(_title:string,_message:string,buttons:typeof alertButtons)=>{alertButtons=buttons;}}},
     'expo-linear-gradient': {LinearGradient:'LinearGradient'},
     './AndroidKeyboardAvoidingView': {AndroidKeyboardAvoidingView:'AndroidKeyboardAvoidingView'},
+    './ScrollEdgeFades': {PageScrollView:'ScrollView'},
     '../../theme/ThemeContext': {useTheme:()=>({colors})},
     '../../../theme/ThemeContext': {useTheme:()=>({colors})},
     '../../../components/workspace/WorkspaceUI': workspace,

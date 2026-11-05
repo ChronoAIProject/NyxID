@@ -35,6 +35,9 @@ pub enum CmaOperationKind {
 /// Bounded identifiers and observed lifecycle metadata, never task input/output.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CmaOperation {
+    /// Server-captured personal connection identity; absent legacy rows are unattributed.
+    #[serde(default)]
+    pub observer_binding: Option<String>,
     /// Internal deduplication for idempotent input receipts without an operation ID.
     #[serde(default)]
     pub receipt_id: Option<String>,
@@ -79,10 +82,23 @@ pub struct DeliveryBinding {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AsyncServiceOperation {
+    /// Server-admitted original task, never caller-supplied authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]
     pub instruction_receipt_version: u32,
+    /// Producer identity verified at generated-artifact admission. Missing legacy
+    /// snapshots cannot gain fresh acquisition authority from endpoint shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_catalog_service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_result: Option<super::generated_artifact::ResultManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_event_turn_id: Option<String>,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]

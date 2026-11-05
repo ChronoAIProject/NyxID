@@ -22,6 +22,7 @@ import {
   useAppForm,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   connectLinkStorageKey,
@@ -48,6 +49,11 @@ import {
   validateConnectOAuthForm,
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
+import type { CredentialFieldSpec } from "@/types/keys";
+import {
+  composeTokenExchangeCredential,
+  parseTokenExchangeCredential,
+} from "@/lib/token-exchange-credential";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -59,17 +65,29 @@ interface DeviceChallenge {
   readonly status: string;
 }
 
-export function ConnectLinkContent({
-  token,
-  embedded = false,
-  redirectOnTerminal = true,
-}: {
+interface ConnectLinkContentProps {
   readonly token: string;
   /** Render inside an existing dialog instead of the standalone hosted page. */
   readonly embedded?: boolean;
   /** Hosted pages return to the requesting app; chat modals stay in place. */
   readonly redirectOnTerminal?: boolean;
-}) {
+}
+
+export function ConnectLinkContent(props: ConnectLinkContentProps) {
+  const { user } = useAuthStore();
+  return (
+    <ConnectLinkSession
+      key={`${user?.id ?? "anonymous"}:${props.token}`}
+      {...props}
+    />
+  );
+}
+
+function ConnectLinkSession({
+  token,
+  embedded = false,
+  redirectOnTerminal = true,
+}: ConnectLinkContentProps) {
   const navigate = useNavigate();
   const { isAuthenticated, isLoading, user } = useAuthStore();
   const [deviceChallenge, setDeviceChallenge] =
@@ -492,7 +510,7 @@ export function ConnectLinkContent({
             ) : (
               <>
                 {preview.data.assistant_intent_locked ? (
-                  <p className="text-12 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
+                  <p className="text-14 text-muted-foreground">{preview.data.use_platform_key ? "Use the NyxID platform connection. This link's intent is fixed." : "Connect your own personal account. This link's intent is fixed."}</p>
                 ) : null}
                 <ConnectionIdentityHeading
                   className="connection-card-heading"
@@ -524,7 +542,7 @@ export function ConnectLinkContent({
                 ) : null}
                 {oauthPopupOpen ? (
                   <p
-                    className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+                    className="rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-13 text-muted-foreground"
                     role="status"
                   >
                     Finish authorization in the provider window, then return
@@ -538,6 +556,11 @@ export function ConnectLinkContent({
                   preview.data.connect_method === "api_key" ? (
                     <CredentialForm
                       preview={preview.data}
+                      fields={
+                        preview.data.token_exchange_credential_fields ??
+                        catalog?.token_exchange_credential_fields ??
+                        []
+                      }
                       pending={actionPending}
                       onSubmit={handleCredentialSubmit}
                     />
@@ -601,7 +624,7 @@ export function ConnectLinkContent({
             )}
           </CardContent>
           {user?.email ? (
-            <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground">
+            <div className="border-t border-border px-5 py-3 text-center text-13 text-muted-foreground">
               Signed in as <span className="text-foreground">{user.email}</span>
             </div>
           ) : null}
@@ -774,7 +797,7 @@ export function ConnectLinkReturnPage() {
     <ConnectShell>
       {recoveryError ? <ErrorBanner message={recoveryError} /> : null}
       <Card className="border-border/50">
-        <CardContent className="p-5 text-center text-12 text-muted-foreground">
+        <CardContent className="p-5 text-center text-14 text-muted-foreground">
           Finishing the connection...
         </CardContent>
       </Card>
@@ -784,10 +807,14 @@ export function ConnectLinkReturnPage() {
 
 function CredentialForm({
   preview,
+  fields,
   pending,
   onSubmit,
 }: {
   readonly preview: ConnectLinkPreview;
+  /** Declared token-exchange fields; when present each gets its own input
+   * and the values compose the JSON credential the backend validates. */
+  readonly fields: readonly CredentialFieldSpec[];
   readonly pending: boolean;
   readonly onSubmit: (values: ConnectCredentialForm) => void;
 }) {
@@ -802,19 +829,36 @@ function CredentialForm({
     },
   });
   const submit = form.handleSubmit((values) => {
-    const error = validateConnectCredentialForm(
-      values,
-      preview.requires_gateway_url,
+    const missing = fields.find(
+      (field) =>
+        !parseTokenExchangeCredential(values.credential)[field.name]?.trim(),
     );
+    const error = missing
+      ? `Enter ${missing.label}.`
+      : validateConnectCredentialForm(values, preview.requires_gateway_url);
     setFormError(error);
     if (!error) onSubmit(values);
   });
   const credential = form.watch("credential").trim();
   const endpointUrl = form.watch("endpoint_url").trim();
+  const structured = fields.length > 0;
+  const fieldValues = parseTokenExchangeCredential(credential);
   const submitDisabled =
     pending ||
     credential.length === 0 ||
+    (structured &&
+      fields.some((field) => !(fieldValues[field.name] ?? "").trim())) ||
     (preview.requires_gateway_url && endpointUrl.length === 0);
+  const setFieldValue = (name: string, value: string) =>
+    form.setValue(
+      "credential",
+      composeTokenExchangeCredential({
+        ...Object.fromEntries(
+          fields.map((field) => [field.name, fieldValues[field.name] ?? ""]),
+        ),
+        [name]: value,
+      }),
+    );
   const credentialLabel =
     preview.auth_key_name.trim() ||
     (preview.requires_gateway_url
@@ -827,24 +871,42 @@ function CredentialForm({
   return (
     <Form {...form}>
       <form className="space-y-4" onSubmit={(event) => void submit(event)}>
-        <FormField
-          control={form.control}
-          name="credential"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>{credentialLabel}</FormLabel>
-              <FormControl>
-                <Input
-                  type="password"
-                  autoComplete="off"
-                  placeholder={credentialPlaceholder}
-                  {...field}
-                />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
+        {structured ? (
+          fields.map((spec) => (
+            <div key={spec.name} className="space-y-1.5">
+              <Label htmlFor={`connect-te-${spec.name}`}>{spec.label}</Label>
+              <Input
+                id={`connect-te-${spec.name}`}
+                type={spec.secret ? "password" : "text"}
+                autoComplete="off"
+                placeholder={
+                  spec.placeholder ?? `Enter ${spec.label.toLowerCase()}`
+                }
+                value={fieldValues[spec.name] ?? ""}
+                onChange={(event) => setFieldValue(spec.name, event.target.value)}
+              />
+            </div>
+          ))
+        ) : (
+          <FormField
+            control={form.control}
+            name="credential"
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{credentialLabel}</FormLabel>
+                <FormControl>
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={credentialPlaceholder}
+                    {...field}
+                  />
+                </FormControl>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        )}
         {connectLinkShowsEndpointUrl(preview) ? (
           <FormField
             control={form.control}
@@ -861,7 +923,7 @@ function CredentialForm({
           />
         ) : null}
         {preview.api_key_instructions ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             {preview.api_key_instructions}
           </p>
         ) : null}
@@ -1014,7 +1076,7 @@ export function RequestDetails({
       </div>
       {preview.api_key_url ? (
         <a
-          className="inline-flex items-center gap-1.5 px-4 text-xs text-muted-foreground hover:text-foreground"
+          className="inline-flex items-center gap-1.5 px-4 type-row-title text-muted-foreground hover:text-foreground"
           href={preview.api_key_url}
           target="_blank"
           rel="noreferrer"
@@ -1026,7 +1088,7 @@ export function RequestDetails({
       {preview.scopes.length > 0 &&
       (preview.connect_method === "oauth" ||
         preview.connect_method === "device_code") ? (
-        <p className="px-4 text-xs text-muted-foreground">
+        <p className="px-4 text-13 text-muted-foreground">
           These additional permissions will be requested on top of the provider
           defaults.
         </p>
@@ -1049,14 +1111,14 @@ function DeviceCodePanel({
 }) {
   return (
     <div className="space-y-3 rounded-lg border border-border/50 p-4">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Enter this code at the provider. NyxID will finish the connection after
         authorization.
       </p>
-      <p className="font-mono text-15 font-semibold text-foreground">
+      <p className="font-mono type-card-title text-foreground">
         {code}
       </p>
-      <p className="text-11 text-muted-foreground" role="status">
+      <p className="text-13 text-muted-foreground" role="status">
         {status === "slow_down"
           ? `Provider requested a slower check. Checking again in ${interval} seconds.`
           : `Checking automatically every ${interval} seconds.`}
@@ -1095,19 +1157,19 @@ export function TerminalPanel({
         )}
       </div>
       {completed ? (
-        <p className="mb-3 flex items-center gap-2 text-sm font-medium text-success">
+        <p className="mb-3 flex items-center gap-2 type-row-title text-success">
           <CheckCircle2 className="size-4" />
           Connection completed
         </p>
       ) : null}
-      <h1 className="text-28 font-semibold leading-tight text-foreground sm:text-36">
+      <h1 className="type-metric text-foreground sm:type-metric">
         {completed
           ? `${serviceName ?? "Service"} connected`
           : status === "cancelled"
             ? "Connection cancelled"
             : "Connection request expired"}
       </h1>
-      <p className="mt-8 text-sm text-muted-foreground sm:mt-12 sm:text-base">
+      <p className="mt-8 text-14 text-muted-foreground sm:mt-12 sm:text-14">
         {callbackUrl
           ? "Returning to the requesting application..."
           : completed
@@ -1115,7 +1177,7 @@ export function TerminalPanel({
             : "You may now close this page or return to the requesting application."}
       </p>
       {completed && !callbackUrl ? (
-        <p className="mt-2 text-xs text-muted-foreground">
+        <p className="mt-2 text-13 text-muted-foreground">
           Your agent can now retry the original request.
         </p>
       ) : null}
@@ -1148,7 +1210,7 @@ function StandaloneConnectShell({ children }: { children: React.ReactNode }) {
     <main className="connect-link-shell flex min-h-dvh items-center justify-center px-4 py-8 text-foreground">
       <div className="relative z-10 flex w-full max-w-lg flex-col gap-5">
         {children}
-        <p className="text-center text-xs text-muted-foreground">
+        <p className="text-center text-13 text-muted-foreground">
           Service connection via NyxID
         </p>
       </div>

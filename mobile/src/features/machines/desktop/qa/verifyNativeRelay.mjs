@@ -44,8 +44,8 @@ async function nativeRelay(session, params, missingNode) {
   const { desktopPrivacyQueue } = load('src/features/machines/desktopPrivacy.ts');
   const store = load('src/lib/auth/sessionStore.ts');
   const epochs = load('src/lib/auth/authEpoch.ts');
-  const env = load('src/lib/env.ts');
-  if (!/^http:\/\/127\.0\.0\.1:3011\/api\/v1(?:\/mobile)?$/.test(env.NYXID_API_BASE_URL)) {
+  const { getApiBaseUrl } = load('src/lib/api/baseUrl.ts');
+  if (!/^http:\/\/127\.0\.0\.1:3011\/api\/v1(?:\/mobile)?$/.test(getApiBaseUrl())) {
     throw new Error('A/PM must serve Metro with the local backend API base on 3011 before real relay QA');
   }
   const compositorModule = load('src/features/machines/desktop/compositor.ts');

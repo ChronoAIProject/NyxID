@@ -6,7 +6,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { api } from "@/lib/api-client";
+import { api, apiClient } from "@/lib/api-client";
 import type {
   AdminUser,
   AdminUserListResponse,
@@ -70,36 +70,73 @@ export function useAdminUserSessions(userId: string) {
   });
 }
 
+function auditLogFilterQuery(params: AdminAuditLogListParams): URLSearchParams {
+  const query = new URLSearchParams();
+  for (const key of [
+    "user_id",
+    "api_key_id",
+    "search",
+    "search_filters",
+    "custom_filters",
+    "event_type",
+    "status",
+    "actor",
+    "created_dates",
+    "created_from",
+    "created_to",
+  ] as const) {
+    if (params[key]) query.set(key, params[key]);
+  }
+  return query;
+}
+
 export function useAdminAuditLog(params: AdminAuditLogListParams) {
-  return useQuery({
-    queryKey: ["admin", "audit-log", params],
-    queryFn: async (): Promise<AdminAuditLogListResponse> => {
+  const filters = auditLogFilterQuery(params).toString();
+  const page = useQuery({
+    queryKey: ["admin", "audit-log", "page", params],
+    queryFn: async ({ signal }): Promise<AdminAuditLogListResponse> => {
       const query = new URLSearchParams({
         page: String(params.page),
         per_page: String(params.per_page),
         sort: params.sort,
+        include_total: "false",
       });
-      if (params.search) query.set("search", params.search);
-      if (params.search_filters) {
-        query.set("search_filters", params.search_filters);
-      }
-      if (params.custom_filters) {
-        query.set("custom_filters", params.custom_filters);
-      }
-      if (params.event_type) query.set("event_type", params.event_type);
-      if (params.status) query.set("status", params.status);
-      if (params.actor) query.set("actor", params.actor);
-      if (params.created_dates) {
-        query.set("created_dates", params.created_dates);
-      }
-      if (params.created_from) query.set("created_from", params.created_from);
-      if (params.created_to) query.set("created_to", params.created_to);
-      return api.get<AdminAuditLogListResponse>(
+      auditLogFilterQuery(params).forEach((value, key) =>
+        query.set(key, value),
+      );
+      return apiClient<AdminAuditLogListResponse>(
         `/admin/audit-log?${query.toString()}`,
+        { signal },
       );
     },
     placeholderData: keepPreviousData,
   });
+
+  const needsTotal =
+    page.data !== undefined &&
+    page.data.total === undefined &&
+    !page.isPlaceholderData;
+  const count = useQuery({
+    queryKey: ["admin", "audit-log", "count", filters],
+    queryFn: ({ signal }) =>
+      apiClient<{ readonly total: number }>(`/admin/audit-log/count?${filters}`, {
+        signal,
+      }),
+    enabled: needsTotal,
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  return {
+    ...page,
+    total:
+      page.data?.total ??
+      (!page.isPlaceholderData ? count.data?.total : undefined),
+    totalError: needsTotal ? count.error : null,
+    refetchTotal: count.refetch,
+    refetch: () =>
+      Promise.all([page.refetch(), ...(needsTotal ? [count.refetch()] : [])]),
+  };
 }
 
 export function useCreateUser() {

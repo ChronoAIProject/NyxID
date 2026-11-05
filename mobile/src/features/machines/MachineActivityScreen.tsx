@@ -1,27 +1,50 @@
 import { useState } from "react";
-import { View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
-import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import type { WorkspaceContentParamList } from "../../app/navigationTypes";
+import type { ContentScreenProps } from "../../app/navigationTypes";
 import {
-  ActionButton,
-  Card,
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
-import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
-import { StatusBadge } from "../../components/StatusBadge";
+  SettingsCheckRow,
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { machinesApi } from "../../lib/api/machinesApi";
 import { machineError, machineKeys, useMachineRuntime } from "./MachineUI";
-import { machineStyles } from "./MachinePresentation";
+import { formatMachineDate, machinePageContent } from "./MachinePresentation";
+
+const ALL_AGENTS = "";
+const UNATTRIBUTED = "unattributed";
+
+export function activityOutcomeTone(outcome: string) {
+  return outcome === "failed" || outcome === "denied" ? "danger" : "default";
+}
+
+export function activityDetailLine(
+  agent: string,
+  createdAt: string,
+  durationMs?: number | null,
+  exitCode?: number | null,
+) {
+  return [
+    agent,
+    formatMachineDate(createdAt),
+    durationMs != null ? `${durationMs} ms` : undefined,
+    exitCode != null ? `Exit code: ${exitCode}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 export function MachineActivityScreen({
   route,
-}: NativeStackScreenProps<WorkspaceContentParamList, "MachineActivity">) {
+  navigation,
+}: ContentScreenProps<"MachineActivity">) {
   const runtime = useMachineRuntime();
-  const [filter, setFilter] = useState("");
-  const [before, setBefore] = useState<string>();
+  const filter = route.params.agent ?? ALL_AGENTS;
+  // A page cursor belongs to the filter it was read with.
+  const [page, setPage] = useState<{ filter: string; before: string }>();
+  const before = page?.filter === filter ? page.before : undefined;
   const query = useQuery({
     queryKey: [
       ...machineKeys(runtime.epoch),
@@ -41,103 +64,201 @@ export function MachineActivityScreen({
     enabled: runtime.active,
     retry: false,
   });
+  const agents = (query.data?.agents ?? []).map((agent) => ({
+    id: agent.id,
+    label: agent.display_name ?? agent.name,
+  }));
+  const agentLabel = (id?: string | null) =>
+    agents.find((agent) => agent.id === id)?.label ?? "Unattributed";
+  const filterLabel =
+    filter === ALL_AGENTS
+      ? "All agents"
+      : filter === UNATTRIBUTED
+        ? "Unattributed"
+        : (agents.find((agent) => agent.id === filter)?.label ??
+          "Selected agent");
+  const pull = usePullRefresh(() => {
+    if (runtime.active) return query.refetch();
+  });
   return (
     <WorkspacePage
       title="Machine activity"
       showHeading={false}
-      refreshing={query.isRefetching}
-      onRefresh={() => {
-        if (runtime.active) void query.refetch();
-      }}
+      refreshing={pull.refreshing}
+      onRefresh={pull.onRefresh}
+      contentStyle={machinePageContent}
     >
-      <Label muted style={machineStyles.metadata}>
-        Metadata only; command contents, credentials and desktop frames are not
-        included.
-      </Label>
-      <WorkspaceSelectionField
-        label="Agent filter"
-        value={[filter]}
-        allowEmpty={false}
-        options={[
-          { value: "", label: "All agents" },
-          { value: "unattributed", label: "Unattributed" },
-          ...(query.data?.agents ?? []).map((agent) => ({
-            value: agent.id,
-            label: agent.display_name ?? agent.name,
-          })),
-        ]}
-        onChange={(values) => {
-          setFilter(values[0] ?? "");
-          setBefore(undefined);
-        }}
-      />
-      {query.isPending && <Label muted>Loading machine activity…</Label>}
+      <SettingsGroup
+        inset={false}
+        footer="Metadata only; command contents, credentials and desktop frames are not included."
+      >
+        <SettingsRow
+          label="Agent"
+          value={filterLabel}
+          accessibilityLabel={`Agent filter, ${filterLabel}`}
+          onPress={() =>
+            navigation.push("MachineActivityFilter", {
+              machineId: route.params.machineId,
+              ownerId: route.params.ownerId,
+              agent: filter,
+              agents,
+            })
+          }
+        />
+      </SettingsGroup>
+      {query.isPending && (
+        <SkeletonRows
+          rows={4}
+          icon={false}
+          title
+          accessibilityLabel="Loading machine activity"
+        />
+      )}
       {query.error && (
         <Notice tone="error" message={machineError(query.error)} />
       )}
-      {!query.error &&
-        query.data?.entries.map((entry) => (
-          <Card key={entry.id}>
-            <View style={machineStyles.row}>
-              <Label numberOfLines={1} style={machineStyles.name}>
-                {entry.action}
-              </Label>
-              <StatusBadge
-                label={entry.outcome}
-                variant={
-                  entry.outcome === "completed"
-                    ? "decisionApproved"
-                    : entry.outcome === "failed" || entry.outcome === "denied"
-                      ? "decisionDenied"
-                      : "decisionExpired"
+      {query.data && !query.error && (
+        <SettingsGroup
+          title={before ? "Older activity" : "Recent activity"}
+          inset={false}
+        >
+          {query.data.entries.map((entry) => {
+            const agent = agentLabel(entry.agent_id);
+            return (
+              <SettingsRow
+                key={entry.id}
+                label={entry.action}
+                detail={activityDetailLine(
+                  agent,
+                  entry.created_at,
+                  entry.duration_ms,
+                  entry.exit_code,
+                )}
+                value={entry.outcome}
+                valueTone={activityOutcomeTone(entry.outcome)}
+                onPress={() =>
+                  navigation.push("MachineActivityDetail", {
+                    id: entry.id,
+                    action: entry.action,
+                    outcome: entry.outcome,
+                    agent,
+                    createdAt: entry.created_at,
+                    durationMs: entry.duration_ms ?? undefined,
+                    exitCode: entry.exit_code ?? undefined,
+                  })
                 }
               />
-            </View>
-            <Label muted style={machineStyles.metadata}>
-              {query.data!.agents.find((agent) => agent.id === entry.agent_id)
-                ?.display_name ??
-                query.data!.agents.find((agent) => agent.id === entry.agent_id)
-                  ?.name ??
-                "Unattributed"}
-              {" · "}
-              {entry.created_at}
-            </Label>
-            <View style={machineStyles.badges}>
-              {entry.duration_ms != null && (
-                <StatusBadge
-                  label={`${entry.duration_ms} ms`}
-                  variant="orgChip"
-                />
-              )}
-              {entry.exit_code != null && (
-                <StatusBadge
-                  label={`Exit code: ${entry.exit_code}`}
-                  variant="orgChip"
-                />
-              )}
-            </View>
-          </Card>
-        ))}
-      {query.data && !query.error && !query.data.entries.length && (
-        <Label muted>No activity matches this filter.</Label>
+            );
+          })}
+          {!query.data.entries.length && (
+            <SettingsRow label="No activity matches this filter." />
+          )}
+        </SettingsGroup>
       )}
-      {query.data?.next_cursor && !query.error && (
-        <ActionButton
-          compact
-          label="Older activity"
-          variant="secondary"
-          disabled={!runtime.active || query.isFetching}
-          onPress={() => setBefore(query.data!.next_cursor!)}
+      {!query.error && (query.data?.next_cursor || before) && (
+        <SettingsGroup inset={false}>
+          {query.data?.next_cursor && (
+            <SettingsRow
+              tone="action"
+              label="Older Activity"
+              disabled={!runtime.active || query.isFetching}
+              onPress={() =>
+                setPage({ filter, before: query.data!.next_cursor! })
+              }
+            />
+          )}
+          {before && (
+            <SettingsRow
+              tone="action"
+              label="Latest Activity"
+              onPress={() => setPage(undefined)}
+            />
+          )}
+        </SettingsGroup>
+      )}
+    </WorkspacePage>
+  );
+}
+
+/** Choosing the agent filter: a checkmark list, since agents are open-ended. */
+export function MachineActivityFilterScreen({
+  route,
+  navigation,
+}: ContentScreenProps<"MachineActivityFilter">) {
+  const { machineId, ownerId, agent, agents } = route.params;
+  const choose = (value: string) =>
+    navigation.popTo(
+      "MachineActivity",
+      { machineId, ownerId, agent: value },
+      { merge: true },
+    );
+  return (
+    <WorkspacePage
+      title="Agent"
+      showHeading={false}
+      contentStyle={machinePageContent}
+    >
+      <SettingsGroup inset={false}>
+        <SettingsCheckRow
+          label="All agents"
+          selected={agent === ALL_AGENTS}
+          onPress={() => choose(ALL_AGENTS)}
         />
-      )}
-      {before && (
-        <ActionButton
-          compact
-          label="Latest activity"
-          variant="secondary"
-          onPress={() => setBefore(undefined)}
+        <SettingsCheckRow
+          label="Unattributed"
+          selected={agent === UNATTRIBUTED}
+          onPress={() => choose(UNATTRIBUTED)}
         />
-      )}
+      </SettingsGroup>
+      {agents.length ? (
+        <SettingsGroup title="Agents" inset={false}>
+          {agents.map((row) => (
+            <SettingsCheckRow
+              key={row.id}
+              label={row.label}
+              selected={agent === row.id}
+              onPress={() => choose(row.id)}
+            />
+          ))}
+        </SettingsGroup>
+      ) : null}
+    </WorkspacePage>
+  );
+}
+
+/** One metadata-only activity entry. */
+export function MachineActivityDetailScreen({
+  route,
+}: ContentScreenProps<"MachineActivityDetail">) {
+  const entry = route.params;
+  return (
+    <WorkspacePage
+      title={entry.action}
+      showHeading={false}
+      contentStyle={machinePageContent}
+    >
+      <SettingsGroup
+        inset={false}
+        footer="Metadata only; command contents, credentials and desktop frames are not included."
+      >
+        <SettingsRow label="Action" value={entry.action} />
+        <SettingsRow
+          label="Outcome"
+          value={entry.outcome}
+          valueTone={activityOutcomeTone(entry.outcome)}
+        />
+        <SettingsRow label="Agent" value={entry.agent} />
+        <SettingsRow label="Time" value={formatMachineDate(entry.createdAt)} />
+        {entry.durationMs != null ? (
+          <SettingsRow label="Duration" value={`${entry.durationMs} ms`} />
+        ) : null}
+        {entry.exitCode != null ? (
+          <SettingsRow label="Exit code" value={String(entry.exitCode)} />
+        ) : null}
+      </SettingsGroup>
+      <SettingsGroup title="Entry ID" inset={false}>
+        <SettingsRow label={entry.id} mono selectable />
+      </SettingsGroup>
     </WorkspacePage>
   );
 }

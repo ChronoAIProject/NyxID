@@ -305,11 +305,21 @@ export function useAssistant(
   }, [active, recover]);
 
   useEffect(() => {
-    if (!conversationId || !active) return;
+    // Refocusing can rerun this with the previous chat in the same commit that
+    // openConversation leaves it; loading that stale chat would strand `loading`.
+    if (!conversationId || !active || selected.current !== conversationId)
+      return;
     let current = true;
     const operation = ++reopenSequence.current;
     const localEpoch = epoch.current;
-    setLoading(true);
+    // iOS microphone permission briefly makes the app inactive. Returning to
+    // already loaded history is a refresh, not a new selection: blocking the
+    // composer here would discard its in-flight dictation and error feedback.
+    // Preserve an initial load or explicit reopen interrupted by that transition.
+    setLoading(
+      (blocking) =>
+        blocking || latestHistory.current?.conversation.id !== conversationId,
+    );
     void refreshHistory(conversationId)
       .catch((cause) => {
         if (
@@ -369,6 +379,7 @@ export function useAssistant(
       text: string,
       retryOf?: string,
       uploads?: AssistantUploadedMessage,
+      acknowledgementId?: string,
     ) => {
       if (sendLock.current) throw new Error("A message is already being sent.");
       if (!activeRef.current) throw new Error("Reconnect to send a message.");
@@ -405,6 +416,7 @@ export function useAssistant(
         agentId,
         text,
         retryOf,
+        acknowledgementId,
         attachmentIds: uploads?.attachmentIds,
       });
       const localEpoch = epoch.current;
@@ -437,6 +449,7 @@ export function useAssistant(
             agentId,
             text,
             retryOf,
+            acknowledgementId,
             attachmentIds: uploads?.attachmentIds,
           },
           (event) => {
@@ -522,9 +535,14 @@ export function useAssistant(
     if (!queued?.length) return;
     continuations.current.delete(id);
     if (history.messages.at(-1)?.error_code === "cancelled") return;
-    void send(queued.map(continuationText).join("\n")).catch((cause) =>
-      setError(errorMessage(cause)),
-    );
+    // Like the web, one turn resumes every card allowed while the last one ran;
+    // the first card marks it as a continuation rather than a user message.
+    void send(
+      queued.map(continuationText).join("\n"),
+      undefined,
+      undefined,
+      queued[0]!.id,
+    ).catch((cause) => setError(errorMessage(cause)));
   }, [active, conversationId, history, sending, loadingOlder, send]);
 
   async function decide(acknowledgementId: string, choice: "allow" | "deny") {

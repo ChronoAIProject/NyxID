@@ -126,6 +126,30 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
     Box::pin(async {
         let (state, thread, call) = setup("voice_session_receipt").await;
         let db = &state.db;
+        // The deployed schema predates both device identity and native token
+        // settlement. Recover/control that exact shape without a data migration.
+        db.collection::<bson::Document>(CALLS)
+            .update_one(
+                doc! {"_id":&call.id},
+                doc! {"$unset":{
+                    "client_key":"", "responses_model":"", "responses_reserved":"",
+                    "responses_finalized":"", "responses_usage":"",
+                }},
+            )
+            .await
+            .unwrap();
+        let legacy = session::get(db, &call.user_id, &thread.id, &call.id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            legacy.responses,
+            crate::models::voice_responses::ResponsesState::Disabled
+        ));
+        assert!(legacy.client_key.is_none());
+        assert_eq!(
+            legacy.created_at.timestamp_millis(),
+            call.created_at.timestamp_millis()
+        );
         let other = session::admit(
             db,
             &call.user_id,
@@ -501,6 +525,7 @@ async fn completed_hidden_voice_results_publish_after_call_close() {
         )
         .insert_one(crate::models::assistant_message::AssistantMessage {
             crm_artifacts: Vec::new(),
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -607,6 +632,7 @@ async fn published_result_notes_select_newest_results_after_previous_turn() {
             )
             .insert_one(crate::models::assistant_message::AssistantMessage {
                 crm_artifacts: Vec::new(),
+                execution_task: None,
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
@@ -748,7 +774,7 @@ async fn unknown_initialization_is_reconciled_after_its_live_slot_expires() {
     .await;
 }
 
-async fn pending_card(
+pub(super) async fn pending_card(
     state: &crate::AppState,
     thread: &crate::models::assistant_conversation::AssistantConversation,
     call: &VoiceSession,
@@ -978,7 +1004,7 @@ async fn provider_fixture_reserves_before_create_attaches_before_sdp_and_closes_
     let billing=BillingRouteContext::new(BillingIngress::LlmProvider,Uuid::new_v4().to_string(),old.user_id.clone(),old.user_id.clone(),None,None,None,None,
         NodeIntent::Direct,"bearer".into(),CredentialClass::UserOwned,BillingMetric::VoiceSeconds,None,false);
     let id=Uuid::new_v4().to_string();
-    let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,
+    let result=runtime::start_with_provider(&state,runtime::StartInput{execution_enrolled: false, responses_billing:None,client_key:None,user:&old.user_id,conversation:&thread.id,client_request_id:&id,
         preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,
         openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await.unwrap();
     assert!(attached.load(Ordering::SeqCst),"Sideband must attach before the SDP answer is exposed");
@@ -1078,7 +1104,7 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
             assert_eq!(platform["available"], false);
             assert_eq!(platform["unavailable_reason"], "provider_rollout_pending");
         }
-        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"}}).await.unwrap();
+        rows.update_one(doc! {"_id": &service.id}, doc! {"$set":{"inference.voice.protocol":"xai_realtime", "inference.voice.usage_source":"server_measured"},"$unset":{"inference.voice.delegation_model":""}}).await.unwrap();
         assert!(super::super::assistant_voice::options(&state.db, &state.encryption_keys, &thread).await.unwrap().is_empty());
         flags::set_platform_override(&state.db, flags::VOICE_GROK_FLAG_KEY, &flags::FlagTarget::Global, true, &thread.user_id).await.unwrap();
         // A protocol switch cannot redirect credentials to the old provider origin.
@@ -1218,7 +1244,7 @@ async fn voice_attach_failure_is_audited_and_recovery_retries_close_without_recr
         let server=tokio::spawn(async move{axum::serve(listener,app).await.unwrap()});
         let billing=BillingRouteContext::new(BillingIngress::LlmProvider,Uuid::new_v4().to_string(),old.user_id.clone(),old.user_id.clone(),None,None,None,None,NodeIntent::Direct,"bearer".into(),CredentialClass::UserOwned,BillingMetric::VoiceSeconds,None,false);
         let id=Uuid::new_v4().to_string();
-        let result=runtime::start_with_provider(&state,runtime::StartInput{user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await;
+        let result=runtime::start_with_provider(&state,runtime::StartInput{execution_enrolled: false, responses_billing:None,client_key:None,user:&old.user_id,conversation:&thread.id,client_request_id:&id,preferences:preferences(),sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"},"identity".into(),billing,openai::OpenAi::fixture(zeroize::Zeroizing::new("fixture-secret".into()),address),None).await;
         let result=diagnostics::finish(&state.db,&old.user_id,result,crate::errors::voice_start::Stage::Transport).await;
         let error=result.err().unwrap();
         assert_eq!(error.response_body().details.unwrap()["reason"],"transport:503");
@@ -1762,4 +1788,124 @@ async fn voice_2142_user_stop_remains_cancelled() {
         assert_eq!(voice::request_outcome(&stopped), Some("cancelled"));
     })
     .await;
+}
+
+#[tokio::test]
+async fn execution_permission_voice_hidden_task_retains_root_and_cancellation() {
+    for global in [false, true] {
+        use crate::services::{
+            assistant_voice as voice, execution_permission_dispatch::phase_b_tests,
+        };
+        let (state, visible, mut call) = setup("execution_voice_root").await;
+        phase_b_tests::enroll_cohort(&state.db, &visible.user_id, global).await;
+        assert!(
+            crate::mw::auth::api_key_auth_user_for_voice(&state.db, &visible)
+                .await
+                .unwrap()
+                .execution_permission
+                .is_none(),
+            "live voice remains excluded"
+        );
+        call.execution_enrolled = true;
+        let segment = transcript::Segment {
+            fragments: Vec::new(),
+            id: Uuid::new_v4().to_string(),
+            speaker: transcript::Speaker::User,
+            text: "Check the calendar".into(),
+            start_ms: 0,
+            end_ms: 1000,
+            sealed: true,
+            complete: true,
+        };
+        transcript::persist(&state.db, &call, &segment)
+            .await
+            .unwrap();
+        let request = transcript::delegate(&state.db, &call, "permission-root", &segment)
+            .await
+            .unwrap();
+        assert!(request.execution_enrolled);
+        let request = voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
+            .await
+            .unwrap();
+        let hidden = request.task_conversation_id.as_deref().unwrap();
+        let mut start = engine::TurnStart::from(&turn(Some(hidden), &segment.text));
+        start.execution_enrollment = true;
+        let row = Box::pin(engine::begin_turn_with_voice(
+            &state.db,
+            &visible.user_id,
+            start.clone(),
+            &state.encryption_keys,
+            Some(&request.id),
+        ))
+        .await
+        .unwrap();
+        let task = row
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(task.task.root_id, request.message_id);
+        assert!(row.automation_thread);
+        let key = crate::services::key_service::get_api_key(
+            &state.db,
+            &visible.user_id,
+            &row.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        assert!(auth.execution_permission.is_some());
+        let chat = auth.assistant_chat.as_ref().unwrap();
+        assert!(chat.execution_voice_task);
+        assert!(!chat.execution_unsupported);
+        assert!(!crate::services::execution_permission_dispatch::proposals::supported_chat(chat));
+        voice::cancel(&state.db, &visible.user_id, &visible.id, &request.id)
+            .await
+            .unwrap();
+        let root = state
+            .db
+            .collection::<bson::Document>("assistant_messages")
+            .find_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            root.get_document("execution_task")
+                .unwrap()
+                .get_bool("cancelled")
+                .unwrap()
+        );
+        let mut session = state.db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        assert!(
+            crate::services::execution_permission_dispatch::tasks::fence(
+                &state.db,
+                &mut session,
+                &task,
+            )
+            .await
+            .is_err()
+        );
+        session.abort_transaction().await.unwrap();
+        let stopped = state
+            .db
+            .collection::<crate::models::assistant_conversation::AssistantConversation>(
+                "assistant_conversations",
+            )
+            .find_one(doc! {"_id":hidden})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stopped.active_turn.as_ref().unwrap().stop_requested);
+        assert!(
+            crate::services::assistant_access_policy::require_same_live_turn(chat, &stopped)
+                .is_err()
+        );
+        state.db.drop().await.unwrap();
+    }
 }

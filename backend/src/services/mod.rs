@@ -121,6 +121,9 @@ pub(crate) mod erasure_admission;
 pub mod event_dedup_cache;
 pub mod exact_service_approval_service;
 pub mod execution_authority;
+pub mod execution_permission;
+pub mod execution_permission_dispatch;
+pub(crate) mod execution_permission_enrollment;
 pub mod feature_flag_admin_service;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
@@ -306,6 +309,7 @@ pub mod assistant_nyxagent;
 pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
 pub mod assistant_nyxagent_runtime;
+pub mod assistant_onboarding_service;
 pub mod assistant_platform_reply_decision;
 pub mod assistant_profile_routing;
 pub mod assistant_service_execution;
@@ -318,6 +322,7 @@ pub mod assistant_team_tools;
 pub mod channel_image_audience;
 pub mod channel_image_delivery;
 pub mod channel_retry_ingress;
+pub(crate) mod channel_turn_context;
 pub mod channel_turn_delivery;
 pub mod collaboration_group_service;
 pub mod provider_link_service;
@@ -541,6 +546,7 @@ pub mod domain_alias_service;
 #[cfg(test)]
 mod shared_agent_tests;
 
+pub(crate) mod nyxbot_admission_service;
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
 
@@ -548,3 +554,8 @@ pub mod assistant_connection_service;
 pub mod monitoring_service;
 
 pub mod assistant_delegated_images;
+
+pub mod cma_session_origin;
+pub mod org_channel_service;
+
+pub mod generated_artifacts;

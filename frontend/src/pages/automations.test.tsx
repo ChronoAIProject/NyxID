@@ -1,3 +1,5 @@
+import { formatAutomationTime } from "@/lib/automation-time";
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   act,
   fireEvent,
@@ -23,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   older: vi.fn(),
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   useSearch: () => mocks.search(),
   Link: ({
     to,
@@ -119,6 +122,82 @@ function chooseOption(label: string, name: string) {
   fireEvent.keyDown(screen.getByLabelText(label), { key: "ArrowDown" });
   fireEvent.keyDown(screen.getByRole("option", { name }), { key: "Enter" });
 }
+
+it.each([
+  { status: "disabled", schedule: { kind: "at", at: "2026-10-22T08:40:00Z" }, next: "2026-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "disabled", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "disabled", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "at", at: "2099-10-22T08:40:00Z" }, next: "2099-10-22T08:40:00Z" },
+  { status: "active", schedule: { kind: "cron", expression: "0 8 * * *", timezone: "Asia/Singapore" }, next: "2099-10-22T00:00:00Z" },
+  { status: "active", schedule: { kind: "every", amount: 1, unit: "hours", anchor: "2026-10-01T00:00:00Z" }, next: null },
+] as const)("shows the effective next run on desktop and mobile: $status / $schedule.kind / $next", ({ status, schedule, next }) => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [{ ...trigger, status, schedule, next_run_at: next }] } });
+  render(<AutomationsPage />);
+  const expected = status !== "active"
+    ? "Schedule paused"
+    : next === null ? "No run scheduled" : `Next: ${formatAutomationTime(next, "Asia/Singapore")}`;
+  const row = screen.getByRole("button", { name: trigger.label });
+  expect(row).toHaveTextContent(expected);
+  if (status !== "active") {
+    expect(row).not.toHaveTextContent(formatAutomationTime(next, "Asia/Singapore"));
+  }
+  expect(mocks.update).not.toHaveBeenCalled();
+});
+
+it("preserves schedule drafts across segments and guards dismissal until discarded", async () => {
+  const user = userEvent.setup();
+  const close = vi.fn();
+  render(<AutomationEditor onClose={close} onSecrets={vi.fn()} />);
+  expect(
+    screen.queryByRole("region", { name: "Unsaved changes" }),
+  ).not.toBeInTheDocument();
+  screen.getByRole("tab", { name: "Calendar" }).focus();
+  await user.keyboard("{ArrowRight}");
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Every" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    ),
+  );
+  await user.clear(screen.getByRole("spinbutton", { name: "Interval amount" }));
+  await user.type(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+    "3",
+  );
+  await user.click(
+    screen.getByRole("button", { name: "Start, end and run limits" }),
+  );
+  await user.type(screen.getByLabelText("Maximum occurrences"), "7");
+  await user.click(screen.getByRole("tab", { name: "Once" }));
+  expect(screen.getByLabelText("Run at time")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Webhook" }));
+  expect(screen.getByLabelText("Inbound verification")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Schedule" }));
+  await user.click(screen.getByRole("tab", { name: "Every" }));
+  expect(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+  ).toHaveValue(3);
+  expect(screen.getByLabelText("Maximum occurrences")).toHaveValue(7);
+  expect(
+    screen.getAllByRole("region", { name: "Form actions" }),
+  ).toHaveLength(1);
+  await user.keyboard("{Escape}");
+  const guard = await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  });
+  await user.click(within(guard).getByRole("button", { name: "Keep editing" }));
+  expect(close).not.toHaveBeenCalled();
+  expect(
+    screen.getByRole("spinbutton", { name: "Interval amount" }),
+  ).toHaveValue(3);
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+  await user.click(within(await screen.findByRole("dialog", {
+    name: "Discard unsaved changes?",
+  })).getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(mocks.create).not.toHaveBeenCalled();
+});
 
 it("previews calendar times after the debounce and cancels stale previews", async () => {
   vi.useFakeTimers();
@@ -299,11 +378,13 @@ it("edits a schedule without changing its source", async () => {
   render(
     <AutomationEditor row={trigger} onClose={vi.fn()} onSecrets={vi.fn()} />,
   );
-  expect(screen.getByLabelText("Source")).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Schedule" })).toBeDisabled();
+  expect(screen.getByRole("tab", { name: "Webhook" })).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Instruction"), {
     target: { value: "Summarise unread notifications" },
   });
   await user.click(screen.getByRole("button", { name: "Save automation" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(mocks.update).toHaveBeenCalledWith({
       id: trigger.id,
@@ -440,8 +521,16 @@ it("shows preference validation errors and keeps invalid timezones unsaved", asy
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
   );
 
+  await user.clear(screen.getByRole("spinbutton", { name: "Runs per hour" }));
+  await user.type(
+    screen.getByRole("spinbutton", { name: "Runs per hour" }),
+    "4",
+  );
   await user.click(screen.getByRole("button", { name: "Save preferences" }));
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent("IANA timezone");
+  expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAttribute("aria-invalid", "true");
+  expect(screen.getByRole("combobox", { name: "Timezone" })).toHaveAccessibleDescription(/IANA timezone/);
   expect(mocks.saveSettings).not.toHaveBeenCalled();
 });
 
@@ -494,4 +583,18 @@ it("keeps expired setup instructions unavailable", () => {
   render(<AutomationsPage />);
   expect(screen.getByText("Setup link expired")).toBeInTheDocument();
   expect(screen.queryByLabelText("Instruction")).not.toBeInTheDocument();
+});
+
+
+it("names webhook, paused and never-run states without placeholder dashes", () => {
+  mocks.triggers.mockReturnValue({ data: { triggers: [
+    { ...trigger, id: "webhook", source: "webhook", schedule: null, next_run_at: null, last_run: null },
+    { ...trigger, id: "paused", status: "disabled", next_run_at: null, last_run: null },
+    { ...trigger, id: "active", next_run_at: null, last_run: null },
+  ] } });
+  render(<AutomationsPage />);
+  expect(screen.getByText(/Runs on webhook events/)).toHaveTextContent("Not run yet");
+  expect(screen.getByText(/Schedule paused/)).toHaveTextContent("Not run yet");
+  expect(screen.getByText(/No run scheduled/)).toHaveTextContent("Not run yet");
+  expect(screen.queryByText(/Next: [—–-]/)).not.toBeInTheDocument();
 });

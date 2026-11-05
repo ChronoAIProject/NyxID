@@ -11,6 +11,8 @@ import {
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
 import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
+import { SkeletonRows } from "../../components/Skeleton";
+import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { agentsApi } from "../../lib/api/agentsApi";
 import { collaborationApi } from "../../lib/api/collaborationApi";
@@ -18,7 +20,7 @@ import {
   inviteToken,
   invitationLink,
 } from "../../lib/api/collaborationTransport";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 import { useCollaborationSession } from "./useCollaborationSession";
 import type { Group, GroupMember } from "./groupContracts";
 import type {
@@ -55,6 +57,10 @@ export function CollaborationGroupControls({
     enabled: session.active,
     retry: false,
   });
+  // The 30s poll refreshes silently; only the person's pull shows the spinner.
+  const pull = usePullRefresh(() =>
+    Promise.all([detail.refetch(), session.identity.refetch()]),
+  );
   const [org, setOrg] = useState("");
   const people = useQuery({
     queryKey: [...session.key, "org-people", org],
@@ -153,11 +159,8 @@ export function CollaborationGroupControls({
   return (
     <WorkspacePage
       title="Group participants and agents"
-      onRefresh={() => {
-        void detail.refetch();
-        void session.identity.refetch();
-      }}
-      refreshing={detail.isFetching}
+      onRefresh={pull.onRefresh}
+      refreshing={pull.refreshing}
     >
       {session.error && <Notice tone="error" message={session.error} />}
       {detail.isError && (
@@ -255,7 +258,7 @@ export function CollaborationGroupControls({
               {invite && (
                 <>
                   <Label selectable>
-                    {invitationLink(NYXID_FRONTEND_URL, invite.token) ??
+                    {invitationLink(getFrontendUrl(), invite.token) ??
                       invite.token}
                   </Label>
                   <Label muted>
@@ -263,14 +266,14 @@ export function CollaborationGroupControls({
                   </Label>
                   <ActionButton
                     label={
-                      invitationLink(NYXID_FRONTEND_URL, invite.token)
+                      invitationLink(getFrontendUrl(), invite.token)
                         ? "Copy invitation link"
                         : "Copy invitation token"
                     }
                     disabled={disabled}
                     onPress={() =>
                       void Clipboard.setStringAsync(
-                        invitationLink(NYXID_FRONTEND_URL, invite.token) ??
+                        invitationLink(getFrontendUrl(), invite.token) ??
                           invite.token,
                       )
                     }
@@ -493,8 +496,11 @@ export function CollaborationGroupControls({
             />
           )}
         </>
-      ) : (
-        <Label muted>Loading current group rights…</Label>
+      ) : detail.isError ? null : (
+        <SkeletonRows
+          rows={4}
+          accessibilityLabel="Loading current group rights"
+        />
       )}
     </WorkspacePage>
   );

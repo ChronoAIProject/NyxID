@@ -188,12 +188,12 @@ export function AssistantDeviceOnboardDialog({
                   id="assistant-device-qr-payload"
                   readOnly
                   value={result.qrPayload}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
             {result.expiresAt ? (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Expires {result.expiresAt}
               </p>
             ) : null}
@@ -251,7 +251,7 @@ export function AssistantDeviceOnboardDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

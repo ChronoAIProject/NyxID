@@ -51,6 +51,28 @@ const SERVER_OPTIONS: AdminAuditLogFilterOptions = {
 };
 
 describe("normalizeAdminAuditLogSearch", () => {
+  it("preserves exact IDs in shared URLs and describes them as equality chips", () => {
+    const normalized = normalizeAdminAuditLogSearch({
+      user_id: "  user-1  ",
+      api_key_id: "key-1",
+      search: "proxy",
+    });
+    expect(normalized).toEqual({
+      user_id: "user-1",
+      api_key_id: "key-1",
+      search: "proxy",
+    });
+    expect(getAdminAuditLogSearchFilters(normalized)).toEqual([
+      { field: "user_id_exact", values: ["user-1"], operator: "is" },
+      { field: "api_key_id_exact", values: ["key-1"], operator: "is" },
+    ]);
+    expect(
+      normalizeAdminAuditLogSearch({
+        user_id: " ",
+        api_key_id: "x".repeat(257),
+      }),
+    ).toEqual({});
+  });
   it("keeps valid non-default table state", () => {
     expect(
       normalizeAdminAuditLogSearch({
@@ -143,7 +165,9 @@ describe("scoped search filters", () => {
 
   it("rejects an unknown field", () => {
     expect(
-      parseAdminAuditLogSearchFilters('[{"field":"event_data","values":["x"]}]'),
+      parseAdminAuditLogSearchFilters(
+        '[{"field":"event_data","values":["x"]}]',
+      ),
     ).toBeUndefined();
   });
 
@@ -172,9 +196,9 @@ describe("scoped search filters", () => {
 
 describe("custom-text filters", () => {
   it("encodes text typed into the event-type filter", () => {
-    expect(
-      adminAuditLogCustomFilterPatch({ event_type: ["mfa"] }),
-    ).toEqual({ custom_filters: '{"event_type":["mfa"]}' });
+    expect(adminAuditLogCustomFilterPatch({ event_type: ["mfa"] })).toEqual({
+      custom_filters: '{"event_type":["mfa"]}',
+    });
   });
 
   it("drops filters that carry no text", () => {
@@ -270,9 +294,11 @@ describe("adminAuditLogFilterPatch", () => {
   it("accepts an event type the server never advertised", () => {
     // The vocabulary is open, so a value can be legitimate without being one of
     // the checkbox options.
-    expect(adminAuditLogFilterPatch("event_type", ["brand.new.event"])).toEqual({
-      event_type: "brand.new.event",
-    });
+    expect(adminAuditLogFilterPatch("event_type", ["brand.new.event"])).toEqual(
+      {
+        event_type: "brand.new.event",
+      },
+    );
   });
 });
 
@@ -359,11 +385,19 @@ describe("getAdminAuditLogSearchFields", () => {
   it("returns server fields in table order", () => {
     expect(
       getAdminAuditLogSearchFields(SERVER_OPTIONS).map((field) => field.key),
-    ).toEqual(["event_type", "user_id", "api_key", "ip_address", "user_agent"]);
+    ).toEqual([
+      "user_id_exact",
+      "api_key_id_exact",
+      "event_type",
+      "user_id",
+      "api_key",
+      "ip_address",
+      "user_agent",
+    ]);
   });
 
-  it("hides scoped search for a server that does not advertise it", () => {
-    expect(getAdminAuditLogSearchFields()).toEqual([]);
+  it("keeps legacy exact ID searches available without advertising unsupported substring fields", () => {
+    expect(getAdminAuditLogSearchFields().map(field => field.key)).toEqual(["user_id_exact", "api_key_id_exact"]);
   });
 });
 

@@ -29,8 +29,14 @@ mod x_bus_tests;
 
 #[path = "nyxbot_custom_event_tests.rs"]
 mod custom_event_tests;
+#[path = "nyxbot_org_channel_tests.rs"]
+mod org_channel_tests;
+
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
+
+#[path = "nyxbot_turn_context_tests.rs"]
+mod turn_context_tests;
 
 const LEGACY_PROVENANCE: crate::services::nyxbot_watch_service::ReportProvenance =
     crate::services::nyxbot_watch_service::ReportProvenance::LEGACY;
@@ -152,7 +158,15 @@ async fn setup_with_reply_impl(
                     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
                     assert_eq!(status, StatusCode::OK, "setup model callback: {}", String::from_utf8_lossy(&bytes));
                 } else {
-                    sink.lock().await.push(body);
+                    // Capture persisted provenance at the real model boundary,
+                    // before settlement removes the active turn.
+                    let raw = headers["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
+                    let (_, key, _) = key_service::validate_api_key(&db, raw).await.unwrap();
+                    let persisted = db.collection::<AssistantConversation>(CONVERSATIONS)
+                        .find_one(doc! {"credential_api_key_id":&key.id}).await.unwrap().unwrap();
+                    let mut observed = body;
+                    observed["_test_channel_context"] = serde_json::to_value(&persisted.active_turn.as_ref().unwrap().channel_context).unwrap();
+                    sink.lock().await.push(observed);
                 }
                 let session = format!("conv_{}", Uuid::new_v4().simple());
                 let response = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
@@ -292,6 +306,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        org_specialist: None,
         gateway_source: None,
         gateway_native_phase: None,
         gateway_native_activation: None,
@@ -760,6 +775,19 @@ async fn gateway_turns_admit_once_answer_only_the_verified_owner_and_keep_contex
             .pending_events
             .iter()
             .any(|event| event.kind == "message" && event.text.contains("And one more thing"))
+    );
+    let context = &queued
+        .pending_events
+        .iter()
+        .find(|e| e.kind == "message")
+        .unwrap()
+        .channel_contexts[0];
+    assert_eq!(context.channel_bot_id, row.channel_bot_id);
+    assert_eq!(context.conversation_kind, "private");
+    assert!(!context.guest);
+    assert_eq!(
+        context.source_event_id,
+        queued.pending_events[0].source_event_ids[0]
     );
     assert_eq!(calls.lock().await.len(), 1);
     // Management test turns carry no context and run nothing.
@@ -2764,6 +2792,9 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: None,
+            channel_context: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -3288,6 +3319,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            org_specialist: None,
             gateway_source: None,
             gateway_native_phase: None,
             gateway_native_activation: None,
@@ -3834,6 +3866,9 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: None,
+            channel_context: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -3970,6 +4005,7 @@ async fn the_same_question_is_not_worked_on_twice() {
         .unwrap()
         .unwrap();
     let asked_from = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: telegram.id.clone(),

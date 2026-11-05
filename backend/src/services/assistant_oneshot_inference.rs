@@ -1035,7 +1035,7 @@ async fn request_inner(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_execution(actor, actor, route.class)
+        .resolve_for_ordinary_execution(actor, actor, route.class)
         .await
         .map_err(|_| RequestFailure::terminal("dispatch_unavailable"))?;
     let ctx = billing::BillingRouteContext::new(

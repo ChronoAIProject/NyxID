@@ -194,6 +194,42 @@ async fn raw(
 }
 
 #[tokio::test]
+async fn voice_2083_allowed_personal_github_identity_read_never_creates_confirmation() {
+    Box::pin(async {
+        let f = orchestrator_fixture("voice_2083_allowed_read").await;
+        let id = connection(&f, &f.owner, "api-github-pat", None).await;
+        for setting in [
+            AccessMode::Nyxmode,
+            AccessMode::AskEveryTime,
+            AccessMode::Autopilot,
+        ] {
+            mode(&f, setting).await;
+            let decision = gate(
+                &f,
+                &id,
+                &f.owner,
+                &json!({"kind":"http","method":"GET","path":"/user"}),
+                None,
+            )
+            .await;
+            assert!(decision.refusal.is_none());
+            assert!(decision.admission.is_some());
+        }
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+                .count_documents(doc! {"conversation_id":&f.row.id,"status":"pending"})
+                .await
+                .unwrap(),
+            0
+        );
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn legacy_org_reads_confirm_in_auto_and_ask_but_never_full_access() {
     let f = orchestrator_fixture("execution_mode_matrix").await;
     let owner = org(&f).await;
@@ -634,6 +670,8 @@ fn selector_is_leading_exact_and_header_binding_excludes_only_control_metadata()
 #[test]
 fn held_execution_fingerprint_binds_credentials_within_the_process_and_preserves_pool_projection() {
     let mut target = super::super::proxy_service::ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         service: test_utils::test_auto_connected_catalog_service(),
         base_url: "https://example.invalid".into(),
@@ -951,6 +989,8 @@ fn guest_model_2121_absent_preconditions_preserve_route_fingerprint() {
         voice: None,
     });
     let target = super::super::proxy_service::ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         service,
         base_url: "https://example.invalid".into(),

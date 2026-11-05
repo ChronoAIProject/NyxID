@@ -5,10 +5,11 @@ import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { TermsPage } from "./terms";
 import { PrivacyPage } from "./privacy";
+import { contrastRatio, DEFAULT_COLORS } from "@/lib/theme-colors";
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ to, children }: { to: string; children: ReactNode }) => (
-    <a href={to}>{children}</a>
+  Link: ({ to, children, className }: { to: string; children: ReactNode; className?: string }) => (
+    <a href={to} className={className}>{children}</a>
   ),
 }));
 vi.mock("@/hooks/use-logo-href", () => ({ useLogoHref: () => "/" }));
@@ -34,6 +35,7 @@ function servePublishedDocuments() {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  document.documentElement.className = "";
 });
 
 it("renders the published hosted-AI and paid-service terms with a public privacy link", async () => {
@@ -93,4 +95,38 @@ it.each([
   render(<Page />);
   expect(await screen.findByRole("link", { name: "View source" })).toHaveAttribute("href", path);
   expect(screen.getByRole("link", { name: "Back to NyxID" })).toHaveAttribute("href", "/");
+});
+
+it.each([
+  { Page: TermsPage, theme: "dark" as const },
+  { Page: TermsPage, theme: "light" as const },
+  { Page: PrivacyPage, theme: "dark" as const },
+  { Page: PrivacyPage, theme: "light" as const },
+])("uses readable semantic prose and underlined links in $theme", async ({ Page, theme }) => {
+  servePublishedDocuments();
+  document.documentElement.className = `theme-${theme}`;
+  const { container } = render(<Page />);
+  await screen.findByRole("heading", { name: Page === PrivacyPage ? "6. Data Retention" : "14.1 Applicable Fees" });
+  const card = container.querySelector(".legal-prose")!;
+  const colors = DEFAULT_COLORS[theme];
+  const textColor = (element: Element): string => {
+    for (let node: Element | null = element; node; node = node.parentElement) {
+      if (node.classList.contains("text-foreground")) return colors.foreground;
+      if (node.classList.contains("text-muted-foreground")) return colors["muted-foreground"];
+    }
+    throw new Error(`Missing semantic color for ${element.tagName}`);
+  };
+  expect(card).toHaveClass("text-foreground", "bg-card");
+  for (const element of card.querySelectorAll("p,li,h1,h2,h3,h4,h5,h6,strong,em,del,code,pre,blockquote,th,td,a")) {
+    expect(contrastRatio(textColor(element), colors.card), element.tagName).toBeGreaterThanOrEqual(4.5);
+  }
+  const links = [...card.querySelectorAll("a"), screen.getByRole("link", { name: "Back to NyxID" })];
+  expect(links.length).toBeGreaterThan(1);
+  for (const link of links) {
+    expect(link).toHaveClass("text-foreground", "underline", "hover:text-muted-foreground");
+    for (const background of [colors.card, colors.background]) {
+      expect(contrastRatio(colors.foreground, background)).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(colors["muted-foreground"], background)).toBeGreaterThanOrEqual(4.5);
+    }
+  }
 });

@@ -54,6 +54,10 @@ feature flags requires deployment readiness:
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
+| `permissions:execution-v1` | Explicit execution-contract reader. Per-person activation requires reader/dispatch/authoring; broad activation additionally requires enrollment readiness below. See [contract](EXECUTION_PERMISSIONS.md). |
+| `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
+| `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Upgrade/drain every writer before activation. |
+| `permissions:execution-enrollment-v1` | Broad enrollment snapshot, scoped hints and live admission integration. Advertised by production heartbeats with complete auth/admission and Phase B integration. Required for global/org activation and clear-that-enables. |
 | `assistant:org-instruction-v1` | Exact owner instruction or a single-use owner card before covered org credential effects, in every access mode. |
 | `assistant:hosted-connect-intent-v1` | New assistant MCP and Plugins links persist immutable personal/platform intent; completion always enforces an existing lock. |
 
@@ -159,3 +163,20 @@ changes do not alter the separate mobile dependency remediation constraints.
 The default-off capabilities `assistant:org-instruction-v1` and `assistant:hosted-connect-intent-v1` use the same admin enable readiness checks for global, org and user overrides. Deploy compatible backend readers and the frontend first: they must understand `org_connection`, preserve its pending cards/controls in Full, and read defaulted intent locks/receipt fields. Then upgrade and drain every API/admission, executor, job/watch worker and link-completer writer, including alternate ingress. Declare the complete `INSTANCE_NAME`/`SECURITY_ROLLOUT_REPLICAS` roster and `SECURITY_ROLLOUT_DRAINED=true`; confirm both capabilities ready before enabling the rules or locked writes. Old binaries must not rejoin after activation. Flag disabling is not a binary rollback plan.
 
 Legacy selection rows have no positive owner provenance and never become instruction. New exact org bindings omit only mode preference, so pending cards remain redeemable after Auto-to-Full; old bindings are revalidated and may require a fresh exact card. New bounded jobs/watches persist server-owned instruction receipts. Old org jobs without proof refuse and require a reviewed replacement command; old org watches pause for an owner card covering the existing remote operation's declared status/result/cancel lifecycle. Old automatic Full receipts are insufficient. Legacy connect links default the lock to false and retain completion overrides; locked links enforce intent even if the write flag is later disabled. Complete deployment and activation evidence belongs in the implementation/PR review report; do not infer a drained writer from a green load-balancer health check.
+
+## Execution-permission broad cohorts
+
+Before global/org activation, upgrade every serving replica and worker, drain old
+writers, and verify `permissions:execution-v1`, `permissions:execution-dispatch-v1`,
+`permissions:execution-authoring-v1` and `permissions:execution-enrollment-v1`. The
+last capability also gates clear-that-enables; explicit disabling is always allowed.
+Pilot orgs can inspect the admin flag response's scoped reconciliation progress.
+Global activation uses bounded snapshot hints and never rewrites the population.
+Auth adds no reads; fresh candidates resolve the live flag before marked admission.
+
+For rollback, disable every effective cohort, including explicit org/user enables,
+then drain marked tasks, proposals/resumes and Phase B descendants on upgraded
+binaries before rolling back. Global false alone does not override a user/org true.
+A racing admitted send may finish; flags are rollout controls, while saved permission
+and claim fences remain authority. Off→on may resume pending valid marked work,
+never a consumed/uncertain claim. See [enrollment contract](EXECUTION_PERMISSIONS.md#global-and-organization-enrollment).

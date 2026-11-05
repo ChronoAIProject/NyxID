@@ -1,3 +1,4 @@
+import { executionProposalSchema } from "./execution-proposal";
 import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
@@ -36,15 +37,16 @@ export const nyxAgentTurnActivitySchema = z.object({
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
-/// A tool image or human upload, fetched from the owner-only attachment route.
+/// Attachment readers accept future types; upload policy remains server-owned.
 export const nyxAgentAttachmentSchema = z.object({
+  filename: z.string().nullable().optional(),
+  source: z.string().nullable().optional(),
+  result_version: z.string().nullable().optional(),
+  preview_kind: z.string().nullable().optional(),
+  expires_at: z.string().nullable().optional(),
   id: z.string(),
-  content_type: z.enum([
-    "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/plain", "text/markdown", "text/csv", "application/json",
-  ]),
-  origin: z.enum(["tool", "user_upload", ""]).optional(),
+  content_type: z.string(),
+  origin: z.string().optional(),
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
@@ -179,7 +181,17 @@ const turnMetadataSchema = z.object({
   failure_reason: nyxAgentFailureReasonSchema.nullish(),
   channel_delivery: z.object({status:z.string(),heard_prefix_chars:z.number().int().nonnegative().nullish(),heard_prefix_matches_sent:z.boolean()}).nullish(),
 });
+export const nyxAgentActionOutcomeSchema = z.object({
+  summary: z.string(),
+  complete: z.boolean(),
+  actions: z.array(z.object({
+    activity_id: z.string(), label: z.string(), status: z.string(), summary: z.string(),
+  })),
+  retry_warning: z.string().nullish(),
+});
 export const nyxAgentMessageSchema = z.object({
+  artifact_delivery: z.object({state: z.string(),count: z.number().int().nonnegative(),recovery_available: z.boolean(),rejected: z.array(z.object({index: z.number().int().nonnegative(), filename: z.string(), reason: z.string()})).default([])}).nullable().optional(),
+  action_outcome: nyxAgentActionOutcomeSchema.nullish(),
   platform_origin: platformTurnOriginSchema.nullish(),
   recovery: nyxAgentRecoverySchema.nullable().optional(),
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullish(), updated_at: z.string().optional() }).nullish(),
@@ -241,6 +253,7 @@ export const nyxAgentModelSchema = z.object({
 export type NyxAgentModel = z.infer<typeof nyxAgentModelSchema>;
 
 export const nyxAgentAcknowledgementSchema = z.object({
+  review_path: z.string().optional(),
   connect_own: z.object({
     supported: z.boolean(), catalog_service_id: z.string().optional(), service_slug: z.string().optional(),
     reason: z.string().optional(), instructions: z.string().optional(),
@@ -274,6 +287,9 @@ export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSche
 /// A pending proxy approval raised by the chat's key; decided through the
 /// ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  execution_proposal: executionProposalSchema.nullish(),
+  status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
+  review_path: z.string().optional(),
   id: z.string(),
   service_slug: z.string(),
   service_name: z.string(),
@@ -304,6 +320,7 @@ export const nyxAgentHistorySchema = z.object({
   messages: z.array(nyxAgentMessageSchema),
   acknowledgements: z.array(nyxAgentAcknowledgementSchema).default([]),
   approvals: z.array(nyxAgentApprovalSchema).default([]),
+  approval_history: z.array(nyxAgentApprovalSchema).optional(),
   waiting: z.array(nyxAgentWaitingSchema).default([]),
   before_seq: z.number().int().positive().nullable(),
 });
@@ -453,6 +470,9 @@ export type NyxAgentSettingsForm = z.infer<ReturnType<typeof nyxAgentSettingsFor
 
 /** A specialist's permission request awaiting NyxBot (or the user). */
 export const assistantAgentRequestSchema = z.object({
+  status: z.string().optional(),
+  code: z.string().optional(),
+  review_path: z.string().optional(),
   request_id: z.string(),
   /** The requesting agent's name. */
   agent: z.string(),
@@ -701,14 +721,32 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  org_specialist: z
+    .object({
+      org_id: z.string(),
+      guest_enabled: z.boolean(),
+      delegated_service_ids: z.array(z.string()),
+      daily_credits: z.string().nullish(),
+    })
+    .optional(),
   guest_readiness: guestReadinessSchema.nullish(),
-  follow_readiness: z.enum(["ready", "unavailable"]).catch("unavailable").optional(),
+  follow_readiness: z
+    .enum(["ready", "unavailable"])
+    .catch("unavailable")
+    .optional(),
   id: z.string(),
   channel_bot_id: z.string(),
   platform: z.string(),
   bot_label: z.string(),
   bot_username: z.string().nullable().default(null),
   transport: z.string(),
+  gateway_source: z.object({ type: z.string() }).optional(),
+  gateway_native_phase: z.string().optional(),
+  gateway_native_activation: z.string().optional(),
+  gateway_native_activation_detail: z.string().optional(),
+  gateway_native_delivery: z.string().optional(),
+  gateway_next_retry_at: z.string().optional(),
+  gateway_retry_available_at: z.string().optional(),
   /** `pending`, `active` or `failed`. */
   status: z.string(),
   last_error: z.string().nullable().default(null),
