@@ -2112,6 +2112,7 @@ async fn v2_child_fences_are_independent_and_ignore_bson_key_order() {
 #[tokio::test]
 async fn v2_new_hot_collection_indexes_exclude_unbound_documents() {
     let (state, _, _, _, server) = root("v2_partial_indexes", false).await;
+    crate::services::security_readiness_service::ready_automation_test_replica(&state.db).await;
     let mut run_indexes = 0;
     for collection in [
         CONVERSATIONS,
