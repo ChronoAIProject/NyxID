@@ -332,6 +332,23 @@ test("initial saved-history loading and explicit thread reopen still block dicta
   }
 });
 
+test("foreground restoration keeps an explicit saved-thread reopen blocked until history settles", async () => {
+  const x = await setup(true);
+  x.reopen();
+  assert.equal(x.h.value().assistant.loading, true);
+  x.app("inactive");
+  x.app("active");
+  await x.h.settle();
+  assert.equal(x.h.value().assistant.loading, true);
+  assert.equal(x.h.value().button.props.disabled, true);
+  await x.h.value().dictation.start();
+  assert.deepEqual(x.events, []);
+  await x.release();
+  assert.equal(x.h.value().assistant.loading, false);
+  assert.equal(x.h.value().button.props.disabled, false);
+  x.h.unmount();
+});
+
 test("background and navigation blur still cancel a saved chat's pending permission", async () => {
   for (const action of ["background", "blur"]) {
     const x = await setup(true);
