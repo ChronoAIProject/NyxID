@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
 import {
   executionProposalSchema,
@@ -98,7 +99,7 @@ export function ExecutionPermissionCard({
       className="max-w-xl space-y-3 rounded-xl border border-border bg-card p-4"
       aria-label="Execution permission"
     >
-      <p className="text-13 font-semibold">
+      <p className="type-card-title">
         {statusLabel[current.state] ?? "Permission status unavailable"}
       </p>
       {current.review && (
@@ -144,9 +145,11 @@ export function ExecutionPermissionCard({
       {current.can_decide && current.supported && (
         <>
           <fieldset className="space-y-2" disabled={disabled || busy}>
-            <legend className="mb-2 text-12 font-medium">Allow for</legend>
+            <Label asChild>
+              <legend className="mb-2">Allow for</legend>
+            </Label>
             {current.choices.map((c) => (
-              <label key={c.id} className="flex items-start gap-2 text-12">
+              <Label key={c.id} className="flex items-start gap-2">
                 <input
                   type="radio"
                   name={`permission-validity-${requestId}`}
@@ -157,20 +160,20 @@ export function ExecutionPermissionCard({
                 <span>
                   {c.label}
                   {c.valid_until && (
-                    <span className="block text-11 text-muted-foreground">
+                    <span className="block text-muted-foreground">
                       Until {new Date(c.valid_until).toLocaleString()}
                     </span>
                   )}
                 </span>
-              </label>
+              </Label>
             ))}
           </fieldset>
           {current.review?.reusable_unavailable && (
-            <p className="text-11 text-muted-foreground">
+            <p className="text-12 text-muted-foreground">
               {current.review.reusable_unavailable}
             </p>
           )}
-          <p className="text-11 text-muted-foreground">
+          <p className="text-12 text-muted-foreground">
             This saves the displayed permission and resumes the retained
             operation. Other required reviews still apply.
           </p>
