@@ -84,6 +84,13 @@ pub struct ErrorResponse {
     /// Structured error-specific context for clients that can recover interactively.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+    /// CRM-specific recovery fields, flattened to preserve the public error shape.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub crm: Option<Box<CrmErrorBody>>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct CrmErrorBody {
     /// Current CRM record for optimistic-concurrency recovery.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current: Option<serde_json::Value>,
@@ -232,6 +239,9 @@ pub enum AppError {
 
     #[error("CRM view validation failed")]
     CrmViewInvalid(Vec<CrmValidationIssue>),
+
+    #[error("CRM view generation is temporarily unavailable")]
+    CrmGenerationUnavailable,
 
     /// Owner selection diagnostics keep the validation_error / 1008 contract.
     #[error("{reason}: {message}")]
@@ -919,9 +929,9 @@ impl AppError {
             Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-            Self::VoiceProviderUnavailable | Self::MonitoringUnavailable => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::VoiceProviderUnavailable
+            | Self::MonitoringUnavailable
+            | Self::CrmGenerationUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ToolOperationNotPublished => StatusCode::NOT_FOUND,
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
@@ -1173,6 +1183,7 @@ impl AppError {
             Self::CrmValidationFailed(_) => 13401,
             Self::CrmIdempotencyMismatch => 13402,
             Self::CrmViewInvalid(_) => 13403,
+            Self::CrmGenerationUnavailable => 13404,
             Self::EmailSignupDisabled => 1009,
             Self::SshNodeKeyMissing(_) => 1011,
             Self::SshHostKeyMismatch(_) => 1012,
@@ -1458,6 +1469,7 @@ impl AppError {
             Self::CrmValidationFailed(_) => "crm_validation_failed",
             Self::CrmIdempotencyMismatch => "crm_idempotency_mismatch",
             Self::CrmViewInvalid(_) => "crm_view_invalid",
+            Self::CrmGenerationUnavailable => "crm_generation_unavailable",
             Self::EmailSignupDisabled => "email_signup_disabled",
             Self::SshNodeKeyMissing(_) => "ssh_node_key_missing",
             Self::SshHostKeyMismatch(_) => "ssh_host_key_mismatch",
@@ -1737,13 +1749,16 @@ impl AppError {
             ),
             _ => None,
         };
-        let current = match &self {
-            AppError::CrmRevisionConflict(current) => Some(current.as_ref().clone()),
-            _ => None,
-        };
-        let errors = match &self {
+        let crm = match &self {
+            AppError::CrmRevisionConflict(current) => Some(Box::new(CrmErrorBody {
+                current: Some(current.as_ref().clone()),
+                errors: None,
+            })),
             AppError::CrmValidationFailed(errors) | AppError::CrmViewInvalid(errors) => {
-                Some(errors.clone())
+                Some(Box::new(CrmErrorBody {
+                    current: None,
+                    errors: Some(errors.clone()),
+                }))
             }
             _ => None,
         };
@@ -1784,8 +1799,7 @@ impl AppError {
             request_id: approval_request_id,
             approve_url,
             details,
-            current,
-            errors,
+            crm,
         }
     }
 }
@@ -3117,8 +3131,7 @@ mod tests {
             request_id: None,
             approve_url: None,
             details: None,
-            current: None,
-            errors: None,
+            crm: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
@@ -3127,6 +3140,9 @@ mod tests {
         assert!(json.get("consent_url").is_none());
         assert!(json.get("request_id").is_none());
         assert!(json.get("details").is_none());
+        assert!(json.get("crm").is_none());
+        assert!(json.get("current").is_none());
+        assert!(json.get("errors").is_none());
     }
 
     #[test]
@@ -3140,11 +3156,33 @@ mod tests {
             request_id: None,
             approve_url: None,
             details: None,
-            current: None,
-            errors: None,
+            crm: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");
+    }
+
+    #[test]
+    fn crm_error_extensions_serialize_as_top_level_fields() {
+        let current = serde_json::json!({"id": "record", "revision": 2});
+        let conflict = serde_json::to_value(
+            AppError::CrmRevisionConflict(Box::new(current.clone())).response_body(),
+        )
+        .unwrap();
+        assert_eq!(conflict["current"], current);
+        assert!(conflict.get("errors").is_none());
+        assert!(conflict.get("crm").is_none());
+
+        let issues = vec![CrmValidationIssue {
+            path: "values.name".into(),
+            message: "is required".into(),
+        }];
+        let validation =
+            serde_json::to_value(AppError::CrmValidationFailed(issues.clone()).response_body())
+                .unwrap();
+        assert_eq!(validation["errors"], serde_json::to_value(issues).unwrap());
+        assert!(validation.get("current").is_none());
+        assert!(validation.get("crm").is_none());
     }
 
     #[test]
@@ -3483,8 +3521,7 @@ fn error_debug_redacts_challenges_and_untrusted_message_details() {
         request_id: None,
         approve_url: None,
         details: None,
-        current: None,
-        errors: None,
+        crm: None,
     };
     assert!(!format!("{response:?}").contains(secret));
     assert_eq!(

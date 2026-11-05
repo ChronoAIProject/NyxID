@@ -105,6 +105,14 @@ pub fn validate_definition(field: &CrmField, path: &str) -> Vec<CrmValidationIss
 }
 
 fn validate_options(options: &[CrmSelectOption], path: &str, errors: &mut Vec<CrmValidationIssue>) {
+    if options.len() > 100 {
+        issue(
+            errors,
+            format!("{path}.options"),
+            "must contain at most 100 options, including archived options",
+        );
+        return;
+    }
     let mut seen = HashSet::new();
     for (index, option) in options.iter().enumerate() {
         let option_path = format!("{path}.options.{index}");
@@ -170,6 +178,9 @@ fn validate_value(
             let text = value
                 .as_str()
                 .ok_or_else(|| error(path, "must be a string"))?;
+            if field.required && text.trim().is_empty() {
+                return Err(error(path, "required text cannot be blank"));
+            }
             if text.chars().count() > *max_length as usize {
                 return Err(error(
                     path,

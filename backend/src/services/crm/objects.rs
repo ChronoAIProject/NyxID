@@ -160,6 +160,9 @@ pub async fn add_field(
                 .find_one(doc! {"owner_id": owner, "key": object_key}).session(&mut *tx).await?
                 .ok_or_else(|| AppError::NotFound("CRM object not found".into()))?;
             require_schema_revision(&current, *expected)?;
+            if current.fields.len() >= 100 {
+                return Err(super::validation_error("fields", "an object may contain at most 100 fields, including archived fields"));
+            }
             if current.fields.iter().any(|candidate| candidate.key == field.key) {
                 return Err(super::validation_error("field.key", "already exists on this object"));
             }
@@ -221,6 +224,9 @@ pub async fn patch_field(
         field.label = label.clone();
     }
     if let Some(required) = patch.required {
+        if !required && current.pipeline.as_ref().is_some_and(|pipeline| pipeline.stage_field == *field_key) {
+            return Err(super::validation_error("required", "the pipeline stage field must remain required"));
+        }
         field.required = required;
     }
     if patch.archived == Some(true) {
@@ -240,6 +246,9 @@ pub async fn patch_field(
         field.archived = false;
     }
     if let Some(options) = &patch.options {
+        if current.pipeline.as_ref().is_some_and(|pipeline| pipeline.stage_field == field_key.as_str()) && options.len() > 50 {
+            return Err(super::validation_error("options", "pipeline stages support at most 50 options, including archived options"));
+        }
         let CrmFieldKind::Select { options: existing } = &field.kind else {
             return Err(super::validation_error(
                 "options",
