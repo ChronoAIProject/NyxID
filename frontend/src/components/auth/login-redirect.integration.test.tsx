@@ -216,6 +216,7 @@ async function open(
     </QueryClientProvider>,
   );
   await act(() => router.load());
+  await act(() => vi.dynamicImportSettled());
   return router;
 }
 
@@ -250,9 +251,7 @@ async function startAppLogin() {
     await act(async () => {
       fireEvent.click(trigger);
     });
-    await vi.waitFor(() => {
-      expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
-    });
+    expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
@@ -389,9 +388,17 @@ it.each(["/login", "/register"])(
 
 it("keeps the conversation return URL through email registration and subsequent login", async () => {
   await open("/register");
-  await userEvent.click(
-    await screen.findByRole("button", { name: "Continue with Email" }),
-  );
+  const email = await screen.findByRole("button", { name: "Continue with Email" });
+  vi.useFakeTimers();
+  await act(async () => {
+    fireEvent.click(email);
+  });
+  // Finish the delayed focus before typing, so it cannot steal another field.
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(350);
+  });
+  expect(screen.getByLabelText("Full Name")).toHaveFocus();
+  vi.useRealTimers();
   await userEvent.type(
     screen.getByLabelText("Full Name"),
     profile.display_name,
@@ -405,11 +412,31 @@ it("keeps the conversation return URL through email registration and subsequent 
     screen.getByLabelText("Confirm Password"),
     "CorrectHorse123!",
   );
-  await userEvent.click(screen.getByRole("button", { name: "Create Account" }));
-  await waitFor(() => expect(window.location.pathname).toBe("/login"));
+  vi.useFakeTimers();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Create Account" }));
+  });
+  expect(callsTo("/auth/register")).toHaveLength(1);
+  expect(JSON.parse(String(callsTo("/auth/register")[0]![1]?.body))).toEqual({
+    display_name: profile.display_name,
+    email: profile.email,
+    password: "CorrectHorse123!",
+    invite_code: "",
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(200);
+  });
+  expect(screen.getByRole("heading", { name: "Welcome back" })).toBeInTheDocument();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250);
+  });
+  expect(screen.getByRole("heading", { name: "Welcome back" })).toBeVisible();
+  expect(screen.getByPlaceholderText("you@example.com")).toHaveFocus();
+  expect(window.location.pathname).toBe("/login");
   expect(new URLSearchParams(window.location.search).get("return_to")).toBe(
     returnPath,
   );
+  vi.useRealTimers();
   await passwordLogin();
   await waitFor(() =>
     expect(assign).toHaveBeenCalledExactlyOnceWith(
