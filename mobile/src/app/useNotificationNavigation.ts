@@ -14,20 +14,42 @@ import {
   notificationLinkConfig,
   reportDeepLinkOpened,
 } from "./linking";
-import { getAuthEpoch } from "../lib/auth/authEpoch";
+import {
+  getAuthAccountId,
+  subscribeAuthAccount,
+} from "../lib/auth/authAccount";
 import { nativeNotificationUrl } from "../lib/notifications/notificationDestination";
+
+type AccountBinding = { accountId: string | null; invalidated: boolean };
+
+function bindAccount(binding: AccountBinding | null, accountId: string | null) {
+  if (!binding || binding.invalidated) return;
+  if (binding.accountId === null) binding.accountId = accountId;
+  else if (binding.accountId !== accountId) binding.invalidated = true;
+}
 
 /** One queue for cold, background and foreground taps; the latest tap owns the destination. */
 export function useNotificationNavigation(
   navigation: NavigationContainerRefWithCurrent<RootStackParamList>,
   guards: RefObject<Set<symbol>>,
 ) {
-  const pending = useRef<{ url: string; epoch: number } | null>(null);
+  const pending = useRef<(AccountBinding & { url: string }) | null>(null);
+  const coldBinding = useRef<AccountBinding | null>(null);
   const handled = useRef<string | undefined>(undefined);
   const intentRevision = useRef(0);
   const flush = useCallback(() => {
-    if (pending.current?.epoch !== getAuthEpoch()) pending.current = null;
-    if (!pending.current || !navigation.isReady() || guards.current.size)
+    const accountId = getAuthAccountId();
+    // Publish account changes synchronously so batched sign-out/sign-in cannot
+    // revive an old tap or rebind an anonymous delayed read a second time.
+    bindAccount(pending.current, accountId);
+    bindAccount(coldBinding.current, accountId);
+    if (pending.current?.invalidated) pending.current = null;
+    if (
+      !pending.current ||
+      !accountId ||
+      !navigation.isReady() ||
+      guards.current.size
+    )
       return;
     const root = navigation.getRootState();
     if (!root.routes.some((route) => route.name === "Workspace")) return;
@@ -63,18 +85,31 @@ export function useNotificationNavigation(
       const normalized = nativeNotificationUrl(url, notificationLinkConfig);
       if (!normalized) return;
       intentRevision.current++;
-      pending.current = { url: normalized, epoch: getAuthEpoch() };
+      pending.current = {
+        url: normalized,
+        accountId: getAuthAccountId(),
+        invalidated: false,
+      };
       reportDeepLinkOpened(normalized);
       flush();
     },
     [flush],
   );
+  useEffect(() => {
+    const unsubscribe = subscribeAuthAccount(flush);
+    flush();
+    return unsubscribe;
+  }, [flush]);
 
   useEffect(() => {
     let mounted = true;
     let receivedTap = false;
     const coldRevision = intentRevision.current;
-    const coldEpoch = getAuthEpoch();
+    const binding: AccountBinding = {
+      accountId: getAuthAccountId(),
+      invalidated: false,
+    };
+    coldBinding.current = binding;
     const handle = (response: Notifications.NotificationResponse | null) => {
       if (!mounted || !response) return;
       const id = `${response.notification.request.identifier}:${response.actionIdentifier}`;
@@ -94,12 +129,16 @@ export function useNotificationNavigation(
     );
     void Notifications.getLastNotificationResponseAsync()
       .then((response) => {
-        if (
-          !receivedTap &&
-          intentRevision.current === coldRevision &&
-          getAuthEpoch() === coldEpoch
-        )
-          handle(response);
+        if (!mounted || receivedTap || intentRevision.current !== coldRevision)
+          return;
+        if (binding.invalidated) {
+          if (response)
+            void Notifications.clearLastNotificationResponseAsync().catch(
+              () => {},
+            );
+          return;
+        }
+        handle(response);
       })
       .catch(() => {});
     return () => {

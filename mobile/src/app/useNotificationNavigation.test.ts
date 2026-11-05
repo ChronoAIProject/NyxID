@@ -11,6 +11,8 @@ import * as hierarchy from "./navigationHierarchy";
 import * as canonical from "./workspaceCanonicalLinks";
 import * as config from "./navigationLinking";
 import { fixture } from "./workspaceNavigationTestHarness";
+import * as authEpoch from "../lib/auth/authEpoch";
+import * as authAccount from "../lib/auth/authAccount";
 
 type Hook = ReturnType<
   typeof import("./useNotificationNavigation").useNotificationNavigation
@@ -25,9 +27,13 @@ function response(
     notification: { request: { identifier, content: { data }, trigger } },
   };
 }
-function setup() {
+function setup(initialAccount: string | null = null) {
   let ready = false;
-  let epoch = 1;
+  let accountId = initialAccount;
+  authAccount.setAuthAccountId(initialAccount);
+  const credentials = new Map<string, string>();
+  const token = (sub: string, revision = 0) =>
+    `e30.${Buffer.from(JSON.stringify({ sub, revision })).toString("base64url")}.sig`;
   const telemetry: any[] = [];
   let state: any = { ...fixture(), routes: [{ name: "Auth" }] };
   const guards = { current: new Set<symbol>() };
@@ -67,12 +73,28 @@ function setup() {
         telemetry.push(event);
       },
     },
-    "../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
+    "./authEpoch": authEpoch,
+    "expo-secure-store": {
+      getItemAsync: async (key: string) => credentials.get(key) ?? null,
+      setItemAsync: async (key: string, value: string) => {
+        credentials.set(key, value);
+      },
+      deleteItemAsync: async (key: string) => {
+        credentials.delete(key);
+      },
+    },
+    "../analyticsConsentState": {
+      analyticsConsentState: { bindAccount: () => {} },
+    },
+    "../lib/auth/authAccount": authAccount,
     "../lib/notifications/notificationDestination": destination,
     "./navigationHierarchy": hierarchy,
     "./navigationLinking": config,
     "./workspaceCanonicalLinks": canonical,
   });
+  const sessions = h.load(
+    fileURLToPath(new URL("../lib/auth/sessionStore.ts", import.meta.url)),
+  ) as typeof import("../lib/auth/sessionStore");
   const linking = h.load(
     fileURLToPath(new URL("./linking.ts", import.meta.url)),
   ) as any;
@@ -80,33 +102,59 @@ function setup() {
   const hook = h.load(
     fileURLToPath(new URL("./useNotificationNavigation.ts", import.meta.url)),
   ).useNotificationNavigation as any;
-  h.mount(() =>
-    hook(
-      {
-        isReady: () => ready,
-        getRootState: () => state,
-        dispatch: (action: any) => actions.push(action),
-      },
-      guards,
-    ),
-  );
+  const navigation = {
+    isReady: () => ready,
+    getRootState: () => state,
+    dispatch: (action: any) => actions.push(action),
+  };
+  h.mount(() => hook(navigation, guards));
   return {
     h,
     guards,
     actions,
     telemetry,
-    changeAccount: () => {
-      epoch++;
-    },
     cached,
     linking,
     tap: (r: any) => tap(r),
     cleared: () => cleared,
     unsubscribed: () => unsubscribed,
-    signIn: () => {
+    signIn: async (nextAccount = "account-a") => {
+      // AuthSessionContext advances before persistence; sessionStore advances
+      // again. Exercise that real module instead of a separate test counter.
+      authEpoch.advanceAuthEpoch();
+      if (authAccount.getAuthAccountId() !== nextAccount)
+        authAccount.setAuthAccountId(null);
+      await sessions.persistAuthSession({
+        accessToken: token(nextAccount),
+        refreshToken: "refresh",
+      });
+      accountId = nextAccount;
+      authAccount.setAuthAccountId(nextAccount);
       ready = true;
       state = fixture();
+      h.render();
       h.value().flush();
+    },
+    signOut: async () => {
+      authEpoch.advanceAuthEpoch();
+      accountId = null;
+      authAccount.setAuthAccountId(null);
+      h.render();
+      await sessions.clearStoredAuthSession();
+      state = { ...fixture(), routes: [{ name: "Auth" }] };
+      h.value().flush();
+    },
+    refresh: async () => {
+      const session = await sessions.loadStoredAuthSession();
+      assert.ok(session && accountId);
+      assert.equal(
+        await sessions.commitRefreshedAuthSession(session, {
+          ...session,
+          accessToken: token(accountId, 1),
+        }),
+        true,
+      );
+      h.render();
     },
   };
 }
@@ -115,7 +163,9 @@ test("cold notification waits through sign-in and navigation readiness and is de
   f.cached.resolve(response({ conversation_id: "thread" }));
   await f.h.settle();
   assert.equal(f.actions.length, 0);
-  f.signIn();
+  const beforeSignIn = authEpoch.getAuthEpoch();
+  await f.signIn();
+  assert.equal(authEpoch.getAuthEpoch(), beforeSignIn + 2);
   assert.equal(f.actions.length, 1);
   assert.match(JSON.stringify(f.actions[0]), /thread/);
   f.tap(response({ conversation_id: "thread" }));
@@ -129,7 +179,7 @@ test("cold notification waits through sign-in and navigation readiness and is de
 });
 test("warm tap and foreground Open share guards; newest destination replaces an older approval", async () => {
   const f = setup();
-  f.signIn();
+  await f.signIn();
   const guard = Symbol();
   f.guards.current.add(guard);
   f.tap(response({ type: "approval_request", request_id: "approval" }));
@@ -167,7 +217,7 @@ test("actual response extraction covers APNs trigger payload and FCM remote mess
 
 test("a foreground Open fences a late cached cold response while navigation is guarded", async () => {
   const f = setup();
-  f.signIn();
+  await f.signIn();
   const guard = Symbol();
   f.guards.current.add(guard);
   f.h.value().open("https://nyx.example/assistant?c=foreground-thread");
@@ -184,7 +234,7 @@ test("a foreground Open fences a late cached cold response while navigation is g
 
 test("warm and toast taps report only link_type once and stale cold reads do not report", async () => {
   const f = setup();
-  f.signIn();
+  await f.signIn();
   f.tap(response({ type: "approval_request", request_id: "secret-id" }));
   f.tap(response({ type: "approval_request", request_id: "secret-id" }));
   f.h.value().open("https://nyx.example/assistant?c=secret-thread");
@@ -196,27 +246,105 @@ test("warm and toast taps report only link_type once and stale cold reads do not
   ]);
   f.h.unmount();
 });
-test("pending taps and delayed cold reads cannot cross an auth epoch", async () => {
-  for (const cold of [false, true]) {
+for (const delayed of [false, true]) {
+  test(`${delayed ? "delayed cold read" : "pending tap"} accepted signed out survives the next sign-in's real epoch advances`, async () => {
     const f = setup();
-    if (!cold) f.tap(response({ conversation_id: "account-a" }));
-    f.changeAccount();
-    if (cold) {
-      f.cached.resolve(response({ conversation_id: "account-a" }));
+    if (!delayed) {
+      f.cached.resolve(response({ conversation_id: "signed-out-thread" }));
       await f.h.settle();
-      assert.equal(f.telemetry.length, 0);
     }
-    f.signIn();
-    assert.equal(f.actions.length, 0);
-    f.tap(response({ conversation_id: "account-b" }, "new"));
+    const before = authEpoch.getAuthEpoch();
+    await f.signIn();
+    assert.equal(authEpoch.getAuthEpoch(), before + 2);
+    if (delayed) {
+      f.cached.resolve(response({ conversation_id: "signed-out-thread" }));
+      await f.h.settle();
+    }
     assert.equal(f.actions.length, 1);
-    assert.match(JSON.stringify(f.actions[0]), /account-b/);
+    assert.match(JSON.stringify(f.actions[0]), /signed-out-thread/);
     f.h.unmount();
+  });
+  for (const transition of [
+    "sign-out",
+    "account-switch",
+    "sign-out-and-back",
+  ]) {
+    test(`${delayed ? "delayed cold read" : "pending tap"} bound to A is dropped on ${transition}`, async () => {
+      const f = setup("account-a");
+      await f.signIn();
+      const guard = Symbol();
+      f.guards.current.add(guard);
+      if (!delayed) f.tap(response({ conversation_id: "private-a-thread" }));
+      if (transition !== "account-switch") await f.signOut();
+      if (transition !== "sign-out")
+        await f.signIn(
+          transition === "account-switch" ? "account-b" : "account-a",
+        );
+      if (delayed) {
+        f.cached.resolve(response({ conversation_id: "private-a-thread" }));
+        await f.h.settle();
+        assert.equal(f.telemetry.length, 0);
+        assert.equal(
+          f.cleared(),
+          1,
+          "a discarded cold response cannot replay after a restart",
+        );
+      }
+      f.guards.current.delete(guard);
+      f.h.value().flush();
+      assert.equal(f.actions.length, 0);
+      f.h.unmount();
+    });
   }
-});
-test("unrecognized destinations and empty payload taps fall back to native Activity", () => {
+  test(`${delayed ? "delayed cold read" : "pending tap"} survives a real same-account token refresh`, async () => {
+    const f = setup("account-a");
+    await f.signIn();
+    const guard = Symbol();
+    f.guards.current.add(guard);
+    if (!delayed) f.tap(response({ conversation_id: "refresh-thread" }));
+    const before = authEpoch.getAuthEpoch();
+    await f.refresh();
+    assert.equal(authEpoch.getAuthEpoch(), before);
+    if (delayed) {
+      f.cached.resolve(response({ conversation_id: "refresh-thread" }));
+      await f.h.settle();
+    }
+    f.guards.current.delete(guard);
+    f.h.value().flush();
+    assert.equal(f.actions.length, 1);
+    assert.match(JSON.stringify(f.actions[0]), /refresh-thread/);
+    f.h.unmount();
+  });
+}
+test("an anonymous delayed cold read binds to the first sign-in, not a later account", async () => {
   const f = setup();
-  f.signIn();
+  await f.signIn();
+  await f.signIn("account-b");
+  f.cached.resolve(response({ conversation_id: "first-account-thread" }));
+  await f.h.settle();
+  assert.equal(f.actions.length, 0);
+  assert.equal(f.telemetry.length, 0);
+  assert.equal(f.cleared(), 1);
+  f.h.unmount();
+});
+test("sign-out and same-account admission invalidate a tap even without a React render between them", async () => {
+  const f = setup("account-a");
+  await f.signIn();
+  const guard = Symbol();
+  f.guards.current.add(guard);
+  f.tap(response({ conversation_id: "old-session-thread" }));
+  authEpoch.advanceAuthEpoch();
+  authAccount.setAuthAccountId(null);
+  authEpoch.advanceAuthEpoch();
+  authAccount.setAuthAccountId("account-a");
+  f.guards.current.delete(guard);
+  f.h.value().flush();
+  assert.equal(f.actions.length, 0);
+  f.h.unmount();
+});
+test("unrecognized destinations and empty payload taps fall back to native Activity", async () => {
+  const f = setup();
+  await f.signIn();
   f.h.value().open("https://nyx.example/no-native-route");
   f.tap(response({}));
   assert.equal(f.actions.length, 2);
