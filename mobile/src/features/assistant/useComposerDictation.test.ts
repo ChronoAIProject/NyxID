@@ -140,6 +140,11 @@ function setup({
       },
     },
   );
+  const ownership = h.load(
+    fileURLToPath(new URL("./voice/audioSessionOwnership.ts", import.meta.url)),
+  ) as typeof import("./voice/audioSessionOwnership");
+  h.mock("./voice/audioSessionOwnership", ownership);
+  h.mock("./audioSessionOwnership", ownership);
   const module = h.load(
     fileURLToPath(new URL("./useComposerDictation.ts", import.meta.url)),
   );
@@ -162,6 +167,7 @@ function setup({
       time += ms;
     },
     native,
+    ownership,
     locales,
     emit,
     result,
@@ -621,14 +627,16 @@ test("discard/background/unmount wait for native end before releasing the audio 
 });
 
 test("a delayed recognizer end cannot deactivate a newer voice owner", async () => {
-  const { claimVoiceAudioSession } = await import("./voice/audioSessionOwnership");
   const f = setup();
   await f.begin();
   f.h.value().discard();
-  const newer = claimVoiceAudioSession();
+  const newer = f.ownership.claimVoiceAudioSession();
   f.native.emit("end");
   assert.equal(f.events.includes("audio-release"), false);
   newer.release();
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  newer.release();
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
   f.h.unmount();
 });
 
@@ -659,26 +667,152 @@ test("ordinary editable dictation appends through the latest draft callback", as
   f.h.unmount();
 });
 
+/** The real bridge class and lease; only its native message port is replaced. */
+function privateAudio(f: ReturnType<typeof setup>) {
+  f.h.mock("react-native", { StyleSheet: { create: (v: unknown) => v } });
+  f.h.mock("react-native-webview", { WebView: "WebView" });
+  const { NativeVoiceMedia } = f.h.load(
+    fileURLToPath(new URL("./voice/VoiceMediaBridge.tsx", import.meta.url)),
+  ) as typeof import("./voice/VoiceMediaBridge");
+  return (ready: boolean, respond = true) => {
+    const media = new NativeVoiceMedia();
+    const commands: Record<string, unknown>[] = [];
+    media.connect((message) => {
+      commands.push(message);
+      if (message.type === "close") f.events.push("private-close");
+      if (respond && message.type === "prepare")
+        queueMicrotask(() => media.receive(JSON.stringify({
+          type: "response", generation: message.generation,
+          requestId: message.requestId, result: "offer",
+        })));
+    });
+    if (ready) media.receive(JSON.stringify({ type: "ready" }));
+    const controller = new AbortController();
+    const preparation = media.prepare("openai_live", controller.signal)
+      .catch((error: Error) => error.message);
+    return { media, commands, controller, preparation };
+  };
+}
+
 for (const closeFirst of [false, true]) {
-  test(`delayed recognizer cleanup cannot deactivate the real private media owner${closeFirst ? " after it closes" : " while it is live"}`, async () => {
+  test(`cancelled private handoff before bridge readiness releases recognition exactly once: cancel ${closeFirst ? "before" : "after"} native end`, async () => {
     const f = setup();
     await f.begin();
     f.h.value().discard();
-    f.h.mock("react-native", { StyleSheet: { create: (v: unknown) => v } });
-    f.h.mock("react-native-webview", { WebView: "WebView" });
-    const { NativeVoiceMedia } = f.h.load(fileURLToPath(new URL("./voice/VoiceMediaBridge.tsx", import.meta.url))) as typeof import("./voice/VoiceMediaBridge");
-    const media = new NativeVoiceMedia();
-    media.connect((message) => {
-      if (message.type === "prepare") queueMicrotask(() => media.receive(JSON.stringify({
-        type: "response", generation: message.generation, requestId: message.requestId, result: "offer",
-      })));
-    });
-    media.receive(JSON.stringify({ type: "ready" }));
-    await media.prepare("openai_live", new AbortController().signal);
-    if (closeFirst) media.close();
+    const p = privateAudio(f)(false);
+    if (closeFirst) p.controller.abort();
     f.native.emit("end");
-    assert.equal(f.events.includes("audio-release"), false);
-    media.close();
+    p.controller.abort();
+    assert.equal(await p.preparation, "Voice audio was closed.");
+    assert.equal(p.commands.length, 0, "the bridge never acquired native media");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+
+  test(`cancelled private media acquisition inherits pending release: cancel ${closeFirst ? "before" : "after"} native end`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(true, false);
+    assert.equal(p.commands[0]?.type, "prepare");
+    if (closeFirst) p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), closeFirst);
+    p.media.close();
+    assert.equal(await p.preparation, "Voice audio was closed.");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    f.h.unmount();
+  });
+
+  test(`prepared private media preserves the obligation until all owners finish: private closes ${closeFirst ? "first" : "last"}`, async () => {
+    const f = setup();
+    await f.begin();
+    f.h.value().discard();
+    const p = privateAudio(f)(true);
+    assert.equal(await p.preparation, "offer");
+    if (closeFirst) p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), closeFirst,
+      "an active newer owner must not be deactivated");
+    p.media.close();
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+    assert.ok(f.events.indexOf("private-close") < f.events.indexOf("audio-release"));
+    p.media.close();
+    f.native.emit("end");
+    assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
     f.h.unmount();
   });
 }
+
+test("private bridge readiness timeout cannot take away a recognizer's deactivation", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(false);
+  f.native.emit("end");
+  context.mock.timers.tick(15000);
+  assert.equal(await p.preparation, "Voice audio is not ready. Please try again.");
+  assert.equal(p.commands.length, 0);
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("private bridge failure and late recognizer end release the last owner exactly once", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(false);
+  p.media.unavailable();
+  assert.equal(await p.preparation, "Voice audio was closed.");
+  assert.equal(f.events.includes("audio-release"), false);
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("native media preparation failure runs the inherited deactivation", async () => {
+  const f = setup();
+  await f.begin();
+  f.h.value().discard();
+  const p = privateAudio(f)(true, false);
+  f.native.emit("end");
+  assert.equal(f.events.includes("audio-release"), false);
+  const command = p.commands[0]!;
+  p.media.receive(JSON.stringify({ type: "response", generation: command.generation,
+    requestId: command.requestId, error: "Media preparation failed." }));
+  assert.equal(await p.preparation, "Media preparation failed.");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  p.media.close();
+  f.h.unmount();
+});
+
+test("rapid repeated recognition/private handoffs retain one obligation until the final owner closes", async () => {
+  const f = setup();
+  const prepare = privateAudio(f);
+  await f.begin();
+  f.h.value().discard();
+  let p = prepare(true);
+  assert.equal(await p.preparation, "offer");
+  f.native.emit("end");
+  for (let i = 0; i < 5; i++) {
+    await f.begin();
+    p.media.close();
+    assert.equal(f.events.includes("audio-release"), false);
+    f.h.value().discard();
+    p = prepare(true);
+    assert.equal(await p.preparation, "offer");
+    f.native.emit("end");
+    assert.equal(f.events.includes("audio-release"), false);
+  }
+  p.media.close();
+  p.media.close();
+  f.native.emit("end");
+  assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
+  f.h.unmount();
+});

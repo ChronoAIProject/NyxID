@@ -301,7 +301,6 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     if (microphoneOwner && microphoneOwner !== this)
       throw new Error("The microphone is already in use.");
     microphoneOwner = this;
-    this.audioOwner = claimVoiceAudioSession();
     this.closed = false;
     this.diagnostics = [];
     const generation = ++this.generation;
@@ -337,6 +336,9 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       }
       if (signal.aborted || this.closed || generation !== this.generation)
         throw closedError();
+      // From this request onward the bridge can acquire native audio. Retain
+      // any previous recognizer's deactivation until this attempt also closes.
+      this.audioOwner = claimVoiceAudioSession();
       const result = await this.request({ type: "prepare", protocol });
       if (signal.aborted || this.closed || generation !== this.generation)
         throw closedError();
@@ -395,7 +397,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     return { ...this.telemetry };
   }
   close(): void {
-    this.audioOwner?.release();
+    const audioOwner = this.audioOwner;
     this.audioOwner = undefined;
     const active = !this.closed && this.ready;
     this.closed = true;
@@ -407,6 +409,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         // A terminated WebContent process already owns no usable media bridge.
       }
     }
+    audioOwner?.release();
     this.telemetry = { playback_ms: 0, playback_audible: false };
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
