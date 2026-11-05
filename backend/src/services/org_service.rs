@@ -807,9 +807,7 @@ pub async fn delete_org_user(db: &mongodb::Database, org_user_id: &str) -> AppRe
     // Cascade memberships
     crate::services::org_role_scope_service::delete_all_for_org(db, org_user_id).await?;
     crate::services::feature_flag_service::delete_all_for_org(db, org_user_id).await?;
-    db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .delete_many(doc! { "org_user_id": org_user_id })
-        .await?;
+    super::execution_permission_enrollment::jobs::delete_org_memberships(db, org_user_id).await?;
     // Cascade invites
     db.collection::<bson::Document>(crate::models::org_invite::COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
@@ -986,6 +984,7 @@ pub async fn create_membership(
                 "Membership changed; retry the invitation".into(),
             ));
         }
+        super::execution_permission_enrollment::lifecycle::apply(db, member_user_id, super::execution_permission_enrollment::lifecycle::Change::Membership { org: org_user_id, role: Some(role) }, &mut transaction).await?;
         return Ok(OrgMembership {
             id: row.id,
             org_user_id: org_user_id.to_string(),
@@ -1011,7 +1010,10 @@ pub async fn create_membership(
     };
 
     match collection.insert_one(&membership).session(&mut transaction).await {
-        Ok(_) => Ok(membership),
+        Ok(_) => {
+            super::execution_permission_enrollment::lifecycle::apply(db, member_user_id, super::execution_permission_enrollment::lifecycle::Change::Membership { org: org_user_id, role: Some(role) }, &mut transaction).await?;
+            Ok(membership)
+        },
         Err(e) if is_duplicate_key_error(&e) => Err(AppError::Conflict(
             "User is already a member of this org".to_string(),
         )),
@@ -1172,7 +1174,8 @@ pub async fn update_membership(
             )
             .await?;
         }
-        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+        let updated = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
             .find_one_and_update(
                 doc! {"_id": membership_id,"revoked_at":null},
                 doc! {"$set":update},
@@ -1180,7 +1183,20 @@ pub async fn update_membership(
             .return_document(mongodb::options::ReturnDocument::After)
             .session(&mut transaction)
             .await?
-            .ok_or_else(|| AppError::Conflict("Membership changed; reload before editing".into()))
+            .ok_or_else(|| {
+                AppError::Conflict("Membership changed; reload before editing".into())
+            })?;
+        super::execution_permission_enrollment::lifecycle::apply(
+            db,
+            &current.member_user_id,
+            super::execution_permission_enrollment::lifecycle::Change::Membership {
+                org: &current.org_user_id,
+                role: Some(updated.role),
+            },
+            &mut transaction,
+        )
+        .await?;
+        Ok(updated)
     }
     .await;
     super::org_membership_authority::finish(transaction, result).await
@@ -1241,6 +1257,16 @@ pub async fn revoke_membership(
             &mut transaction,
             org_user_id,
             member_user_id,
+        )
+        .await?;
+        super::execution_permission_enrollment::lifecycle::apply(
+            db,
+            member_user_id,
+            super::execution_permission_enrollment::lifecycle::Change::Membership {
+                org: org_user_id,
+                role: None,
+            },
+            &mut transaction,
         )
         .await?;
         Ok(())

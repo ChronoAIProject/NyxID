@@ -510,6 +510,13 @@ pub(crate) async fn apply_user_security_state_in_session(
             "Account state changed; refresh before retrying".into(),
         ));
     }
+    super::execution_permission_enrollment::lifecycle::apply(
+        db,
+        user_id,
+        super::execution_permission_enrollment::lifecycle::Change::Account { active },
+        session,
+    )
+    .await?;
     if let Some(policy) = &owner_deletion_policy {
         // Same transaction as the account/source fence. These
         // retained lifecycle records outlive the user cascade;

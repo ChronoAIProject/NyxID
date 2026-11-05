@@ -314,6 +314,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::cma_session_origin::ensure_indexes(db).await?;
     crate::services::assistant_invocation_service::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
+    crate::services::execution_permission_enrollment::jobs::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
     crate::services::channel_image_delivery::ensure_indexes(db).await?;
     crate::services::voice::session::ensure_indexes(db).await?;
@@ -2407,6 +2408,20 @@ async fn ensure_feature_flag_indexes(db: &Database) -> Result<(), mongodb::error
             IndexModel::builder()
                 .keys(doc! { "org_user_id": 1, "flag_key": 1, "definition_id": 1, "target_kind": 1, "target_key": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // Single-flag enrollment snapshot/live reads must not scan every flag.
+    feature_flag_overrides
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"flag_key":1,"definition_id":1,"org_user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("feature_flag_single_scope".to_owned())
+                        .build(),
+                )
                 .build(),
         )
         .await?;

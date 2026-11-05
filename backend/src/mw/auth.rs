@@ -995,7 +995,10 @@ async fn api_key_auth_user_inner(
                         | crate::models::api_key::ApiKeyPurpose::PermissionBound
                 )
         })
-        .and_then(|u| u.execution_permission_enrollment);
+        .filter(|u| {
+            crate::services::execution_permission_enrollment::snapshot::candidate(db, u, &[])
+        })
+        .map(|_| 1);
     let execution_permission =
         crate::services::execution_permission_dispatch::RequestContext::enrolled(
             marker.or_else(|| {
@@ -1540,7 +1543,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
                     let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
-                        execution_enrolled: first_party_session && user.execution_permission_enrollment == Some(1),
+                        execution_enrolled: first_party_session && state.execution_enrollment.candidate(&user, &[]),
                         execution_permission: None,
                         mfa_assured,
                         mfa_enabled: (first_party_session
@@ -1631,7 +1634,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
-                                    execution_enrolled: u.execution_permission_enrollment == Some(1),
+                                    execution_enrolled: state.execution_enrollment.candidate(&u, &[]),
                                     execution_permission: None,
                                     mfa_assured: sess.mfa_assured == Some(true),
                                     mfa_enabled: (u.user_type == crate::models::user::UserType::Person)

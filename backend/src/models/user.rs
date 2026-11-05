@@ -226,7 +226,7 @@ pub struct OnboardingState {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
-    /// Server-only rollout hint. Never consent; authored with the per-person flag.
+    /// Server-only personal/org rollout hint. Never consent; global candidacy is a process snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_permission_enrollment: Option<u32>,
     #[serde(rename = "_id")]

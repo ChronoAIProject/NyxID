@@ -157,7 +157,7 @@ pub async fn authorize(
             .find_one(doc! {"_id":actor,"is_active":true,"user_type":{"$ne":"org"}})
             .await?
             .ok_or_else(missing)?;
-        person.user_type.is_person() && person.execution_permission_enrollment == Some(1)
+        super::execution_permission_enrollment::snapshot::candidate(db, &person, &[])
     } else {
         false
     };

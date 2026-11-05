@@ -222,8 +222,9 @@ pub(super) async fn enqueue_with_uploads_ready(
                         .await?;
                     }
                 }
+                let participating = access.execution_enrolled && svc::execution_permission_enrollment::live_enabled(db, actor, Some(session)).await?;
                 let request = GroupRequest {
-                    execution_task: access.execution_enrolled.then(|| crate::models::execution_permission::TaskAdmission {
+                    execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
                         version:1, task:crate::models::execution_permission::TaskRef {root_kind:crate::models::execution_permission::TaskRootKind::GroupRequest,root_id:id.clone()},
                         actor_user_id:actor.into(),audience:crate::models::execution_permission::Audience::Group {group_id:group_id.into(),revision:access.membership_revision()},epoch:1,
                         hard_deadline:Utc::now()+chrono::Duration::hours(24),cancelled:false,parent_turn_id:None,
