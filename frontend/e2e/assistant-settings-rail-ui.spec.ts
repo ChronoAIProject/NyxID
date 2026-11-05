@@ -49,7 +49,8 @@ async function settingsApi(page: Page) {
   let user = {
     id: "d4f5a6b7-c8d9-4e0f-a1b2-c3d4e5f60718",
     display_name: "Reader",
-    email: "reader@example.com",
+    email:
+      "reader.account-settings-review+long-address-for-verification@international-research-department.example.com",
     email_verified: true,
     has_password: true,
     mfa_enabled: false,
@@ -73,7 +74,7 @@ async function settingsApi(page: Page) {
       body: source.replace(
         signature,
         `${signature}
-      if (["/users/me", "/auth/password/change", "/sessions"].includes(endpoint.split("?")[0])) return undefined;`,
+      if (["/users/me", "/auth/password/change", "/sessions"].includes(endpoint.split("?")[0]) || endpoint.startsWith("/auth/mfa/")) return undefined;`,
       ),
     });
   });
@@ -117,6 +118,34 @@ async function settingsApi(page: Page) {
       ],
     }),
   );
+  await page.route("**/api/v1/auth/mfa/setup", (route) =>
+    route.fulfill({
+      json: {
+        secret: "JBSWY3DPEHPK3PXP",
+        qr_code_url: "otpauth://totp/NyxID?secret=JBSWY3DPEHPK3PXP",
+      },
+    }),
+  );
+  await page.route("**/api/v1/auth/mfa/confirm", (route) => {
+    writes.push({
+      method: route.request().method(),
+      path: "/auth/mfa/confirm",
+      body: route.request().postDataJSON(),
+    });
+    user = { ...user, mfa_enabled: true };
+    return route.fulfill({
+      json: { recovery_codes: ["recovery-one", "recovery-two"] },
+    });
+  });
+  await page.route("**/api/v1/auth/mfa/disable", (route) => {
+    writes.push({
+      method: route.request().method(),
+      path: "/auth/mfa/disable",
+      body: route.request().postDataJSON(),
+    });
+    user = { ...user, mfa_enabled: false };
+    return route.fulfill({ json: {} });
+  });
   return writes;
 }
 
@@ -190,7 +219,9 @@ for (const mode of ["light", "dark"] as const) {
         .getByRole("dialog", { name: "Review changes" })
         .getByRole("button", { name: "Save changes", exact: true })
         .click();
-      await expect(page.getByRole("dialog", { name: "Review changes" })).toHaveCount(0);
+      await expect(
+        page.getByRole("dialog", { name: "Review changes" }),
+      ).toHaveCount(0);
       await expect(
         content.getByRole("region", { name: "Unsaved changes" }),
       ).toHaveCount(0);
@@ -202,6 +233,87 @@ for (const mode of ["light", "dark"] as const) {
         },
       ]);
       await capture(page, `settings-${mode}-${width}-studio`);
+    });
+
+    test(`two-factor switch follows confirmed server state in ${mode} at ${width}px`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await theme(page, mode);
+      const writes = await settingsApi(page);
+      await openAssistant(page, { faults: { nyxagentEnabled: true } });
+      const panel = await settings(page);
+      await panel.getByRole("tab", { name: "Security", exact: true }).click();
+      const toggle = page.getByRole("switch", {
+        name: "Toggle two-factor authentication",
+        includeHidden: true,
+      });
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      await toggle.click();
+      let setup = page.getByRole("dialog", {
+        name: "Enable Two-Factor Authentication",
+        exact: true,
+      });
+      await expect(setup).toBeVisible();
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      await capture(page, `settings-${mode}-${width}-mfa-setup`);
+      await setup.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      await toggle.click();
+      setup = page.getByRole("dialog", {
+        name: "Enable Two-Factor Authentication",
+        exact: true,
+      });
+      await setup.getByRole("button", { name: "Begin Setup" }).click();
+      const verify = page.getByRole("dialog", {
+        name: "Scan QR Code",
+        exact: true,
+      });
+      await verify.getByRole("textbox").fill("123456");
+      await verify.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(writes).toEqual([]);
+      await toggle.click();
+      await setup.getByRole("button", { name: "Begin Setup" }).click();
+      await verify.getByRole("textbox").fill("123456");
+      await verify.getByRole("button", { name: "Verify and Enable" }).click();
+      await page
+        .getByRole("dialog", { name: "Recovery Codes", exact: true })
+        .getByRole("button", { name: "Done" })
+        .click();
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      await expect(page.getByText("MFA enabled successfully", { exact: true })).toBeHidden({ timeout: 10_000 });
+      await toggle.click();
+      const disable = page.getByRole("dialog", {
+        name: "Disable Two-Factor Authentication",
+        exact: true,
+      });
+      await expect(disable).toBeVisible();
+      await capture(page, `settings-${mode}-${width}-mfa-disable`);
+      await disable
+        .getByRole("button", { name: "Cancel", exact: true })
+        .click();
+      await expect(toggle).toHaveAttribute("aria-checked", "true");
+      await toggle.click();
+      await disable
+        .getByLabel("Authenticator or recovery code", { exact: true })
+        .fill("123456");
+      await disable
+        .getByLabel("Password", { exact: true })
+        .fill("current-password");
+      await disable
+        .getByRole("button", { name: "Disable MFA", exact: true })
+        .click();
+      await expect(disable).toHaveCount(0);
+      await expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(writes).toEqual([
+        { method: "POST", path: "/auth/mfa/confirm", body: { code: "123456" } },
+        {
+          method: "POST",
+          path: "/auth/mfa/disable",
+          body: { code: "123456", password: "current-password" },
+        },
+      ]);
     });
 
     test(`grouped account settings, reviewed saves and dismissal in ${mode} at ${width}px`, async ({
@@ -245,7 +357,70 @@ for (const mode of ["light", "dark"] as const) {
             (element) => element.scrollWidth - element.clientWidth,
           ),
         ).toBeLessThanOrEqual(1);
+        if (label === "Profile") {
+          const name = tab.getByRole("textbox", { name: "Name", exact: true });
+          expect(
+            await name.evaluate((input) => getComputedStyle(input).textAlign),
+          ).toBe("start");
+          const email = tab.getByLabel("Email", { exact: true });
+          await expect(email).toBeDisabled();
+          await expect(email).toHaveAttribute(
+            "title",
+            /international-research-department/,
+          );
+          expect(
+            await email.evaluate(
+              (input) => getComputedStyle(input).textOverflow,
+            ),
+          ).toBe("ellipsis");
+          await expect(
+            tab.getByText("Verified", { exact: true }),
+          ).toBeVisible();
+        }
+        if (label === "Security") {
+          for (const [field, placeholder] of [
+            ["Current Password", "Enter current password"],
+            ["New Password", "Enter new password"],
+            ["Confirm New Password", "Re-enter new password"],
+          ]) {
+            await expect(
+              tab.getByLabel(field, { exact: true }),
+            ).toHaveAttribute("placeholder", placeholder);
+          }
+        }
+        if (label === "Display") {
+          for (const title of ["Text size", "Spacing", "Chat content width"]) {
+            const slider = tab.getByRole("slider", {
+              name: title,
+              exact: true,
+            });
+            const range = slider.locator("..");
+            const heading = range.locator("[data-range-heading]");
+            const labelBox = (await heading.locator("label").boundingBox())!;
+            const valueBox = (await heading.locator("output").boundingBox())!;
+            expect(
+              Math.abs(
+                labelBox.y +
+                  labelBox.height / 2 -
+                  valueBox.y -
+                  valueBox.height / 2,
+              ),
+            ).toBeLessThan(2);
+            const sliderBox = (await slider.boundingBox())!;
+            expect(sliderBox.y).toBeGreaterThan(labelBox.y + labelBox.height);
+            expect(sliderBox.width).toBeCloseTo(
+              (await range.boundingBox())!.width,
+              0,
+            );
+          }
+        }
         await capture(page, `settings-${mode}-${width}-${label.toLowerCase()}`);
+        if (label === "Display") {
+          await tab
+            .getByRole("slider", { name: "Chat content width", exact: true })
+            .scrollIntoViewIfNeeded();
+          await capture(page, `settings-${mode}-${width}-display-layout`);
+        }
       }
       await panel.getByRole("tab", { name: "Profile", exact: true }).click();
       await panel
@@ -437,6 +612,14 @@ for (const mode of ["light", "dark"] as const) {
     }).toPass();
     await capture(page, `rail-${mode}-desktop-aside`);
     await expect(rail).toHaveAttribute("data-scroll-edges", "top");
+    await expect(rail.locator('[tabindex="0"]')).toHaveCount(1);
+    const current = rail.locator('[aria-current="location"]');
+    await current.hover();
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
+    await page.mouse.down();
+    await expect(page.getByRole("tooltip")).toContainText("Review item 240");
+    await page.mouse.up();
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
     const initialScroll = await page
       .locator("[data-chat-transcript]")
       .evaluate((element) => element.scrollTop);
@@ -450,7 +633,34 @@ for (const mode of ["light", "dark"] as const) {
         .evaluate((element) => element.scrollTop),
     ).toBe(initialScroll);
     expect(await rail.locator("button").count()).toBeLessThan(160);
+    await expect(rail.locator('[tabindex="0"]')).toHaveCount(1);
+    // Browse tick history independently of the transcript's bounded message window.
+    const offscreenIndex = await rail.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return Array.from(
+        element.querySelectorAll<HTMLElement>("[data-chat-index-target]"),
+      ).find((tick) => {
+        const index = Number(tick.dataset.chatIndexTarget);
+        const rect = tick.getBoundingClientRect();
+        return (
+          rect.top >= bounds.top + 20 &&
+          rect.bottom <= bounds.bottom - 20 &&
+          !document.querySelector(`[data-chat-message-index="${index}"]`)
+        );
+      })?.dataset.chatIndexTarget;
+    });
+    expect(offscreenIndex).toBeDefined();
+    const destination = page.locator(`#message-rail-message-${offscreenIndex}`);
+    await expect(destination).toHaveCount(0);
+    await rail.locator(`[data-chat-index-target="${offscreenIndex}"]`).click();
+    await expect(destination).toBeInViewport();
+    await expect(
+      rail.locator(`[data-chat-index-target="${offscreenIndex}"]`),
+    ).toHaveAttribute("aria-current", "location");
+    await expect(rail.locator('[tabindex="0"]')).toHaveCount(1);
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
     const tick = rail.locator('[data-chat-index-target][tabindex="0"]');
+    await expect(tick).toHaveCount(1);
     await tick.focus();
     await page.keyboard.press("Home");
     await expect(rail).toHaveAttribute("data-scroll-edges", "bottom");
@@ -482,6 +692,8 @@ for (const mode of ["light", "dark"] as const) {
     });
     await page.mouse.up();
     await expect(page.locator("#message-rail-message-8")).toBeInViewport();
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
+    await expect(rail.locator('[tabindex="0"]')).toHaveCount(1);
     await rail.locator('[aria-current="location"]').focus();
     await page.keyboard.press("End");
     await expect(rail).toHaveAttribute("data-scroll-edges", "top");

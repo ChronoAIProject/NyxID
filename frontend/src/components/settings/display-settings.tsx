@@ -1,5 +1,6 @@
+import { RangeControl } from "@/components/ui/range-control";
 import { Label, FieldHelp } from "@/components/ui/label";
-import { useRef, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Check,
   Monitor,
@@ -112,7 +113,10 @@ function SegmentedChoice<T extends string | number>({
             const nextOption = options[next];
             if (!nextOption) return;
             onChange(nextOption.value);
-            const radios = event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]');
+            const radios =
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                '[role="radio"]',
+              );
             radios?.[next]?.focus();
           }}
           className={cn(
@@ -211,111 +215,47 @@ function SidebarWidthControl({
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   return (
-    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
-      <input
-        type="range"
-        aria-label={label}
-        min={SIDEBAR_WIDTH.min}
-        max={SIDEBAR_WIDTH.max}
-        step={4}
-        value={width}
-        onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
-        className="min-w-0 max-w-full flex-1 basis-[10em] accent-primary"
-      />
-      <span className="min-w-[5ch] text-right font-mono text-13 text-muted-foreground">
-        {width}px
-      </span>
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label={`Reset ${label.toLowerCase()}`}
-        title="Reset to default"
-        disabled={width === SIDEBAR_WIDTH.default}
-        onClick={() => setSidebarWidth(sidebar, SIDEBAR_WIDTH.default)}
-        className={cn(width === SIDEBAR_WIDTH.default && "invisible")}
-      >
-        <RotateCcw className="size-3" />
-      </Button>
-    </div>
+    <RangeControl
+      label={label}
+      description={
+        sidebar === "dashboard"
+          ? "Used when the main sidebar is expanded."
+          : "The agents and chats list in the assistant."
+      }
+      saved={width}
+      onChange={(value) => setSidebarWidth(sidebar, value)}
+      {...SIDEBAR_WIDTH}
+      step={4}
+      defaultValue={SIDEBAR_WIDTH.default}
+      formatValue={(value) => `${value}px`}
+      commitOnRelease={false}
+    />
   );
 }
 
 function ScaleControl({
-  id,
   label,
+  description,
   scale,
   onChange,
 }: {
-  readonly id: string;
   readonly label: string;
+  readonly description: string;
   readonly scale: number;
   readonly onChange: (value: number) => void;
 }) {
-  const [draft, setDraft] = useState<number | null>(null);
-  const dragPointer = useRef<number | null>(null);
-  const value = draft ?? scale;
-  const multiplier = `${Number(value.toFixed(2))}×`;
-
   return (
-    <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">
-      <div className="flex max-w-full flex-1 basis-[16em] items-start gap-3">
-        <div className="min-w-0 flex-1 space-y-1">
-          <input
-            id={id}
-            type="range"
-            aria-label={label}
-            aria-valuetext={multiplier}
-            min={DISPLAY_SCALE_MIN}
-            max={DISPLAY_SCALE_MAX}
-            step={DISPLAY_SCALE_STEP}
-            value={value}
-            onChange={(e) => {
-              const next = e.currentTarget.valueAsNumber;
-              if (dragPointer.current !== null) setDraft(next);
-              else onChange(next);
-            }}
-            onPointerDown={(e) => {
-              if (e.button !== 0 || dragPointer.current !== null) return;
-              dragPointer.current = e.pointerId;
-              e.currentTarget.setPointerCapture(e.pointerId);
-              setDraft(scale);
-            }}
-            onPointerUp={(e) => {
-              if (dragPointer.current !== e.pointerId) return;
-              dragPointer.current = null;
-              onChange(e.currentTarget.valueAsNumber);
-              setDraft(null);
-            }}
-            onPointerCancel={() => {
-              dragPointer.current = null;
-              setDraft(null);
-            }}
-            onLostPointerCapture={() => {
-              dragPointer.current = null;
-              setDraft(null);
-            }}
-            className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
-          />
-          <div
-            className="flex flex-wrap justify-between gap-x-2 text-13 text-muted-foreground"
-            aria-hidden="true"
-          >
-            <span>{DISPLAY_SCALE_MIN}×</span>
-            <span>{DISPLAY_SCALE_MAX}×</span>
-          </div>
-          <p className="text-13 text-muted-foreground">
-            Default: {DISPLAY_SCALE_DEFAULT}×
-          </p>
-        </div>
-        <output
-          htmlFor={id}
-          aria-live="off"
-          className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-13 text-muted-foreground"
-        >
-          {multiplier}
-        </output>
-      </div>
-    </div>
+    <RangeControl
+      label={label}
+      description={description}
+      saved={scale}
+      onChange={onChange}
+      min={DISPLAY_SCALE_MIN}
+      max={DISPLAY_SCALE_MAX}
+      step={DISPLAY_SCALE_STEP}
+      defaultValue={DISPLAY_SCALE_DEFAULT}
+      formatValue={(value) => `${Number(value.toFixed(2))}×`}
+    />
   );
 }
 
@@ -338,21 +278,15 @@ function SidebarSettings() {
           onChange={setSidebarMode}
         />
       </SettingRow>
-      <SettingRow
-        title="Main sidebar width"
-        description="Used when the main sidebar is expanded."
-      >
+      <GroupedRow>
         <SidebarWidthControl sidebar="dashboard" label="Main sidebar width" />
-      </SettingRow>
-      <SettingRow
-        title="Assistant sidebar width"
-        description="The agents and chats list in the assistant."
-      >
+      </GroupedRow>
+      <GroupedRow>
         <SidebarWidthControl
           sidebar="assistant"
           label="Assistant sidebar width"
         />
-      </SettingRow>
+      </GroupedRow>
     </GroupedList>
   );
 }
@@ -383,11 +317,7 @@ function ColorEditor() {
             onChange={setEditMode}
           />
           {editMode !== resolved && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setMode(editMode)}
-            >
+            <Button variant="ghost" size="sm" onClick={() => setMode(editMode)}>
               Switch to {editMode} theme to preview
             </Button>
           )}
@@ -554,28 +484,22 @@ export function DisplaySettings() {
             onChange={setMode}
           />
         </SettingRow>
-        <SettingRow
-          title="Text size"
-          description="Resize text and icons together. Controls adapt to keep them readable."
-        >
+        <GroupedRow>
           <ScaleControl
-            id="text-size"
             label="Text size"
+            description="Resize text and icons together. Controls adapt to keep them readable."
             scale={textScale}
             onChange={setTextScale}
           />
-        </SettingRow>
-        <SettingRow
-          title="Spacing"
-          description="Choose how much room sits between controls and content."
-        >
+        </GroupedRow>
+        <GroupedRow>
           <ScaleControl
-            id="spacing"
             label="Spacing"
+            description="Choose how much room sits between controls and content."
             scale={density}
             onChange={setDensity}
           />
-        </SettingRow>
+        </GroupedRow>
         <SettingRow
           title="Motion"
           description="Follow your device preference or use fewer animations."
@@ -598,18 +522,12 @@ export function DisplaySettings() {
         title="Chat layout"
         footer="Set a comfortable reading width and writing area for all your chats."
       >
-        <SettingRow
-          title="Chat content width"
-          description="Maximum width for messages and the composer. Smaller screens fit automatically."
-        >
+        <GroupedRow>
           <ChatWidthControl />
-        </SettingRow>
-        <SettingRow
-          title="Maximum composer height"
-          description="How tall your draft can grow before it scrolls. Short drafts stay compact and always fit the screen."
-        >
+        </GroupedRow>
+        <GroupedRow>
           <ComposerHeightControl />
-        </SettingRow>
+        </GroupedRow>
       </GroupedList>
       <SidebarSettings />
       <ColorEditor />

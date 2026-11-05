@@ -90,7 +90,12 @@ it.each([4, 5])("keeps only the current tick violet, including either role, with
   const first = nav.querySelector("button")!;
   expect(first).toHaveClass("focus-visible:ring-muted-foreground");
   fireEvent.pointerEnter(first, { pointerType: "mouse" });
+  expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  nav.setPointerCapture = vi.fn();
+  fireEvent.pointerDown(first, { button: 0, pointerId: 1, clientY: 100 });
   expect(screen.getByRole("tooltip")).toHaveTextContent("Message 0");
+  fireEvent.pointerUp(nav, { pointerId: 1 });
+  expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   expect(first.firstElementChild).not.toHaveClass("text-nyx-secondary-400");
   fireEvent.click(first, { detail: 0 });
   expect(navigate).toHaveBeenLastCalledWith(0);

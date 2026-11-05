@@ -392,7 +392,15 @@ a trailing chevron; buttons and links must keep accessible names.
 Groups never contain another group, card or outlined control. Use borderless
 `GroupedInput`, `GroupedTextarea` and `GroupedSelectTrigger` inside rows.
 Short fields can pair a leading label and trailing value; longer fields grow
-under their label. Validation text is destructive and linked with
+under their label. Account text fields consistently stack a label above a
+left-aligned, full-width input, including Name, Email and password fields.
+Editable names have a pencil affordance; empty password fields have explicit
+entry placeholders with visibility controls inside the row. Email keeps its
+verification badge beside the label and truncates long read-only values,
+retaining the full address in its title. Range rows use the shared
+`RangeControl`: label and current value aligned above a full-width slider,
+with one muted helper below and a reset action beside the value. Native range
+semantics expose the bounds; do not stack min/max and default captions. Validation text is destructive and linked with
 `aria-describedby` (the shared Form primitives provide these links). Put
 field-specific explanations directly below their field in `text-13 text-text-tertiary`; reserve the group footer for shared context, warnings and errors. Never concatenate unrelated field help in a footer. Destructive
 actions are destructive-colored rows in their own neutral group.
@@ -484,8 +492,9 @@ transcript's edge-aware mask pattern: fade only an edge with more ticks beyond
 it, and remove that fade at the revealed edge. Wheel browsing, dragging (with
 edge autoscroll), and keyboard navigation scroll the rail; transcript navigation
 keeps the current tick visible. Rail scrolling is immediate, including with
-reduced motion. Hover/focus shows a preview and click, drag and keyboard
-navigation jump to messages. Observe the toolbar size to keep the rail below
+reduced motion. A passing pointer shows no preview. Pressing or dragging a tick
+previews its message until release; keyboard focus also previews. Click, drag
+and keyboard navigation jump to messages. Observe the toolbar size to keep the rail below
 its controls, including wrapped compact headers. Defer rail position and size
 writes to an animation frame outside ResizeObserver delivery: moving the
 rail's top also changes the measured viewport height during header animation.
@@ -873,6 +882,8 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |
+| 2026-11-05 | Conversation previews require an intentional gesture | Passing pointers leave the rail quiet. Press and drag preview until release; keyboard focus retains its preview. Browser coverage includes virtualized-message jumps, isolated wheel scrolling and one roving tab stop. |
 | 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |
 | 2026-11-05 | Conversation index belongs to the chat viewport | Anchor to the transcript column before every preview/CMA/machine aside, independent of sidebar and saved column width. Fill the space below the toolbar and above the composer, retain 7px pitch and bounded scrolling with edge-aware fades, and change only the current tick’s accent color. Hide the rail below 768px without reserving a gutter. |
 | 2026-11-04 | One control treatment and page rhythm in both shells | Shared themed controls and portals use the same density, padding, gaps, minimums, icons and radii. WorkspacePageHeader composes PageHeader; content insets, section gaps and card gaps share shell classes. Assistant-only root CSS is limited to transcript tick slots. Browser parity covers real shells and portals at all supported audit scales. |

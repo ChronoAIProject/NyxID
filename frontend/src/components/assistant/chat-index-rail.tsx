@@ -277,7 +277,6 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
                 tabIndex={index === focusIndex ? 0 : -1}
                 className="group absolute left-0 flex w-full cursor-pointer items-center justify-end pr-[calc(var(--chat-index-tick-width)/4)] outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-muted-foreground"
                 style={{ height: layout.pitch, top: centerOffset + index * layout.pitch }}
-                onPointerEnter={(event) => { if (event.pointerType !== "touch" && !dragging.current) preview(index, event.currentTarget); }}
                 onFocus={(event) => { reveal(index); preview(index, event.currentTarget); }}
                 onClick={(event) => { if (event.detail === 0) navigate(index); }}
               >

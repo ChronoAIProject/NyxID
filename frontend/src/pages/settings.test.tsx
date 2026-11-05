@@ -122,6 +122,28 @@ describe.each(["/settings", "/assistant"] as const)(
       expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument();
     });
 
+    it("identifies editable text fields and keeps long email addresses available", async () => {
+      await open(route);
+      const name = screen.getByRole("textbox", { name: "Name" });
+      expect(name).toBeEnabled();
+      expect(name).toHaveAttribute("placeholder", "Your name");
+      const email = screen.getByRole("textbox", { name: "Email" });
+      expect(email).toBeDisabled();
+      expect(email).toHaveAttribute("title", securityUser.email);
+      expect(email).toHaveClass("truncate");
+      act(() => useAuthStore.setState({ user: { ...useAuthStore.getState().user!, has_password: true } }));
+      await userEvent.click(screen.getByRole("tab", { name: "Security" }));
+      for (const [label, placeholder] of [["Current Password", "Enter current password"], ["New Password", "Enter new password"], ["Confirm New Password", "Re-enter new password"]] as const) {
+        const input = screen.getByLabelText(label, { exact: true });
+        expect(input).toHaveAttribute("placeholder", placeholder);
+        expect(input).toHaveAttribute("type", "password");
+        await userEvent.click(screen.getByRole("button", { name: `Show ${label.toLowerCase()}` }));
+        expect(input).toHaveAttribute("type", "text");
+        await userEvent.click(screen.getByRole("button", { name: `Hide ${label.toLowerCase()}` }));
+        expect(input).toHaveAttribute("type", "password");
+      }
+    });
+
     it("keeps profile drafts across tabs, reviews only the name, and preserves the update API", async () => {
       const original = transport.getMockImplementation()!;
       transport.mockImplementation(async (url, options) => url === "/api/v1/users/me" && options?.method === "PUT"

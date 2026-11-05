@@ -77,7 +77,15 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Eye, EyeOff, Trash2, ExternalLink, Copy, Check } from "lucide-react";
+import {
+  Eye,
+  EyeOff,
+  Pencil,
+  Trash2,
+  ExternalLink,
+  Copy,
+  Check,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   getDeviceIcon,
@@ -285,32 +293,39 @@ function ProfileForm({ user }: { readonly user: User }) {
             name="display_name"
             rules={{ required: "Name is required" }}
             render={({ field }) => (
-              <FormItem inline>
+              <FormItem>
                 <FormLabel>Name</FormLabel>
-                <FormControl>
-                  <Input
-                    {...field}
-                    className="min-w-0 flex-1 basis-40 sm:text-right"
-                    placeholder="Your name"
+                <div className="relative">
+                  <FormControl>
+                    <Input
+                      {...field}
+                      className="pr-8"
+                      placeholder="Your name"
+                    />
+                  </FormControl>
+                  <Pencil
+                    aria-hidden="true"
+                    className="pointer-events-none absolute right-0 top-1/2 size-4 -translate-y-1/2 text-text-tertiary"
                   />
-                </FormControl>
+                </div>
                 <FormMessage />
               </FormItem>
             )}
           />
-          <GroupedRow>
-            <Label htmlFor="profile-email" className="flex-1">
-              Email
-            </Label>
-            <Badge variant={user.email_verified ? "success" : "warning"}>
-              {user.email_verified ? "Verified" : "Not verified"}
-            </Badge>
+          <GroupedRow className="block space-y-0.5">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="profile-email">Email</Label>
+              <Badge variant={user.email_verified ? "success" : "warning"}>
+                {user.email_verified ? "Verified" : "Not verified"}
+              </Badge>
+            </div>
             <Input
               id="profile-email"
               value={user.email}
               disabled
               aria-readonly="true"
-              className="basis-full text-text-tertiary disabled:opacity-100"
+              title={user.email}
+              className="truncate text-text-tertiary disabled:opacity-100"
             />
           </GroupedRow>
           {!user.email_verified && (
@@ -415,6 +430,7 @@ function SecurityTab() {
       setDisableMfaError("Password is required for this account");
       return;
     }
+    setDisableMfaError(null);
     try {
       await disableMfa.mutateAsync({
         code: disableMfaCode.trim(),
@@ -502,6 +518,7 @@ function SecurityTab() {
           accessory={
             <Switch
               checked={user?.mfa_enabled ?? false}
+              disabled={disableMfa.isPending}
               onCheckedChange={(checked) => {
                 if (checked) setMfaDialogOpen(true);
                 else setDisableMfaDialogOpen(true);
@@ -536,6 +553,7 @@ function SecurityTab() {
             </DialogDescription>
           </DialogHeader>
           <GroupedList
+            aria-busy={disableMfa.isPending}
             footer={
               disableMfaError && (
                 <p role="alert" className="text-destructive">
@@ -550,6 +568,7 @@ function SecurityTab() {
               </Label>
               <Input
                 id="disable-mfa-code"
+                disabled={disableMfa.isPending}
                 value={disableMfaCode}
                 onChange={(e) => setDisableMfaCode(e.target.value)}
                 placeholder="000000 or recovery code"
@@ -563,6 +582,7 @@ function SecurityTab() {
                 <Label htmlFor="disable-mfa-password">Password</Label>
                 <Input
                   id="disable-mfa-password"
+                  disabled={disableMfa.isPending}
                   type="password"
                   autoComplete="current-password"
                   value={disableMfaPassword}
@@ -572,6 +592,11 @@ function SecurityTab() {
               </GroupedRow>
             )}
           </GroupedList>
+          {disableMfa.isPending && (
+            <p role="status" className="px-4 text-13 text-text-tertiary">
+              Disabling two-factor authentication…
+            </p>
+          )}
           <DialogFooter className="bg-background">
             <GroupedDialogCancel
               variant="outline"
@@ -650,15 +675,21 @@ function SecurityTab() {
                             {...field}
                             type={shown ? "text" : "password"}
                             autoComplete={autoComplete}
+                            placeholder={
+                              name === "currentPassword"
+                                ? "Enter current password"
+                                : name === "newPassword"
+                                  ? "Enter new password"
+                                  : "Re-enter new password"
+                            }
                             className="pr-10"
                           />
                         </FormControl>
                         <button
                           type="button"
-                          tabIndex={-1}
                           onClick={() => setShown((v) => !v)}
                           className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={shown ? "Hide password" : "Show password"}
+                          aria-label={`${shown ? "Hide" : "Show"} ${label.toLowerCase()}`}
                         >
                           {shown ? (
                             <Eye className="h-4 w-4" />

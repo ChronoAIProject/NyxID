@@ -16,7 +16,8 @@ describe("DisplaySettings", () => {
   it("labels the new default as 1× and formats a precisely migrated preference for the slider", async () => {
     render(<DisplaySettings />);
     expect(screen.getByRole("slider", { name: "Text size" })).toHaveAttribute("aria-valuetext", "1×");
-    expect(screen.getAllByText("Default: 1×")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Reset text size" })).toHaveAttribute("title", "Reset to 1×");
+    expect(screen.getByRole("button", { name: "Reset spacing" })).toHaveAttribute("title", "Reset to 1×");
     localStorage.setItem("nyxid.theme", JSON.stringify({ state: { textScale: 1.17 }, version: 1 }));
     await act(async () => useThemeStore.persist.rehydrate());
     expect(screen.getByRole("slider", { name: "Text size" })).toHaveAttribute("aria-valuetext", "1.38×");
@@ -43,6 +44,22 @@ describe("DisplaySettings", () => {
     await user.keyboard("{ArrowDown}");
     expect(motion.getByRole("radio", { name: "Reduce" })).toHaveFocus();
     expect(useThemeStore.getState().motion).toBe("reduce");
+  });
+
+  it.each(["Text size", "Spacing", "Chat content width", "Maximum composer height", "Main sidebar width", "Assistant sidebar width"])("gives %s the shared labelled range with one helper and an accessible reset", async (label) => {
+    render(<DisplaySettings />);
+    const slider = screen.getByRole("slider", { name: label });
+    const range = slider.closest("[data-range-control]")!;
+    const heading = range.querySelector("[data-range-heading]")!;
+    expect(heading.querySelector("label")).toHaveAttribute("for", slider.id);
+    expect(heading.querySelector("output")).toHaveTextContent(slider.getAttribute("aria-valuetext")!);
+    expect(document.getElementById(slider.getAttribute("aria-describedby")!)).toHaveClass("text-text-tertiary");
+    const reset = within(range as HTMLElement).getByRole("button", { name: `Reset ${label.toLowerCase()}` });
+    expect(reset).toBeDisabled();
+    fireEvent.change(slider, { target: { value: slider.getAttribute("max")! } });
+    expect(reset).toBeEnabled();
+    await userEvent.click(reset);
+    expect(reset).toBeDisabled();
   });
 
   it("switches theme, text size, spacing and motion", async () => {
