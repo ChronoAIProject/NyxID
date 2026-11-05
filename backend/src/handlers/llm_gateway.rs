@@ -1070,8 +1070,9 @@ async fn llm_proxy_request_inner(
     });
     let response = match concurrency {
         Some(lease) => {
-            let response = lease.run(execution).await?;
-            lease.hold_response_unless_failed(response)
+            let mut response = lease.run(execution).await?;
+            super::invocation_diagnostics::suppress_for_retained_capacity(&mut response);
+            lease.hold_response(response)
         }
         None => execution.await?,
     };
@@ -1963,8 +1964,9 @@ async fn gateway_provider_request(
     });
     let response = match concurrency {
         Some(lease) => {
-            let response = lease.run(execution).await?;
-            lease.hold_response_unless_failed(response)
+            let mut response = lease.run(execution).await?;
+            super::invocation_diagnostics::suppress_for_retained_capacity(&mut response);
+            lease.hold_response(response)
         }
         None => execution.await?,
     };

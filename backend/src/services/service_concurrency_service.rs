@@ -421,17 +421,6 @@ impl Lease {
         > = Box::pin(frames);
         Response::from_parts(parts, Body::new(StreamBody::new(frames)))
     }
-
-    /// Failed downstream responses are diagnosed before they are returned.
-    /// They must release the service slot first so the caller-scoped health
-    /// probe can enter the same service without manufacturing a 12600 result.
-    pub fn hold_response_unless_failed(self, response: Response) -> Response {
-        if response.status().is_client_error() || response.status().is_server_error() {
-            response
-        } else {
-            self.hold_response(response)
-        }
-    }
 }
 impl Drop for LeaseInner {
     fn drop(&mut self) {

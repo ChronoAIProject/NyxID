@@ -69,6 +69,15 @@ pub(crate) struct HttpInvocation {
     context: RequestContext,
 }
 
+#[derive(Clone, Copy)]
+struct RetainedServiceCapacity;
+
+pub(crate) fn suppress_for_retained_capacity(response: &mut Response) {
+    if response.status().is_client_error() || response.status().is_server_error() {
+        response.extensions_mut().insert(RetainedServiceCapacity);
+    }
+}
+
 impl HttpInvocation {
     pub(crate) fn start(state: &AppState, request: &mut Request<Body>) -> Option<Self> {
         // Nested gateway/pool wrappers share the outer invocation's budget.
@@ -101,6 +110,14 @@ impl HttpInvocation {
             Err(error) => diagnostics::eligible_error(error),
         };
         if !eligible {
+            return result;
+        }
+        if result.as_ref().is_ok_and(|response| {
+            response
+                .extensions()
+                .get::<RetainedServiceCapacity>()
+                .is_some()
+        }) {
             return result;
         }
         let id = invocation
@@ -245,6 +262,27 @@ mod tests {
                 Some("secret")
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn retained_capacity_suppresses_only_failed_responses() {
+        let mut failed = Response::builder().status(503).body(Body::empty()).unwrap();
+        suppress_for_retained_capacity(&mut failed);
+        assert!(
+            failed
+                .extensions()
+                .get::<RetainedServiceCapacity>()
+                .is_some()
+        );
+
+        let mut succeeded = Response::new(Body::empty());
+        suppress_for_retained_capacity(&mut succeeded);
+        assert!(
+            succeeded
+                .extensions()
+                .get::<RetainedServiceCapacity>()
+                .is_none()
         );
     }
 }
