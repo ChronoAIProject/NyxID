@@ -74,6 +74,7 @@ function setup(initialAccount: string | null = null) {
       },
     },
     "./authEpoch": authEpoch,
+    "./authAccount": authAccount,
     "expo-secure-store": {
       getItemAsync: async (key: string) => credentials.get(key) ?? null,
       setItemAsync: async (key: string, value: string) => {
@@ -118,6 +119,7 @@ function setup(initialAccount: string | null = null) {
     tap: (r: any) => tap(r),
     cleared: () => cleared,
     unsubscribed: () => unsubscribed,
+    clearCredentials: sessions.clearStoredAuthSession,
     signIn: async (nextAccount = "account-a") => {
       // AuthSessionContext advances before persistence; sessionStore advances
       // again. Exercise that real module instead of a separate test counter.
@@ -337,6 +339,22 @@ test("sign-out and same-account admission invalidate a tap even without a React 
   authAccount.setAuthAccountId(null);
   authEpoch.advanceAuthEpoch();
   authAccount.setAuthAccountId("account-a");
+  f.guards.current.delete(guard);
+  f.h.value().flush();
+  assert.equal(f.actions.length, 0);
+  f.h.unmount();
+});
+test("HTTP credential invalidation drops account-bound taps without waiting for auth UI", async () => {
+  const f = setup("account-a");
+  await f.signIn();
+  const guard = Symbol();
+  f.guards.current.add(guard);
+  f.tap(response({ conversation_id: "invalidated-thread" }));
+  const before = authEpoch.getAuthEpoch();
+  await f.clearCredentials();
+  assert.equal(authEpoch.getAuthEpoch(), before + 1);
+  assert.equal(authAccount.getAuthAccountId(), null);
+  await f.signIn();
   f.guards.current.delete(guard);
   f.h.value().flush();
   assert.equal(f.actions.length, 0);
