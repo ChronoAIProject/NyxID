@@ -375,6 +375,29 @@ to v0.73.0 removes social MFA enforcement. Only environments that ran unreleased
 #1970 builds have rejecting replicas to drain. Deploy the web step-up UI only
 after all API replicas support the route.
 
+### iPad layout
+
+The iOS target is universal (iPhone and iPad). iPhone starts in portrait; iPad
+supports all orientations and resizable multitasking windows. The Expo config,
+committed Xcode target and Info.plist are checked together by
+`pnpm check:native-sync`. These native configuration changes require a new
+installed binary; an existing iPhone-only TestFlight build cannot gain iPad
+support from a JavaScript reload.
+
+Windows at least 900pt wide show a persistent 300pt sidebar beside the retained
+chat/content navigator. Narrower windows use the push drawer, capped at 360pt.
+Chat transcripts and composers keep their existing device-local reading-width
+preference and fit the available content column. Settings sheets become centered
+720×860pt maximum cards at 768pt and above; keyboard/window changes constrain the
+same mounted surface. Smaller split windows retain the phone layout. Settings
+rows wrap according to measured width and text scaling.
+
+The machine desktop viewer follows the current iPad window without requiring a
+full-screen orientation lock; iPhone retains its existing landscape entry and
+portrait restoration. Release acceptance must cover a fresh universal iPad build,
+portrait/landscape, narrow split and floating windows, keyboard changes and
+physical-device touch, in addition to focused automated layout regressions.
+
 ### Native drawer and chat display
 
 Signed-in management uses one retained pull-up drawer over the current chat.

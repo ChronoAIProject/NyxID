@@ -31,7 +31,7 @@ import {
   clampSidebarOffset,
   settleSidebarOpen,
   SIDEBAR_EDGE_WIDTH,
-  sidebarPushWidth,
+  workspaceSidebarLayout,
 } from "./workspacePushState";
 
 export type WorkspaceContentTransitionHandle = {
@@ -56,11 +56,15 @@ type Props = {
   children: ReactNode;
 };
 
-/** The sidebar stays still. The actual mounted content moves as one slab. */
+/** Keep the navigator mounted while switching between push and side-by-side. */
 export function WorkspacePushShell(props: Props) {
   const { colors } = useTheme();
   const { width } = useWindowDimensions();
-  const openWidth = sidebarPushWidth(width);
+  const layout = workspaceSidebarLayout(width);
+  const persistent = props.enabled && layout.persistent;
+  const persistentNow = useRef(persistent);
+  persistentNow.current = persistent;
+  const openWidth = layout.sidebarWidth;
   const visible = props.visible;
   const edgeBack = Boolean(props.onEdgeBack) && !visible;
   const reduced = useReducedMotion();
@@ -93,9 +97,9 @@ export function WorkspacePushShell(props: Props) {
   useLayoutEffect(() => {
     workspaceFocus.setModalActive(
       focusOwner,
-      props.enabled && settledOpen && !props.obscured,
+      props.enabled && !persistent && settledOpen && !props.obscured,
     );
-  }, [focusOwner, props.enabled, settledOpen, props.obscured]);
+  }, [focusOwner, props.enabled, persistent, settledOpen, props.obscured]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -159,6 +163,7 @@ export function WorkspacePushShell(props: Props) {
     if (
       !mounted.current ||
       !state.enabled ||
+      persistentNow.current ||
       dragging.current ||
       dragActive.value ||
       programmatic.value ||
@@ -193,13 +198,13 @@ export function WorkspacePushShell(props: Props) {
     reconcileEndpoint(props.visible);
   }, [props.visible, props.presented]);
   useEffect(() => {
-    if (!settledOpen || !props.enabled || props.obscured) return;
+    if (!settledOpen || !props.enabled || persistent || props.obscured) return;
     workspaceFocus.focusModalOnce(focusOwner, () =>
       latest.current.visible && !latest.current.obscured
         ? latest.current.initialFocusTarget()
         : null,
     );
-  }, [settledOpen, props.enabled, props.obscured, focusOwner]);
+  }, [settledOpen, props.enabled, persistent, props.obscured, focusOwner]);
   function animate(open: boolean, fingerRelease = false) {
     endpoint.current = `${open}:${openWidth}:${reduced}`;
     const id = ++generation.current;
@@ -232,12 +237,15 @@ export function WorkspacePushShell(props: Props) {
     }
   }
   useEffect(() => {
-    if (!props.enabled) {
+    if (!props.enabled || persistent) {
       generation.current++;
+      transition.value = generation.current;
       cancelAnimation(offset);
       offset.value = 0;
-      restoreContent();
+      if (!props.enabled) restoreContent();
       setSettledOpen(false);
+      dragging.current = false;
+      dragActive.value = false;
       programmatic.value = false;
       endpoint.current = undefined;
       return;
@@ -248,12 +256,13 @@ export function WorkspacePushShell(props: Props) {
         endpoint.current = next;
       else animate(props.visible);
     }
-  }, [props.visible, props.enabled, openWidth, reduced]);
+  }, [props.visible, props.enabled, persistent, openWidth, reduced]);
 
   function revealStart() {
     if (
       !latest.current.enabled ||
       latest.current.obscured ||
+      (persistentNow.current && !latest.current.onEdgeBack) ||
       !(latest.current.visible || latest.current.gestureEnabled)
     )
       return;
@@ -277,7 +286,8 @@ export function WorkspacePushShell(props: Props) {
     animate(open, true);
   }
   useEffect(() => {
-    if (!props.enabled || !props.presented || props.obscured) return;
+    if (!props.enabled || persistent || !props.presented || props.obscured)
+      return;
     const subscription = BackHandler.addEventListener(
       "hardwareBackPress",
       () => {
@@ -286,7 +296,7 @@ export function WorkspacePushShell(props: Props) {
       },
     );
     return () => subscription.remove();
-  }, [props.enabled, props.presented, props.obscured]);
+  }, [props.enabled, persistent, props.presented, props.obscured]);
 
   // These detectors live on dedicated edge/sliver targets, never above a
   // transcript, code/table ScrollView or composer in the responder hierarchy.
@@ -294,7 +304,11 @@ export function WorkspacePushShell(props: Props) {
     .enabled(
       props.enabled &&
         !props.obscured &&
-        (visible ? props.presented : props.gestureEnabled),
+        (persistent
+          ? edgeBack && props.gestureEnabled
+          : visible
+            ? props.presented
+            : props.gestureEnabled),
     )
     .activeOffsetX(visible ? -18 : 18)
     .failOffsetY([-10, 10])
@@ -335,18 +349,20 @@ export function WorkspacePushShell(props: Props) {
       }
     });
   const slabStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: offset.value }],
-    borderTopLeftRadius: offset.value > 0 ? 16 : 0,
-    borderBottomLeftRadius: offset.value > 0 ? 16 : 0,
-    shadowOpacity: offset.value > 0 ? 0.2 : 0,
+    transform: [{ translateX: persistent ? 0 : offset.value }],
+    borderTopLeftRadius: persistent || offset.value > 0 ? 16 : 0,
+    borderBottomLeftRadius: persistent || offset.value > 0 ? 16 : 0,
+    shadowOpacity: !persistent && offset.value > 0 ? 0.2 : 0,
   }));
   const clipStyle = useAnimatedStyle(() => ({
     opacity: contentOpacity.value,
-    borderTopLeftRadius: offset.value > 0 ? 16 : 0,
-    borderBottomLeftRadius: offset.value > 0 ? 16 : 0,
+    borderTopLeftRadius: persistent || offset.value > 0 ? 16 : 0,
+    borderBottomLeftRadius: persistent || offset.value > 0 ? 16 : 0,
   }));
-  const active = props.enabled && props.presented;
-  const sidebarInteractive = props.enabled && settledOpen && !props.obscured;
+  const active = props.enabled && !persistent && props.presented;
+  const sidebarInteractive =
+    props.enabled && (persistent || settledOpen) && !props.obscured;
+  const sidebarModal = !persistent && sidebarInteractive;
   return (
     <View
       style={[styles.root, { backgroundColor: colors.sidebarBase }]}
@@ -356,7 +372,7 @@ export function WorkspacePushShell(props: Props) {
         props.obscured ? "no-hide-descendants" : "auto"
       }
       onAccessibilityEscape={() => {
-        if (sidebarInteractive) props.onOpenChange(false);
+        if (sidebarModal) props.onOpenChange(false);
       }}
     >
       {props.enabled ? (
@@ -377,16 +393,20 @@ export function WorkspacePushShell(props: Props) {
         testID="workspace-content-slab"
         style={[
           styles.slab,
-          { backgroundColor: colors.bg, shadowColor: colors.shadowColor },
+          {
+            backgroundColor: colors.bg,
+            shadowColor: colors.shadowColor,
+            marginLeft: persistent ? openWidth : 0,
+          },
           slabStyle,
         ]}
       >
         <Animated.View
           testID="workspace-slab-content"
           accessible={false}
-          accessibilityElementsHidden={sidebarInteractive}
+          accessibilityElementsHidden={sidebarModal}
           importantForAccessibility={
-            sidebarInteractive ? "no-hide-descendants" : "auto"
+            sidebarModal ? "no-hide-descendants" : "auto"
           }
           style={[styles.content, clipStyle]}
         >
@@ -394,7 +414,9 @@ export function WorkspacePushShell(props: Props) {
         </Animated.View>
         {props.enabled &&
         !props.obscured &&
-        (active || props.gestureEnabled) ? (
+        (persistent
+          ? edgeBack && props.gestureEnabled
+          : active || props.gestureEnabled) ? (
           <GestureDetector gesture={pan}>
             <Pressable
               testID={
