@@ -3208,6 +3208,41 @@ pub(crate) async fn create_api_key_with_id(
     Ok(api_key)
 }
 
+/// One-shot, per-database admission gate for cancellation-safety regression tests.
+#[derive(Clone)]
+pub struct AdmissionPause {
+    pub entered: std::sync::Arc<tokio::sync::Notify>,
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+fn admission_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>
+{
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+pub fn install_admission_pause(db: &mongodb::Database) -> AdmissionPause {
+    let pause = AdmissionPause {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    admission_pauses()
+        .lock()
+        .unwrap()
+        .insert(db.name().into(), pause.clone());
+    pause
+}
+
+pub async fn pause_committed_admission(db: &mongodb::Database) {
+    let pause = { admission_pauses().lock().unwrap().remove(db.name()) };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.resume.notified().await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

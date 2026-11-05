@@ -266,6 +266,10 @@ async fn v2_direct_wait_survives_owner_turn_kill_switch_and_lost_callback() {
         1
     );
     assert!(thread.pending_events[0].automation_work.is_some());
+    let note = &thread.pending_events[0].text;
+    assert!(note.contains("Specialist schedule-researcher replied"));
+    assert!(note.contains(child.agent_id.as_deref().unwrap()));
+    assert!(note.contains("nyxid__read_subagent"));
     server.abort();
 }
 
@@ -1166,15 +1170,18 @@ async fn v2_mixed_group_follower_survives_legacy_post_and_deletion_delivers_fail
             .count(),
         1
     );
-    assert!(
-        crate::services::assistant_group_service::take_followers_if_quiet(
-            &state.db, OWNER, &group.id
-        )
+    let (legacy, _) = crate::services::assistant_group_service::take_followers_if_quiet(
+        &state.db, OWNER, &group.id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0].conversation_id, "ordinary-thread");
+    let current = crate::services::assistant_group_service::get(&state.db, OWNER, &group.id)
         .await
-        .unwrap()
-        .0
-        .is_empty()
-    );
+        .unwrap();
+    assert_eq!(current.followers.len(), 1);
+    assert!(current.followers[0].automation.is_some());
     crate::services::assistant_group_service::delete(&state.db, OWNER, &group.id)
         .await
         .unwrap();
@@ -1634,4 +1641,791 @@ async fn legacy_turn_stop_and_group_paths_do_not_read_or_persist_v2_state() {
             .iter()
             .all(|message| !message.contains_key("automation_work"))
     );
+}
+
+#[tokio::test]
+async fn v2_slow_committed_admission_keeps_its_driver_and_expired_fence_aborts() {
+    let (mut state, _, server) = setup("v2_slow_admission").await;
+    state.config.automation_continuation_v2_enabled = true;
+    crate::services::security_readiness_service::ready_automation_test_replica(&state.db).await;
+    let agent = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let trigger = automation(&state, &agent.id, None).await;
+    let run = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    let job = schedules::claim(&state.db, &run.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let pause = crate::test_utils::install_admission_pause(&state.db);
+    let worker_state = state.clone();
+    let worker = tokio::spawn(async move { run_job_once(&worker_state, &job).await });
+    tokio::time::timeout(std::time::Duration::from_secs(20), pause.entered.notified())
+        .await
+        .unwrap();
+    // The old 30-second timeout dropped this future after begin_turn committed.
+    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
+    assert!(
+        !worker.is_finished(),
+        "Committed admission must retain its future until it spawns the driver"
+    );
+    pause.resume.notify_one();
+    worker.await.unwrap().unwrap();
+    assert_eq!(
+        completed(&state, &trigger).await.outcome,
+        RunOutcome::Completed
+    );
+
+    let next = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    let job = schedules::claim(&state.db, &next.id, Utc::now())
+        .await
+        .unwrap()
+        .unwrap();
+    let thread = schedules::run_thread(&state.db, &state.encryption_keys, &next, &trigger)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(schedules::WORK)
+        .update_one(
+            doc! {"_id": &next.id},
+            doc! {"$set": {"at": schedules::date(Utc::now() - Duration::seconds(1))}},
+        )
+        .await
+        .unwrap();
+    let mut request = start(&thread.id, "Expired admission");
+    request.origin = TurnOrigin::Trigger;
+    request.trigger = Some(schedules::TurnClaim {
+        enroll_v2: true,
+        run_id: next.id,
+        fence: job.get_str("fence").unwrap().into(),
+        trigger_updated_at: trigger.updated_at,
+        continuation: false,
+    });
+    assert!(
+        engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
+            .await
+            .is_err()
+    );
+    assert!(
+        engine::get(&state.db, OWNER, &thread.id)
+            .await
+            .unwrap()
+            .active_turn
+            .is_none()
+    );
+    server.abort();
+}
+
+fn stop_job(
+    id: &str,
+    thread: &str,
+    turn: Option<&str>,
+    run: Option<&str>,
+) -> crate::models::machine_job::MachineJob {
+    crate::models::machine_job::MachineJob {
+        automation_run_id: run.map(str::to_owned),
+        id: id.into(),
+        user_id: OWNER.into(),
+        node_id: "offline-node".into(),
+        runtime_id: "runtime".into(),
+        binding: None,
+        runtime_generation: None,
+        conversation_id: thread.into(),
+        issuing_turn_id: turn.map(str::to_owned),
+        api_key_id: "test-key".into(),
+        agent_id: "test-agent".into(),
+        state: "running".into(),
+        exit_code: None,
+        stop_reason: None,
+        duration_ms: None,
+        cancellation_requested_by: None,
+        cancellation_requested_at: None,
+        services: Vec::new(),
+        report_to: None,
+        report_provenance: 0,
+        created_at: Utc::now(),
+        expires_at: Utc::now() + Duration::hours(1),
+        finished_at: None,
+        retain_until: None,
+    }
+}
+
+#[tokio::test]
+async fn v2_marked_idle_and_owner_stop_keep_main_cleanup_and_protect_only_live_runs() {
+    use crate::models::async_service_operation::COLLECTION_NAME as WATCHES;
+    use crate::models::machine_job::{COLLECTION_NAME as JOBS, MachineJob};
+    for marked in [false, true] {
+        for active in [false, true] {
+            for waiting in [false, true] {
+                if waiting && !marked {
+                    continue;
+                }
+                let (state, _, run, row, server) = root("v2_stop_main_cleanup", false).await;
+                let _child = child(&state, &row).await;
+                save_reply(&state, &row, "Waiting", None).await;
+                if waiting {
+                    v2::barrier(&state.db, &run).await.unwrap();
+                } else {
+                    schedules::finish(&state.db, &run.id, RunOutcome::Completed, None, "")
+                        .await
+                        .unwrap();
+                }
+                if !marked {
+                    state
+                        .db
+                        .collection::<Document>(CONVERSATIONS)
+                        .update_one(
+                            doc! {"_id": &row.id},
+                            doc! {"$unset": {"automation_v2": ""}},
+                        )
+                        .await
+                        .unwrap();
+                }
+                let owner = if active {
+                    Some(
+                        engine::begin_turn(
+                            &state.db,
+                            OWNER,
+                            &start(&row.id, "Ordinary question"),
+                            &state.encryption_keys,
+                        )
+                        .await
+                        .unwrap(),
+                    )
+                } else {
+                    None
+                };
+                let turn = owner
+                    .as_ref()
+                    .and_then(|r| r.active_turn.as_ref())
+                    .map(|t| t.turn_id.as_str());
+                for (id, bound) in [
+                    ("old-watch", None),
+                    ("current-watch", None),
+                    ("bound-watch", Some(&run.id)),
+                ] {
+                    let mut watch = doc! {"_id": id, "user_id": OWNER, "conversation_id": &row.id, "turn_id": turn, "state": "waiting"};
+                    if let Some(run) = bound {
+                        watch.insert("delivery", doc! {"automation_work": {"run_id": run}});
+                    }
+                    state
+                        .db
+                        .collection::<Document>(WATCHES)
+                        .insert_one(watch)
+                        .await
+                        .unwrap();
+                }
+                state
+                    .db
+                    .collection::<MachineJob>(JOBS)
+                    .insert_many([
+                        stop_job("old-job", &row.id, Some("older-turn"), None),
+                        stop_job("current-job", &row.id, turn, None),
+                        stop_job("bound-job", &row.id, Some("automation-turn"), Some(&run.id)),
+                    ])
+                    .await
+                    .unwrap();
+                let target = engine::request_stop_target(&state.db, OWNER, &row.id)
+                    .await
+                    .unwrap();
+                match target {
+                    engine::StopTarget::Legacy => {
+                        crate::services::machine_service::cancel_conversation(
+                            &state, OWNER, &row.id,
+                        )
+                        .await
+                        .unwrap()
+                    }
+                    engine::StopTarget::Scoped(snapshot) => {
+                        crate::services::machine_service::cancel_unrelated(
+                            &state,
+                            OWNER,
+                            &row.id,
+                            snapshot.as_deref(),
+                        )
+                        .await
+                        .unwrap()
+                    }
+                }
+                for id in ["old-watch", "current-watch", "bound-watch"] {
+                    let watch = state
+                        .db
+                        .collection::<Document>(WATCHES)
+                        .find_one(doc! {"_id": id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        watch.get_str("state").unwrap(),
+                        if id == "bound-watch" && waiting {
+                            "waiting"
+                        } else {
+                            "cancelling"
+                        }
+                    );
+                }
+                for id in ["old-job", "current-job", "bound-job"] {
+                    let job = state
+                        .db
+                        .collection::<MachineJob>(JOBS)
+                        .find_one(doc! {"_id": id})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        job.state,
+                        if id == "bound-job" && waiting {
+                            "running"
+                        } else {
+                            "finished"
+                        }
+                    );
+                }
+                if active {
+                    assert!(
+                        engine::get(&state.db, OWNER, &row.id)
+                            .await
+                            .unwrap()
+                            .active_turn
+                            .unwrap()
+                            .stop_requested
+                    );
+                }
+                if waiting {
+                    assert_eq!(
+                        state
+                            .db
+                            .collection::<TriggerRun>(RUNS)
+                            .find_one(doc! {"_id": &run.id})
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .outcome,
+                        RunOutcome::Waiting
+                    );
+                }
+                server.abort();
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn v2_direct_after_turn_keeps_delivery_and_queued_pool_duties() {
+    let (state, _, _, row, server) = root("v2_after_turn_duties", false).await;
+    let child = child(&state, &row).await;
+    let queued_agent = named_specialist(&state, "queued-researcher").await;
+    let queued = team::home_thread(&state.db, &state.encryption_keys, &queued_agent)
+        .await
+        .unwrap();
+    engine::push_events(
+        &state.db,
+        OWNER,
+        &queued.id,
+        vec![team::event("test", "Queued work".into(), None)],
+    )
+    .await
+    .unwrap();
+    state.db.collection::<Document>(CONVERSATIONS).update_one(doc! {"_id": &child.id}, doc! {"$set": {"deliver_also": [{"nyxbot_channel_id": "missing-channel", "partition": "chat", "platform": "telegram"}]}}).await.unwrap();
+    save_reply(&state, &child, "Research finished", None).await;
+    crate::handlers::assistant_team::after_turn(&state, &child, "Research finished", None).await;
+    assert!(
+        engine::get(&state.db, OWNER, &child.id)
+            .await
+            .unwrap()
+            .deliver_also
+            .is_empty()
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            if state
+                .db
+                .collection::<Document>(MESSAGES)
+                .find_one(doc! {"conversation_id": &queued.id, "role": "assistant"})
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn v2_child_fences_are_independent_and_ignore_bson_key_order() {
+    let (state, _, run, row, server) = root("v2_parallel_fences", false).await;
+    // Persist the same identity in a different BSON key order.
+    let work = row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .automation_work
+        .as_ref()
+        .unwrap();
+    let ordered = mongodb::bson::to_document(work).unwrap();
+    let reordered: Document = ordered
+        .iter()
+        .rev()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"active_turn.automation_work": reordered}},
+        )
+        .await
+        .unwrap();
+    let mut children = Vec::new();
+    for i in 0..6 {
+        let agent = named_specialist(&state, &format!("parallel-{i}")).await;
+        let thread = team::home_thread(&state.db, &state.encryption_keys, &agent)
+            .await
+            .unwrap();
+        let mut request = start(&thread.id, "Parallel work");
+        request.origin = TurnOrigin::Orchestrator;
+        request.report_to = Some(row.id.clone());
+        request.automation_parent = Some(direct::Parent {
+            thread: row.id.clone(),
+            turn: row.active_turn.as_ref().unwrap().turn_id.clone(),
+            work: work.clone(),
+        });
+        children.push(
+            engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
+                .await
+                .unwrap(),
+        );
+    }
+    let before = state
+        .db
+        .collection::<TriggerRun>(RUNS)
+        .find_one(doc! {"_id": &run.id})
+        .await
+        .unwrap()
+        .unwrap()
+        .coordinator
+        .unwrap()
+        .version;
+    for child in &children {
+        let work = child
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .automation_work
+            .as_ref()
+            .unwrap();
+        let ordered = mongodb::bson::to_document(work).unwrap();
+        let reordered: Document = ordered
+            .iter()
+            .rev()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        state
+            .db
+            .collection::<Document>(HANDOFFS)
+            .update_one(
+                doc! {"_id": &work.work_id},
+                doc! {"$set": {"work": reordered}},
+            )
+            .await
+            .unwrap();
+        let mut preview = child.clone();
+        let mut event = team::event("test", "Resume this child".into(), None);
+        event.automation_work = Some(work.clone());
+        preview.pending_events = vec![event];
+        assert!(v2::event_can_resume(&state.db, &preview).await.unwrap());
+    }
+    let fences = children.iter().map(|child| {
+        let db = state.db.clone();
+        let thread = child.id.clone();
+        let work = child
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .automation_work
+            .clone()
+            .unwrap();
+        async move {
+            let context = (db.clone(), thread, work);
+            crate::services::transaction_service::run_db_only(
+                &db,
+                &context,
+                |session, (db, thread, work)| {
+                    Box::pin(async move { v2::fence_work(db, OWNER, thread, work, session).await })
+                },
+            )
+            .await
+        }
+    });
+    for result in futures::future::join_all(fences).await {
+        result.unwrap();
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<TriggerRun>(RUNS)
+            .find_one(doc! {"_id": &run.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .coordinator
+            .unwrap()
+            .version,
+        before
+    );
+    v2::cancel(&state.db, OWNER, &run.trigger_id, &run.id, "cancelled", "")
+        .await
+        .unwrap();
+    let child = &children[0];
+    let mut session = state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(
+        v2::fence_work(
+            &state.db,
+            OWNER,
+            &child.id,
+            child
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .automation_work
+                .as_ref()
+                .unwrap(),
+            &mut session
+        )
+        .await
+        .is_err()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn v2_new_hot_collection_indexes_exclude_unbound_documents() {
+    let (state, _, _, _, server) = root("v2_partial_indexes", false).await;
+    let mut run_indexes = 0;
+    for collection in [
+        CONVERSATIONS,
+        RUNS,
+        crate::models::assistant_group::COLLECTION_NAME,
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+        crate::models::async_service_operation::COLLECTION_NAME,
+    ] {
+        let indexes: Vec<_> = state
+            .db
+            .collection::<Document>(collection)
+            .list_indexes()
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for index in indexes {
+            let options = index.options.unwrap();
+            if options
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("automation_"))
+            {
+                assert!(
+                    options.partial_filter_expression.is_some(),
+                    "{collection}: {:?}",
+                    options.name
+                );
+                if collection == RUNS {
+                    run_indexes += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        run_indexes, 1,
+        "One partial index covers drain and owner/thread lookups"
+    );
+    // Diagnostic hints execute with exactly the partial-index predicates.
+    v2::diagnostic(&state.db, false).await.unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn v2_legacy_queue_eviction_preserves_protected_events() {
+    let (state, _, run, row, server) = root("v2_legacy_eviction", false).await;
+    let mut protected = team::event("group_settled", "Protected result".into(), None);
+    protected.automation_work = Some(v2::context(&run, &row.id));
+    let mut events = vec![protected.clone()];
+    for i in 1..engine::MAX_PENDING_EVENTS {
+        events.push(team::event("ordinary", format!("notice-{i}"), None));
+    }
+    engine::push_events(&state.db, OWNER, &row.id, events)
+        .await
+        .unwrap();
+    engine::push_events(
+        &state.db,
+        OWNER,
+        &row.id,
+        vec![team::event("ordinary", "Newest notice".into(), None)],
+    )
+    .await
+    .unwrap();
+    let current = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert_eq!(current.pending_events.len(), engine::MAX_PENDING_EVENTS);
+    assert!(current.pending_events.iter().any(|e| e.id == protected.id));
+    assert!(!current.pending_events.iter().any(|e| e.text == "notice-1"));
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|e| e.text == "Newest notice")
+    );
+    let protected: Vec<_> = (0..engine::MAX_PENDING_EVENTS)
+        .map(|i| {
+            let mut event = team::event("group_settled", format!("result-{i}"), None);
+            event.automation_work = Some(v2::context(&run, &row.id));
+            event
+        })
+        .collect();
+    state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"pending_events": mongodb::bson::to_bson(&protected).unwrap()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        engine::push_events(
+            &state.db,
+            OWNER,
+            &row.id,
+            vec![team::event("ordinary", "Cannot fit".into(), None)]
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        engine::get(&state.db, OWNER, &row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        engine::MAX_PENDING_EVENTS
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
+    let (state, _, _, row, server) = root("v2_group_recipients", false).await;
+    let editor = named_specialist(&state, "editor").await;
+    let reviewer = named_specialist(&state, "reviewer").await;
+    let group = crate::services::assistant_group_service::create(
+        &state.db,
+        OWNER,
+        "Recipients",
+        &[editor.id.clone(), reviewer.id.clone()],
+        "user",
+    )
+    .await
+    .unwrap();
+    let (_, ids) = work_groups::post(&state.db, &authority(&row), &group, "Investigate this")
+        .await
+        .unwrap();
+    assert_eq!(ids, [group.lead_agent_id.clone()]);
+    crate::services::assistant_group_service::persist_last_recipients(
+        &state.db,
+        OWNER,
+        &group.id,
+        &[reviewer.id.clone()],
+    )
+    .await
+    .unwrap();
+    let group = crate::services::assistant_group_service::get(&state.db, OWNER, &group.id)
+        .await
+        .unwrap();
+    let (_, ids) = work_groups::post(&state.db, &authority(&row), &group, "Follow up")
+        .await
+        .unwrap();
+    assert_eq!(ids, [reviewer.id]);
+    let group = crate::services::assistant_group_service::get(&state.db, OWNER, &group.id)
+        .await
+        .unwrap();
+    for (_, agent) in work_groups::queued(&group) {
+        let child = group_turn(&state, &group, &agent).await;
+        save_reply(&state, &child, "Finished", None).await;
+    }
+    work_groups::recover(&state.db, &group).await.unwrap();
+    let current = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    let summary = current
+        .pending_events
+        .iter()
+        .find(|e| e.kind == "group_settled")
+        .unwrap();
+    assert_eq!(summary.report_to.as_deref(), Some(row.id.as_str()));
+    server.abort();
+}
+
+#[tokio::test]
+async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group_members() {
+    use crate::models::{
+        assistant_sharing::{ShareRole, ShareSubject},
+        org_membership::OrgRole,
+    };
+    use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
+    let (state, _, run, row, server) = root("v2_foreign_specialists", false).await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    sharing::ensure_indexes(&state.db).await.unwrap();
+    for flag in ["assistant:org-agents", sharing::FLAG] {
+        flags::set_platform_override(&state.db, flag, &flags::FlagTarget::Global, true, OWNER)
+            .await
+            .unwrap();
+    }
+    let mut shared_agent = None;
+    for org in [true, false] {
+        let owner = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection(USERS)
+            .insert_one(test_user(
+                &owner,
+                if org { UserType::Org } else { UserType::Person },
+            ))
+            .await
+            .unwrap();
+        if org {
+            state
+                .db
+                .collection(crate::models::org_membership::COLLECTION_NAME)
+                .insert_one(crate::test_utils::test_membership(
+                    &owner,
+                    OWNER,
+                    OrgRole::Admin,
+                    None,
+                ))
+                .await
+                .unwrap();
+        }
+        let request = team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: if org {
+                "org-researcher"
+            } else {
+                "shared-researcher"
+            }
+            .into(),
+            description: "Delegated research".into(),
+            display_name: None,
+            persona: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        };
+        let (agent, _) = team::create_specialist_for(
+            &state.db,
+            &state.encryption_keys,
+            if org { OWNER } else { &owner },
+            &owner,
+            request,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if !org {
+            sharing::update(
+                &state.db,
+                &owner,
+                &agent.id,
+                sharing::SharingUpdate {
+                    expected_version: 0,
+                    enabled: true,
+                    shared_access: Default::default(),
+                    audience: vec![sharing::Audience {
+                        subject_kind: ShareSubject::Person,
+                        subject_id: OWNER.into(),
+                        role: ShareRole::User,
+                    }],
+                },
+                true,
+            )
+            .await
+            .unwrap();
+            shared_agent = Some(agent.clone());
+        }
+        let admitted = team::delegable_specialist(&state.db, OWNER, &agent.id)
+            .await
+            .unwrap();
+        let thread = team::home_thread_for(&state.db, &state.encryption_keys, OWNER, &admitted)
+            .await
+            .unwrap();
+        let mut request = start(&thread.id, "Research for this automation");
+        request.origin = TurnOrigin::Orchestrator;
+        request.report_to = Some(row.id.clone());
+        request.automation_parent = Some(direct::Parent {
+            thread: row.id.clone(),
+            turn: row.active_turn.as_ref().unwrap().turn_id.clone(),
+            work: row
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .automation_work
+                .clone()
+                .unwrap(),
+        });
+        let child = engine::begin_turn(&state.db, OWNER, &request, &state.encryption_keys)
+            .await
+            .unwrap();
+        assert_eq!(child.user_id, OWNER);
+        assert_eq!(child.agent_owner_id.as_deref(), Some(owner.as_str()));
+        assert_eq!(child.shared_agent_thread, !org);
+        assert!(child.active_turn.as_ref().unwrap().execution_task.is_none());
+        save_reply(&state, &child, "Foreign specialist result", None).await;
+        direct::recover(&state.db, &run).await.unwrap();
+        let current = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+        assert!(current.pending_events.iter().any(|e| {
+            e.agent_id.as_deref() == Some(agent.id.as_str())
+                && e.automation_work
+                    .as_ref()
+                    .is_some_and(|w| w.run_id == run.id)
+        }));
+    }
+    let shared = shared_agent.unwrap();
+    let group = crate::services::assistant_group_service::create(
+        &state.db,
+        OWNER,
+        "Shared crew",
+        &[shared.id.clone()],
+        "user",
+    )
+    .await
+    .unwrap();
+    let (_, addressed) = work_groups::post(
+        &state.db,
+        &authority(&row),
+        &group,
+        "@shared-researcher Review this",
+    )
+    .await
+    .unwrap();
+    assert_eq!(addressed, [shared.id.clone()]);
+    let current = crate::services::assistant_group_service::get(&state.db, OWNER, &group.id)
+        .await
+        .unwrap();
+    let member = group_turn(&state, &current, &shared.id).await;
+    assert!(member.shared_agent_thread);
+    save_reply(&state, &member, "Shared group result", None).await;
+    crate::handlers::assistant_team::after_turn(&state, &member, "Shared group result", None).await;
+    let parent = engine::get(&state.db, OWNER, &row.id).await.unwrap();
+    assert!(
+        parent
+            .pending_events
+            .iter()
+            .any(|e| e.kind == "group_settled" && e.text.contains("Shared group result"))
+    );
+    server.abort();
 }

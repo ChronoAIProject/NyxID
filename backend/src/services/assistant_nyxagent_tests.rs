@@ -5585,6 +5585,7 @@ async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work
         .await
         .unwrap();
     let job = |id: &str, issuing_turn: Option<String>| MachineJob {
+        automation_run_id: None,
         id: id.into(),
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),
