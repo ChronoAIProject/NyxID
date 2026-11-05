@@ -32,7 +32,7 @@ function setup() {
       View: "View",
       Image: "Image",
       Pressable: "Pressable",
-      ActivityIndicator: "Spinner",
+      useWindowDimensions: () => ({ fontScale: 1 }),
       StyleSheet: { create: (s: unknown) => s },
     },
     "lucide-react-native": { Check: "Check", FileText: "FileText", X: "X" },
@@ -41,6 +41,7 @@ function setup() {
     },
     "../../components/workspace/WorkspaceUI": { Label: "Label" },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "./AssistantUploadProgress": { AssistantUploadProgress: "Progress" },
     "./AssistantImagePreview": { AssistantImagePreview: "Preview" },
   });
   const C = h.load(
@@ -83,5 +84,49 @@ test("removing or switching the current draft image closes its preview", () => {
   x.h.render();
   assert.equal(x.preview().props.uri, undefined);
   assert.deepEqual(x.removed, []);
+  x.h.unmount();
+});
+
+test("attachment chip dimensions and remove target stay stable across all states without ready text or ticks", () => {
+  const x = setup();
+  const heights = [];
+  for (const row of [
+    { progress: 0 },
+    { progress: 42 },
+    { progress: 99 },
+    { progress: 100, item: { label: "Draft.png" } },
+    { progress: 42, error: "Upload failed" },
+  ]) {
+    x.props.files = [{ ...x.file, item: undefined, ...row } as any];
+    x.h.render();
+    const card = x
+      .all()
+      .find(
+        (n) => Array.isArray(n.props.style) && n.props.style[0]?.width === 260,
+      )!;
+    heights.push(card.props.style[1].height);
+    const remove = x
+      .all()
+      .find((n) => n.props.accessibilityLabel === "Remove Draft.png")!;
+    assert.equal(remove.props.style.minHeight, 44);
+    assert.equal(remove.props.style.minWidth, 44);
+    assert.equal(
+      x
+        .all()
+        .some(
+          (n) =>
+            n.type === "Check" ||
+            n.type === "Spinner" ||
+            n.props.children === "Ready",
+        ),
+      false,
+    );
+    if (row.item)
+      assert.equal(
+        x.all().find((n) => n.type === "Progress")!.props.status.loader,
+        "none",
+      );
+  }
+  assert.equal(new Set(heights).size, 1);
   x.h.unmount();
 });

@@ -1009,6 +1009,12 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   the safe-area inset rather than adding a second padded strip. The one-row
   private header stays compact; group name, ownership context and settings
   share one header, with member details retained.
+- Native pending attachment chips keep their width and text-scaled height through
+  waiting, upload, checking, ready and error states, with a 44pt remove target.
+  A thin bottom bar shows upload progress; waiting/checking gently pulse a short
+  segment (static under Reduce Motion). Status text owns accessibility. Ready
+  chips show only the thumbnail/icon, filename and remove control, without a
+  tick or Ready label. Errors keep red text and remove the loader.
 - Chat Details, History and Working context are nested pages in the content slab.
   History shares the cursor-paged Recents browser, filtered to the current agent.
   Title edits, deletion and context reset retain dirty/critical-write guards.
@@ -1018,7 +1024,7 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   with the effective agent override shown read-only. Chat and agent settings use
   the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
   Voice, conversation mode and completion notices are chosen in Settings › Voice;
-  the call screen has no pickers and only names the voice and mode (Hold to talk or Hands-free) before a call.
+  the call screen has no voice/source pickers. The expanded composer visibly names the saved voice and tariff while connecting and throughout the call; Hold to talk and Hands-free share the same controls.
 - Native Automations is display-only: configured tasks, source/schedule, target,
   confirmation policy, read-only status and paged run history with exact thread
   links. It issues GET requests only. Creation, changes and execution belong to
@@ -1112,7 +1118,10 @@ and reads new agent replies with native speech synthesis. It releases the
 recognizer during playback, pauses on typed drafts or an unavailable crew, and
 ends on backgrounding or leaving the chat. Uncertain delivery retains the
 existing review-before-resend fence. This mode starts on entry and supports the
-same minimize/expand behavior.
+same voice shell, header, central microphone, End control and minimized row.
+Silence re-arms listening; temporary app inactivity resumes automatically while
+an explicit microphone pause stays paused. Reply speech uses prose and link labels,
+with code omitted.
 Ordinary composer dictation continues to insert words into the draft for
 explicit review and sending.
 
