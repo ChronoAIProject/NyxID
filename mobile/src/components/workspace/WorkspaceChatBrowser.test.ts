@@ -22,6 +22,7 @@ type Props = {
   refreshDisabled?: boolean;
   refreshLabel?: string;
   emptyText?: string;
+  loadingLabel?: string;
   footer?: Element;
   primaryAction?: {
     label: string;
@@ -130,7 +131,7 @@ function setup(
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": Object.fromEntries(
-      ["ChevronLeft", "RefreshCw", "Search", "X", "Plus", "MessageSquare"].map(
+      ["ChevronLeft", "RefreshCw", "Search", "SquarePen", "X", "Plus", "MessageSquare"].map(
         (name) => [name, name],
       ),
     ),
@@ -141,6 +142,7 @@ function setup(
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../theme/designTokens": { fonts: {} },
     "./workspaceChatListModel": { searchDrawerItems },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
   });
   const { WorkspaceChatBrowser } = harness.load(
     fileURLToPath(new URL("./WorkspaceChatBrowser.tsx", import.meta.url)),
@@ -195,6 +197,36 @@ test("the primary action is rendered above saved history, outside its list foote
   );
   env.button("Start a chat with HR Admin Bot").props.onPress();
   assert.equal(env.counts().started, 1);
+  env.harness.unmount();
+});
+
+const flat = (style: unknown): Record<string, any> =>
+  Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+
+test("the sheet shows a drag handle, a centred title and one search + New chat row", () => {
+  const env = setup({ onRefresh: () => {} });
+  const rows = env.all();
+  const handle = rows.find(
+    (row) => flat(row.props.style).width === 36 && flat(row.props.style).height === 4,
+  );
+  assert.ok(handle, "drag handle");
+  const heading = rows.find((row) => row.props.accessibilityRole === "header")!;
+  assert.equal(flat(heading.props.style).textAlign, "center");
+  // Both header sides reserve the same width so the title is truly centred.
+  const sides = rows.filter(
+    (row) => row.type === "View" && typeof flat(row.props.style).width === "number" && flat(row.props.style).width >= 44,
+  );
+  assert.equal(sides.length, 2);
+  assert.equal(flat(sides[0]!.props.style).width, flat(sides[1]!.props.style).width);
+  const actionRow = rows.find(
+    (row) =>
+      flat(row.props.style).flexDirection === "row" &&
+      elements(row).some((child) => child.type === "TextInput") &&
+      elements(row).some(
+        (child) => child.props.accessibilityLabel === "Start a chat with HR Admin Bot",
+      ),
+  );
+  assert.ok(actionRow, "search and New chat share one row");
   env.harness.unmount();
 });
 
@@ -453,5 +485,15 @@ test("Android completes child dismissal after the hidden state commits without r
   assert.equal(env.counts().dismissed, 1);
   env.harness.render();
   assert.equal(env.counts().dismissed, 1);
+  env.harness.unmount();
+});
+
+test("a pending first load shows a row skeleton instead of the empty text", () => {
+  const env = setup({ items: [], loadingLabel: "Loading chats" });
+  const empty = env.list().props.ListEmptyComponent;
+  assert.equal(empty.type, "SkeletonRows");
+  assert.equal(empty.props.accessibilityLabel, "Loading chats");
+  env.update({ loadingLabel: undefined });
+  assert.match(content(env.list().props.ListEmptyComponent), /No chats yet/);
   env.harness.unmount();
 });

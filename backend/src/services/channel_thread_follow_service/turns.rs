@@ -14,7 +14,36 @@ pub async fn validate_in_session(
     session: &mut ClientSession,
 ) -> AppResult<NyxbotThread> {
     let b = origin.thread.as_deref().ok_or_else(not_found)?;
-    let channel = fence(db, &origin.nyxbot_channel_id, owner, session).await?;
+    let channel_access = if let Some(e) = &origin.org_execution {
+        Some(
+            Box::pin(super::super::org_channel_service::validate_in_session(
+                db,
+                session,
+                origin,
+                owner,
+                &e.agent_id,
+                true,
+            ))
+            .await?,
+        )
+    } else {
+        None
+    };
+    let transport_owner = channel_access
+        .as_ref()
+        .map_or(owner, |a| a.channel().user_id.as_str());
+    let mut channel = fence(db, &origin.nyxbot_channel_id, transport_owner, session).await?;
+    if let Some(access) = &channel_access {
+        if access.execution().guest != b.guest {
+            return Err(not_found());
+        }
+        channel.owner_sender_ids = if b.guest {
+            Vec::new()
+        } else {
+            vec![b.sender_id.clone()]
+        };
+    }
+    let owner = transport_owner;
     if channel.status != "active"
         || !super::super::channel_thread_service::gateway::supports(&channel)
     {
@@ -25,11 +54,18 @@ pub async fn validate_in_session(
     {
         return Err(not_found());
     }
+    let mut child_filter = doc! {"_id":&b.child_id,"user_id":owner,"channel_id":&channel.id,"partition":&origin.partition,"record_scope":SCOPE};
+    if channel_access.is_none() {
+        child_filter.insert("conversation_id", conversation);
+    } else {
+        let e = origin.org_execution.as_ref().ok_or_else(not_found)?;
+        if db.collection::<bson::Document>(crate::models::org_channel::LANES).find_one(doc!{"conversation_id":conversation,
+            "channel_id":&channel.id,"partition":&origin.partition,"actor_id":&e.actor_id,"agent_id":&e.agent_id,
+            "binding_revision":&e.revision,"guest_revision":&e.guest_revision}).session(&mut *session).await?.is_none() {return Err(not_found());}
+    }
     let child = db
         .collection::<NyxbotThread>(THREADS)
-        .find_one(doc! {"_id":&b.child_id,
-        "user_id":owner,"channel_id":&channel.id,"partition":&origin.partition,"record_scope":SCOPE,
-        "conversation_id":conversation})
+        .find_one(child_filter)
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
@@ -160,7 +196,7 @@ pub async fn validate_in_session(
         .collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&b.agent_id,"user_id":owner,"destroyed_at":bson::Bson::Null})
+        .find_one(doc! {"_id":&b.agent_id,"user_id":channel.org_specialist.as_ref().map_or(owner, |b| b.org_id.as_str()),"destroyed_at":bson::Bson::Null})
         .session(&mut *session)
         .await?;
     if agent.is_none() {
@@ -193,6 +229,17 @@ pub async fn admit_turn(
     session: &mut ClientSession,
 ) -> AppResult<()> {
     if origin.thread.is_none() {
+        if let Some(e) = &origin.org_execution {
+            Box::pin(super::super::org_channel_service::validate_in_session(
+                db,
+                session,
+                origin,
+                owner,
+                &e.agent_id,
+                true,
+            ))
+            .await?;
+        }
         return Ok(());
     }
     let child = validate_in_session(db, owner, origin, conversation, false, session).await?;
@@ -271,7 +318,7 @@ pub async fn filter_events(
                                 crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME,
                             )
                             .find_one(
-                                doc! {"_id":source,"user_id":owner,"conversation_id":conversation},
+                                doc! {"_id":source,"$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],"conversation_id":conversation},
                             )
                             .session(&mut *session)
                             .await?;
@@ -294,7 +341,7 @@ pub async fn filter_events(
                         .await?;
                     }
                     db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
-                        .update_one(doc! {"_id": source, "user_id": owner,
+                        .update_one(doc! {"_id": source, "$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],
                             "delivery.state": {"$in": ["waiting", "pending"]}},
                             doc! {"$set": {"status": "refused", "delivery.state": "refused"},
                                 "$unset": {"event_context_ciphertext": "", "delivery.target_ciphertext": ""}})

@@ -355,7 +355,7 @@ async fn handle_node_web_terminal(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             &billing_resolution_user_id,
             &resource_owner_id,
             credential_class,

@@ -718,6 +718,8 @@ async fn shared_transports_async_mcp_survives_settlement_and_two_replica_polling
             .await
             .unwrap();
             let start = crate::services::assistant_nyxagent::TurnStart {
+                execution_enrollment: false,
+                execution_parent: None,
                 owner_instruction_source: None,
                 media_event_ids: Vec::new(),
                 channel_uploads: Vec::new(),
@@ -1793,5 +1795,102 @@ async fn shared_transports_security_mcp_cannot_upgrade_without_http_stream_admis
     .await;
     assert_eq!(result["result"]["isError"], true);
     assert!(upstream.received_requests().await.unwrap().is_empty());
+    f.f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn execution_permission_covers_shared_actor_connection_without_consent_or_risk_cards() {
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::Request,
+    };
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/status"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let f = TransportFixture::new("execution_shared_covered", &server.uri()).await;
+    f.f.state
+        .db
+        .collection::<Document>("users")
+        .update_one(
+            doc! {"_id":&f.f.outsider},
+            doc! {"$set":{"execution_permission_enrollment":1_i32}},
+        )
+        .await
+        .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.f.state.db,
+        &f.f.outsider,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let auth = f.auth().await;
+    crate::services::execution_permission_dispatch::tests::seed_for_chat(
+        &f.f.state,
+        &auth,
+        &f.actor_connection,
+        &f.catalog,
+        "GET",
+        "/status",
+    )
+    .await;
+    let mut request = Request::builder()
+        .uri("/proxy/s/shared-transport-actor/status")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    );
+    let response = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
+        State(f.f.state.clone()),
+        auth,
+        Default::default(),
+        Path(("shared-transport-actor".into(), "status".into())),
+        request,
+    ))
+    .await
+    .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&body)
+    );
+    assert_eq!(
+        f.f.state
+            .db
+            .collection::<Document>("assistant_agent_consents")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        f.f.state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     f.f.state.db.drop().await.unwrap();
 }

@@ -173,6 +173,18 @@ function setup({
     "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
     "../../theme/ThemeContext": { useTheme: () => ({ colors }) },
     "../../theme/flowStyles": { createFlowStyles: () => ({}) },
+    "../../components/brand/BrandNebula": {
+      BrandNebula: "BrandNebula",
+      BreathingMark: "BreathingMark",
+      RiseIn: "RiseIn",
+    },
+    "lucide-react-native": {
+      Eye: "Eye",
+      EyeOff: "EyeOff",
+      LockKeyhole: "LockKeyhole",
+      Mail: "Mail",
+    },
+    "../../components/brand/PortalMark": { PortalMarkLogo: "PortalMarkLogo" },
   });
   const { AuthHomeScreen } = harness.load(
     fileURLToPath(new URL("./AuthHomeScreen.tsx", import.meta.url)),
@@ -299,7 +311,7 @@ for (const emailEnabled of [false, true]) {
         assert.equal(tree.some((element) => element.props.accessibilityLabel === label), true);
       }
       assert.equal(tree.some((element) => element.type === "Pressable" && textContent(element) === "Sign In"), true);
-      assert.equal(tree.some((element) => element.type === "Text" && textContent(element) === "or"), providers.length > 0);
+      assert.equal(tree.some((element) => element.type === "Text" && textContent(element) === "or continue with email"), providers.length > 0);
       assert.equal(tree.some((element) => element.props.accessibilityLabel === "Create account"), emailEnabled);
       if (providers.length > 0) {
         assert.ok(tree.indexOf(screen.social().at(-1)!) < tree.indexOf(screen.input("Email")), "provider rows precede email, matching the web");

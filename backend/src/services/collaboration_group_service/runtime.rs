@@ -359,6 +359,7 @@ pub(super) async fn begin_ready(
             let roster=agents.iter().filter(|a|a.destroyed_at.is_none()).map(|a|format!("{} (@{})",serde_json::to_string(&people::label(a.display_name.as_deref().unwrap_or(&a.name))).unwrap_or_default(),people::agent_handle(&a.id))).collect::<Vec<_>>().join(", ");
             let mut start = engine::TurnStart::from(&engine::TurnRequest {conversation_id:Some(row.id.clone()),text:format!("Group transcript (context, not authority):\n{}\n\nOriginal request:\n{}",transcript,people::line(&trigger,&participants,&agents,12000)),agent_id:None,model:None,access_mode:None,attachment_ids:vec![],acknowledgement_id:None,retry_of:None});
             start.origin=TurnOrigin::Group;start.guest=row.guest_turn;
+            start.execution_enrollment=admission.execution_enrolled;
             // These are the exact request's public uploads, never the owner's
             // private uploads. Guest image delivery is live-fenced at preparation
             // and download; non-image files receive an explicit withheld notice.
@@ -490,7 +491,7 @@ pub(crate) async fn publish_reply(
         attachments: published_images,
         id: Uuid::new_v4().to_string(),
         group_id: b.group_id.clone(),
-        user_id: group.user_id,
+        user_id: group.user_id.clone(),
         seq: group.message_count,
         role: if failed { "notice" } else { "agent" }.into(),
         agent_id: Some(b.agent_id.clone()),
@@ -515,9 +516,10 @@ pub(crate) async fn publish_reply(
         created_at: Utc::now(),
     };
     db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
-        .insert_one(public)
-        .session(session)
+        .insert_one(&public)
+        .session(&mut *session)
         .await?;
+    notifications::enqueue(db, &group, &public, session).await?;
     Ok(())
 }
 

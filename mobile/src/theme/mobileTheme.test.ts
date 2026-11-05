@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chatBubbleColors, lightBubblePalettes, normalizeLightBubblePalette } from "./chatAppearance";
+import { bubblePalettes, chatBubbleColors, normalizeBubblePalette } from "./chatAppearance";
 import {
   darkColors,
   darkSheetColors,
@@ -34,13 +34,16 @@ function composite(rgba: string, base: string): Rgb {
       value * (1 - parts[3]!) + (parts[index]! / 255) * parts[3]!,
   ) as Rgb;
 }
-test("every chat palette keeps AA text contrast and an invalid saved choice falls back to gray", () => {
-  for (const palette of [...Object.values(lightBubblePalettes), chatBubbleColors("dark", "graphite")])
-    assert.ok(ratio(rgb(palette.foreground), rgb(palette.background)) >= 4.5);
-  assert.equal(normalizeLightBubblePalette("removed-palette"), "gray");
-  assert.equal(normalizeLightBubblePalette(null), "gray");
-  assert.equal(chatBubbleColors("light", "graphite"), lightBubblePalettes.graphite);
-  assert.deepEqual(chatBubbleColors("dark", "gray"), chatBubbleColors("dark", "graphite"));
+test("every chat palette keeps AA text contrast in both themes and an invalid saved choice falls back to gray", () => {
+  for (const palette of Object.values(bubblePalettes))
+    for (const colors of [palette.light, palette.dark])
+      assert.ok(ratio(rgb(colors.foreground), rgb(colors.background)) >= 4.5, palette.label);
+  assert.equal(normalizeBubblePalette("removed-palette"), "gray");
+  assert.equal(normalizeBubblePalette(null), "gray");
+  assert.equal(chatBubbleColors("light", "graphite"), bubblePalettes.graphite.light);
+  assert.equal(chatBubbleColors("dark", "lavender"), bubblePalettes.lavender.dark);
+  assert.deepEqual(chatBubbleColors("dark", "gray"), { background: "#2C2C30", foreground: "#EFEFF1" });
+  assert.notDeepEqual(chatBubbleColors("dark", "gray"), chatBubbleColors("dark", "graphite"));
 });
 test("native body and secondary text meet AA on every shared surface in both themes", () => {
   for (const colors of [darkColors, lightColors])

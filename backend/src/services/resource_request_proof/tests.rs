@@ -255,6 +255,8 @@ impl Fixture {
             .unwrap()
             .unwrap();
         super::super::proxy_service::ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,

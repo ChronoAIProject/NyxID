@@ -60,6 +60,7 @@ async fn queue(f: &Fixture, event: &NyxbotEvent, question: &str) -> bool {
         OWNER,
         f.event.conversation_id.as_deref().unwrap(),
         work(event, question),
+        None,
     )
     .await
     .unwrap()
@@ -191,7 +192,8 @@ async fn queue_transaction_rolls_back_source_acceptance_when_conversation_write_
             &f.state.db,
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
-            work(&event, "question")
+            work(&event, "question"),
+            None
         )
         .await
         .is_err()
@@ -316,7 +318,8 @@ async fn every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomi
             &f.state.db,
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
-            work(&invalid, "another question")
+            work(&invalid, "another question"),
+            None
         )
         .await
         .is_err()
@@ -499,6 +502,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         OWNER,
         &home.id,
         work(&event, "specialist question"),
+        None,
     )
     .await
     .unwrap();
@@ -965,6 +969,7 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 media_work,
+                None
             )
             .await
             .unwrap()

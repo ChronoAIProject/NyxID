@@ -160,3 +160,10 @@ export function validateConnectOAuthForm(
   }
   return null;
 }
+
+/** `POST /connect-links`: the raw token appears only inside `connect_url`. */
+export const createConnectLinkResponseSchema = z.object({
+  id: z.string(),
+  connect_url: z.string(),
+  expires_at: z.string(),
+});

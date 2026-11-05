@@ -27,6 +27,7 @@ impl AgentIdentity {
 /// One actor, group and optional immutable request chain. Fields are private;
 /// callers cannot transplant this snapshot to another group/requester/agent.
 pub struct RequestAccess {
+    pub(super) execution_enrolled: bool,
     pub(super) group: AssistantGroup,
     pub(super) actor: String,
     pub(super) request_id: Option<String>,
@@ -257,6 +258,9 @@ pub(super) async fn for_group(
         );
     }
     Ok(RequestAccess {
+        execution_enrolled: users.iter().any(|u| {
+            u.id == actor && u.user_type.is_person() && u.execution_permission_enrollment == Some(1)
+        }),
         participants: super::people::project(&group, &users),
         group,
         actor: actor.into(),

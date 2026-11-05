@@ -885,7 +885,7 @@ pub(crate) async fn run_owner_turn(
                 let now = Utc::now();
                 engine::mark_queued(&state.db,&row,&turn_id,now,now+chrono::Duration::seconds(60)).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
-                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline)).await;
+                let ready = Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,false,setup_deadline,super::org_channel_service::origin(&row))).await;
                 engine::mark_dequeued(&state.db,&row,&turn_id).await
                     .map_err(|_|TurnError::internal("assistant_unavailable","prepare"))?;
                 if !ready.unwrap_or(false) {return Err(super::assistant_guest_model_setup::failure(&state.db,&row).await);}
@@ -916,7 +916,7 @@ pub(crate) async fn run_owner_turn(
                     .and_then(|r|r.get_str("claim").ok().map(str::to_owned));
                 // Another request may already have replaced the rejected generation.
                 let force = current==setup_generation;
-                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline)).await.unwrap_or(false) {
+                if Box::pin(super::assistant_guest_model_setup::ensure(&state,&row.user_id,agent,&row.model,force,setup_deadline,super::org_channel_service::origin(&row))).await.unwrap_or(false) {
                     partial.clear();
                     instruction_context = None;
                     return execute_owner_turn(&state,egress.as_ref(),&authority,&row,&text,&mut credential,policy,&mut events,&block_id,&mut partial,&mut instruction_context).await;
@@ -1594,6 +1594,13 @@ async fn execute_turn_inner(
         ""
     };
     let mut guidance = guidance.to_owned();
+    if row
+        .active_turn
+        .as_ref()
+        .is_some_and(|turn| turn.voice_request_id.is_some())
+    {
+        guidance.push_str(crate::services::voice::runtime::TASK_GUIDANCE);
+    }
     if !row.guest_model_setup
         && !row.guest_turn
         && crate::services::assistant_service_execution::instruction::prompt_applies(
@@ -1935,10 +1942,15 @@ async fn execute_turn_inner(
         } else {
             first_byte_deadline
         };
+        let mut first_byte = super::assistant_start_retry::FirstByteDeadline::new(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            bounds.no_progress,
+        );
         let response = acknowledgement
             .wait(
-                tokio::time::timeout_at(
-                    deadline,
+                first_byte.wait(
+                    &state.db,
+                    row,
                     request(
                         state,
                         egress,
@@ -1956,8 +1968,7 @@ async fn execute_turn_inner(
                 events,
                 egress,
             )
-            .await
-            .map_err(|_| TurnError::internal("first_byte_timeout", "first_byte"))?;
+            .await?;
         let response = match response {
             Ok(response) => response,
             Err(AppError::PoolAttemptTransport(
@@ -2171,7 +2182,6 @@ async fn execute_turn_inner(
                     .max(0) as u64,
             );
         }
-        let deadline = first_byte_deadline;
         if !response
             .headers()
             .get("content-type")
@@ -2193,26 +2203,24 @@ async fn execute_turn_inner(
         let mut running_response_id: Option<String> = None;
         let streamed: Result<(), TurnError> = async {
             loop {
-                let timeout = if received {
-                    stream_timeout(
+                let next = if received {
+                    let timeout = stream_timeout(
                         bounds,
                         last_transport_activity.elapsed(),
                         last_semantic_progress.elapsed(),
-                    )
+                    );
+                    tokio::time::timeout(timeout, body.next())
+                        .await
+                        .map_err(|_| {
+                            if last_semantic_progress.elapsed() >= bounds.no_progress {
+                                TurnError::internal("idle_timeout", "no_progress")
+                            } else {
+                                TurnError::internal("idle_timeout", "idle")
+                            }
+                        })?
                 } else {
-                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                    first_byte.wait(&state.db, row, body.next()).await?
                 };
-                let next = tokio::time::timeout(timeout, body.next())
-                    .await
-                    .map_err(|_| {
-                        if !received {
-                            TurnError::internal("first_byte_timeout", "first_byte")
-                        } else if last_semantic_progress.elapsed() >= bounds.no_progress {
-                            TurnError::internal("idle_timeout", "no_progress")
-                        } else {
-                            TurnError::internal("idle_timeout", "idle")
-                        }
-                    })?;
                 let Some(chunk) = next else {
                     break;
                 };

@@ -8,7 +8,7 @@ import {
   lightSheetColors,
   type ThemeColors,
 } from "./mobileTheme";
-import { normalizeLightBubblePalette, type LightBubblePalette } from "./chatAppearance";
+import { normalizeBubblePalette, type BubblePalette } from "./chatAppearance";
 
 export type ThemePreference = "system" | "light" | "dark";
 export type ThemeMode = "light" | "dark";
@@ -18,11 +18,12 @@ type ThemeContextValue = {
   mode: ThemeMode;
   preference: ThemePreference;
   setPreference: (p: ThemePreference) => void;
-  lightBubblePalette: LightBubblePalette;
-  setLightBubblePalette: (palette: LightBubblePalette) => void;
+  bubblePalette: BubblePalette;
+  setBubblePalette: (palette: BubblePalette) => void;
 };
 
 const STORAGE_KEY = "nyxid_theme_preference";
+// The key predates dark-mode palettes; it is kept so saved choices carry over.
 const BUBBLE_STORAGE_KEY = "nyxid_light_bubble_palette_v1";
 
 const ThemeContext = createContext<ThemeContextValue>({
@@ -30,15 +31,15 @@ const ThemeContext = createContext<ThemeContextValue>({
   mode: "light",
   preference: "system",
   setPreference: () => {},
-  lightBubblePalette: "gray",
-  setLightBubblePalette: () => {},
+  bubblePalette: "gray",
+  setBubblePalette: () => {},
 });
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const systemScheme = useColorScheme();
   const [preference, setPreferenceState] = useState<ThemePreference>("system");
   const [loaded, setLoaded] = useState(false);
-  const [lightBubblePalette, setLightBubblePaletteState] = useState<LightBubblePalette>("gray");
+  const [bubblePalette, setBubblePaletteState] = useState<BubblePalette>("gray");
   const bubbleWrites = useRef(Promise.resolve());
 
   useEffect(() => {
@@ -52,7 +53,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         if (value === "light" || value === "dark" || value === "system") {
           setPreferenceState(value);
         }
-        setLightBubblePaletteState(normalizeLightBubblePalette(palette));
+        setBubblePaletteState(normalizeBubblePalette(palette));
         setLoaded(true);
       })
       .catch(() => { if (active) setLoaded(true); });
@@ -64,9 +65,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     SecureStore.setItemAsync(STORAGE_KEY, p).catch(() => {});
   }, []);
 
-  const setLightBubblePalette = useCallback((palette: LightBubblePalette) => {
-    const next = normalizeLightBubblePalette(palette);
-    setLightBubblePaletteState(next);
+  const setBubblePalette = useCallback((palette: BubblePalette) => {
+    const next = normalizeBubblePalette(palette);
+    setBubblePaletteState(next);
     bubbleWrites.current = bubbleWrites.current
       .catch(() => {})
       .then(() => SecureStore.setItemAsync(BUBBLE_STORAGE_KEY, next));
@@ -81,8 +82,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const colors = mode === "light" ? lightColors : darkColors;
 
   const value = useMemo<ThemeContextValue>(
-    () => ({ colors, mode, preference, setPreference, lightBubblePalette, setLightBubblePalette }),
-    [colors, mode, preference, setPreference, lightBubblePalette, setLightBubblePalette],
+    () => ({ colors, mode, preference, setPreference, bubblePalette, setBubblePalette }),
+    [colors, mode, preference, setPreference, bubblePalette, setBubblePalette],
   );
 
   if (!loaded) return null;

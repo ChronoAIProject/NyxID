@@ -22,6 +22,7 @@ it("restores only minimise preferences for the same owner", async () => {
   expect(JSON.parse(localStorage.getItem("nyxid.cma-session")!).state).toEqual({
     ownerId: "owner",
     minimised: { [key]: true },
+    pinned: {},
   });
   useCmaSessionStore.getState().setMinimised("owner", key, false);
   expect(useCmaSessionStore.getState().minimised[key]).toBe(false);
@@ -92,4 +93,22 @@ it("rejects malformed preferences and bounds retained session identities", async
       .setMinimised("owner", `${cmaSession.connection.id}:agt_${i}`, true);
   }
   expect(Object.keys(useCmaSessionStore.getState().minimised)).toHaveLength(50);
+});
+
+it("persists account-bound pins, restores on reload, and removes only the unpinned session", async () => {
+  transitionAssistantIdentity("owner");
+  useCmaSessionStore.getState().setPinned("owner", key, true);
+  useCmaSessionStore.getState().setMinimised("owner", key, true);
+  await useCmaSessionStore.persist.rehydrate();
+  expect(useCmaSessionStore.getState().pinned).toEqual({ [key]: true });
+  useCmaSessionStore.getState().setPinned("owner", key, false);
+  expect(useCmaSessionStore.getState().pinned).toEqual({});
+  expect(useCmaSessionStore.getState().minimised[key]).toBe(true);
+  useCmaSessionStore.getState().setPinned("owner", key, true);
+  transitionAssistantIdentity("other");
+  expect(useCmaSessionStore.getState().pinned).toEqual({});
+  useCmaSessionStore.getState().setPinned("owner", key, true);
+  expect(useCmaSessionStore.getState().pinned).toEqual({});
+  transitionAssistantIdentity(null);
+  expect(useCmaSessionStore.getState().ownerId).toBeNull();
 });

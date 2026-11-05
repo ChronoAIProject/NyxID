@@ -6,8 +6,14 @@ import { ChannelBotsManager } from "./nyxbot-channels";
 import { ApiError } from "@/lib/api-client";
 
 const data = vi.hoisted(() => ({
-  channels: [] as unknown[], bots: [] as unknown[],
-  connect: vi.fn(), link: vi.fn(), pending: false,
+  channels: [] as unknown[],
+  bots: [] as unknown[],
+  orgs: [] as unknown[],
+  orgChannels: false,
+  connect: vi.fn(),
+  link: vi.fn(),
+  retryGateway: vi.fn(),
+  pending: false,
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   nyxBotOf: (agents: AssistantAgent[]) => agents.find((agent) => agent.kind === "nyxbot"),
@@ -15,11 +21,18 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useConnectNyxBotChannel: () => ({ isPending: data.pending, mutateAsync: data.connect }),
   useDisconnectNyxBotChannel: () => ({ isPending: false }),
   useLinkNyxBotChannel: () => ({ isPending: false, mutateAsync: data.link }),
+  useRetryNyxBotChannelGateway: () => ({ isPending: false, mutateAsync: data.retryGateway }),
 }));
 vi.mock("@/hooks/use-channel-bots", () => ({
   useChannelBots: () => ({ data: data.bots, isPending: false }),
 }));
-vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: data.orgs }) }));
+vi.mock("@/hooks/use-feature-flag", () => ({
+  useFeature: () => data.orgChannels,
+}));
+vi.mock("./org-specialist-channel-settings", () => ({
+  OrgSpecialistChannelSettings: () => <div>Member verification</div>,
+}));
 vi.mock("./nyxbot-channel-chats", () => ({
   ChannelChats: ({ agents }: { agents: readonly AssistantAgent[] }) => (
     <div data-testid="channel-chat-agents">
@@ -28,10 +41,19 @@ vi.mock("./nyxbot-channel-chats", () => ({
   ),
 }));
 beforeEach(() => {
-  data.channels = []; data.bots = []; data.pending = false;
-  data.connect.mockResolvedValue({ channel_agent: { bot_label: "Receipts" }, link: {
-    code: "LINK123", instructions: "Send this code to your bot.", expires_at: "2026-10-22T00:00:00Z",
-  } });
+  data.channels = [];
+  data.bots = [];
+  data.orgs = [];
+  data.orgChannels = false;
+  data.pending = false;
+  data.connect.mockResolvedValue({
+    channel_agent: { bot_label: "Receipts" },
+    link: {
+      code: "LINK123",
+      instructions: "Send this code to your bot.",
+      expires_at: "2026-10-22T00:00:00Z",
+    },
+  });
   data.link.mockResolvedValue(undefined);
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -197,4 +219,109 @@ it.each([
   render(<ChannelBotsManager agents={[]} />);
   expect(screen.getByText(`Last error: ${explanation}`)).toBeVisible();
   expect(screen.getByText(code)).toHaveClass("text-text-tertiary");
+});
+
+it("offers an enabled organization specialist only to its admin and same-org bots", async () => {
+  data.orgChannels = true;
+  data.orgs = [{ id: "team", your_role: "admin" }];
+  data.bots = [
+    { id: "owned", user_id: "team", label: "Team bot", platform: "lark" },
+    {
+      id: "foreign",
+      user_id: "different",
+      label: "Other bot",
+      platform: "lark",
+    },
+  ];
+  const specialist = {
+    ...agent("org-specialist", "idle", "org"),
+    owner_id: "team",
+  };
+  render(<ChannelBotsManager agents={[agent("personal"), specialist]} />);
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("combobox", { name: "Agent for Team bot" }),
+  );
+  expect(screen.getByRole("option", { name: "org-specialist" })).toBeVisible();
+  await user.keyboard("{Escape}");
+  await user.click(
+    screen.getByRole("combobox", { name: "Agent for Other bot" }),
+  );
+  expect(
+    screen.queryByRole("option", { name: "org-specialist" }),
+  ).not.toBeInTheDocument();
+});
+
+it("keeps member verification available on an existing binding without giving management or linking rights", () => {
+  data.orgs = [{ id: "team", your_role: "member" }];
+  data.channels = [
+    {
+      ...connection("active"),
+      org_specialist: {
+        org_id: "team",
+        guest_enabled: false,
+        delegated_service_ids: [],
+        daily_credits: null,
+      },
+    },
+  ];
+  render(
+    <ChannelBotsManager
+      agents={[{ ...agent("first", "idle", "org"), owner_id: "team" }]}
+    />,
+  );
+  expect(screen.getByText("Member verification")).toBeVisible();
+  expect(
+    screen.queryByRole("button", { name: "Disconnect" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /Link account|Link another account/ }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByTestId("channel-chat-agents")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("combobox", { name: "Agent for Receipts" }),
+  ).toBeDisabled();
+});
+
+
+it.each(["discord.invalid_intents", undefined])("2183 explains working relay fallback and retries explicitly with detail %s", async (detail) => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct",
+    gateway_native_activation: "gateway_rejected_request", gateway_native_activation_detail: detail,
+    gateway_next_retry_at: "2026-11-05T00:00:00Z", gateway_retry_available_at: "2026-11-04T01:00:00Z",
+    delivery_status: "ok" })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText("Working on NyxID relay.")).toBeVisible();
+  expect(screen.getByText(`Native gateway activation did not complete: ${detail ?? "gateway_rejected_request"}.`)).toBeVisible();
+  expect(screen.getByText(/Next automatic retry:/)).toBeVisible();
+  expect(screen.getByText(/does not confirm native gateway acceptance/)).toBeVisible();
+  await userEvent.setup().click(screen.getByRole("button", { name: "Retry native gateway now" }));
+  expect(data.retryGateway).toHaveBeenCalledWith({ channelAgentId: "channel" });
+});
+
+it("2183 distinguishes native selection from confirmed delivery", () => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "gateway", gateway_source: { type: "discord", bot_id: "100" }, gateway_native_activation: "pending_discovery" })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText(/Native gateway selected.*pending_discovery/)).toBeVisible();
+  expect(screen.getByText(/Native delivery has not been confirmed/)).toBeVisible();
+  expect(screen.queryByText("Working on NyxID relay.")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Retry native gateway now" })).toBeNull();
+});
+
+it("2183 disables retry for an unverified owner and shows actionable refusal", async () => {
+  const row = nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "direct", owner_linked: false, gateway_native_activation: "gateway_rejected_request" });
+  data.channels = [row];
+  const view = render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByRole("button", { name: "Retry native gateway now" })).toBeDisabled();
+  data.channels = [{ ...row, owner_linked: true }];
+  view.rerender(<ChannelBotsManager agents={[]} />);
+  data.retryGateway.mockRejectedValueOnce(new Error("native_gateway_retry_rate_limited"));
+  await userEvent.setup().click(screen.getByRole("button", { name: "Retry native gateway now" }));
+  expect(screen.getByText(/Wait ten minutes after the last gateway attempt/)).toBeVisible();
+});
+
+it("2183 never presents an older relay-sourced gateway as native", () => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform: "discord", transport: "gateway" })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText(/Agent Event Gateway with NyxID relay intake/)).toBeVisible();
+  expect(screen.queryByText(/Native gateway selected/)).toBeNull();
 });

@@ -10,7 +10,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { ChevronLeft } from "lucide-react-native";
+import { ChevronLeft, KeyRound, UserRound } from "lucide-react-native";
+import { SettingsGroup, SettingsRow } from "../../components/settings/SettingsList";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -457,10 +458,33 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   This request has expired. Start Agent Key login again.
                 </Text>
               )}
+              {/* A terminal code chooses its access from an iOS grouped list. */}
+              {mint && step === "review" && isAuthenticated ? (
+                <SettingsGroup
+                  title="Sign the terminal in with"
+                  footer="Anyone with the code can use it once, within five minutes. An Agent Key keeps the terminal to that key's services and approvals."
+                >
+                  <SettingsRow
+                    icon={KeyRound}
+                    label="Choose an Agent Key"
+                    badge="Recommended"
+                    detail="Only this key's services and approvals"
+                    disabled={pending || expired}
+                    onPress={() => void act(loadOptions)}
+                  />
+                  <SettingsRow
+                    icon={UserRound}
+                    label="Full account session"
+                    detail="Signs the terminal in as you, with full access"
+                    disabled={pending}
+                    onPress={() => setStep("account")}
+                  />
+                </SettingsGroup>
+              ) : null}
               {step === "review" &&
+                !(mint && isAuthenticated) &&
                 (isAuthenticated &&
-                (mint ||
-                  flow === "agent-key" ||
+                (flow === "agent-key" ||
                   preview?.supports_grant_choice === true) ? (
                   <PrimaryButton
                     label="Choose an Agent Key"
@@ -480,21 +504,7 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                     }
                   />
                 ))}
-              {mint && step === "review" && isAuthenticated && (
-                <>
-                  <Text style={styles.cautionText}>
-                    Anyone with this code can redeem the selected access once,
-                    within five minutes. Restricted Agent Key access is
-                    recommended.
-                  </Text>
-                  <PrimaryButton
-                    label="Full account session"
-                    kind="ghost"
-                    disabled={pending}
-                    onPress={() => setStep("account")}
-                  />
-                </>
-              )}
+
               {step === "account" && (
                 <View style={styles.inputSection}>
                   <Text style={styles.inputLabel}>

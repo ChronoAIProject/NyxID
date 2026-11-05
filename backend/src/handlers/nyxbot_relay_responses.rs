@@ -220,7 +220,7 @@ pub(super) async fn settle_admission(
     let (text, failed) = match result {
         Ok(Inbound::Turn(_)) | Ok(Inbound::Queued) => return,
         Ok(Inbound::Reply(text)) => (Some(text.as_str()), false),
-        Ok(Inbound::Silent) => (None, false),
+        Ok(Inbound::Silent(_)) => (None, false),
         Ok(Inbound::Busy) => (
             Some("NyxBot is busy. This message was not started. Please try again shortly."),
             false,

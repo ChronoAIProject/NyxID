@@ -2,8 +2,13 @@ import { WorkspacePageSurface } from "./WorkspacePageSurface";
 import { workspaceContentAnimation } from "../components/workspace/workspacePushState";
 import {
   AssistantDetailsScreen,
+  AssistantTitleEditScreen,
   AssistantWorkingContextScreen,
 } from "../features/assistant/AssistantDetailsScreen";
+import {
+  AgentProfileEditScreen,
+  agentProfileFieldTitle,
+} from "../features/agents/AgentProfileEditScreen";
 import {
   WorkspaceRecentsScreen,
   WorkspaceSearchScreen,
@@ -34,9 +39,27 @@ import { DeviceLoginScreen } from "../features/auth/DeviceLoginScreen";
 import { AgentKeyLoginScreen } from "../features/auth/AgentKeyLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
+import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
+import { VoiceSettingsScreen } from "../features/account/VoiceSettingsScreen";
+import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
+import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
+import {
+  ProfileFieldEditScreen,
+  profileFieldTitle,
+} from "../features/account/ProfileFieldEditScreen";
+import { SessionDetailScreen } from "../features/account/SessionDetailScreen";
+import {
+  ChatLayoutEditScreen,
+  chatLayoutTitle,
+} from "../features/display/ChatLayoutEditScreen";
 import { AccountSecurityScreen } from "../features/account/AccountSecurityScreen";
 import { MachinePolicyScreen } from "../features/machines/MachinePolicyScreen";
-import { MachineActivityScreen } from "../features/machines/MachineActivityScreen";
+import {
+  MachineActivityDetailScreen,
+  MachineActivityFilterScreen,
+  MachineActivityScreen,
+} from "../features/machines/MachineActivityScreen";
+import { SavedLoginScreen } from "../features/machines/SavedLogins";
 import { AgentMachinesScreen } from "../features/machines/AgentMachinesScreen";
 import { MachineDesktopRoute } from "../features/machines/MachineDesktopRoute";
 import { MachinesScreen } from "../features/machines/MachinesScreen";
@@ -45,6 +68,7 @@ import { WorkspaceDrawerHeader } from "../components/workspace/WorkspaceDrawerHe
 import { ActivityScreen } from "../features/activity/ActivityScreen";
 import { PluginSkillPage } from "../features/plugins/PluginSkills";
 import { AuthoredSkillPage } from "../features/plugins/NativeAuthoredSkillReview";
+import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnectionHistory";
 import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
 import { AssistantScreen } from "../features/assistant/AssistantScreen";
 import { AssistantLinkHost } from "../features/assistant/AssistantLinkHost";
@@ -57,6 +81,8 @@ import {
   AutomationsScreen,
   AutomationDetailScreen,
   AutomationRunsScreen,
+  AutomationRunDetailScreen,
+  AutomationAgentFilterScreen,
 } from "../features/automations/AutomationsScreen";
 import {
   PluginsScreen,
@@ -125,6 +151,9 @@ function AgentsRoute({ navigation, route }: WorkspaceScreenProps<"Agents">) {
       onCreateGroup={() => navigation.push("GroupEditor")}
       onOpenChat={openChat}
       onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
+      onEditProfile={(agentId, field) =>
+        navigation.push("AgentProfileEdit", { agentId, field })
+      }
       onOpenMachines={(agentId) =>
         navigation.push("AgentMachines", { agentId })
       }
@@ -202,6 +231,9 @@ function AgentDetailRoute({
       onClose={() => navigation.goBack()}
       onOpenChat={openChat}
       onOpenSkills={(agentId) => navigation.push("AgentSkills", { agentId })}
+      onEditProfile={(agentId, field) =>
+        navigation.push("AgentProfileEdit", { agentId, field })
+      }
       onOpenMachines={(agentId) =>
         navigation.push("AgentMachines", { agentId })
       }
@@ -338,6 +370,11 @@ function WorkspaceNavigator() {
         options={{ title: "Chat details" }}
       />
       <ContentStack.Screen
+        name="AssistantTitleEdit"
+        component={AssistantTitleEditScreen}
+        options={{ title: "Title" }}
+      />
+      <ContentStack.Screen
         name="AssistantHistory"
         component={WorkspaceRecentsScreen}
         options={{ title: "Chat history" }}
@@ -405,6 +442,13 @@ function WorkspaceNavigator() {
         options={{ title: "Agent" }}
       />
       <ContentStack.Screen
+        name="AgentProfileEdit"
+        component={AgentProfileEditScreen}
+        options={({ route }) => ({
+          title: agentProfileFieldTitle(route.params.field),
+        })}
+      />
+      <ContentStack.Screen
         name="GroupEditor"
         component={GroupEditorRoute}
         options={({ route }) => ({
@@ -436,6 +480,11 @@ function WorkspaceNavigator() {
         options={{ title: "Connections" }}
       />
       <ContentStack.Screen
+        name="ConnectionHistoryDetail"
+        component={ConnectionHistoryDetailScreen}
+        options={({ route }) => ({ title: route.params.title })}
+      />
+      <ContentStack.Screen
         name="ActiveGrants"
         component={ActivityScreen}
         options={{ title: "Active grants" }}
@@ -455,6 +504,21 @@ function WorkspaceNavigator() {
           title: "Machine activity",
           header: WorkspacePageHeader,
         }}
+      />
+      <ContentStack.Screen
+        name="MachineActivityFilter"
+        component={MachineActivityFilterScreen}
+        options={{ title: "Agent", header: WorkspacePageHeader }}
+      />
+      <ContentStack.Screen
+        name="MachineActivityDetail"
+        component={MachineActivityDetailScreen}
+        options={{ title: "Activity", header: WorkspacePageHeader }}
+      />
+      <ContentStack.Screen
+        name="MachineSavedLogin"
+        component={SavedLoginScreen}
+        options={{ title: "Saved login", header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="AgentMachines"
@@ -498,6 +562,16 @@ function WorkspaceNavigator() {
         name="AutomationRuns"
         component={AutomationRunsScreen}
         options={{ title: "Run history" }}
+      />
+      <ContentStack.Screen
+        name="AutomationRunDetail"
+        component={AutomationRunDetailScreen}
+        options={{ title: "Run" }}
+      />
+      <ContentStack.Screen
+        name="AutomationAgentFilter"
+        component={AutomationAgentFilterScreen}
+        options={{ title: "Agent" }}
       />
       <ContentStack.Screen
         name="ActivityDetail"
@@ -648,6 +722,43 @@ function SettingsSheetRoute({
             options={{ title: "Account & security" }}
           />
           <SheetStack.Screen
+            name="NotificationSettings"
+            component={NotificationSettingsScreen}
+            options={{ title: "Notifications" }}
+          />
+          <SheetStack.Screen
+            name="DisplaySettings"
+            component={DisplaySettingsScreen}
+            options={{ title: "Display" }}
+          />
+          <SheetStack.Screen
+            name="VoiceSettings"
+            component={VoiceSettingsScreen}
+            options={{ title: "Voice" }}
+          />
+          <SheetStack.Screen
+            name="PrivacySettings"
+            component={PrivacySettingsScreen}
+            options={{ title: "Privacy" }}
+          />
+          <SheetStack.Screen
+            name="ProfileEdit"
+            component={ProfileFieldEditScreen}
+            options={({ route }) => ({
+              title: profileFieldTitle(route.params.field),
+            })}
+          />
+          <SheetStack.Screen
+            name="SessionDetail"
+            component={SessionDetailScreen}
+            options={{ title: "Session" }}
+          />
+          <SheetStack.Screen
+            name="ChatLayoutEdit"
+            component={ChatLayoutEditScreen}
+            options={({ route }) => ({ title: chatLayoutTitle(route.params.key) })}
+          />
+          <SheetStack.Screen
             name="TermsOfService"
             component={TermsOfServiceScreen}
             options={{ title: "Terms of Service" }}
@@ -660,12 +771,15 @@ function SettingsSheetRoute({
           <SheetStack.Screen
             name="DeviceLogin"
             component={DeviceLoginScreen}
-            options={{ title: "Scan QR code" }}
+            options={{ title: "Scan QR Code" }}
           />
           <SheetStack.Screen
             name="AgentKeyLogin"
             component={AgentKeyLoginScreen}
-            options={{ title: "Agent Key login" }}
+            // Minting a terminal code says so, matching the drawer row.
+            options={({ route }) => ({
+              title: route.params?.mint ? "Terminal Login Code" : "Agent Key Login",
+            })}
           />
         </SheetStack.Navigator>
       </WorkspaceSheetSurface>
@@ -715,8 +829,8 @@ export function AppNavigator({
   if (isRestoring)
     return (
       <FullScreenLoading
-        title="Restoring session..."
-        subtitle="Validating local secure session"
+        title="Signing you in…"
+        subtitle="Restoring your secure session"
       />
     );
   return (

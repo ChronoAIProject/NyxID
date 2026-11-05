@@ -232,7 +232,7 @@ export function useNyxAgentAssistantChat({
           ? 5000
           : livePollInterval(
               query.state.data?.acknowledgements.some((row) => row.status === "pending") ||
-                (query.state.data?.approvals.length ?? 0) > 0
+                query.state.data?.approvals.some((row) => !row.status || row.status === "pending")
                 ? 2000
                 : // Waiting on something outside the chat: notice when it happens.
                   (query.state.data?.waiting.length ?? 0) > 0

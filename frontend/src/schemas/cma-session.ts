@@ -26,11 +26,12 @@ export const cmaAgentSchema = z.object({
   title: z.string().nullish(),
   owner_title: z.string().nullish(),
   status: z.string().max(80),
+  callback_url: z.unknown().optional(),
 });
 export type CmaAgent = z.infer<typeof cmaAgentSchema>;
 
 export const cmaAgentPageSchema = z.object({
-  items: z.array(cmaAgentSchema),
+  items: z.array(cmaAgentSchema).max(50),
   next: z.string().nullish(),
 });
 
@@ -42,7 +43,26 @@ export const cmaRoutesSchema = z.object({
 });
 export type CmaRoutes = z.infer<typeof cmaRoutesSchema>;
 
+export const cmaSessionOriginSchema = z.object({
+  service_id: z.uuid(),
+  agent_id: cmaAgentIdSchema,
+  conversation_id: z.string().min(1).max(200),
+  turn_id: z.string().min(1).max(200),
+  specialist_id: z.string().min(1).max(200),
+  cma_url: z.string().nullable(),
+  connection_name: z.string().max(300).optional(),
+  connection_slug: z.string().optional(),
+});
+export type CmaSessionOrigin = z.infer<typeof cmaSessionOriginSchema>;
+export const cmaOriginPageSchema = z.object({
+  sessions: z.array(cmaSessionOriginSchema).max(50),
+  connections: z.array(cmaConnectionSchema).max(50).default([]),
+  next_cursor: z.uuid().nullable(),
+});
+
 export const cmaSessionReferenceSchema = z.object({
+  origin: cmaSessionOriginSchema.optional(),
+  callbackUrl: z.string().nullable().optional(),
   connection: cmaConnectionSchema,
   agentId: cmaAgentIdSchema,
   title: z.string().max(300),
