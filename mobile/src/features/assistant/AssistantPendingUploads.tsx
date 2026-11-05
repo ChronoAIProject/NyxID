@@ -68,20 +68,22 @@ export function AssistantPendingUploads({
                   },
                 ]}
               >
-                {image ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`Preview ${row.file.name}`}
-                    onPress={() => setPreview(row)}
-                  >
-                    <Image
-                      source={{ uri: row.file.uri }}
-                      style={styles.thumbnail}
-                    />
-                  </Pressable>
-                ) : (
-                  <FileText size={23} color={colors.textSecondary} />
-                )}
+                <View style={styles.media}>
+                  {image ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Preview ${row.file.name}`}
+                      onPress={() => setPreview(row)}
+                    >
+                      <Image
+                        source={{ uri: row.file.uri }}
+                        style={styles.thumbnail}
+                      />
+                    </Pressable>
+                  ) : (
+                    <FileText size={23} color={colors.textSecondary} />
+                  )}
+                </View>
                 <View style={styles.fill}>
                   {showMentionHandles && !row.item ? (
                     <Label
@@ -145,6 +147,12 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderWidth: 1,
     borderRadius: radius.md,
+  },
+  media: {
+    width: 36,
+    height: 36,
+    alignItems: "center",
+    justifyContent: "center",
   },
   thumbnail: { width: 36, height: 36, borderRadius: 6 },
   handle: { fontSize: 11 },

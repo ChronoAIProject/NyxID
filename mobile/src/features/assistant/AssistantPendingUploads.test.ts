@@ -105,6 +105,18 @@ test("attachment chip dimensions and remove target stay stable across all states
         (n) => Array.isArray(n.props.style) && n.props.style[0]?.width === 260,
       )!;
     heights.push(card.props.style[1].height);
+    const media = x
+      .all()
+      .find(
+        (n) =>
+          n.type === "View" &&
+          n.props.style?.width === 36 &&
+          n.props.style?.height === 36,
+      );
+    assert.ok(
+      media,
+      "thumbnail and fallback icon reserve the same media frame",
+    );
     const remove = x
       .all()
       .find((n) => n.props.accessibilityLabel === "Remove Draft.png")!;
