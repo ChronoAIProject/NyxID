@@ -84,6 +84,16 @@ pub struct RecordResponse {
     pub archived: bool,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_protected: Vec<String>,
+    #[serde(default)]
+    pub created_by: Option<super::activities::ActivityActorResponse>,
+    #[serde(default)]
+    pub updated_by: Option<super::activities::ActivityActorResponse>,
+    #[serde(default)]
+    pub field_sources: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_stale: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -95,7 +105,7 @@ pub struct RecordLinkResponse {
 }
 
 #[derive(Clone, Debug)]
-struct PreparedValues {
+pub(crate) struct PreparedValues {
     scalar_changes: BTreeMap<String, Option<Bson>>,
     ref_changes: BTreeMap<String, RefChange>,
 }
@@ -105,6 +115,14 @@ struct RefChange {
     target_object: String,
     single: bool,
     ids: Vec<String>,
+}
+
+struct ActivityInput {
+    kind: CrmActivityKind,
+    actor: CrmActor,
+    summary: CrmActivitySummary,
+    body: Option<String>,
+    created_at: chrono::DateTime<Utc>,
 }
 
 pub fn receipt_context<T: Serialize>(
@@ -156,7 +174,14 @@ pub fn receipt_context<T: Serialize>(
 pub async fn get(db: &Database, owner_id: &str, record_id: &str) -> AppResult<RecordResponse> {
     let mut session = db.client().start_session().await?;
     let record = record_in_session(db, owner_id, record_id, &mut session).await?;
-    hydrate_record(db, &record, &mut session).await
+    let mut response = hydrate_record(db, &record, &mut session).await?;
+    let mut actors = response
+        .created_by
+        .iter_mut()
+        .chain(response.updated_by.iter_mut())
+        .collect::<Vec<_>>();
+    super::activities::hydrate_agent_names(db, owner_id, &mut actors).await?;
+    Ok(response)
 }
 
 pub async fn raw_by_id(db: &Database, record_id: &str) -> AppResult<CrmRecord> {
@@ -184,56 +209,84 @@ pub async fn create(
         db,
         &context,
         |tx, (db, owner, actor, input, receipt)| {
-            Box::pin(async move {
-                super::fence_owner(db, owner, tx).await?;
-                if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
-                    return response_from_value(response);
-                }
-                let object = object_in_session(db, owner, &input.object, tx).await?;
-                let prepared = prepare_values(db, tx, owner, &object, &input.values, true).await?;
-                let overrides =
-                    validate_override_edit(&object, &input.protect, &[], &BTreeSet::new())?;
-                let now = Utc::now();
-                let mut record = CrmRecord {
-                    id: Uuid::new_v4().to_string(),
-                    owner_id: owner.clone(),
-                    object_id: object.id.clone(),
-                    object_key: object.key.clone(),
-                    revision: 1,
-                    values: Document::new(),
-                    refs: Document::new(),
-                    overrides: overrides.into_iter().collect(),
-                    created_by: actor.clone(),
-                    updated_by: actor.clone(),
-                    archived_at: None,
-                    created_at: now,
-                    updated_at: now,
-                };
-                apply_prepared(&mut record, &prepared);
-                db.collection::<CrmRecord>(RECORDS)
-                    .insert_one(&record)
-                    .session(&mut *tx)
-                    .await?;
-                replace_links(db, tx, &record, &prepared.ref_changes, now).await?;
-                insert_activity(
-                    db,
-                    tx,
-                    &record,
-                    CrmActivityKind::Created,
-                    actor.clone(),
-                    CrmActivitySummary::default(),
-                    None,
-                    now,
-                )
-                .await?;
-                let response = hydrate_record(db, &record, tx).await?;
-                insert_receipt(db, tx, receipt.as_ref(), &response, now).await?;
-                Ok(response)
-            })
+            Box::pin(create_in_session(db, owner, actor, input, receipt, tx))
         },
     )
     .await;
     recover_duplicate(db, receipt.as_ref(), result).await
+}
+
+pub(crate) async fn create_in_session(
+    db: &Database,
+    owner: &String,
+    actor: &CrmActor,
+    input: &CreateRecordInput,
+    receipt: &Option<ReceiptContext>,
+    tx: &mut ClientSession,
+) -> AppResult<RecordResponse> {
+    super::fence_owner(db, owner, tx).await?;
+    if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
+        return response_from_value(response);
+    }
+    let object = object_in_session(db, owner, &input.object, tx).await?;
+    if actor.kind == crate::models::crm_record::CrmActorKind::Agent && !input.protect.is_empty() {
+        return Err(super::validation_error(
+            "protect",
+            "only humans can change field protection",
+        ));
+    }
+    let prepared = prepare_values(db, tx, owner, &object, &input.values, true).await?;
+    let overrides = validate_override_edit(&object, &input.protect, &[], &BTreeSet::new())?;
+    let now = Utc::now();
+    let mut record = CrmRecord {
+        field_sources: mongodb::bson::Document::new(),
+        id: Uuid::new_v4().to_string(),
+        owner_id: owner.clone(),
+        object_id: object.id.clone(),
+        object_key: object.key.clone(),
+        revision: 1,
+        values: Document::new(),
+        refs: Document::new(),
+        overrides: overrides.into_iter().collect(),
+        created_by: actor.clone(),
+        updated_by: actor.clone(),
+        archived_at: None,
+        created_at: now,
+        updated_at: now,
+    };
+    apply_prepared(&mut record, &prepared);
+    for key in input.values.keys() {
+        record.field_sources.insert(
+            key,
+            bson::DateTime::from_chrono(
+                actor
+                    .source
+                    .as_ref()
+                    .map_or(now, |source| source.ordered_at),
+            ),
+        );
+    }
+    db.collection::<CrmRecord>(RECORDS)
+        .insert_one(&record)
+        .session(&mut *tx)
+        .await?;
+    replace_links(db, tx, &record, &prepared.ref_changes, now).await?;
+    insert_activity(
+        db,
+        tx,
+        &record,
+        ActivityInput {
+            kind: CrmActivityKind::Created,
+            actor: actor.clone(),
+            summary: CrmActivitySummary::default(),
+            body: None,
+            created_at: now,
+        },
+    )
+    .await?;
+    let response = hydrate_record(db, &record, tx).await?;
+    insert_receipt(db, tx, receipt.as_ref(), &response, now).await?;
+    Ok(response)
 }
 
 pub async fn patch(
@@ -256,82 +309,164 @@ pub async fn patch(
         db,
         &context,
         |tx, (db, owner, record_id, actor, input, receipt)| {
-            Box::pin(async move {
-                super::fence_owner(db, owner, tx).await?;
-                if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
-                    return response_from_value(response);
-                }
-                let mut record = record_in_session(db, owner, record_id, tx).await?;
-                let object = object_in_session(db, owner, &record.object_key, tx).await?;
-                require_revision(db, tx, &record, input.expected_revision).await?;
-                let prepared =
-                    prepare_values(db, tx, owner, &object, &input.values, false).await?;
-                let old_overrides: BTreeSet<String> = record.overrides.iter().cloned().collect();
-                let overrides = validate_override_edit(
-                    &object,
-                    &input.protect,
-                    &input.unprotect,
-                    &old_overrides,
-                )?;
-                let mut changed_fields = changed_fields(&record, &prepared);
-                if overrides != old_overrides {
-                    changed_fields.insert("overrides".into());
-                }
-                if changed_fields.is_empty() {
-                    let response = hydrate_record(db, &record, tx).await?;
-                    insert_receipt(db, tx, receipt.as_ref(), &response, Utc::now()).await?;
-                    return Ok(response);
-                }
-                apply_prepared(&mut record, &prepared);
-                record.overrides = overrides.into_iter().collect();
-                record.revision += 1;
-                record.updated_by = actor.clone();
-                record.updated_at = Utc::now();
-                let update = doc! {
-                    "$set": {
-                        "values": &record.values,
-                        "refs": &record.refs,
-                        "overrides": bson::to_bson(&record.overrides).map_err(|error| AppError::Internal(error.to_string()))?,
-                        "updated_by": bson::to_bson(&record.updated_by).map_err(|error| AppError::Internal(error.to_string()))?,
-                        "updated_at": bson::DateTime::from_chrono(record.updated_at),
-                    },
-                    "$inc": {"revision": 1_i64},
-                };
-                let updated = db
-                    .collection::<CrmRecord>(RECORDS)
-                    .update_one(
-                        doc! {"_id": record_id, "owner_id": owner, "revision": input.expected_revision},
-                        update,
-                    )
-                    .session(&mut *tx)
-                    .await?;
-                if updated.modified_count != 1 {
-                    let current = record_in_session(db, owner, record_id, tx).await?;
-                    return Err(revision_conflict(db, tx, &current).await?);
-                }
-                replace_links(db, tx, &record, &prepared.ref_changes, record.updated_at).await?;
-                insert_activity(
-                    db,
-                    tx,
-                    &record,
-                    CrmActivityKind::Updated,
-                    actor.clone(),
-                    CrmActivitySummary {
-                        changed_fields: Some(changed_fields.into_iter().collect()),
-                        ..Default::default()
-                    },
-                    None,
-                    record.updated_at,
-                )
-                .await?;
-                let response = hydrate_record(db, &record, tx).await?;
-                insert_receipt(db, tx, receipt.as_ref(), &response, record.updated_at).await?;
-                Ok(response)
-            })
+            Box::pin(patch_in_session(
+                db, owner, record_id, actor, input, receipt, tx,
+            ))
         },
     )
     .await;
     recover_duplicate(db, receipt.as_ref(), result).await
+}
+
+pub(crate) async fn patch_in_session(
+    db: &Database,
+    owner: &String,
+    record_id: &str,
+    actor: &CrmActor,
+    input: &PatchRecordInput,
+    receipt: &Option<ReceiptContext>,
+    tx: &mut ClientSession,
+) -> AppResult<RecordResponse> {
+    super::fence_owner(db, owner, tx).await?;
+    if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
+        return response_from_value(response);
+    }
+    let mut record = record_in_session(db, owner, record_id, tx).await?;
+    let object = object_in_session(db, owner, &record.object_key, tx).await?;
+    require_revision(db, tx, &record, input.expected_revision).await?;
+    let agent = actor.kind == crate::models::crm_record::CrmActorKind::Agent;
+    if agent && (!input.protect.is_empty() || !input.unprotect.is_empty()) {
+        return Err(super::validation_error(
+            "protect",
+            "only humans can change field protection",
+        ));
+    }
+    let skipped: Vec<String> = input
+        .values
+        .keys()
+        .filter(|key| agent && record.overrides.contains(key))
+        .cloned()
+        .collect();
+    let skipped_stale: Vec<String> = input
+        .values
+        .keys()
+        .filter(|key| {
+            agent
+                && actor.source.as_ref().is_some_and(|source| {
+                    record
+                        .field_sources
+                        .get_datetime(key)
+                        .is_ok_and(|last| last.to_chrono() > source.ordered_at)
+                })
+        })
+        .cloned()
+        .collect();
+    let values = input
+        .values
+        .iter()
+        .filter(|(key, _)| !skipped.contains(key) && !skipped_stale.contains(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let prepared = prepare_values(db, tx, owner, &object, &values, false).await?;
+    let old_overrides: BTreeSet<String> = record.overrides.iter().cloned().collect();
+    let overrides =
+        validate_override_edit(&object, &input.protect, &input.unprotect, &old_overrides)?;
+    let mut changed_fields = changed_fields(&record, &prepared);
+    if overrides != old_overrides {
+        changed_fields.insert("overrides".into());
+    }
+    let source_time = actor
+        .source
+        .as_ref()
+        .map_or_else(Utc::now, |source| source.ordered_at);
+    let advance_source = !values.is_empty()
+        && values.keys().any(|key| {
+            record
+                .field_sources
+                .get_datetime(key)
+                .map_or(true, |last| last.to_chrono() < source_time)
+        });
+    if changed_fields.is_empty() && !advance_source {
+        let mut response = hydrate_record(db, &record, tx).await?;
+        response.skipped_protected = skipped;
+        response.skipped_stale = skipped_stale;
+        insert_receipt(db, tx, receipt.as_ref(), &response, Utc::now()).await?;
+        return Ok(response);
+    }
+    let stage_change = object.pipeline.as_ref().and_then(|pipeline| {
+        let before = record
+            .values
+            .get_str(&pipeline.stage_field)
+            .ok()
+            .map(str::to_owned);
+        let after = prepared
+            .scalar_changes
+            .get(&pipeline.stage_field)?
+            .as_ref()
+            .and_then(Bson::as_str)
+            .map(str::to_owned);
+        (before != after).then_some((before, after))
+    });
+    apply_prepared(&mut record, &prepared);
+    for key in values.keys() {
+        record
+            .field_sources
+            .insert(key, bson::DateTime::from_chrono(source_time));
+    }
+    record.overrides = overrides.into_iter().collect();
+    record.revision += 1;
+    record.updated_by = actor.clone();
+    record.updated_at = Utc::now();
+    let update = doc! {
+        "$set": {
+            "values": &record.values,
+            "field_sources": &record.field_sources,
+            "refs": &record.refs,
+            "overrides": bson::to_bson(&record.overrides).map_err(|error| AppError::Internal(error.to_string()))?,
+            "updated_by": bson::to_bson(&record.updated_by).map_err(|error| AppError::Internal(error.to_string()))?,
+            "updated_at": bson::DateTime::from_chrono(record.updated_at),
+        },
+        "$inc": {"revision": 1_i64},
+    };
+    let updated = db
+        .collection::<CrmRecord>(RECORDS)
+        .update_one(
+            doc! {"_id": record_id, "owner_id": owner, "revision": input.expected_revision},
+            update,
+        )
+        .session(&mut *tx)
+        .await?;
+    if updated.modified_count != 1 {
+        let current = record_in_session(db, owner, record_id, tx).await?;
+        return Err(revision_conflict(db, tx, &current).await?);
+    }
+    replace_links(db, tx, &record, &prepared.ref_changes, record.updated_at).await?;
+    let (kind, from, to) = match stage_change {
+        Some((from, to)) => (CrmActivityKind::StageChanged, from, to),
+        None => (CrmActivityKind::Updated, None, None),
+    };
+    insert_activity(
+        db,
+        tx,
+        &record,
+        ActivityInput {
+            kind,
+            actor: actor.clone(),
+            summary: CrmActivitySummary {
+                changed_fields: Some(changed_fields.into_iter().collect()),
+                from,
+                to,
+            },
+            body: None,
+            created_at: record.updated_at,
+        },
+    )
+    .await?;
+    let mut response = hydrate_record(db, &record, tx).await?;
+    response.skipped_protected = skipped;
+    response.skipped_stale = skipped_stale;
+    insert_receipt(db, tx, receipt.as_ref(), &response, record.updated_at).await?;
+    Ok(response)
 }
 
 pub async fn set_archived(
@@ -393,19 +528,21 @@ pub async fn set_archived(
                     db,
                     tx,
                     &record,
-                    CrmActivityKind::Updated,
-                    actor.clone(),
-                    CrmActivitySummary {
-                        changed_fields: Some(vec![if *archived {
-                            "archived"
-                        } else {
-                            "restored"
-                        }
-                        .into()]),
-                        ..Default::default()
+                    ActivityInput {
+                        kind: CrmActivityKind::Updated,
+                        actor: actor.clone(),
+                        summary: CrmActivitySummary {
+                            changed_fields: Some(vec![if *archived {
+                                "archived"
+                            } else {
+                                "restored"
+                            }
+                            .into()]),
+                            ..Default::default()
+                        },
+                        body: None,
+                        created_at: now,
                     },
-                    None,
-                    now,
                 )
                 .await?;
                 let response = hydrate_record(db, &record, tx).await?;
@@ -437,82 +574,35 @@ pub async fn move_stage(
     let result = crate::services::transaction_service::run_db_only(
         db,
         &context,
-        |tx, (db, owner, record_id, actor, input, receipt)| {
+        |tx, (db, owner, id, actor, input, receipt)| {
             Box::pin(async move {
                 super::fence_owner(db, owner, tx).await?;
                 if let Some(response) = receipt_in_session(db, receipt.as_ref(), tx).await? {
                     return response_from_value(response);
                 }
-                let mut record = record_in_session(db, owner, record_id, tx).await?;
+                let record = record_in_session(db, owner, id, tx).await?;
                 let object = object_in_session(db, owner, &record.object_key, tx).await?;
-                require_revision(db, tx, &record, input.expected_revision).await?;
-                let pipeline = object.pipeline.as_ref().ok_or_else(|| {
+                let pipeline = object.pipeline.ok_or_else(|| {
                     super::validation_error("to", "this object does not have a pipeline")
                 })?;
-                let field = object
-                    .fields
-                    .iter()
-                    .find(|field| field.key == pipeline.stage_field)
-                    .ok_or_else(|| {
-                        AppError::Internal("CRM pipeline stage field is missing".into())
-                    })?;
-                let to_value = Value::String(input.to.clone());
-                let stored = match fields::validate_write_value(field, &to_value, "to") {
-                    Ok(fields::ValidatedValue::Stored(value)) => value,
-                    Ok(_) => {
-                        return Err(super::validation_error("to", "must be a stage option"));
-                    }
-                    Err(error) => return Err(AppError::CrmValidationFailed(vec![error])),
-                };
-                let previous = record
-                    .values
-                    .get_str(&pipeline.stage_field)
-                    .ok()
-                    .map(str::to_owned);
-                if previous.as_deref() == Some(input.to.as_str()) {
-                    let response = hydrate_record(db, &record, tx).await?;
-                    insert_receipt(db, tx, receipt.as_ref(), &response, Utc::now()).await?;
-                    return Ok(response);
-                }
-                let now = Utc::now();
-                record.values.insert(&pipeline.stage_field, stored);
-                record.revision += 1;
-                record.updated_by = actor.clone();
-                record.updated_at = now;
-                let updated = db
-                    .collection::<CrmRecord>(RECORDS)
-                    .update_one(
-                        doc! {"_id": record_id, "owner_id": owner, "revision": input.expected_revision},
-                        doc! {"$set": {
-                            format!("values.{}", pipeline.stage_field): &input.to,
-                            "updated_at": bson::DateTime::from_chrono(now),
-                            "updated_by": bson::to_bson(actor).map_err(|error| AppError::Internal(error.to_string()))?,
-                        }, "$inc": {"revision": 1_i64}},
-                    )
-                    .session(&mut *tx)
-                    .await?;
-                if updated.modified_count != 1 {
-                    let current = record_in_session(db, owner, record_id, tx).await?;
-                    return Err(revision_conflict(db, tx, &current).await?);
-                }
-                insert_activity(
+                patch_in_session(
                     db,
-                    tx,
-                    &record,
-                    CrmActivityKind::StageChanged,
-                    actor.clone(),
-                    CrmActivitySummary {
-                        changed_fields: Some(vec![pipeline.stage_field.clone()]),
-                        from: previous,
-                        to: Some(input.to.clone()),
+                    owner,
+                    id,
+                    actor,
+                    &PatchRecordInput {
+                        expected_revision: input.expected_revision,
+                        values: BTreeMap::from([(
+                            pipeline.stage_field,
+                            Value::String(input.to.clone()),
+                        )]),
+                        protect: vec![],
+                        unprotect: vec![],
                     },
-                    None,
-                    now,
+                    receipt,
+                    tx,
                 )
-                .await?;
-                let response = hydrate_record(db, &record, tx).await?;
-                insert_receipt(db, tx, receipt.as_ref(), &response, now).await?;
-                Ok(response)
+                .await
             })
         },
     )
@@ -520,7 +610,7 @@ pub async fn move_stage(
     recover_duplicate(db, receipt.as_ref(), result).await
 }
 
-async fn prepare_values(
+pub(crate) async fn prepare_values(
     db: &Database,
     tx: &mut ClientSession,
     owner_id: &str,
@@ -760,11 +850,7 @@ async fn insert_activity(
     db: &Database,
     tx: &mut ClientSession,
     record: &CrmRecord,
-    kind: CrmActivityKind,
-    actor: CrmActor,
-    summary: CrmActivitySummary,
-    body: Option<String>,
-    now: chrono::DateTime<Utc>,
+    input: ActivityInput,
 ) -> AppResult<()> {
     db.collection::<CrmActivity>(ACTIVITIES)
         .insert_one(CrmActivity {
@@ -772,18 +858,18 @@ async fn insert_activity(
             owner_id: record.owner_id.clone(),
             record_id: record.id.clone(),
             object_key: record.object_key.clone(),
-            kind,
-            actor,
-            summary,
-            body,
-            created_at: now,
+            kind: input.kind,
+            actor: input.actor,
+            summary: input.summary,
+            body: input.body,
+            created_at: input.created_at,
         })
         .session(&mut *tx)
         .await?;
     Ok(())
 }
 
-async fn object_in_session(
+pub(crate) async fn object_in_session(
     db: &Database,
     owner_id: &str,
     key: &str,
@@ -980,6 +1066,19 @@ fn hydrate_loaded_record(
         archived: record.archived_at.is_some(),
         created_at: record.created_at.to_rfc3339(),
         updated_at: record.updated_at.to_rfc3339(),
+        created_by: Some(record.created_by.clone().into()),
+        updated_by: Some(record.updated_by.clone().into()),
+        field_sources: record
+            .field_sources
+            .iter()
+            .filter_map(|(key, value)| {
+                value
+                    .as_datetime()
+                    .map(|time| (key.clone(), time.to_chrono().to_rfc3339()))
+            })
+            .collect(),
+        skipped_protected: Vec::new(),
+        skipped_stale: Vec::new(),
     })
 }
 
@@ -1089,6 +1188,7 @@ pub(crate) async fn insert_receipt<T: Serialize>(
     let Some(receipt) = receipt else {
         return Ok(());
     };
+    super::tools::fence_admission(db, &receipt.owner_id, tx).await?;
     db.collection::<CrmMutationReceipt>(RECEIPTS)
         .insert_one(CrmMutationReceipt {
             id: receipt.id.clone(),

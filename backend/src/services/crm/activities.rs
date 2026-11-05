@@ -40,12 +40,23 @@ pub struct ActivityResponse {
     pub created_at: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityActorResponse {
     pub kind: CrmActorKind,
     pub user_id: String,
     pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     pub api_key_id: Option<String>,
+    pub source: Option<ActivitySourceResponse>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActivitySourceResponse {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub run_id: Option<String>,
+    pub ordered_at: String,
 }
 
 impl From<CrmActor> for ActivityActorResponse {
@@ -54,9 +65,58 @@ impl From<CrmActor> for ActivityActorResponse {
             kind: actor.kind,
             user_id: actor.user_id,
             agent_id: actor.agent_id,
+            agent_name: None,
             api_key_id: actor.api_key_id,
+            source: actor.source.map(|source| ActivitySourceResponse {
+                conversation_id: source.conversation_id,
+                turn_id: source.turn_id,
+                run_id: source.run_id,
+                ordered_at: source.ordered_at.to_rfc3339(),
+            }),
         }
     }
+}
+
+/// A single bounded lookup serves a history page or record detail. Actor IDs
+/// remain readable when a specialist was removed, without exposing other owners.
+pub(crate) async fn hydrate_agent_names(
+    db: &Database,
+    owner: &str,
+    actors: &mut [&mut ActivityActorResponse],
+) -> AppResult<()> {
+    use crate::models::assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS};
+    let pairs: Vec<_> = actors
+        .iter()
+        .filter_map(|actor| {
+            actor.agent_id.as_ref().map(|id| {
+                doc! {"_id":id,"user_id":{"$in":[owner,actor.user_id.as_str()]}}
+            })
+        })
+        .collect();
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<AssistantAgent> = db
+        .collection::<AssistantAgent>(AGENTS)
+        .find(doc! {"$or":pairs,"destroyed_at":bson::Bson::Null})
+        .limit(100)
+        .max_time(QUERY_TIMEOUT)
+        .await?
+        .try_collect()
+        .await?;
+    for actor in actors {
+        actor.agent_name = rows
+            .iter()
+            .find(|row| Some(&row.id) == actor.agent_id.as_ref())
+            .map(|row| {
+                row.display_name
+                    .as_deref()
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(&row.name)
+                    .to_owned()
+            });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -131,8 +191,18 @@ pub async fn list(
         .flatten()
         .map(|cursor| encode_cursor(&cursor))
         .transpose()?;
+    let mut activities: Vec<ActivityResponse> = rows.into_iter().map(Into::into).collect();
+    hydrate_agent_names(
+        db,
+        owner_id,
+        &mut activities
+            .iter_mut()
+            .map(|row| &mut row.actor)
+            .collect::<Vec<_>>(),
+    )
+    .await?;
     Ok(ActivityPage {
-        activities: rows.into_iter().map(Into::into).collect(),
+        activities,
         next_cursor,
     })
 }

@@ -76,8 +76,25 @@ pub struct CrmAggregateQuery {
     #[serde(default)]
     pub filters: Vec<CrmFilter>,
     pub group_by: Option<String>,
+    #[serde(default)]
+    pub date_bucket: Option<DateBucket>,
     pub measure: AggregateMeasure,
     pub order: AggregateOrder,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DateBucket {
+    pub unit: CalendarUnit,
+    pub timezone: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalendarUnit {
+    Day,
+    Week,
+    Month,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,45 +213,8 @@ pub async fn aggregate(
 ) -> AppResult<AggregateResult> {
     let validated = validate_aggregate(db, owner_id, query).await?;
     let (_, unit) = measure_accumulator(&validated.object, &query.measure)?;
-    let group_id = match &query.group_by {
-        Some(key) => {
-            let field = field(&validated.object, key).expect("validated group field");
-            if matches!(field.kind, CrmFieldKind::Record { .. }) {
-                doc! {"$arrayElemAt": [format!("$refs.{key}"), 0]}.into()
-            } else {
-                Bson::String(format!("$values.{key}"))
-            }
-        }
-        None => Bson::Null,
-    };
-    let mut pipeline = vec![
-        doc! {"$match": validated.filter.clone()},
-        doc! {"$group": aggregate_group(&validated.object, &query.measure, group_id)?},
-    ];
-    append_group_labels(
-        db,
-        owner_id,
-        &validated.object,
-        query.group_by.as_deref(),
-        &mut pipeline,
-    )
-    .await?;
-    if matches!(query.order, AggregateOrder::ValueDesc) {
-        pipeline.push(doc! {"$set": {
-            "sort_value": aggregate_value_expression(&query.measure),
-        }});
-    }
-    pipeline.push(doc! {"$sort": aggregate_sort(query)});
-    pipeline.push(doc! {"$facet": {
-        "points": [{"$limit": MAX_GROUPS as i64}],
-        "remainder": [
-            {"$skip": MAX_GROUPS as i64},
-            {"$group": aggregate_summary_group(&query.measure, true)},
-        ],
-        "total": [
-            {"$group": aggregate_summary_group(&query.measure, false)},
-        ],
-    }});
+    let pipeline =
+        build_aggregate_pipeline(db, owner_id, &validated.object, &validated.filter, query).await?;
     let result = db
         .collection::<CrmRecord>(RECORDS)
         .aggregate(pipeline)
@@ -276,13 +256,7 @@ pub async fn aggregate(
         .and_then(Bson::as_document);
     let total = match total_row {
         Some(row) => aggregate_output(row, &query.measure, &unit)?,
-        None if matches!(
-            query.measure,
-            AggregateMeasure::Count | AggregateMeasure::Sum { .. }
-        ) =>
-        {
-            json!(0)
-        }
+        None if matches!(query.measure, AggregateMeasure::Count) => json!(0),
         None => Value::Null,
     };
     Ok(AggregateResult {
@@ -293,20 +267,61 @@ pub async fn aggregate(
     })
 }
 
-pub async fn validate_table_query(
+async fn build_aggregate_pipeline(
     db: &Database,
     owner_id: &str,
-    query: &CrmTableQuery,
-) -> AppResult<CrmObject> {
-    Ok(validate_table(db, owner_id, query).await?.object)
-}
-
-pub async fn validate_aggregate_query(
-    db: &Database,
-    owner_id: &str,
+    object: &CrmObject,
+    filter: &Document,
     query: &CrmAggregateQuery,
-) -> AppResult<CrmObject> {
-    Ok(validate_aggregate(db, owner_id, query).await?.object)
+) -> AppResult<Vec<Document>> {
+    let group_id = match &query.group_by {
+        Some(key) => {
+            let field = field(object, key).expect("validated group field");
+            if let Some(bucket) = &query.date_bucket {
+                let format = match bucket.unit {
+                    CalendarUnit::Day => "%Y-%m-%d",
+                    CalendarUnit::Week => "%G-W%V",
+                    CalendarUnit::Month => "%Y-%m",
+                };
+                let value = format!("$values.{key}");
+                doc! {"$dateToString": {"date": {"$convert": {"input": value, "to": "date", "onNull": Bson::Null, "onError": Bson::Null}}, "format": format, "timezone": &bucket.timezone, "onNull": Bson::Null}}.into()
+            } else if matches!(field.kind, CrmFieldKind::Record { .. }) {
+                doc! {"$arrayElemAt": [format!("$refs.{key}"), 0]}.into()
+            } else {
+                Bson::String(format!("$values.{key}"))
+            }
+        }
+        None => Bson::Null,
+    };
+    let mut pipeline = vec![
+        doc! {"$match": filter.clone()},
+        doc! {"$group": aggregate_group(object, &query.measure, group_id)?},
+    ];
+    append_group_labels(
+        db,
+        owner_id,
+        object,
+        query.group_by.as_deref(),
+        &mut pipeline,
+    )
+    .await?;
+    if matches!(query.order, AggregateOrder::ValueDesc) {
+        pipeline.push(doc! {"$set": {
+            "sort_value": aggregate_value_expression(&query.measure),
+        }});
+    }
+    pipeline.push(doc! {"$sort": aggregate_sort(query)});
+    pipeline.push(doc! {"$facet": {
+        "points": [{"$limit": MAX_GROUPS as i64}],
+        "remainder": [
+            {"$skip": MAX_GROUPS as i64},
+            {"$group": aggregate_summary_group(&query.measure, true)},
+        ],
+        "total": [
+            {"$group": aggregate_summary_group(&query.measure, false)},
+        ],
+    }});
+    Ok(pipeline)
 }
 
 pub fn validate_live_fields(
@@ -319,8 +334,8 @@ pub fn validate_live_fields(
     errors
 }
 
-struct ValidatedQuery {
-    object: CrmObject,
+pub(crate) struct ValidatedQuery {
+    pub(crate) object: CrmObject,
     filter: Document,
 }
 
@@ -330,6 +345,14 @@ async fn validate_table(
     query: &CrmTableQuery,
 ) -> AppResult<ValidatedQuery> {
     let object = objects::get(db, owner_id, &query.object).await?;
+    validate_table_metadata(owner_id, object, query)
+}
+
+pub(crate) fn validate_table_metadata(
+    owner_id: &str,
+    object: CrmObject,
+    query: &CrmTableQuery,
+) -> AppResult<ValidatedQuery> {
     let mut errors = validate_filters(&object, &query.filters);
     if !(1..=MAX_PAGE_SIZE).contains(&query.page_size) {
         errors.push(issue("page_size", "must be between 1 and 200"));
@@ -378,6 +401,14 @@ async fn validate_aggregate(
     query: &CrmAggregateQuery,
 ) -> AppResult<ValidatedQuery> {
     let object = objects::get(db, owner_id, &query.object).await?;
+    validate_aggregate_metadata(owner_id, object, query)
+}
+
+pub(crate) fn validate_aggregate_metadata(
+    owner_id: &str,
+    object: CrmObject,
+    query: &CrmAggregateQuery,
+) -> AppResult<ValidatedQuery> {
     let mut errors = validate_filters(&object, &query.filters);
     if let Some(group_by) = &query.group_by {
         match field(&object, group_by) {
@@ -385,10 +416,18 @@ async fn validate_aggregate(
             Some(field) if field.archived => {
                 errors.push(issue("group_by", "archived fields cannot be queried"))
             }
-            Some(field) if !fields::group_eligible(field) => errors.push(issue(
-                "group_by",
-                "must be a select, boolean, user, or one-record field",
-            )),
+            Some(field)
+                if !fields::group_eligible(field)
+                    && !matches!(
+                        field.kind,
+                        CrmFieldKind::Date {} | CrmFieldKind::Datetime {}
+                    ) =>
+            {
+                errors.push(issue(
+                    "group_by",
+                    "must be a select, boolean, user, or one-record field",
+                ))
+            }
             Some(field)
                 if query.order == AggregateOrder::OptionOrder
                     && !matches!(field.kind, CrmFieldKind::Select { .. }) =>
@@ -405,6 +444,33 @@ async fn validate_aggregate(
             "order",
             "option_order requires a select group_by field",
         ));
+    }
+    let calendar_field = query
+        .group_by
+        .as_ref()
+        .and_then(|key| field(&object, key))
+        .filter(|f| matches!(f.kind, CrmFieldKind::Date {} | CrmFieldKind::Datetime {}));
+    match (&query.date_bucket, calendar_field) {
+        (Some(bucket), Some(field)) => {
+            if bucket.timezone.parse::<chrono_tz::Tz>().is_err() {
+                errors.push(issue("date_bucket.timezone", "must be an IANA timezone"));
+            }
+            if matches!(field.kind, CrmFieldKind::Date {}) && bucket.timezone != "UTC" {
+                errors.push(issue(
+                    "date_bucket.timezone",
+                    "calendar dates require UTC; their date is never converted",
+                ));
+            }
+        }
+        (None, Some(_)) => errors.push(issue(
+            "date_bucket",
+            "date groups require an explicit calendar bucket and timezone",
+        )),
+        (Some(_), None) => errors.push(issue(
+            "date_bucket",
+            "requires a date or datetime group_by field",
+        )),
+        _ => {}
     }
     if let Some(measure_field) = measure_field(&query.measure) {
         match field(&object, measure_field) {
@@ -552,6 +618,10 @@ fn aggregate_group(
     match measure {
         AggregateMeasure::Sum { .. } => {
             group.insert("sum", doc! {"$sum": present_numeric});
+            group.insert(
+                "measure_count",
+                doc! {"$sum": {"$cond": [present, 1_i64, 0_i64]}},
+            );
         }
         AggregateMeasure::Avg { .. } => {
             group.insert("sum", doc! {"$sum": present_numeric});
@@ -596,7 +666,7 @@ async fn append_group_labels(
                 .map(|option| {
                     Bson::Document(doc! {
                         "case": {"$eq": ["$_id", &option.value]},
-                        "then": &option.label,
+                        "then": {"$literal": &option.label},
                     })
                 })
                 .collect();
@@ -613,19 +683,32 @@ async fn append_group_labels(
                 .iter()
                 .map(|option| Bson::String(option.value.clone()))
                 .collect();
+            let value_label = if label_branches.is_empty() {
+                Bson::Document(doc! {"$toString": "$_id"})
+            } else {
+                Bson::Document(doc! {"$switch": {
+                    "branches": label_branches,
+                    "default": {"$toString": "$_id"},
+                }})
+            };
+            let value_archived = if archived_branches.is_empty() {
+                Bson::Boolean(true)
+            } else {
+                Bson::Document(doc! {"$switch": {
+                    "branches": archived_branches,
+                    "default": true,
+                }})
+            };
             pipeline.push(doc! {"$set": {
                 "label": {"$cond": [
                     {"$eq": ["$_id", Bson::Null]},
                     "None",
-                    {"$switch": {
-                        "branches": label_branches,
-                        "default": {"$toString": "$_id"},
-                    }},
+                    value_label,
                 ]},
                 "archived": {"$cond": [
                     {"$eq": ["$_id", Bson::Null]},
                     false,
-                    {"$switch": {"branches": archived_branches, "default": true}},
+                    value_archived,
                 ]},
                 "option_index": {"$cond": [
                     {"$eq": ["$_id", Bson::Null]},
@@ -634,6 +717,8 @@ async fn append_group_labels(
                 ]},
             }});
         }
+        CrmFieldKind::Date {} | CrmFieldKind::Datetime {} => pipeline
+            .push(doc! {"$set": {"label": {"$ifNull": ["$_id", "No date"]}, "archived": false}}),
         CrmFieldKind::Boolean {} => pipeline.push(doc! {"$set": {
             "label": {"$switch": {
                 "branches": [
@@ -647,26 +732,43 @@ async fn append_group_labels(
         CrmFieldKind::User {} => {
             pipeline.push(doc! {"$lookup": {
                 "from": crate::models::user::COLLECTION_NAME,
-                "localField": "_id",
-                "foreignField": "_id",
+                "let": {"group_id": "$_id"},
+                "pipeline": [
+                    {"$match": {"is_active":true,"user_type":"person","$expr": {"$eq": ["$_id", "$$group_id"]}}},
+                    {"$limit": 1_i64},
+                    {"$lookup": {
+                        "from":crate::models::org_membership::COLLECTION_NAME,
+                        "let":{"person_id":"$_id"},
+                        "pipeline":[
+                            {"$match":{"org_user_id":owner_id,"revoked_at":Bson::Null,"$expr":{"$eq":["$member_user_id","$$person_id"]}}},
+                            {"$project":{"_id":1_i64}}, {"$limit":1_i64}
+                        ],"as":"membership"
+                    }},
+                    {"$match":{"$expr":{"$or":[{"$eq":["$_id",owner_id]},{"$gt":[{"$size":"$membership"},0_i64]}]}}},
+                    {"$project": {"_id": 0_i64, "display_name": {"$cond":[{"$gt":[{"$strLenCP":{"$trim":{"input":{"$ifNull":["$display_name",""]}}}},0_i64]},"$display_name","Member"]}}},
+                ],
                 "as": "label_row",
             }});
             pipeline.push(doc! {"$set": {
                 "label": {"$cond": [
                     {"$eq": ["$_id", Bson::Null]},
                     "None",
-                    {"$ifNull": [{"$arrayElemAt": ["$label_row.display_name", 0_i64]}, "Deleted user"]},
+                    {"$ifNull": [{"$arrayElemAt": ["$label_row.display_name", 0_i64]}, "Unavailable member"]},
                 ]},
                 "archived": false,
             }});
+            pipeline.push(doc! {"$unset": "label_row"});
         }
         CrmFieldKind::Record { target, .. } => {
             let target_object = objects::get(db, owner_id, target).await?;
-            let label_field = target_object
+            let label_expression = target_object
                 .fields
                 .iter()
                 .find(|field| field.required && matches!(field.kind, CrmFieldKind::Text { .. }))
-                .map(|field| format!("$label_row.values.{}", field.key));
+                .map_or_else(
+                    || Bson::Document(doc! {"$literal": "(unnamed)"}),
+                    |field| Bson::String(format!("$values.{}", field.key)),
+                );
             pipeline.push(doc! {"$lookup": {
                 "from": RECORDS,
                 "let": {"group_id": "$_id"},
@@ -676,19 +778,19 @@ async fn append_group_labels(
                         {"$eq": ["$owner_id", owner_id]},
                         {"$eq": ["$object_key", target]},
                     ]}}},
+                    {"$project": {
+                        "_id": 0_i64,
+                        "archived_at": 1_i64,
+                        "label": label_expression,
+                    }},
                     {"$limit": 1_i64},
                 ],
                 "as": "label_row",
             }});
-            let live_label = label_field.map_or_else(
-                || Bson::String("(unnamed)".into()),
-                |path| {
-                    Bson::Document(doc! {"$ifNull": [
-                        {"$arrayElemAt": [path, 0_i64]},
-                        "(unnamed)",
-                    ]})
-                },
-            );
+            let live_label = Bson::Document(doc! {"$ifNull": [
+                {"$arrayElemAt": ["$label_row.label", 0_i64]},
+                "(unnamed)",
+            ]});
             pipeline.push(doc! {"$set": {
                 "label": {"$cond": [
                     {"$eq": ["$_id", Bson::Null]},
@@ -712,6 +814,7 @@ async fn append_group_labels(
                     ]},
                 ]},
             }});
+            pipeline.push(doc! {"$unset": "label_row"});
         }
         _ => {
             return Err(AppError::Internal(
@@ -759,6 +862,7 @@ fn aggregate_summary_group(measure: &AggregateMeasure, group_count: bool) -> Doc
         AggregateMeasure::Count => {}
         AggregateMeasure::Sum { .. } => {
             summary.insert("sum", doc! {"$sum": "$sum"});
+            summary.insert("measure_count", doc! {"$sum": "$measure_count"});
         }
         AggregateMeasure::Avg { .. } => {
             summary.insert("sum", doc! {"$sum": "$sum"});
@@ -795,11 +899,21 @@ fn aggregate_output(
     if matches!(measure, AggregateMeasure::Count) {
         return safe_integer_output(i128::from(bson_u64(row.get("count")).unwrap_or(0)));
     }
+    if matches!(measure, AggregateMeasure::Sum { .. })
+        && bson_u64(row.get("measure_count")).unwrap_or(0) == 0
+    {
+        return Ok(Value::Null);
+    }
     if unit.format == "currency" {
         return match measure {
             AggregateMeasure::Sum { .. } => exact_integer(row.get("sum"))
                 .map(safe_integer_output)
-                .unwrap_or_else(|| Ok(json!(0))),
+                .ok_or_else(|| {
+                    super::validation_error(
+                        "measure",
+                        "currency aggregate exceeds exact numeric range",
+                    )
+                })?,
             AggregateMeasure::Avg { .. } => {
                 let count = bson_u64(row.get("measure_count")).unwrap_or(0);
                 if count == 0 {
@@ -827,16 +941,23 @@ fn aggregate_output(
             if count == 0 {
                 return Ok(Value::Null);
             }
-            return Ok(bson_f64(row.get("sum"))
-                .map(|sum| json!(sum / count as f64))
-                .unwrap_or(Value::Null));
+            return finite_output(bson_f64(row.get("sum")).map(|sum| sum / count as f64));
         }
         AggregateMeasure::Min { .. } | AggregateMeasure::Max { .. } => row.get("value"),
         AggregateMeasure::Count => unreachable!(),
     };
-    Ok(value
-        .and_then(|value| bson_f64(Some(value)))
-        .map_or(Value::Null, |value| json!(value)))
+    finite_output(value.and_then(|value| bson_f64(Some(value))))
+}
+
+fn finite_output(value: Option<f64>) -> AppResult<Value> {
+    match value {
+        Some(value) if !value.is_finite() => Err(super::validation_error(
+            "measure",
+            "aggregate exceeds finite numeric range",
+        )),
+        Some(value) => Ok(json!(value)),
+        None => Ok(Value::Null),
+    }
 }
 
 fn exact_integer(value: Option<&Bson>) -> Option<i128> {
@@ -926,7 +1047,17 @@ fn measure_accumulator(
             };
             let unit = match fields::measure_unit(metadata).expect("measure was validated") {
                 fields::MeasureUnit::Number => AggregateUnit {
-                    format: "number".into(),
+                    format: if matches!(
+                        metadata.kind,
+                        CrmFieldKind::Number {
+                            format: crate::models::crm_object::CrmNumberFormat::Percent
+                        }
+                    ) {
+                        "percent"
+                    } else {
+                        "number"
+                    }
+                    .into(),
                     currency: None,
                 },
                 fields::MeasureUnit::Currency => AggregateUnit {
@@ -1194,6 +1325,7 @@ mod tests {
             include_archived: false,
         };
         let record = CrmRecord {
+            field_sources: mongodb::bson::Document::new(),
             id: "00000000-0000-4000-8000-000000000001".into(),
             owner_id: "owner".into(),
             object_id: "object".into(),
@@ -1276,7 +1408,7 @@ mod tests {
         );
         assert!(matches!(
             aggregate_output(
-                &doc! {"sum": Bson::Decimal128("9007199254740992".parse().unwrap())},
+                &doc! {"sum": Bson::Decimal128("9007199254740992".parse().unwrap()), "measure_count": 1_i64},
                 &AggregateMeasure::Sum {
                     field: "amount".into(),
                 },
@@ -1284,6 +1416,259 @@ mod tests {
             ),
             Err(AppError::CrmValidationFailed(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn aggregate_groups_missing_empty_select_as_none() {
+        let db = crate::test_utils::connect_transaction_test_database("crm_aggregate_empty_select")
+            .await;
+        super::super::ensure_indexes(&db).await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        objects::ensure_seeded(&db, &owner).await.unwrap();
+        let object = objects::get(&db, &owner, "company").await.unwrap();
+        let now = chrono::Utc::now();
+        db.collection::<CrmRecord>(RECORDS)
+            .insert_one(CrmRecord {
+                field_sources: mongodb::bson::Document::new(),
+                id: uuid::Uuid::new_v4().to_string(),
+                owner_id: owner.clone(),
+                object_id: object.id,
+                object_key: "company".into(),
+                revision: 1,
+                values: doc! {"name": "No industry"},
+                refs: Document::new(),
+                overrides: vec![],
+                created_by: crate::models::crm_record::CrmActor::human(&owner),
+                updated_by: crate::models::crm_record::CrmActor::human(&owner),
+                archived_at: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let result = aggregate(
+            &db,
+            &owner,
+            &CrmAggregateQuery {
+                date_bucket: None,
+                object: "company".into(),
+                filters: vec![],
+                group_by: Some("industry".into()),
+                measure: AggregateMeasure::Count,
+                order: AggregateOrder::LabelAsc,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.total, json!(1));
+        assert!(!result.truncated);
+        assert_eq!(result.points.len(), 1);
+        assert_eq!(result.points[0].key, Value::Null);
+        assert_eq!(result.points[0].label, "None");
+        assert_eq!(result.points[0].value, json!(1));
+        assert!(!result.points[0].archived);
+    }
+
+    #[tokio::test]
+    async fn aggregate_treats_dollar_prefixed_select_labels_as_literals() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "crm_aggregate_literal_select_labels",
+        )
+        .await;
+        super::super::ensure_indexes(&db).await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        objects::ensure_seeded(&db, &owner).await.unwrap();
+        let opportunity = objects::get(&db, &owner, "opportunity").await.unwrap();
+        let mut options = match &opportunity
+            .fields
+            .iter()
+            .find(|field| field.key == "stage")
+            .unwrap()
+            .kind
+        {
+            CrmFieldKind::Select { options } => options.clone(),
+            _ => panic!("seeded opportunity stage must be a select"),
+        };
+        options[0].label = "$$crm_missing_variable".into();
+        options[1].label = "$Revenue".into();
+        let opportunity = objects::patch_field(
+            &db,
+            &owner,
+            "opportunity",
+            "stage",
+            objects::PatchField {
+                expected_schema_revision: opportunity.schema_revision,
+                label: None,
+                required: None,
+                archived: None,
+                options: Some(options),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let now = chrono::Utc::now();
+        let actor = crate::models::crm_record::CrmActor::human(&owner);
+        let records = [("Dollar variable", "new"), ("Dollar field", "qualified")]
+            .into_iter()
+            .map(|(name, stage)| CrmRecord {
+                field_sources: mongodb::bson::Document::new(),
+                id: uuid::Uuid::new_v4().to_string(),
+                owner_id: owner.clone(),
+                object_id: opportunity.id.clone(),
+                object_key: "opportunity".into(),
+                revision: 1,
+                values: doc! {"name": name, "stage": stage},
+                refs: Document::new(),
+                overrides: vec![],
+                created_by: actor.clone(),
+                updated_by: actor.clone(),
+                archived_at: None,
+                created_at: now,
+                updated_at: now,
+            });
+        db.collection::<CrmRecord>(RECORDS)
+            .insert_many(records)
+            .await
+            .unwrap();
+
+        let result = aggregate(
+            &db,
+            &owner,
+            &CrmAggregateQuery {
+                date_bucket: None,
+                object: "opportunity".into(),
+                filters: vec![],
+                group_by: Some("stage".into()),
+                measure: AggregateMeasure::Count,
+                order: AggregateOrder::LabelAsc,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result
+                .points
+                .iter()
+                .map(|point| point.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["$$crm_missing_variable", "$Revenue"]
+        );
+        assert_eq!(
+            result
+                .points
+                .iter()
+                .map(|point| point.value.clone())
+                .collect::<Vec<_>>(),
+            vec![json!(1), json!(1)]
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_label_lookups_project_and_discard_joined_rows() {
+        let db = crate::test_utils::connect_transaction_test_database(
+            "crm_aggregate_label_lookup_projection",
+        )
+        .await;
+        super::super::ensure_indexes(&db).await.unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        objects::ensure_seeded(&db, &owner).await.unwrap();
+
+        let opportunity = objects::get(&db, &owner, "opportunity").await.unwrap();
+        let record_query = CrmAggregateQuery {
+            date_bucket: None,
+            object: "opportunity".into(),
+            filters: vec![],
+            group_by: Some("company".into()),
+            measure: AggregateMeasure::Count,
+            order: AggregateOrder::LabelAsc,
+        };
+        let record_filter = build_filter(&owner, &opportunity, &[], false).unwrap();
+        let record_pipeline =
+            build_aggregate_pipeline(&db, &owner, &opportunity, &record_filter, &record_query)
+                .await
+                .unwrap();
+        let record_lookup = record_pipeline
+            .iter()
+            .find_map(|stage| stage.get_document("$lookup").ok())
+            .filter(|lookup| lookup.get_str("from") == Ok(RECORDS))
+            .unwrap();
+        let record_project = record_lookup
+            .get_array("pipeline")
+            .unwrap()
+            .iter()
+            .filter_map(Bson::as_document)
+            .find_map(|stage| stage.get_document("$project").ok())
+            .unwrap();
+        assert_eq!(record_project.len(), 3);
+        assert_eq!(record_project.get_i64("_id"), Ok(0));
+        assert_eq!(record_project.get_i64("archived_at"), Ok(1));
+        assert_eq!(record_project.get_str("label"), Ok("$values.name"));
+        assert!(!record_project.contains_key("values"));
+        let record_unset = record_pipeline
+            .iter()
+            .position(|stage| stage.get_str("$unset") == Ok("label_row"))
+            .unwrap();
+        let record_sort = record_pipeline
+            .iter()
+            .position(|stage| stage.contains_key("$sort"))
+            .unwrap();
+        let record_facet = record_pipeline
+            .iter()
+            .position(|stage| stage.contains_key("$facet"))
+            .unwrap();
+        assert!(record_unset < record_sort && record_unset < record_facet);
+
+        let company = objects::get(&db, &owner, "company").await.unwrap();
+        let user_query = CrmAggregateQuery {
+            date_bucket: None,
+            object: "company".into(),
+            filters: vec![],
+            group_by: Some("owner".into()),
+            measure: AggregateMeasure::Count,
+            order: AggregateOrder::LabelAsc,
+        };
+        let user_filter = build_filter(&owner, &company, &[], false).unwrap();
+        let user_pipeline =
+            build_aggregate_pipeline(&db, &owner, &company, &user_filter, &user_query)
+                .await
+                .unwrap();
+        let user_lookup = user_pipeline
+            .iter()
+            .find_map(|stage| stage.get_document("$lookup").ok())
+            .filter(|lookup| lookup.get_str("from") == Ok(crate::models::user::COLLECTION_NAME))
+            .unwrap();
+        let user_project = user_lookup
+            .get_array("pipeline")
+            .unwrap()
+            .iter()
+            .filter_map(Bson::as_document)
+            .find_map(|stage| stage.get_document("$project").ok())
+            .unwrap();
+        assert_eq!(user_project.len(), 2);
+        assert_eq!(user_project.get_i64("_id"), Ok(0));
+        // Only an authorized, active person's display label may leave the join;
+        // the expression also supplies the same blank-name fallback as people::lookup.
+        let display_name = user_project.get_document("display_name").unwrap();
+        let choices = display_name.get_array("$cond").unwrap();
+        assert_eq!(choices[1].as_str(), Some("$display_name"));
+        assert_eq!(choices[2].as_str(), Some("Member"));
+        let user_unset = user_pipeline
+            .iter()
+            .position(|stage| stage.get_str("$unset") == Ok("label_row"))
+            .unwrap();
+        let user_sort = user_pipeline
+            .iter()
+            .position(|stage| stage.contains_key("$sort"))
+            .unwrap();
+        let user_facet = user_pipeline
+            .iter()
+            .position(|stage| stage.contains_key("$facet"))
+            .unwrap();
+        assert!(user_unset < user_sort && user_unset < user_facet);
     }
 
     #[tokio::test]
@@ -1365,6 +1750,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, option)| CrmRecord {
+                field_sources: mongodb::bson::Document::new(),
                 id: uuid::Uuid::new_v4().to_string(),
                 owner_id: owner.clone(),
                 object_id: object.id.clone(),
@@ -1387,6 +1773,7 @@ mod tests {
         rows[50].values.insert("score", -5.0);
         rows[51].values.remove("score");
         rows.push(CrmRecord {
+            field_sources: mongodb::bson::Document::new(),
             id: uuid::Uuid::new_v4().to_string(),
             owner_id: owner.clone(),
             object_id: object.id.clone(),
@@ -1402,6 +1789,7 @@ mod tests {
             updated_at: now,
         });
         rows.push(CrmRecord {
+            field_sources: mongodb::bson::Document::new(),
             id: uuid::Uuid::new_v4().to_string(),
             owner_id: other_owner.clone(),
             object_id: other_object.id,
@@ -1425,6 +1813,7 @@ mod tests {
             &db,
             &owner,
             &CrmAggregateQuery {
+                date_bucket: None,
                 object: "company".into(),
                 filters: vec![],
                 group_by: Some("bucket".into()),
@@ -1469,6 +1858,7 @@ mod tests {
                 &db,
                 &owner,
                 &CrmAggregateQuery {
+                    date_bucket: None,
                     object: "company".into(),
                     filters: vec![],
                     group_by: Some("bucket".into()),
@@ -1486,6 +1876,7 @@ mod tests {
             &db,
             &owner,
             &CrmAggregateQuery {
+                date_bucket: None,
                 object: "company".into(),
                 filters: vec![],
                 group_by: None,
