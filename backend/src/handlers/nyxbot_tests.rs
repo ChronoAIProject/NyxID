@@ -20,6 +20,8 @@ mod transport_tests;
 mod discord_tests;
 #[path = "nyxbot_native_tests.rs"]
 mod native_tests;
+#[path = "nyxbot_routing_tests.rs"]
+mod routing_tests;
 
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
@@ -300,6 +302,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         gateway_native_phase: None,
         gateway_native_activation: None,
         gateway_native_activation_detail: None,
+        gateway_native_activation_operation: None,
         gateway_native_delivery: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
@@ -3298,6 +3301,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             gateway_native_phase: None,
             gateway_native_activation: None,
             gateway_native_activation_detail: None,
+            gateway_native_activation_operation: None,
             gateway_native_delivery: None,
             gateway_bot_mentions: Default::default(),
             gateway_threads: Default::default(),
@@ -4328,6 +4332,14 @@ async fn mock_gateway(
     state: &mut AppState,
     refuse: Arc<std::sync::atomic::AtomicBool>,
 ) -> (GatewayCalls, tokio::task::JoinHandle<()>) {
+    mock_gateway_with_routing(state, refuse, Default::default()).await
+}
+
+async fn mock_gateway_with_routing(
+    state: &mut AppState,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+    routing_behavior: Arc<routing_tests::RoutingBehavior>,
+) -> (GatewayCalls, tokio::task::JoinHandle<()>) {
     use axum::{
         extract::Path,
         http::{HeaderMap, StatusCode},
@@ -4343,6 +4355,12 @@ async fn mock_gateway(
     let create = {
         let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
         move |headers: HeaderMap, Json(body): Json<Value>| async move {
+            if !routing_tests::request_matches_schema("ChannelCreateRequest", &body) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code":"invalid_request"})),
+                );
+            }
             let creator = headers["authorization"]
                 .to_str()
                 .unwrap()
@@ -4392,10 +4410,14 @@ async fn mock_gateway(
             let mut response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
                 "endpoints":{"nyxid_callback_url":format!("{callback_base}/callbacks/{channel_id}")},"provider":{"slug":"nyxbot","binding_id":binding},
                 "definition":{"owner":{"kind":"human","subject":claims.sub},"sources":body["sources"],
-                    "reply":body["reply"],"profile":body["profile"]}});
+                    "reply":body["reply"],"partition":body["partition"],"profile":body["profile"]}});
             if body["sources"][0]["type"] == "discord" {
                 response["native_discord_activation"] = json!({"state":"pending_discovery"});
-                response["definition"]["routing"] = body["routing"].clone();
+                // Creation seeds its own default-only policy, not NyxID's policy.
+                response["definition"]["routing"] = json!({"version":1,
+                    "default_consumer":{"name":"default","mentionable":true},
+                    "default_targets":["default"],"max_targets":1,"reply_label":"auto",
+                    "addressing":{"mentions":true,"command":true,"event_field":true,"unknown_target_notice":true}});
             }
             remote
                 .lock()
@@ -4407,6 +4429,12 @@ async fn mock_gateway(
     let attach = {
         let (calls, remote) = (calls.clone(), remote.clone());
         move |Path(id): Path<String>, Json(body): Json<Value>| async move {
+            if !routing_tests::request_matches_schema("ChannelUpdateRequest", &body) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code":"invalid_request"})),
+                );
+            }
             let expected = body["expected_version"].as_i64().unwrap_or_default();
             calls
                 .lock()
@@ -4423,10 +4451,77 @@ async fn mock_gateway(
                 return (StatusCode::CONFLICT, Json(json!({"code":"conflict"})));
             }
             current["version"] = json!(expected + 1);
-            for field in ["sources", "reply", "profile", "routing", "partition"] {
+            for field in ["sources", "reply", "profile", "partition"] {
                 current["definition"][field] = body[field].clone();
             }
             (StatusCode::OK, Json(current.clone()))
+        }
+    };
+    let routing = {
+        let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
+        move |headers: HeaderMap, Path(id): Path<String>, Json(body): Json<Value>| async move {
+            if !routing_tests::request_matches_schema("RoutingUpdateRequest", &body) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code":"invalid_request"})),
+                )
+                    .into_response();
+            }
+            let creator = headers["authorization"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("Bearer ")
+                .unwrap();
+            let claims =
+                crate::crypto::jwt::verify_token(&nyxid.jwt_keys, &nyxid.config, creator).unwrap();
+            assert!(crate::services::nyxbot_gateway_service::is_creator_claims(
+                &claims
+            ));
+            calls
+                .lock()
+                .await
+                .push(("PUT".into(), format!("{id}/routing"), body.clone()));
+            if routing_behavior.pause.load(Ordering::SeqCst) {
+                routing_behavior.arrived.notify_one();
+                routing_behavior.resume.notified().await;
+            }
+            let mut guard = remote.lock().await;
+            let (current, _) = guard.get_mut(&id).unwrap();
+            assert_eq!(current["definition"]["owner"]["subject"], claims.sub);
+            let expected = body["expected_version"].as_i64().unwrap();
+            if routing_behavior.conflict.load(Ordering::SeqCst) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"code":"version_conflict"})),
+                )
+                    .into_response();
+            }
+            if current["version"] != expected {
+                // CMAEG confirms only the immediately following identical policy.
+                if current["version"] == expected + 1
+                    && current["definition"]["routing"] == body["routing"]
+                {
+                    return (StatusCode::OK, Json(current.clone())).into_response();
+                }
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"code":"version_conflict"})),
+                )
+                    .into_response();
+            }
+            current["version"] = json!(expected + 1);
+            if !routing_behavior.unacknowledged.load(Ordering::SeqCst) {
+                current["definition"]["routing"] = body["routing"].clone();
+            }
+            if routing_behavior.lose_response.swap(false, Ordering::SeqCst) {
+                // Accepted write whose body never reaches the client intact.
+                return (StatusCode::OK, "{").into_response();
+            }
+            let mut response = current.clone();
+            if routing_behavior.wrong_version.load(Ordering::SeqCst) {
+                response["version"] = json!(expected + 2);
+            }
+            (StatusCode::OK, Json(response)).into_response()
         }
     };
     let read = {
@@ -4509,6 +4604,7 @@ async fn mock_gateway(
         .route("/channel-capabilities",axum::routing::get(||async {Json(json!({"relay_authoring":{
             "native_discord_writes_enabled":true,"native_discord_auto_activation_enabled":true,"multi_consumer_writes_enabled":true}}))}))
         .route("/channels", post(create))
+        .route("/channels/{id}/routing", axum::routing::put(routing))
         .route("/channel-records/{id}", axum::routing::get(read.clone()))
         .route(
             "/channels/{id}",
