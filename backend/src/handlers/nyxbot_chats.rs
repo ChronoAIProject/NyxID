@@ -693,20 +693,6 @@ pub(super) async fn waiting_hint(
         .then(|| "I'll answer everyone here once my owner has talked to me in this chat.".into()))
 }
 
-/// How the agent should picture a chat in its instructions.
-pub(super) fn describe(chat: &NyxbotThread) -> String {
-    let title = chat
-        .title
-        .as_deref()
-        .map(|title| format!(" \"{}\"", excerpt(title, 60).replace('"', "'")))
-        .unwrap_or_default();
-    match chat.kind.as_deref() {
-        Some("private") => "a private chat".into(),
-        Some("channel") => format!("the channel{title}"),
-        _ => format!("the group chat{title}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Gateway admission
 // ---------------------------------------------------------------------------

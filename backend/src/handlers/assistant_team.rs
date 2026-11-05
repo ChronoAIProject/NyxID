@@ -173,6 +173,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         automation_parent: None,
         execution_enrollment: false,
         execution_parent: None,
+        channel_context: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -1000,6 +1001,7 @@ pub(crate) async fn assign(
             execution_enrollment: false,
             execution_parent: execution_parent
                 .and_then(crate::services::execution_permission_dispatch::tasks::parent),
+            channel_context: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),

@@ -67,6 +67,7 @@ pub struct Access {
     execution: Execution,
     origin: ChannelOrigin,
     agent: AssistantAgent,
+    member_private_source: bool,
 }
 impl std::fmt::Debug for Access {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -149,6 +150,20 @@ impl Access {
             return Err(denied());
         }
         Ok(())
+    }
+
+    /// A member's private agent home can accept sources from multiple bound
+    /// bots. Its latest reply preference is not the authority of queued work.
+    /// Only a live private member source may replace that preference for this
+    /// check; group/guest/follow lanes retain their exact persisted binding.
+    pub(crate) fn check_source_conversation(&self, row: &AssistantConversation) -> AppResult<()> {
+        if self.member_private_source && row.channel.is_none() {
+            let mut scoped = row.clone();
+            scoped.reply_channel = Some(self.origin.clone());
+            self.check_conversation(&scoped)
+        } else {
+            self.check_conversation(row)
+        }
     }
 }
 
@@ -486,6 +501,9 @@ pub(crate) async fn validate_in_session(
     live_doc(db,session,crate::models::channel_conversation::COLLECTION_NAME,doc!{"_id":&channel.route_id,"user_id":&execution.org_id,
         "channel_bot_id":&channel.channel_bot_id,"agent_api_key_id":&channel.route_api_key_id,"is_active":true,"retired_by_transfer":{"$ne":true}},fence).await?;
     Ok(Access {
+        member_private_source: !execution.guest
+            && origin.thread.is_none()
+            && thread.kind.as_deref() == Some("private"),
         channel,
         execution: execution.clone(),
         origin: origin.clone(),

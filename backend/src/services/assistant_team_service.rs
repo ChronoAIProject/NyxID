@@ -133,6 +133,7 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
         automation_work: None,
         execution_task: None,
+        channel_contexts: Vec::new(),
         delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,

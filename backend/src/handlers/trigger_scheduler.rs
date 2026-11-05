@@ -490,6 +490,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         automation_parent: None,
         execution_enrollment: false,
         execution_parent: None,
+        channel_context: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),

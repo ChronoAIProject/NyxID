@@ -13,6 +13,7 @@ mod image_delivery_tests;
 mod source_queue_tests;
 
 struct Fixture {
+    calls: Calls,
     state: AppState,
     channel: NyxbotChannel,
     key: String,
@@ -27,7 +28,7 @@ impl Drop for Fixture {
 }
 
 async fn fixture(name: &str) -> Fixture {
-    let (state, _, upstream) = setup(name).await;
+    let (state, calls, upstream) = setup(name).await;
     let (mut channel, key) = channel(&state, "gateway").await;
     channel.owner_sender_ids = vec!["7".into()];
     state
@@ -129,6 +130,7 @@ async fn fixture(name: &str) -> Fixture {
         .await
         .unwrap();
     Fixture {
+        calls,
         state,
         channel,
         key,

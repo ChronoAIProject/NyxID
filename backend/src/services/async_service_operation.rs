@@ -638,6 +638,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             let event = AgentEvent {
                 automation_work: w.delivery.automation_work.clone(),
                 execution_task: w.execution_task.clone(),
+                channel_contexts: Vec::new(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,
