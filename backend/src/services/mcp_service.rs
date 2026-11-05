@@ -2875,7 +2875,7 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
         .strip_prefix("nyxid__")
         .and_then(super::crm::tools::annotation_hints);
     let (read_only, destructive, open_world) = match name {
-        _ if let Some(hints) = crm_hints => hints,
+        _ if crm_hints.is_some() => crm_hints?,
         "nyxid__task_status" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"
