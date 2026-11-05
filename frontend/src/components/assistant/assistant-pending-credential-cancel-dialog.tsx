@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -122,7 +123,7 @@ export function AssistantPendingCredentialCancelDialog({
         </DialogHeader>
 
         {!resultId ? (
-          <div className="space-y-3 border-y border-border py-4 text-12">
+          <div className="space-y-3 border-y border-border py-4 text-14">
             <div className="flex items-center justify-between gap-4">
               <span className="text-muted-foreground">Pending credential</span>
               <Badge
@@ -141,7 +142,7 @@ export function AssistantPendingCredentialCancelDialog({
                 {params.nodeId}
               </Badge>
             </div>
-            <label className="flex items-start gap-2">
+            <Label className="flex items-start gap-2">
               <Checkbox
                 checked={confirmed}
                 onCheckedChange={(value) => setConfirmed(value === true)}
@@ -150,12 +151,12 @@ export function AssistantPendingCredentialCancelDialog({
                 <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
                 this request cannot be consumed after cancellation.
               </span>
-            </label>
+            </Label>
           </div>
         ) : null}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

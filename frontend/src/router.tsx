@@ -1,3 +1,5 @@
+import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
+import { FloatingCmaSessions } from "@/components/assistant/cma-session-card";
 import { captureGroupInvite } from "./lib/collaboration-invite";
 import "@/lib/platform-personal-handoff";
 import { PersonalLinkPage } from "@/pages/platform-personal-link";
@@ -161,11 +163,14 @@ import {
 const rootRoute = createRootRoute({
   component: () => (
     <TooltipProvider delayDuration={200}>
-      <Suspense>
-        <Outlet />
-      </Suspense>
-      <Toaster />
-      <CreditsDeniedHost />
+      <CmaSessionProvider>
+        <Suspense>
+          <Outlet />
+        </Suspense>
+        <Toaster />
+        <CreditsDeniedHost />
+        <FloatingCmaSessions />
+      </CmaSessionProvider>
     </TooltipProvider>
   ),
 });

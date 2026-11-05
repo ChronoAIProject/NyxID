@@ -643,6 +643,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
     let expires_at = expires_at.into().resolve_for_storage(now)?;
 
     let new_key = ApiKey {
+        permission_policy_id: None,
         id: id.clone(),
         user_id: user_id.to_string(),
         name: name.to_string(),
@@ -1177,6 +1178,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .clone()
                 };
                 let mut successor = ApiKey {
+                    permission_policy_id: old_key.permission_policy_id.clone(),
                     id: successor_for_transaction.clone(),
                     user_id: old_key.user_id.clone(),
                     name: old_key.name.clone(),
@@ -1279,11 +1281,22 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .get_bool("allow_auto_connected_services")
                         .unwrap_or(false);
                     match &authority {
+                        super::assistant_agent_credential_service::KeyAuthority::Collaboration(..) => {
+                            // Use the final group projection, including its narrowed scopes.
+                            successor.assistant_agent_owner_id = fields.get_str("assistant_agent_owner_id").ok().map(str::to_owned);
+                            successor.assistant_operation_scopes = bson::from_bson(fields.get("assistant_operation_scopes").cloned().unwrap_or_default())
+                                .map_err(|_| AppError::Internal("Invalid group key authority".into()))?;
+                            successor.allowed_service_ids = bson::from_bson(fields.get("allowed_service_ids").cloned().unwrap_or_default())
+                                .map_err(|_| AppError::Internal("Invalid group key authority".into()))?;
+                            successor.allowed_platform_service_ids = bson::from_bson(fields.get("allowed_platform_service_ids").cloned().unwrap_or_default())
+                                .map_err(|_| AppError::Internal("Invalid group key authority".into()))?;
+                        }
                         super::assistant_agent_credential_service::KeyAuthority::Subagent(
                             grants,
                             scopes,
                             owner,
-                        ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner) => {
+                        ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner)
+                        | super::assistant_agent_credential_service::KeyAuthority::OrgChannelGuest(grants, scopes, owner) => {
                             successor.assistant_agent_owner_id = Some(owner.clone());
                             successor.assistant_operation_scopes = scopes.clone();
                             successor.allowed_service_ids = grants.service_ids.clone();
@@ -1304,12 +1317,20 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     }
                     successor.allowed_node_ids.clear();
                     successor.assistant_group_id = conversation
-                        .group_request_id
+                        .collaboration
                         .as_ref()
-                        .and(conversation.group_id.clone());
-                    if successor.assistant_group_id.is_some() {
-                        // Group authentication binds the key to its hidden
-                        // thread. Move that binding with the encrypted successor,
+                        .map(|binding| binding.group_id.clone())
+                        .or_else(|| {
+                            conversation
+                                .group_request_id
+                                .as_ref()
+                                .and(conversation.group_id.clone())
+                        });
+                    if successor.assistant_group_id.is_some()
+                        || super::org_channel_service::origin(&conversation).is_some()
+                    {
+                        // Group, collaboration and org-channel authentication bind
+                        // the key to its thread. Move that binding with the encrypted successor,
                         // rather than waiting for the next turn to refresh it.
                         db.collection::<bson::Document>(
                             crate::models::assistant_conversation::COLLECTION_NAME,

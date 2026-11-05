@@ -4,6 +4,7 @@ import { fileURLToPath, URL } from "node:url";
 import { hookHarness, deferred } from "../assistant/assistantHookTestHarness";
 import { darkColors } from "../../theme/mobileTheme";
 import * as challengeUiState from "./challengeUiState";
+import type { ChallengeDetail } from "../../lib/api/types";
 
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (e: Element): Element[] => [
@@ -12,12 +13,14 @@ const nodes = (e: Element): Element[] => [
     .flat(Infinity)
     .flatMap((c) => (c?.props ? nodes(c) : [])),
 ];
-function setup() {
+function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
   const calls: unknown[][] = [];
+  const openedUrls: string[] = [];
   let guard: any;
   let pending = false;
   const gate = deferred<void>();
   const data = {
+    execution_proposal,
     id: "request-1",
     title: "GitHub",
     action: "Write",
@@ -36,10 +39,10 @@ function setup() {
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    "../../lib/env": { NYXID_FRONTEND_URL: "https://app.example.test" },
     "react-native": {
-      ...Object.fromEntries(
-        ["Pressable", "ScrollView", "Text", "View"].map((n) => [n, n]),
-      ),
+      Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
+      ...Object.fromEntries(["Text", "View"].map((n) => [n, n])),
       AppState: { currentState: "active" },
       StyleSheet: { create: (s: unknown) => s },
     },
@@ -61,14 +64,23 @@ function setup() {
         },
       }),
     },
-    "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsPage: "SettingsPage",
+      SettingsRow: "SettingsRow",
+    },
+    "../../components/ChallengeCard": {
+      ApprovalDecisionPair: "ApprovalDecisionPair",
+    },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/FullScreenLoading": {
       FullScreenLoading: "FullScreenLoading",
     },
     "../../components/ToastOverlay": { ToastOverlay: "ToastOverlay" },
-    "../../components/StatusBadge": { StatusBadge: "StatusBadge" },
-    "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
-    "./ApprovalEvidence": { ApprovalEvidence: "ApprovalEvidence" },
+    "./ApprovalEvidence": {
+      ApprovalEvidence: "ApprovalEvidence",
+      approvalExpiryLabel: () => "Expiry label",
+    },
     "../../lib/telemetry": { capture: () => {} },
     "../../lib/notifications/pushNotifications": {
       setActiveChallengeId: () => {},
@@ -83,8 +95,7 @@ function setup() {
     },
     "./challengeUiState": challengeUiState,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: darkColors }) },
-    "../../theme/designTokens": { radius: {}, spacing: {}, typeScale: {} },
-    "../../theme/flowStyles": { createFlowStyles: () => ({}) },
+    "../../theme/designTokens": { spacing: {}, typeScale: {} },
     "../../hooks/useNetworkStatus": {
       useNetworkStatus: () => ({ isConnected: true }),
     },
@@ -109,10 +120,15 @@ function setup() {
   return {
     h,
     calls,
+    openedUrls,
     gate,
     guard: () => guard,
-    button: (label: string) =>
-      nodes(h.flush()).find((n) => n.props.label === label)!,
+    pair: () =>
+      nodes(h.flush()).find((n) => n.type === "ApprovalDecisionPair")!,
+    row: (label: string) =>
+      nodes(h.flush()).find(
+        (n) => n.type === "SettingsRow" && n.props.label === label,
+      )!,
   };
 }
 
@@ -120,10 +136,12 @@ test("the native approval detail page preserves grant duration and blocks Back d
   const e = setup();
   assert.equal(e.guard().defaultRole, "back");
   assert.equal(e.guard().disabled, false);
-  const request = e.button("Approve").props.onPress();
+  assert.equal(e.pair().props.disabled, false);
+  const request = e.pair().props.onApprove();
   e.h.flush();
   assert.deepEqual(e.calls, [["request-1", "APPROVE", 7 * 86400]]);
   assert.equal(e.guard().disabled, true);
+  assert.equal(e.pair().props.disabled, true);
   e.gate.resolve();
   await request;
   e.h.flush();
@@ -133,9 +151,41 @@ test("the native approval detail page preserves grant duration and blocks Back d
 
 test("denial on the native detail page sends no reusable grant duration", async () => {
   const e = setup();
-  const request = e.button("Deny").props.onPress();
+  const request = e.pair().props.onDeny();
   assert.deepEqual(e.calls, [["request-1", "DENY", undefined]]);
   e.gate.resolve();
   await request;
+  e.h.unmount();
+});
+
+test("the approval detail reads as label/value groups ahead of the decision pair", () => {
+  const e = setup();
+  assert.equal(e.row("Action").props.value, "Write");
+  assert.equal(e.row("Resource").props.value, "repo");
+  assert.equal(e.row("Requester").props.value, "reviewer");
+  assert.equal(e.row("Status").props.value, "Pending");
+  assert.equal(e.row("Risk level").props.value, "Low");
+  assert.equal(e.row("Grant duration").props.value, "7 days");
+  assert.equal(e.row("Expires").props.value, "Expiry label");
+  assert.equal(e.row("GitHub").props.detail, "Review write");
+  e.h.unmount();
+});
+
+test("execution proposal detail retains the redesigned groups and has only a web-review action", () => {
+  const e = setup({
+    version: 1,
+    state: "pending",
+    review_path: "/assistant/approvals",
+  });
+  assert.equal(e.row("Action").props.value, "Write");
+  assert.equal(e.row("Requester").props.value, "reviewer");
+  assert.equal(e.row("Expires").props.value, "Expiry label");
+  assert.equal(e.pair(), undefined);
+  const link = e.row("Review in the web app");
+  assert.equal(link.props.tone, "action");
+  assert.equal(link.props.accessibilityRole, "link");
+  link.props.onPress();
+  assert.deepEqual(e.openedUrls, ["https://app.example.test/assistant/approvals"]);
+  assert.deepEqual(e.calls, []);
   e.h.unmount();
 });

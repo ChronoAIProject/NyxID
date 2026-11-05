@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState, type ReactNode } from "react";
 import {
   useNyxbotModelUsage,
@@ -54,7 +55,7 @@ function Table({
       aria-label={title}
       tabIndex={0}
     >
-      <table className="w-full text-12">
+      <table className="w-full text-14">
         <caption className="sr-only">{title}</caption>
         <thead>
           <tr>
@@ -62,7 +63,7 @@ function Table({
               <th
                 key={column}
                 scope="col"
-                className="h-8 whitespace-nowrap border-b border-border px-3 text-left text-10 font-semibold uppercase tracking-wide text-text-tertiary"
+                className="h-8 whitespace-nowrap border-b border-border px-3 text-left type-table-header uppercase tracking-wide text-text-tertiary"
               >
                 {column}
               </th>
@@ -85,7 +86,7 @@ function Cell({
   return (
     <Tag
       scope={heading ? "row" : undefined}
-      className={`border-b border-border/50 px-3 py-2.5 text-left tabular-nums ${heading ? "min-w-44 font-semibold" : "whitespace-nowrap font-mono text-11"}`}
+      className={`border-b border-border/50 px-3 py-2.5 text-left tabular-nums ${heading ? "min-w-44 type-table-header" : "whitespace-nowrap font-mono type-secondary"}`}
     >
       {children}
     </Tag>
@@ -151,10 +152,10 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
     <section className="space-y-4" aria-label="NyxBot model usage">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="font-display text-15 font-semibold">
+          <h2 className="font-display type-card-title">
             Cost and billing by model
           </h2>
-          <p className="mt-1 max-w-3xl text-12 text-muted-foreground">
+          <p className="mt-1 max-w-3xl text-14 text-muted-foreground">
             Model executions by NyxBot and specialists. Credits include wallet,
             grant and allowance funding. Model names are recorded billing
             identities and may be request aliases.
@@ -175,7 +176,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
           if (draft.trim()) changeFilter({ model: draft.trim() });
         }}
       >
-        <label className="min-w-0 space-y-1 text-11 text-muted-foreground">
+        <Label className="min-w-0 space-y-1 text-muted-foreground">
           Billing model
           <Input
             value={draft}
@@ -183,7 +184,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             placeholder="Exact model name"
             onChange={(e) => setDraft(e.target.value)}
           />
-        </label>
+        </Label>
         <Button type="submit" variant="outline" disabled={!draft.trim()}>
           Apply model
         </Button>
@@ -203,7 +204,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             All models
           </Button>
         )}
-        <p role="status" className="pb-2 text-11 text-text-tertiary">
+        <p role="status" className="pb-2 text-13 text-text-tertiary">
           {filter.unknown
             ? "Unknown model selected"
             : filter.model
@@ -231,7 +232,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             (e) => e.population === "unclassified" && e.usage.events > 0,
           ) && (
             <p
-              className="rounded-lg border border-warning/40 p-3 text-12"
+              className="rounded-lg border border-warning/40 p-3 text-14"
               role="note"
             >
               Some confirmed historical assistant activity lacks evidence of
@@ -241,7 +242,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
           )}
           {candidates && candidates.usage.events > 0 && (
             <p
-              className="rounded-lg border border-warning/40 p-3 text-12"
+              className="rounded-lg border border-warning/40 p-3 text-14"
               role="note"
             >
               Some historical usage cannot be attributed.{" "}
@@ -250,14 +251,14 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
             </p>
           )}
           {partial && (
-            <p role="note" className="text-12 text-warning">
+            <p role="note" className="text-14 text-warning">
               Partial cost estimate · {count(data.totals.unknown_cost_events)}{" "}
               billable events have unavailable historical prices. ≥ shows the
               known subtotal; Unavailable means no cost could be priced.
             </p>
           )}
           {data.totals.events === 0 ? (
-            <p className="rounded-lg border border-dashed border-border p-5 text-12 text-muted-foreground">
+            <p className="rounded-lg border border-dashed border-border p-5 text-14 text-muted-foreground">
               No attributed model usage in this period
               {filter.model || filter.unknown ? " for this model" : ""}.
             </p>
@@ -273,13 +274,13 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   ] as const
                 ).map(([label, field]) => (
                   <Card key={field} className="min-w-0 p-4">
-                    <p className="text-10 uppercase tracking-wide text-muted-foreground">
+                    <p className="text-12 uppercase tracking-wide text-muted-foreground">
                       {label}
                     </p>
-                    <p className="mt-2 break-words font-display text-22 tabular-nums">
+                    <p className="mt-2 break-words font-display type-metric tabular-nums">
                       {modelCost(data.totals, field)}
                     </p>
-                    <p className="mt-1 text-10 text-text-tertiary">credits</p>
+                    <p className="mt-1 text-12 text-text-tertiary">credits</p>
                   </Card>
                 ))}
               </div>
@@ -315,10 +316,10 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 ))}
               </Table>
               <div>
-                <h2 className="font-display text-15 font-semibold">
+                <h2 className="font-display type-card-title">
                   Traffic by model
                 </h2>
-                <p className="mt-1 text-12 text-muted-foreground">
+                <p className="mt-1 text-14 text-muted-foreground">
                   Provider-reported token counts. Total = input + output. Cache
                   counts can overlap input; audio and image counts are subsets.
                 </p>
@@ -367,10 +368,10 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 className="min-w-0 p-4"
               >
                 <div className="mb-4">
-                  <h2 className="font-display text-15 font-semibold leading-none tracking-tight">
+                  <h2 className="font-display type-card-title tracking-tight">
                     Model services
                   </h2>
-                  <p className="mt-1 text-12 text-muted-foreground">
+                  <p className="mt-1 text-14 text-muted-foreground">
                     {MEASURE_LABELS.requests} · {BREAKDOWN_LABELS.service}
                   </p>
                 </div>
@@ -379,11 +380,11 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   panel={SERVICES_PANEL}
                 />
                 <details className="group mt-4 border-t border-border/50 pt-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-11 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">
                     Cost and tokens by service
                     <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
                   </summary>
-                  <p className="mt-2 text-11 text-muted-foreground">
+                  <p className="mt-2 text-13 text-muted-foreground">
                     The inference service is recorded on every model execution,
                     including usage from before model names were captured.
                   </p>
@@ -415,10 +416,10 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                 className="min-w-0 p-4"
               >
                 <div className="mb-4">
-                  <h2 className="font-display text-15 font-semibold leading-none tracking-tight">
+                  <h2 className="font-display type-card-title tracking-tight">
                     Top billing accounts
                   </h2>
-                  <p className="mt-1 text-12 text-muted-foreground">
+                  <p className="mt-1 text-14 text-muted-foreground">
                     {MEASURE_LABELS.cost} · {BREAKDOWN_LABELS.owner}
                   </p>
                 </div>
@@ -427,11 +428,11 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                   panel={ACCOUNTS_PANEL}
                 />
                 <details className="group mt-4 border-t border-border/50 pt-3">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-11 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
+                  <summary className="flex cursor-pointer list-none items-center justify-between type-secondary-emphasis text-muted-foreground [&::-webkit-details-marker]:hidden">
                     Models by billing account
                     <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
                   </summary>
-                  <p className="mt-2 text-11 text-muted-foreground">
+                  <p className="mt-2 text-13 text-muted-foreground">
                     Ranked by known gross credits, then requests. Missing prices
                     can affect cost ranking. Each account shows up to 20 models
                     and a summed Other row.
@@ -441,16 +442,16 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                       <div key={account.id} className="min-w-0 space-y-2">
                         <div className="flex flex-wrap justify-between gap-2">
                           <div>
-                            <h3 className="text-13 font-semibold">
+                            <h3 className="type-card-title">
                               {account.display_name}
                             </h3>
-                            <p className="text-11 text-text-tertiary">
+                            <p className="text-13 text-text-tertiary">
                               {account.user_type === "org"
                                 ? "Organization"
                                 : (account.email ?? "Billing account")}
                             </p>
                           </div>
-                          <p className="text-12 tabular-nums">
+                          <p className="text-14 tabular-nums">
                             {modelCost(usage, "gross_cost")} credits ·{" "}
                             {count(usage.requests)} requests ·{" "}
                             {count(usage.total_tokens)} tokens
@@ -477,7 +478,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
                       </div>
                     ))}
                     {data.other_accounts && (
-                      <p className="text-12 tabular-nums">
+                      <p className="text-14 tabular-nums">
                         <strong>
                           Other · {count(data.other_accounts.groups)} billing
                           accounts
@@ -493,7 +494,7 @@ export function NyxbotModelUsage({ from, to }: { from: string; to: string }) {
               </Card>
             </>
           )}
-          <details className="text-11 text-muted-foreground">
+          <details className="text-13 text-muted-foreground">
             <summary className="cursor-pointer">
               Scope and data freshness
             </summary>

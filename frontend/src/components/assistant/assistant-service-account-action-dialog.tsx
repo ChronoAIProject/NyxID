@@ -268,7 +268,7 @@ export function AssistantServiceAccountActionDialog({
                 />
               </div>
             ) : null}
-            <p className="font-mono text-xs text-muted-foreground">
+            <p className="font-mono text-13 text-muted-foreground">
               {result.id}
             </p>
           </div>
@@ -294,7 +294,7 @@ export function AssistantServiceAccountActionDialog({
                 </div>
               </>
             ) : (
-              <p className="font-mono text-xs text-muted-foreground">
+              <p className="font-mono text-13 text-muted-foreground">
                 {serviceAccountId}
               </p>
             )}
@@ -311,8 +311,8 @@ export function AssistantServiceAccountActionDialog({
                 </div>
                 {targetOrgId ? (
                   <div className="space-y-1.5">
-                    <p className="text-xs font-medium">Target organization</p>
-                    <p className="break-all font-mono text-xs text-muted-foreground">
+                    <p className="type-secondary-emphasis">Target organization</p>
+                    <p className="break-all font-mono text-13 text-muted-foreground">
                       {targetOrgId}
                     </p>
                   </div>
@@ -320,7 +320,7 @@ export function AssistantServiceAccountActionDialog({
               </>
             ) : null}
             {destructive ? (
-              <label className="flex items-start gap-2 text-xs">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
@@ -329,12 +329,12 @@ export function AssistantServiceAccountActionDialog({
                   <ShieldAlert className="size-3" />I understand this change
                   revokes access.
                 </span>
-              </label>
+              </Label>
             ) : null}
           </div>
         )}
         {error ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

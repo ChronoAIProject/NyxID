@@ -65,7 +65,7 @@ export function AssistantSearchButton({ onOpen }: { readonly onOpen: () => void 
           Search
           <span aria-hidden="true" className="flex gap-0.5">
             {SEARCH_SHORTCUT_KEYS.map((key) => (
-              <kbd key={key} className="flex h-5 min-w-5 items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong px-1 font-sans text-10 text-text-tertiary">
+              <kbd key={key} className="flex h-5 min-w-5 items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong px-1 font-sans text-12 text-text-tertiary">
                 {key}
               </kbd>
             ))}
@@ -231,12 +231,12 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
         />
       </div>
       <Command.List className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain p-2 md:max-h-[min(60vh,520px)]">
-        <Command.Empty className="px-3 py-8 text-center text-13 text-text-tertiary">No results.</Command.Empty>
+        <Command.Empty className="px-3 py-8 text-center text-15 text-text-tertiary">No results.</Command.Empty>
         {nyxagentEnabled ? (
           <Section heading="Recent chats">
             {recent.isPending ? (
               <Command.Loading>
-                <p className="px-3 py-2 text-12 text-text-tertiary">Loading chats...</p>
+                <p className="px-3 py-2 text-14 text-text-tertiary">Loading chats...</p>
               </Command.Loading>
             ) : null}
             {chats.map((entry) => <Row key={entry.id} entry={entry} />)}
@@ -279,7 +279,7 @@ function Section({ heading, children }: { readonly heading: string; readonly chi
   return (
     <Command.Group
       heading={heading}
-      className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-12 [&_[cmdk-group-heading]]:text-text-tertiary"
+      className="[&_[cmdk-group-heading]]:px-3 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-3 [&_[cmdk-group-heading]]:text-14 [&_[cmdk-group-heading]]:text-text-tertiary"
     >
       {children}
     </Command.Group>
@@ -293,11 +293,11 @@ function Row({ entry }: { readonly entry: Entry }) {
       value={entry.id}
       keywords={[entry.label, ...(entry.keywords ?? []), ...(entry.hint ? [entry.hint] : [])]}
       onSelect={entry.run}
-      className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground data-[selected=true]:bg-overlay-strong data-[selected=true]:text-foreground"
+      className="flex items-center gap-3 rounded-lg px-3 py-2 text-15 text-muted-foreground data-[selected=true]:bg-overlay-strong data-[selected=true]:text-foreground"
     >
       <Icon aria-hidden="true" className="h-4 w-4 shrink-0 text-text-tertiary" />
       <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-      {entry.hint ? <span className="shrink-0 text-11 text-text-tertiary">{entry.hint}</span> : null}
+      {entry.hint ? <span className="shrink-0 text-13 text-text-tertiary">{entry.hint}</span> : null}
     </Command.Item>
   );
 }

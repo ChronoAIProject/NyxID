@@ -1,3 +1,4 @@
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
@@ -7,7 +8,6 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { collaborationApi } from "@/hooks/use-collaboration-groups";
 import { guestAccessRequestSchema } from "@/schemas/collaboration-group";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -30,8 +30,10 @@ const schema = z.object({
 });
 export function CollaborationGuestControls({
   agentId,
+  disabled = false,
 }: {
   readonly agentId: string;
+  readonly disabled?: boolean;
 }) {
   const flag = useFeature(FEATURE_FLAG.SHARED_AGENTS);
   const actor = useAuthStore((s) => s.user?.id);
@@ -77,70 +79,87 @@ export function CollaborationGuestControls({
   });
   if (!query.data?.length) return null;
   return (
-    <section className="space-y-2 text-12" aria-label="Group guest replies">
-      <p className="font-medium">Group guest replies</p>
-      <p className="text-muted-foreground">
-        Allow guests separately for each group. This gives you no access to its
-        transcript or participants.
-      </p>
+    <section className="space-y-2 text-14" aria-label="Group guest replies">
       {query.data.map((row) => (
-        <div
-          className="space-y-2 rounded-lg border border-border p-3"
+        <GroupedList
           key={row.group_id}
+          title={`Group ${row.group_id}`}
+          info="Allow people in this group to use this agent under your guest service policy. This does not give you access to the group’s transcript or participants."
+          footer={
+            <>
+              <p>
+                Allow guests separately for each group. This gives you no access
+                to its transcript or participants.
+              </p>
+              {row.request?.status === "pending" && !row.enabled ? (
+                <>
+                  <p>
+                    Allow current and future participants without use rights to
+                    use this agent under your guest service policy. They use
+                    your identity and billing; they cannot approve cards or use
+                    private account tools.
+                  </p>
+                  <p>
+                    Expires {new Date(row.request.expires_at).toLocaleString()}
+                  </p>
+                </>
+              ) : null}
+              {mutation.error || cancel.error ? (
+                <p role="alert" className="text-destructive">
+                  {(mutation.error ?? cancel.error)?.message}
+                </p>
+              ) : null}
+            </>
+          }
         >
-          <p className="min-w-0 break-all">Group {row.group_id}</p>
+          <GroupedRow
+            search={{ id: `group-guests-${row.group_id}`, title: "Guest replies", breadcrumb: `Access › Group ${row.group_id}`, keywords: row.enabled ? "Enabled" : "Disabled" }}
+            title="Guest replies"
+            accessory={row.enabled ? "Enabled" : "Disabled"}
+          />
           {row.request ? (
-            <Badge variant="secondary">Request {row.request.status}</Badge>
+            <GroupedRow
+              title="Request"
+              accessory={row.request.status.replaceAll("_", " ")}
+            />
           ) : null}
           {row.request?.status === "pending" && !row.enabled ? (
             <>
-              <p className="text-muted-foreground">
-                Allow current and future participants without use rights to use
-                this agent under your guest service policy. They use your
-                identity and billing; they cannot approve cards or use private
-                account tools.
-              </p>
-              <p className="text-muted-foreground">
-                Expires {new Date(row.request.expires_at).toLocaleString()}
-              </p>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="primary"
-                  disabled={cancel.isPending}
-                  isLoading={mutation.isPending}
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  disabled={disabled || cancel.isPending || mutation.isPending}
                   onClick={() => mutation.mutate(row)}
                 >
                   Approve participant access
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={mutation.isPending}
-                  isLoading={cancel.isPending}
+                </button>
+              </GroupedRow>
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  disabled={disabled || mutation.isPending || cancel.isPending}
                   onClick={() => cancel.mutate(row)}
                 >
                   Cancel request
-                </Button>
-              </div>
+                </button>
+              </GroupedRow>
             </>
           ) : (
-            <Button
-              size="sm"
-              isLoading={mutation.isPending}
-              onClick={() =>
-                row.enabled ? mutation.mutate(row) : setConfirm(row)
-              }
-            >
-              {row.enabled ? "Disable guests" : "Enable guests"}
-            </Button>
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                disabled={disabled || mutation.isPending}
+                onClick={() =>
+                  row.enabled ? mutation.mutate(row) : setConfirm(row)
+                }
+              >
+                {row.enabled ? "Disable guests" : "Enable guests"}
+              </button>
+            </GroupedRow>
           )}
-        </div>
+        </GroupedList>
       ))}
-      {mutation.error || cancel.error ? (
-        <p role="alert" className="text-destructive">
-          {(mutation.error ?? cancel.error)?.message}
-        </p>
-      ) : null}
+
       {confirm ? (
         <Dialog
           open
@@ -160,7 +179,7 @@ export function CollaborationGuestControls({
             <DialogFooter>
               <Button onClick={() => setConfirm(undefined)}>Cancel</Button>
               <Button
-                variant="primary"
+                variant="ghost"
                 isLoading={mutation.isPending}
                 onClick={() => mutation.mutate(confirm)}
               >

@@ -6,6 +6,8 @@ export type AssistantTurnInput = {
   agentId?: string;
   text: string;
   retryOf?: string;
+  /** The allowed card this turn resumes; the server records it as `continuation_of`. */
+  acknowledgementId?: string;
   attachmentIds?: readonly string[];
 };
 
@@ -26,6 +28,11 @@ export function assistantTurnBody(input: AssistantTurnInput) {
   if (input.retryOf && ids.length)
     throw new Error("Retry uses the original message's attachments.");
   if (input.conversationId) conversationIdSchema.parse(input.conversationId);
+  if (input.acknowledgementId !== undefined) {
+    z.string().uuid().parse(input.acknowledgementId);
+    if (!input.conversationId)
+      throw new Error("A decision can only resume its own chat.");
+  }
   return {
     ...(input.conversationId
       ? { conversation_id: input.conversationId }
@@ -34,6 +41,9 @@ export function assistantTurnBody(input: AssistantTurnInput) {
         }),
     text: input.text,
     ...(input.retryOf ? { retry_of: input.retryOf } : {}),
+    ...(input.acknowledgementId
+      ? { acknowledgement_id: input.acknowledgementId }
+      : {}),
     ...(ids.length ? { attachment_ids: [...ids] } : {}),
   };
 }

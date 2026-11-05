@@ -506,6 +506,15 @@ impl BillingService {
                 "Runtime allocation pricing requires dedicated prepaid window admission".into(),
             ));
         }
+        let org_guest = ctx.org_channel_guest.is_some();
+        if let Some(guest) = &ctx.org_channel_guest {
+            if !self.config.billing_enabled || self.lago.is_none() {
+                return Err(crate::errors::AppError::BillingNotConfigured(
+                    "Organization channel guests require active billing".into(),
+                ));
+            }
+            crate::services::org_channel_service::budget::require_payer(&self.db, guest).await?;
+        }
         let public = ctx.public_admission.is_some();
         let managed = ctx.managed_admission.is_some();
         if public && (!required || !self.config.billing_enabled || ctx.pool_attempt.is_some()) {
@@ -527,7 +536,7 @@ impl BillingService {
             // Staged rollout: charging applies only to owners covered by the
             // billing feature flag. Everyone else is metered for
             // observability but never charged on either layer.
-            let rollout_enabled = if required && !managed {
+            let rollout_enabled = if (required && !managed) || org_guest {
                 // Autonomous channels have a persisted owner but no acting
                 // organization member. Use the owner's rollout baseline.
                 let owner = self
@@ -556,12 +565,14 @@ impl BillingService {
             // without billing.platform_billable stay free (metered only),
             // so BYOK and unconfigured services never draw from wallets.
             let platform_billable = if rollout_enabled && ctx.service_platform_billable {
-                self.ensure_wallet_for_charging(&ctx.billing_owner_id)
-                    .await?;
+                if !org_guest {
+                    self.ensure_wallet_for_charging(&ctx.billing_owner_id)
+                        .await?;
+                }
                 let chargeable = self
                     .owner_has_chargeable_wallet(&ctx.billing_owner_id)
                     .await?;
-                if required && !chargeable {
+                if (required || org_guest) && !chargeable {
                     return Err(crate::errors::AppError::BillingNotConfigured(
                         if managed { "Managed execution requires a provisioned billing wallet and subscription" } else {
                             "A provisioned Lago billing wallet and subscription are required for paid channels, including grant or allowance funding"
@@ -572,7 +583,9 @@ impl BillingService {
             } else {
                 false
             };
-            if (public || managed) && (!rollout_enabled || !platform_billable) {
+            if (org_guest && !rollout_enabled)
+                || ((public || managed) && (!rollout_enabled || !platform_billable))
+            {
                 return Err(crate::errors::AppError::BillingProviderUnavailable(
                     "Required execution funding is unavailable".into(),
                 ));
@@ -610,7 +623,7 @@ impl BillingService {
         } else {
             None
         };
-        if required
+        if (required || org_guest)
             && self.config.billing_enabled
             && ctx.has_billable_layers()
             && reservation.is_none()

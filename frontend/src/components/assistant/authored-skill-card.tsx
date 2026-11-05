@@ -35,15 +35,15 @@ function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
   if (!data.failure_code) return null;
   return (
     <>
-      <p role="alert" className="text-12 text-destructive">
+      <p role="alert" className="text-14 text-destructive">
         {publicationFailureText(data.failure_code, data.status, "authored")}
       </p>
       {data.failure_rules.length ? (
-        <ul className="list-disc pl-5 text-11 text-muted-foreground">
+        <ul className="list-disc pl-5 text-13 text-muted-foreground">
           {data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}
         </ul>
       ) : data.failure_details_unavailable ? (
-        <p className="text-11 text-muted-foreground">Format details unavailable.</p>
+        <p className="text-13 text-muted-foreground">Format details unavailable.</p>
       ) : null}
     </>
   );
@@ -57,7 +57,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
 }) {
   if (data.scope_unavailable) {
     return (
-      <p role="alert" className="text-11 text-muted-foreground">
+      <p role="alert" className="text-13 text-muted-foreground">
         Scope unavailable. Reload the draft before allowing publication.
       </p>
     );
@@ -67,7 +67,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   return (
     <>
       {omissions.length ? (
-        <ul aria-label="Declared omissions" className="list-disc pl-5 text-11 text-muted-foreground">
+        <ul aria-label="Declared omissions" className="list-disc pl-5 text-13 text-muted-foreground">
           {omissions.map((text, index) => <li key={index}>{text}</li>)}
         </ul>
       ) : null}
@@ -78,13 +78,13 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
             checked={accepted}
             onCheckedChange={(checked) => onAccepted(checked === true)}
           />
-          <Label htmlFor={id} className="text-11 leading-normal">
+          <Label htmlFor={id}>
             I accept this reduced scope ({omissions.length} declared omission
             {omissions.length === 1 ? "" : "s"}).
           </Label>
         </div>
       ) : (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           The drafting agent declares this draft covers everything requested.
           The read coverage shown here is what NyxID observed.
         </p>
@@ -106,7 +106,7 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
   return (
     <>
       {data.coverage.length ? (
-        <div className="space-y-1 text-11 text-muted-foreground">
+        <div className="space-y-1 text-13 text-muted-foreground">
           <p>Observed reads in the drafting conversation</p>
           <ul>
             {data.coverage.map((upload) => (
@@ -123,7 +123,7 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
         </div>
       ) : null}
       {data.coverage_omitted ? (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {data.coverage_omitted} earlier uploads are not shown.
         </p>
       ) : null}
@@ -205,8 +205,8 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     finally { await refresh(); }
   }
   const messages = <>
-    {error ? <p role="alert" className="text-12 text-destructive">{error}</p> : null}
-    {notice ? <p role="status" className="text-12 text-muted-foreground">{notice}</p> : null}
+    {error ? <p role="alert" className="text-14 text-destructive">{error}</p> : null}
+    {notice ? <p role="status" className="text-14 text-muted-foreground">{notice}</p> : null}
   </>;
   const buttons = actions.length > 0 ? <div className="flex justify-end gap-2">
     {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Deny</Button> : null}
@@ -236,7 +236,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     return <div className="space-y-2">
       {status}
       <div className="ml-[30px] space-y-2">
-        {actions.includes("show_updated_draft") ? <p className="text-12 text-muted-foreground">A rebuilt package for this draft is waiting for its review card.</p> : null}
+        {actions.includes("show_updated_draft") ? <p className="text-14 text-muted-foreground">A rebuilt package for this draft is waiting for its review card.</p> : null}
         {messages}
         {buttons}
       </div>
@@ -244,20 +244,20 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   }
   if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
   return <section aria-label="Review skill draft" className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
-    <p className="text-13 font-medium">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
-    {data ? <p className="text-12">Attach to {data.agent_name}</p> : null}
-    <p className="text-12 text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>
-    {data?.base_scripts_not_copied ? <p className="text-12 text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
+    <p className="type-card-title">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
+    {data ? <p className="text-14">Attach to {data.agent_name}</p> : null}
+    <p className="text-14 text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>
+    {data?.base_scripts_not_copied ? <p className="text-14 text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
     {data?.files.map((file) => <div key={file.path}>
-      <p className="text-12 font-medium">{file.path}</p>
-      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-11">{file.content}</pre>
+      <p className="type-row-title">{file.path}</p>
+      <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-14">{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">
       <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
         {editing ? "Close the editor" : "Edit before publishing"}
       </Button>
       {editing ? <>
-        <p className="text-12 text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
+        <p className="text-14 text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
         <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
           setEditing(false);
           setNotice(SAVED_EDIT_NOTICE);
@@ -265,9 +265,9 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
         }} />
       </> : null}
     </div> : null}
-    {data?.status === "publishing" ? <p role="status" className="text-12 text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
+    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
     {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
-    {preview.isError ? <p role="alert" className="text-12 text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
+    {preview.isError ? <p role="alert" className="text-14 text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
     {data ? (
       <>
         <FailureDetails data={data} />

@@ -87,26 +87,15 @@
 }
 
 .analytics-summary {
-  gap: 0;
+  gap: 1px;
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: var(--color-card);
+  background: var(--color-border);
 }
 .analytics-summary > div {
   border: 0;
   border-radius: 0;
-  background: transparent;
+  background: var(--color-card);
   padding: 14px 16px;
-}
-.analytics-summary > div + div {
-  border-left: 1px solid var(--color-border);
-}
-@media (max-width: 1023px) {
-  .analytics-summary > div:nth-child(3) {
-    border-left: 0;
-  }
-  .analytics-summary > div:nth-child(n + 3) {
-    border-top: 1px solid var(--color-border);
-  }
 }

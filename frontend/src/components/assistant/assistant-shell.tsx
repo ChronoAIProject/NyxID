@@ -72,7 +72,7 @@ function AssistantShellLayout({
   const hasPreview = Boolean(aside || (wideScreen && cmaCards));
   const shellTitle = contentTitle ? null : onRenameTitle ? (
     <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
-  ) : <h1 className="truncate text-15 font-semibold text-foreground" title={title}>{title}</h1>;
+  ) : <h1 className="truncate type-card-title text-foreground" title={title}>{title}</h1>;
   const viewportRef = useAssistantViewport();
   useScrollFades(viewportRef);
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
@@ -151,7 +151,7 @@ function AssistantShellLayout({
             >
               <Menu className="h-4 w-4" />
             </button>
-            <div className="min-w-0 flex-1 truncate text-12 text-muted-foreground">
+            <div className="min-w-0 flex-1 truncate text-14 text-muted-foreground">
               {!desktop ? shellTitle : null}
             </div>
             {!desktop ? headerActions : null}
@@ -162,7 +162,7 @@ function AssistantShellLayout({
             {sidebarHidden ? (
               // Hidden sidebar: a slim rail with home, the sidebar toggle and
               // search, then the sidebar itself drawn as icons and avatars.
-              <aside className="hidden w-max shrink-0 flex-col items-center bg-sidebar px-2 md:flex">
+              <aside data-tour="sidebar" className="hidden w-max shrink-0 flex-col items-center bg-sidebar px-2 md:flex">
                 <div className="flex shrink-0 flex-col items-center gap-1 pt-2.5 pb-1">
                   <Link
                     to="/assistant"
@@ -182,6 +182,7 @@ function AssistantShellLayout({
               </aside>
             ) : (
               <aside
+                data-tour="sidebar"
                 className="relative hidden shrink-0 flex-col bg-sidebar md:flex"
                 style={{ width: sidebarWidth }}
               >
@@ -258,6 +259,7 @@ function AssistantShellLayout({
                 aria-label="Close chats"
               />
               <aside
+                data-tour="sidebar"
                 className="relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
                 style={{
                   paddingTop: "var(--sat)",

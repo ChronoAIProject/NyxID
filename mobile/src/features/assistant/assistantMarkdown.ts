@@ -1,7 +1,7 @@
 import type MarkdownIt from "markdown-it";
 import imageRule from "markdown-it/lib/rules_inline/image";
 import footnote from "markdown-it-footnote";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { firstPartyFrontendUrls } from "../../lib/env";
 import { assistantLinkTarget } from "./assistantLinkTarget";
 
 export const assistantMarkdownOptions = {
@@ -12,7 +12,7 @@ export const assistantMarkdownOptions = {
 
 export function safeAssistantLinkUrl(
   url: string,
-  frontendUrl = NYXID_FRONTEND_URL,
+  frontendUrl: string | readonly string[] = firstPartyFrontendUrls(),
 ): string | null {
   if (url.trim().startsWith("#")) return url.trim();
   const internal = assistantLinkTarget(url, frontendUrl);

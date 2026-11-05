@@ -61,7 +61,7 @@ export function ProviderServices({
     >
       <div>
         <h3 className="font-semibold">Linked services</h3>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Choose the service to configure. Shared credentials, access, endpoint
           rules, and prices belong to each service. A provider can back multiple
           services.
@@ -70,7 +70,7 @@ export function ProviderServices({
       {isLoading && <p>Loading services…</p>}
       {error && <p role="alert">Could not load linked services.</p>}
       {linked?.length === 0 && (
-        <p className="text-sm text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           No linked services. Link an existing service or create one to
           configure access.
         </p>
@@ -80,7 +80,7 @@ export function ProviderServices({
           <div className="flex items-center justify-between gap-3">
             <div>
               <span className="font-medium">{service.name}</span>{" "}
-              <code className="text-xs">{service.slug}</code>
+              <code className="text-14">{service.slug}</code>
             </div>
             <Button variant="outline" asChild>
               <Link
@@ -93,7 +93,7 @@ export function ProviderServices({
           </div>
           {!service.provider_config_id && (
             <div className="flex items-center gap-2">
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Legacy provider requirement; primary provider link is not set.
               </p>
               <Button
@@ -111,7 +111,7 @@ export function ProviderServices({
               </Button>
             </div>
           )}
-          <p className="text-xs">
+          <p className="text-13">
             Shared credential: {serviceCredentialStatus(service)} · Platform
             key:{" "}
             {service.platform_key?.enabled || service.legacy_public_master
@@ -123,11 +123,11 @@ export function ProviderServices({
               ? "all authenticated users"
               : `${service.platform_key?.allowed_owner_ids.length ?? 0} selected owners`}
           </p>
-          <p className="text-xs">{laneSummary(service)}</p>
+          <p className="text-13">{laneSummary(service)}</p>
         </div>
       ))}
       {supportsServices && !provider.is_active && (
-        <p className="text-sm text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Enable this provider before linking or creating services.
         </p>
       )}
@@ -175,7 +175,7 @@ export function ProviderServices({
             </Button>
           </div>
           {link.error && (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {link.error instanceof ApiError
                 ? link.error.message
                 : "Could not link service"}

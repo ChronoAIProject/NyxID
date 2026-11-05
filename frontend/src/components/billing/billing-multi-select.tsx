@@ -74,7 +74,7 @@ export function BillingMultiSelect({
               variant="outline"
               aria-label={`Filter ${label.toLowerCase()}`}
               disabled={disabled}
-              className="min-w-40 justify-between gap-6"
+              className="min-w-0 max-w-full flex-wrap justify-between gap-2 whitespace-normal text-left"
             >
               <span>{label}</span>
               <span className="ml-auto text-muted-foreground">
@@ -89,7 +89,7 @@ export function BillingMultiSelect({
             className="w-72 space-y-3 p-3"
           >
             {description && (
-              <p className="text-11 text-muted-foreground">{description}</p>
+              <p className="text-13 text-muted-foreground">{description}</p>
             )}
             <Input
               aria-label={`Search ${label.toLowerCase()}`}
@@ -114,7 +114,7 @@ export function BillingMultiSelect({
                       !checked && limit !== undefined && values.length >= limit
                     }
                     className={cn(
-                      "flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-12 text-foreground outline-none transition-colors hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                      "flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-14 text-foreground outline-none transition-colors hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
                       checked && "bg-overlay",
                     )}
                     onClick={() =>
@@ -139,7 +139,7 @@ export function BillingMultiSelect({
                         {option.label}
                       </span>
                       {option.detail && (
-                        <span className="block text-10 text-muted-foreground">
+                        <span className="block text-12 text-muted-foreground">
                           {option.detail}
                         </span>
                       )}
@@ -148,7 +148,7 @@ export function BillingMultiSelect({
                 );
               })}
               {!filtered.length && (
-                <p className="p-2 text-12 text-muted-foreground">
+                <p className="p-2 text-14 text-muted-foreground">
                   No matching {label.toLowerCase()}.
                 </p>
               )}
@@ -182,11 +182,11 @@ export function BillingMultiSelect({
           {values.map((value) => (
             <div
               key={value}
-              className="flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border px-2.5 py-1 text-11"
+              className="flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-border px-2.5 py-1 text-13"
             >
               <button
                 type="button"
-                className="min-w-0 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="min-w-0 break-words rounded text-left type-row-title outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label={`Edit ${itemLabel.toLowerCase()} filter: ${nameOf(value)}`}
                 onClick={() => setOpen(true)}
               >
@@ -196,6 +196,7 @@ export function BillingMultiSelect({
                 </span>
               </button>
               <button
+                data-icon-button=""
                 type="button"
                 className="shrink-0 rounded p-1 text-muted-foreground hover:bg-overlay-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 aria-label={`Remove ${itemLabel.toLowerCase()}: ${nameOf(value)}`}

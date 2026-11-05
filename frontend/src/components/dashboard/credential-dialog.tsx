@@ -73,11 +73,11 @@ export function CredentialDialog({
               autoComplete="off"
             />
             {inputConfig.type === "basic" && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Format: username:password
               </p>
             )}
-            <p className="text-xs text-muted-foreground">Max 8192 characters</p>
+            <p className="text-13 text-muted-foreground">Max 8192 characters</p>
           </div>
 
           <div className="space-y-2">

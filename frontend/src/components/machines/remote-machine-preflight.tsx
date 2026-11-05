@@ -17,7 +17,9 @@ function useObservationTime() {
 
 export function RemoteMachineQuota({
   quota,
+  grouped = false,
 }: {
+  readonly grouped?: boolean;
   readonly quota?: z.infer<typeof remoteMachineQuotaSchema> | null;
 }) {
   const now = useObservationTime();
@@ -25,7 +27,7 @@ export function RemoteMachineQuota({
   return (
     <section
       aria-label="Platform quota preflight"
-      className="space-y-1 text-12 text-muted-foreground"
+      className={grouped ? "space-y-1" : "space-y-1 text-14 text-muted-foreground"}
     >
       <p>
         Namespace quota: {quota ? quota.status.replaceAll("_", " ") : "Unknown"}
@@ -60,11 +62,13 @@ export function RemoteMachineQuota({
 
 export function RemoteMachineBillingPreflight({
   preflight,
+  grouped = false,
   quoteProfile,
   quoteRate,
   quotePrice,
   now,
 }: {
+  readonly grouped?: boolean;
   readonly preflight?: z.infer<
     typeof remoteMachineBillingPreflightSchema
   > | null;
@@ -87,7 +91,7 @@ export function RemoteMachineBillingPreflight({
   return (
     <section
       aria-label="Paid runtime prerequisites"
-      className="space-y-2 text-12 text-muted-foreground"
+      className={grouped ? "space-y-1" : "space-y-2 text-14 text-muted-foreground"}
     >
       <p>
         Billing preflight:{" "}

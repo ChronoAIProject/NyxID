@@ -232,7 +232,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
         {step === "requesting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Requesting code from {provider.name}...
             </p>
           </div>
@@ -242,11 +242,11 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-5">
             {/* User code display */}
             <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              <p className="type-secondary-emphasis uppercase tracking-wider text-muted-foreground">
                 Your code
               </p>
               <div className="flex items-center gap-3">
-                <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
+                <code className="type-metric tracking-[0.3em] font-mono text-primary-text">
                   {userCode}
                 </code>
                 <Button
@@ -276,7 +276,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
             </div>
 
             {/* Instructions */}
-            <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
+            <div className="rounded-lg bg-muted p-3 text-14 text-muted-foreground">
               <ol className="list-decimal list-inside space-y-1">
                 <li>Click the link above to open the authentication page</li>
                 <li>Enter the code shown above</li>
@@ -285,7 +285,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
             </div>
 
             {/* Polling status */}
-            <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center justify-between text-13 text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 <span>Waiting for authentication...</span>
@@ -307,7 +307,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-success" />
-              <p className="text-12 text-muted-foreground text-center">
+              <p className="text-14 text-muted-foreground text-center">
                 Your {provider.name} account has been connected successfully.
                 Tokens are encrypted and stored securely.
               </p>
@@ -324,7 +324,7 @@ export function DeviceCodeDialog({ provider, onClose }: DeviceCodeDialogProps) {
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <AlertCircle className="h-8 w-8 text-destructive" />
-              <p className="text-12 text-destructive text-center">
+              <p className="text-14 text-destructive text-center">
                 {errorMessage}
               </p>
             </div>

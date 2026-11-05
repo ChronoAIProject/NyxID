@@ -344,7 +344,7 @@ function CopyableCode({ children }: { readonly children: string }) {
 
   return (
     <div className="relative">
-      <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+      <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-14">
         {children}
       </pre>
       <Button
@@ -403,7 +403,7 @@ function CatalogGrid({
         <button
           type="button"
           onClick={() => setChoosingPostHogRegion(false)}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 text-13 text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back to catalog
@@ -426,10 +426,10 @@ function CatalogGrid({
                 onClick={() => onSelect(entry)}
                 className="flex flex-col gap-1.5 rounded-lg border border-border p-4 text-left transition-colors hover:border-hairline-strong hover:bg-accent/40"
               >
-                <span className="text-12 font-medium">
+                <span className="type-row-title">
                   {postHogRegion(entry) === "US" ? "United States" : "European Union"}
                 </span>
-                <span className="text-11 text-muted-foreground">
+                <span className="text-13 text-muted-foreground">
                   {new URL(entry.base_url).hostname}
                 </span>
               </button>
@@ -458,7 +458,7 @@ function CatalogGrid({
           className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Globe className="h-5 w-5 text-muted-foreground" />
-          <span className="text-xs font-medium">Custom Endpoint</span>
+          <span className="type-secondary-emphasis">Custom Endpoint</span>
         </button>
 
         <button
@@ -467,7 +467,7 @@ function CatalogGrid({
           className="flex min-h-[7.5rem] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-border p-4 text-center transition-colors duration-300 hover:border-hairline-strong hover:bg-accent/40"
         >
           <Terminal className="h-5 w-5 text-muted-foreground" />
-          <span className="text-xs font-medium">Custom SSH</span>
+          <span className="type-secondary-emphasis">Custom SSH</span>
         </button>
 
         {filtered?.map((entry) => (
@@ -485,31 +485,31 @@ function CatalogGrid({
               <ServiceIcon slug={entry.slug} iconUrl={entry.icon_url} size="sm" />
               <div className="flex flex-wrap justify-end gap-1">
                 {entry.service_type === "ssh" && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     SSH
                   </Badge>
                 )}
                 {entry.requires_gateway_url && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     URL required
                   </Badge>
                 )}
                 {entry.provider_type === "oauth2" && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     OAuth
                   </Badge>
                 )}
                 {entry.provider_type === "device_code" && (
-                  <Badge variant="secondary" className="text-10">
+                  <Badge variant="secondary" className="text-12">
                     Device Code
                   </Badge>
                 )}
               </div>
             </div>
-            <span className="line-clamp-1 w-full text-12 font-medium">
+            <span className="line-clamp-1 w-full type-row-title">
               {entry === postHogRepresentative ? "PostHog" : entry.name}
             </span>
-            <span className="line-clamp-2 w-full text-11 leading-snug text-muted-foreground">
+            <span className="line-clamp-2 w-full text-13 text-muted-foreground">
               {entry === postHogRepresentative
                 ? "Connect projects and analytics in the US or EU."
                 : (entry.description ?? entry.base_url)}
@@ -570,7 +570,7 @@ function RoutingStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back to catalog
@@ -607,8 +607,8 @@ function RoutingStep({
               }`}
             >
               <Globe className="h-5 w-5" />
-              <span className="text-xs font-medium">Direct</span>
-              <span className="text-10 text-muted-foreground">
+              <span className="type-secondary-emphasis">Direct</span>
+              <span className="text-12 text-muted-foreground">
                 NyxID proxies to endpoint
               </span>
             </button>
@@ -623,8 +623,8 @@ function RoutingStep({
               }`}
             >
               <Server className="h-5 w-5" />
-              <span className="text-xs font-medium">Via Node</span>
-              <span className="text-10 text-muted-foreground">
+              <span className="type-secondary-emphasis">Via Node</span>
+              <span className="text-12 text-muted-foreground">
                 {catalogEntry?.auth_method === "ifttt_mcp"
                   ? "IFTTT OAuth uses direct routing"
                   : "Route through credential node"}
@@ -632,7 +632,7 @@ function RoutingStep({
             </button>
           </div>
         ) : (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             SSH services must be routed through a credential node.
           </p>
         )}
@@ -750,7 +750,7 @@ function KeyForm({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -773,7 +773,7 @@ function KeyForm({
           href={catalogEntry.api_key_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
         >
           Get API key
           <ExternalLink className="h-3 w-3" />
@@ -781,7 +781,7 @@ function KeyForm({
       )}
 
       {catalogEntry?.api_key_instructions && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {catalogEntry.api_key_instructions}
         </p>
       )}
@@ -802,7 +802,7 @@ function KeyForm({
             maxLength={200}
             onChange={(e) => onChange({ label: e.target.value })}
           />
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Give it a name you'll recognize. The proxy slug is auto-generated
             from this.
           </p>
@@ -841,7 +841,7 @@ function KeyForm({
                       }
                     />
                     {field.secret && (
-                      <p className="text-11 text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Stored encrypted. NyxID exchanges this server-side for
                         an access token and caches it -- you never have to
                         refresh tokens, and the secret never leaves NyxID.
@@ -891,7 +891,7 @@ function KeyForm({
                       update({ secret_access_key: e.target.value })
                     }
                   />
-                  <p className="text-11 text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Stored encrypted. The IAM policy attached to this key
                     enforces read-only — NyxID never elevates it.
                   </p>
@@ -916,7 +916,7 @@ function KeyForm({
                     />
                   </div>
                 </div>
-                <p className="text-11 text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Cost Explorer is single-region (us-east-1, service=ce). For
                   other AWS services, change `service` to match (e.g. `s3`,
                   `dynamodb`).
@@ -963,19 +963,19 @@ function KeyForm({
               }
             />
             {!requiresCredential && (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 This service can be used without storing a user credential in
                 NyxID.
               </p>
             )}
             {requiresCredential && form.authMethod === "body" && (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 NyxID injects this value into the request JSON body under the
                 field name below.
               </p>
             )}
             {requiresCredential && form.authMethod === "bot_bearer" && (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 Sent as{" "}
                 <code className="font-mono">
                   Authorization: Bot &lt;token&gt;
@@ -1011,7 +1011,7 @@ function KeyForm({
             }
           />
           {endpointUrlError && (
-            <p className="text-xs text-destructive">{endpointUrlError}</p>
+            <p className="text-13 text-destructive">{endpointUrlError}</p>
           )}
         </div>
 
@@ -1029,9 +1029,9 @@ function KeyForm({
             aria-invalid={openapiSpecUrlError ? true : undefined}
           />
           {openapiSpecUrlError && (
-            <p className="text-xs text-destructive">{openapiSpecUrlError}</p>
+            <p className="text-13 text-destructive">{openapiSpecUrlError}</p>
           )}
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             When set, AI agents discover concrete operations from the spec
             instead of being limited to a single generic proxy tool.
           </p>
@@ -1162,7 +1162,7 @@ function NodeSetupStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -1215,7 +1215,7 @@ function NodeSetupStep({
                     aria-invalid={sshPortError ? true : undefined}
                   />
                   {sshPortError && (
-                    <p className="text-xs text-destructive">{sshPortError}</p>
+                    <p className="text-13 text-destructive">{sshPortError}</p>
                   )}
                 </div>
               </div>
@@ -1255,7 +1255,7 @@ function NodeSetupStep({
                         onChange({ sshPrincipals: e.target.value })
                       }
                     />
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       Comma-separated Unix usernames for certificate login
                     </p>
                   </div>
@@ -1274,9 +1274,9 @@ function NodeSetupStep({
                       aria-invalid={sshTtlError ? true : undefined}
                     />
                     {sshTtlError && (
-                      <p className="text-xs text-destructive">{sshTtlError}</p>
+                      <p className="text-13 text-destructive">{sshTtlError}</p>
                     )}
-                    <p className="text-11 text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       15-60 minutes. Shorter is more secure.
                     </p>
                   </div>
@@ -1293,7 +1293,7 @@ function NodeSetupStep({
                   value={form.endpointUrl}
                   onChange={(e) => onChange({ endpointUrl: e.target.value })}
                 />
-                <p className="text-11 text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   The target URL configured on your node agent
                 </p>
               </div>
@@ -1358,12 +1358,12 @@ function NodeSetupStep({
       <div className="rounded-lg border border-border bg-muted/50 p-4 space-y-3">
         <div className="flex items-center gap-2">
           <Terminal className="h-4 w-4 text-primary-text" />
-          <p className="text-12 font-medium">Node Setup Instructions</p>
+          <p className="type-row-title">Node Setup Instructions</p>
         </div>
 
         {isSsh ? (
           <div className="space-y-2">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               The SSH service will be created with certificate-based
               authentication. After creation, full setup instructions (CA key,
               sshd_config, node agent setup) will be available on the service
@@ -1372,7 +1372,7 @@ function NodeSetupStep({
           </div>
         ) : (
           <div className="space-y-3">
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Run this on your node to auto-setup credentials. It detects the
               service type and guides you through the right flow:
             </p>
@@ -1380,10 +1380,10 @@ function NodeSetupStep({
               {`nyxid node credentials setup --service ${slug || "<slug>"}`}
             </CopyableCode>
             {isCustom && (
-              <p className="text-11 text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 The exact service slug will be shown on the service detail page
                 after creation. Update the{" "}
-                <code className="text-10">--service</code> flag accordingly.
+                <code className="text-14">--service</code> flag accordingly.
               </p>
             )}
             {catalogEntry?.api_key_url && (
@@ -1391,7 +1391,7 @@ function NodeSetupStep({
                 href={catalogEntry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+                className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
               >
                 Get API key
                 <ExternalLink className="h-3 w-3" />
@@ -1929,14 +1929,14 @@ function OAuthStep({
           href={authorizationUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 text-13 font-medium text-primary-foreground transition-opacity hover:opacity-90"
+          className="flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-3 py-2 type-row-title text-primary-foreground transition-opacity hover:opacity-90"
         >
           <ExternalLink className="h-4 w-4" />
           Open {catalogEntry.name}
         </a>
 
         <div
-          className="flex items-center gap-2 rounded-lg border border-hairline bg-overlay px-3 py-2 text-12"
+          className="flex items-center gap-2 rounded-lg border border-hairline bg-overlay px-3 py-2 text-14"
           role="status"
           aria-live="polite"
         >
@@ -2018,7 +2018,7 @@ function OAuthStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2046,7 +2046,7 @@ function OAuthStep({
       )}
 
       {error && (
-        <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
           {error}
         </div>
       )}
@@ -2464,7 +2464,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2489,7 +2489,7 @@ function DeviceCodeStep({
             idPrefix="device-scope"
           />
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This provider does not accept additional scopes -- they are fixed by
             the upstream client registration.
           </p>
@@ -2512,7 +2512,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2564,7 +2564,7 @@ function DeviceCodeStep({
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+          className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-3 w-3" />
           Back
@@ -2577,7 +2577,7 @@ function DeviceCodeStep({
         />
         <div className="flex flex-col items-center gap-3 py-4">
           <AlertCircle className="h-8 w-8 text-destructive" />
-          <p className="text-12 text-destructive text-center">
+          <p className="text-14 text-destructive text-center">
             {errorMessage}
           </p>
         </div>
@@ -2599,7 +2599,7 @@ function DeviceCodeStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2613,11 +2613,11 @@ function DeviceCodeStep({
       />
 
       <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+        <p className="type-secondary-emphasis uppercase tracking-wider text-muted-foreground">
           Your code
         </p>
         <div className="flex items-center gap-3">
-          <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
+          <code className="type-metric tracking-[0.3em] font-mono text-primary-text">
             {userCode}
           </code>
           <Button
@@ -2643,7 +2643,7 @@ function DeviceCodeStep({
         </Button>
       </div>
 
-      <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
+      <div className="rounded-lg bg-muted p-3 text-14 text-muted-foreground">
         <ol className="list-decimal list-inside space-y-1">
           <li>Click the link above to open the authentication page</li>
           <li>Enter the code shown above</li>
@@ -2651,7 +2651,7 @@ function DeviceCodeStep({
         </ol>
       </div>
 
-      <div className="flex items-center justify-between text-xs text-muted-foreground">
+      <div className="flex items-center justify-between text-13 text-muted-foreground">
         <div className="flex items-center gap-2">
           <Loader2 className="h-3 w-3 animate-spin" />
           <span>Waiting for authentication...</span>
@@ -2725,7 +2725,7 @@ function OAuthCredentialsStep({
       <button
         type="button"
         onClick={onBack}
-        className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
       >
         <ArrowLeft className="h-3 w-3" />
         Back
@@ -2743,7 +2743,7 @@ function OAuthCredentialsStep({
           href={catalogEntry.documentation_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
         >
           How to create an OAuth app
           <ExternalLink className="h-3 w-3" />
@@ -2759,7 +2759,7 @@ function OAuthCredentialsStep({
       )}
 
       {error && (
-        <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+        <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
           {error}
         </div>
       )}
@@ -2832,7 +2832,7 @@ function OwnerPicker({
   return (
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <div className="flex items-center gap-2 type-secondary-emphasis text-muted-foreground">
           <Building2 className="h-3.5 w-3.5" />
           Owner
         </div>
@@ -2840,7 +2840,7 @@ function OwnerPicker({
           <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
         </div>
       </div>
-      <p className="mt-1 text-11 text-muted-foreground">
+      <p className="mt-1 text-13 text-muted-foreground">
         Org-owned services are shared with every admin of that organization and
         can be proxied by its members.
       </p>
@@ -2859,10 +2859,10 @@ function AccessPolicyPicker({
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <Label htmlFor="add-key-admin-only" className="text-xs font-medium">
+          <Label htmlFor="add-key-admin-only">
             Admin-only execution
           </Label>
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Restrict this org-owned service to organization admins.
           </p>
         </div>

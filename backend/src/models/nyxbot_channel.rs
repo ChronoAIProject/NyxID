@@ -59,6 +59,8 @@ pub struct GatewayBotMentionSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_specialist: Option<super::org_channel::Binding>,
     #[serde(default)]
     pub gateway_source: Option<GatewaySource>,
     /// `preparing` admits provider binding only; `ready` permits native turns.

@@ -53,7 +53,7 @@ export function ServiceSavedViews({
           >
             <Bookmark className="size-3.5" aria-hidden="true" />
             Saved views
-            <span className="rounded-full bg-muted px-1.5 text-10 tabular-nums">
+            <span className="rounded-full bg-muted px-1.5 text-12 tabular-nums">
               {view.workspace.views.length}
             </span>
             <ChevronDown className="size-3" aria-hidden="true" />
@@ -64,8 +64,8 @@ export function ServiceSavedViews({
           className="w-96 max-w-[calc(100vw-2rem)] space-y-3"
         >
           <div>
-            <h3 className="text-13 font-semibold">Saved views</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <h3 className="type-card-title">Saved views</h3>
+            <p className="mt-1 text-13 text-muted-foreground">
               Save named filter combinations. The default opens when you return
               to AI Services.
             </p>
@@ -79,7 +79,7 @@ export function ServiceSavedViews({
                 <div className="flex items-center gap-1">
                   <button
                     type="button"
-                    className="min-w-0 flex-1 rounded p-1 text-left text-xs font-medium hover:bg-accent"
+                    className="min-w-0 flex-1 rounded p-1 text-left type-row-title hover:bg-accent"
                     onClick={() => {
                       onRestore(saved.filters, saved.id);
                       setOpen(false);
@@ -94,7 +94,7 @@ export function ServiceSavedViews({
                         />
                       )}
                     </span>
-                    <span className="mt-1 block text-11 font-normal text-muted-foreground">
+                    <span className="mt-1 block type-secondary text-muted-foreground">
                       {view.workspace.default_id === saved.id
                         ? "Default · "
                         : ""}
@@ -153,7 +153,7 @@ export function ServiceSavedViews({
                   </Button>
                 </div>
                 {pendingDelete === saved.id && (
-                  <div className="mt-2 flex items-center gap-2 text-xs">
+                  <div className="mt-2 flex items-center gap-2 text-13">
                     <span>Delete this view?</span>
                     <Button
                       size="sm"
@@ -179,7 +179,7 @@ export function ServiceSavedViews({
             ))}
           </div>
           {view.workspace.views.length === 0 && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               No saved views yet. Set your filters, then save a view below.
             </p>
           )}
@@ -220,7 +220,7 @@ export function ServiceSavedViews({
             {form.formState.errors.name && (
               <p
                 id="service-view-name-error"
-                className="text-xs text-destructive"
+                className="text-13 text-destructive"
               >
                 {form.formState.errors.name.message}
               </p>
@@ -238,18 +238,18 @@ export function ServiceSavedViews({
               Save new view
             </Button>
             {view.workspace.views.length >= 20 && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 You can save up to 20 views.
               </p>
             )}
           </form>
           {!view.canSaveViews && (
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Saving named views requires the updated server.
             </p>
           )}
           {view.saveError && (
-            <p role="alert" className="text-xs text-destructive">
+            <p role="alert" className="text-13 text-destructive">
               {view.saveError}
             </p>
           )}
@@ -258,7 +258,7 @@ export function ServiceSavedViews({
       {active && (
         <span
           role="status"
-          className="inline-flex items-center gap-1.5 text-11 text-muted-foreground"
+          className="inline-flex items-center gap-1.5 text-13 text-muted-foreground"
         >
           <Check className="size-3 text-success" />
           {active.name}

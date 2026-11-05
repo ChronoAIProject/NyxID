@@ -6,6 +6,7 @@ import type {
 } from "./types";
 
 export type BackendApprovalRequestItem = {
+  execution_proposal?: { version: number; state: string; review_path: string; supported?: boolean; can_decide?: boolean } | null;
   id: string;
   service_name: string;
   service_slug: string;
@@ -77,6 +78,7 @@ export function mapBackendRequestToChallenge(
           : "unknown";
   const fromOrgPolicy = item.from_org_policy === true;
   return {
+    execution_proposal: item.execution_proposal,
     id: item.id,
     title: item.service_name.trim() || "Unknown Service",
     action,

@@ -106,7 +106,7 @@ export function FlagOrganizationEditor({
 
   if (!canWrite)
     return (
-      <p className="py-1.5 text-12 text-muted-foreground">
+      <p className="py-1.5 text-14 text-muted-foreground">
         {current.group ?? "Grouped by namespace"} ·{" "}
         {current.tags.length ? current.tags.join(", ") : "No tags"} ·{" "}
         {current.sunset ? "Sunset" : "Active"}
@@ -141,7 +141,7 @@ export function FlagOrganizationEditor({
               <option key={name} value={name} />
             ))}
           </datalist>
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Keep related flags together. Leave blank to use the namespace.
           </p>
         </div>
@@ -158,7 +158,7 @@ export function FlagOrganizationEditor({
           />
           <p
             id={`flag-tags-hint-${flagKey}`}
-            className={`text-11 ${validation.success ? "text-muted-foreground" : "text-destructive"}`}
+            className={`text-13 ${validation.success ? "text-muted-foreground" : "text-destructive"}`}
             role={validation.success ? undefined : "alert"}
           >
             {validation.success
@@ -171,7 +171,7 @@ export function FlagOrganizationEditor({
         <Sunset className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
         <div className="flex-1 space-y-1">
           <Label htmlFor={`flag-sunset-${flagKey}`}>Mark for sunset</Label>
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Hide this flag from the default view while code cleanup is pending.
             Its default and rollout overrides continue to apply. Turn this off
             to restore it to Active.

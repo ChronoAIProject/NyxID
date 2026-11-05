@@ -104,7 +104,7 @@ describe("ApprovalsView", () => {
   it("lists pending approvals from the real listing with their service", async () => {
     mockApi({ pending: [PENDING] });
     render(<ApprovalsView />, { wrapper: createWrapper() });
-    expect(await screen.findByText("Waiting on you")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /Pending \(1\)/ })).toBeInTheDocument();
     expect(screen.getByText("Lark Bot")).toBeInTheDocument();
     expect(
       screen.getByText("Post the drafted summary to #payments-oncall"),
@@ -121,16 +121,22 @@ describe("ApprovalsView", () => {
     mockApi({ pending: [PENDING] });
     render(<ApprovalsView />, { wrapper: createWrapper() });
     expect(await screen.findByText("History")).toBeInTheDocument();
-    // Each entry renders twice: mobile card list + desktop table.
-    expect(await screen.findAllByText("Approved")).toHaveLength(2);
-    expect(screen.getAllByText("Denied")).toHaveLength(2);
-    expect(screen.getAllByText("Expired")).toHaveLength(2);
+    await userEvent.setup().click(screen.getByRole("tab", { name: "History" }));
+    expect(await screen.findAllByText("Approved")).toHaveLength(1);
+    expect(screen.getAllByText("Denied")).toHaveLength(1);
+    expect(screen.getAllByText("Expired")).toHaveLength(1);
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    const rows = screen.getByRole("tabpanel").querySelectorAll('[data-grouped-row]');
+    expect(rows).toHaveLength(3);
+    for (const row of rows) expect(row.querySelector("svg")).not.toBeNull();
+    expect(screen.getByText("Approved")).toHaveClass("workspace-status-success");
+    expect(screen.getByText("Denied")).toHaveClass("workspace-status-destructive");
     // NyxID "push" decisions surface as the mobile channel.
-    expect(screen.getByText("Mobile")).toBeInTheDocument();
+    expect(screen.getByText(/Mobile/)).toBeInTheDocument();
     // The pending request stays in the Waiting section only.
     expect(
-      screen.getAllByText("Post the drafted summary to #payments-oncall"),
-    ).toHaveLength(1);
+      screen.queryByText("Post the drafted summary to #payments-oncall"),
+    ).not.toBeInTheDocument();
   });
 
   it("decides a pending approval through the real endpoint", async () => {
@@ -186,17 +192,32 @@ describe("ApprovalsView", () => {
 
     render(<ApprovalsView />, { wrapper: createWrapper() });
 
-    expect(await screen.findByText("Waiting on you")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /Pending \(2\)/ })).toBeInTheDocument();
     expect(screen.getByText("Post without an expiry")).toBeInTheDocument();
     expect(
       screen.getByText("Post the drafted summary to #payments-oncall"),
     ).toBeInTheDocument();
-    expect(
-      await screen.findAllByText("Decided at an unknown time"),
-    ).toHaveLength(2);
-    const historyRows = within(screen.getByRole("table")).getAllByRole("row");
-    expect(historyRows[1]).toHaveTextContent("Rotate the deploy key");
-    expect(historyRows[2]).toHaveTextContent("Decided at an unknown time");
+    await userEvent.setup().click(screen.getByRole("tab", { name: "History" }));
+    expect(await screen.findAllByText("Decided at an unknown time")).toHaveLength(1);
+    const history = screen.getByRole("tabpanel");
+    const rows = history.querySelectorAll("[data-grouped-row]");
+    expect(rows[0]).toHaveTextContent("Rotate the deploy key");
+    expect(rows[1]).toHaveTextContent("Decided at an unknown time");
+    expect(within(history).getByText("Unknown date")).toBeInTheDocument();
+  });
+
+  it("groups history by local day and sorts actual instants before malformed dates", async () => {
+    const now = new Date();
+    const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+    const requests = [request({ id: "old", status: "approved", action_description: "Yesterday request", decided_at: yesterday.toISOString() }), request({ id: "invalid", status: "expired", action_description: "Malformed date", decided_at: "invalid", created_at: "invalid" }), request({ id: "today", status: "approved", action_description: "Today request", decided_at: now.toISOString() })];
+    mockGet.mockImplementation((url: string) => Promise.resolve(url.startsWith("/notifications/settings") ? { grant_expiry_days: 7 } : listResponse(url.includes("status=pending") ? [] : requests)));
+    render(<ApprovalsView />, { wrapper: createWrapper() });
+    await userEvent.setup().click(await screen.findByRole("tab", { name: "History" }));
+    await screen.findByText("Today request");
+    const groups = screen.getByRole("tabpanel").querySelectorAll("section");
+    expect(groups[0]).toHaveAccessibleName("Today");
+    expect(groups[1]).toHaveAccessibleName("Yesterday");
+    expect(groups[2]).toHaveAccessibleName("Unknown date");
   });
 
   it("stays usable when the listing fails: toast, rendered sections, inline retry", async () => {
@@ -226,7 +247,7 @@ describe("ApprovalsView", () => {
 
     mockApi({ pending: [PENDING] });
     await user.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText("Waiting on you")).toBeInTheDocument();
+    expect(await screen.findByRole("tab", { name: /Pending \(1\)/ })).toBeInTheDocument();
     toastSpy.mockRestore();
   });
 });

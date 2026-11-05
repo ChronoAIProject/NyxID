@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { channelPlatformName } from "@/lib/assistant/nyxbot-labels";
 import { useId, useState } from "react";
 import { useAdminPlatformTargets } from "@/hooks/use-platform-onboarding";
@@ -144,13 +145,13 @@ export function NativePlatformEntrySetup({
           : "Shared entry for another chat platform"
       }
     >
-      <div className="space-y-4 p-4 text-12">
+      <div className="space-y-4 p-4 text-14">
         <p>
           {profile
             ? "Review this entry’s current credentials and transport before updating. Updating pauses both access modes and revokes prior chat authority. Owner routing remains closed; explicitly enable access after verification."
             : "Conversion permanently closes owner routing and starts the shared entry paused. Select the delivery transport explicitly. Discord questions use /nyx ask; Slack and other private-message controls use their supported chat surface."}
         </p>
-        <label className="block space-y-1">
+        <Label className="block space-y-1">
           Chat channel
           <select
             aria-label="Native chat channel"
@@ -169,8 +170,8 @@ export function NativePlatformEntrySetup({
               </option>
             ))}
           </select>
-        </label>
-        <label className="block space-y-1">
+        </Label>
+        <Label className="block space-y-1">
           Delivery transport
           <select
             aria-label="Native delivery transport"
@@ -189,7 +190,7 @@ export function NativePlatformEntrySetup({
               </option>
             ))}
           </select>
-        </label>
+        </Label>
         {bot && !transports.includes("gateway") && (
           <p>
             Gateway transport is unavailable for {bot.platform}. Select direct
@@ -230,7 +231,7 @@ export function NativePlatformEntrySetup({
         </div>
         <details onToggle={(event) => setShowFunding(event.currentTarget.open)}>
           <summary>Replace reviewed credentials or setup funding</summary>
-          <label className="block space-y-1">
+          <Label className="block space-y-1">
             Optional funding organization
             <select
               aria-label="Native funding organization"
@@ -247,28 +248,28 @@ export function NativePlatformEntrySetup({
                 </option>
               ))}
             </select>
-          </label>
+          </Label>
           <p>
             Use a connected credential owned by this channel’s existing owner.
             Leaving these fields empty retains its current credential selection.
           </p>
-          <label>
+          <Label>
             Replacement OAuth connection
             <Input
               aria-label="Native replacement connection"
               value={connectionId}
               onChange={(event) => setConnectionId(event.target.value)}
             />
-          </label>
+          </Label>
           {bot?.platform === "discord" && (
-            <label>
+            <Label>
               Discord public verification key
               <Input
                 aria-label="Native verification public key"
                 value={publicKey}
                 onChange={(event) => setPublicKey(event.target.value)}
               />
-            </label>
+            </Label>
           )}
         </details>
         {reviewedLifecycle && (
@@ -287,9 +288,9 @@ export function NativePlatformEntrySetup({
                   setLifecycleConfirmed(checked ? lifecycleKey : undefined)
                 }
               />
-              <label htmlFor={lifecycleReviewId}>
+              <Label htmlFor={lifecycleReviewId}>
                 I reviewed this entry and its selected replacement credentials.
-              </label>
+              </Label>
             </div>
             <Button
               disabled={
@@ -337,9 +338,9 @@ export function NativePlatformEntrySetup({
                   setConfirmed(checked ? reviewKey : undefined)
                 }
               />
-              <label htmlFor={reviewId}>
+              <Label htmlFor={reviewId}>
                 I reviewed this exact retained setup.
-              </label>
+              </Label>
             </div>
             <Button
               disabled={

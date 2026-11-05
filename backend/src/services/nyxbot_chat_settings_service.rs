@@ -86,15 +86,24 @@ impl AccessSettings {
 }
 
 /// Bound both the walk and mutation. A cap refusal rolls back the channel too.
-pub(crate) async fn update(
+pub(crate) async fn update_as(
     db: &Database,
     row: &NyxbotChannel,
+    manager: &str,
     settings: &AccessSettings,
 ) -> AppResult<u64> {
     settings.validate()?;
-    let context = (db.clone(), row.clone(), settings.clone());
-    super::transaction_service::run_db_only(db, &context, |tx, (db, row, settings)| {
+    let context = (
+        db.clone(),
+        row.clone(),
+        settings.clone(),
+        manager.to_owned(),
+    );
+    super::transaction_service::run_db_only(db, &context, |tx, (db, row, settings, manager)| {
         Box::pin(async move {
+            if row.org_specialist.is_some() {
+                super::org_channel_service::fence_management(db, tx, row, manager).await?;
+            }
             if let Some(org) = row.bot_owner_id.as_deref() {
                 super::org_membership_authority::fence_live_member(db, &row.user_id, tx).await?;
                 // Contend with role changes/revocation, not just a snapshot read.

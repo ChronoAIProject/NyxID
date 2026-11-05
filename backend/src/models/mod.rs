@@ -50,6 +50,8 @@ pub mod device_pubkey_lockout;
 pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
+pub mod execution_permission;
+pub mod execution_proposal;
 pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;
@@ -147,6 +149,7 @@ pub mod assistant_group;
 pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
+pub mod assistant_onboarding;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod assistant_skill_draft_attempt;
@@ -242,3 +245,6 @@ pub mod nyxbot_gateway_release;
 pub mod discord_gateway;
 
 pub mod assistant_delegated_image;
+
+pub mod cma_session_origin;
+pub mod org_channel;

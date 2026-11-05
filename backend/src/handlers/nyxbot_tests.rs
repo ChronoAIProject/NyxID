@@ -29,6 +29,9 @@ mod x_bus_tests;
 
 #[path = "nyxbot_custom_event_tests.rs"]
 mod custom_event_tests;
+#[path = "nyxbot_org_channel_tests.rs"]
+mod org_channel_tests;
+
 #[path = "nyxbot_guest_model_tests.rs"]
 mod guest_model_tests;
 
@@ -292,6 +295,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        org_specialist: None,
         gateway_source: None,
         gateway_native_phase: None,
         gateway_native_activation: None,
@@ -2763,6 +2767,8 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -3287,6 +3293,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            org_specialist: None,
             gateway_source: None,
             gateway_native_phase: None,
             gateway_native_activation: None,
@@ -3832,6 +3839,8 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            execution_enrollment: false,
+            execution_parent: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -3968,6 +3977,7 @@ async fn the_same_question_is_not_worked_on_twice() {
         .unwrap()
         .unwrap();
     let asked_from = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: telegram.id.clone(),

@@ -595,7 +595,7 @@ pub(crate) async fn update_prepared(
                                 doc! {"$set":{"status":"expired"}}).session(&mut *session).await?;
                         db.collection::<bson::Document>(crate::models::approval_grant::COLLECTION_NAME)
                             .update_many(doc! {"requester_type":"api_key","requester_id":&row.credential_api_key_id,"org_scoped":{"$ne":true}},
-                                doc! {"$set":{"revoked":true}}).session(&mut *session).await?;
+                                super::approval_service::revoke_grant_update(Utc::now())).session(&mut *session).await?;
                         let (_, revoked) = engine::delete_in_session(db, owner, &row.id, session).await?;
                         children.extend(revoked);
                         retired.push((row.id, row.agent_id));

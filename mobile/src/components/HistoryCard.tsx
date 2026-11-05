@@ -1,24 +1,25 @@
 import { ServiceIcon } from "./ServiceIcon";
 import { useMemo } from "react";
-import { BlurView } from "expo-blur";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { radius, spacing, typeScale } from "../theme/designTokens";
+import { ChevronRight } from "lucide-react-native";
+import { spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
-import { StatusBadge } from "./StatusBadge";
+import { GroupedCell } from "./GroupedCell";
 import type { ChallengeDetail, ChallengeStatus } from "../lib/api/types";
 
 type HistoryCardProps = {
   item: ChallengeDetail;
+  /** Position in its date group, for the rounded corners and separators. */
+  first?: boolean;
+  last?: boolean;
   onPress?: () => void;
 };
 
-function decisionVariant(
-  status: ChallengeStatus,
-): "decisionApproved" | "decisionDenied" | "decisionExpired" {
-  if (status === "APPROVED") return "decisionApproved";
-  if (status === "DENIED") return "decisionDenied";
-  return "decisionExpired";
+function decisionColor(c: ThemeColors, status: ChallengeStatus): string {
+  if (status === "APPROVED") return c.success;
+  if (status === "DENIED") return c.danger;
+  return c.textMuted;
 }
 
 // DESIGN.md §Interaction Rules: status badges always Title Case.
@@ -59,7 +60,13 @@ function recordedRequester(item: ChallengeDetail): string | undefined {
     : undefined;
 }
 
-export function HistoryCard({ item, onPress }: HistoryCardProps) {
+/** A decided request: an inset-group row with its outcome as the trailing value. */
+export function HistoryCard({
+  item,
+  first = true,
+  last = true,
+  onPress,
+}: HistoryCardProps) {
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -69,115 +76,94 @@ export function HistoryCard({ item, onPress }: HistoryCardProps) {
   const requester = recordedRequester(item);
   const decidedAt = item.decided_at ? formatTime(item.decided_at) : undefined;
   const requestedAt = formatTime(item.created_at);
-  const riskVariant =
-    item.risk_level === "high"
-      ? "riskHigh"
-      : item.risk_level === "medium"
-        ? "riskMedium"
-        : "riskLow";
   const riskLabel =
     item.risk_level.charAt(0).toUpperCase() + item.risk_level.slice(1);
+  const decision = decisionLabel(item.status);
 
   return (
-    <Pressable
-      style={styles.card}
-      onPress={onPress}
-      accessibilityRole={onPress ? "button" : undefined}
-      accessibilityLabel={`${decisionLabel(item.status)}: ${summary}`}
-      accessibilityHint={onPress ? "View approval request details" : undefined}
-    >
-      <View style={styles.chipRow}>
-        <ServiceIcon slug={item.service_slug} size="sm" />
-        <StatusBadge
-          variant={decisionVariant(item.status)}
-          label={decisionLabel(item.status)}
-        />
-        {item.risk_level !== "unknown" ? (
-          <StatusBadge variant={riskVariant} label={`${riskLabel} risk`} />
-        ) : null}
-      </View>
-      <Text style={styles.title} numberOfLines={2}>{item.title}</Text>
-      <Text style={styles.secondary}>
-        {summary}
-      </Text>
-      {requester ? (
-        <Text style={styles.meta}>Requested by {requester}</Text>
-      ) : null}
-      <Text style={styles.meta}>
-        {channel ? `via ${channel} · ` : ""}
-        {decidedAt
-          ? `Decided ${decidedAt}`
-          : requestedAt
-            ? `Requested ${requestedAt}`
-            : "Time not recorded"}
-      </Text>
-    </Pressable>
+    <GroupedCell first={first} last={last}>
+      <Pressable
+        style={({ pressed }) => [
+          styles.row,
+          pressed && onPress && styles.pressed,
+        ]}
+        onPress={onPress}
+        accessibilityRole={onPress ? "button" : undefined}
+        accessibilityLabel={`${decision}: ${summary}`}
+        accessibilityHint={
+          onPress ? "View approval request details" : undefined
+        }
+      >
+        <View style={styles.tile}>
+          <ServiceIcon slug={item.service_slug} size="md" />
+        </View>
+        <View style={styles.body}>
+          <Text style={styles.title} numberOfLines={2}>
+            {item.title}
+          </Text>
+          <Text style={styles.secondary}>{summary}</Text>
+          {requester ? (
+            <Text style={styles.meta}>Requested by {requester}</Text>
+          ) : null}
+          <Text style={styles.meta}>
+            {channel ? `via ${channel} · ` : ""}
+            {decidedAt
+              ? `Decided ${decidedAt}`
+              : requestedAt
+                ? `Requested ${requestedAt}`
+                : "Time not recorded"}
+            {item.risk_level !== "unknown" ? ` · ${riskLabel} risk` : ""}
+          </Text>
+        </View>
+        <Text
+          style={[styles.value, { color: decisionColor(colors, item.status) }]}
+        >
+          {decision}
+        </Text>
+        {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
+      </Pressable>
+    </GroupedCell>
   );
 }
 
+/** A date group's title, in the small caps of an iOS grouped list. */
 export function HistorySectionHeader({ title }: { title: string }) {
-  const { colors, mode } = useTheme();
+  const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-
-  const inner = <Text style={styles.sectionHeader}>{title}</Text>;
-
   return (
-    <View style={styles.sectionHeaderRow}>
-      {mode === "dark" ? (
-        <BlurView intensity={60} tint="dark" style={styles.sectionHeaderBlur}>
-          {inner}
-        </BlurView>
-      ) : (
-        <View style={styles.sectionHeaderBlur}>{inner}</View>
-      )}
-    </View>
+    <Text accessibilityRole="header" style={styles.sectionHeader}>
+      {title.toUpperCase()}
+    </Text>
   );
 }
 
 const createStyles = (c: ThemeColors) =>
   StyleSheet.create({
-    card: {
-      // DESIGN.md §Border Radius: cards = rounded-xl (12px); 50%-opacity border.
-      borderRadius: radius.lg,
-      backgroundColor: c.card,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      padding: spacing.xxl,
-      gap: spacing.xs,
-    },
-    chipRow: {
+    row: {
       flexDirection: "row",
-      flexWrap: "wrap",
-      gap: spacing.xs,
+      alignItems: "center",
+      gap: spacing.lg,
+      minHeight: 52,
+      paddingHorizontal: spacing.xxl,
+      paddingVertical: spacing.md,
     },
-    title: {
-      ...typeScale.title,
-      color: c.textPrimary,
+    pressed: { backgroundColor: c.navActive },
+    tile: {
+      width: 30,
+      alignSelf: "flex-start",
+      alignItems: "center",
+      paddingTop: 2,
     },
-    secondary: {
-      ...typeScale.label,
-      color: c.textSecondary,
-    },
-    meta: {
-      ...typeScale.small,
-      color: c.textMuted,
-    },
-    sectionHeaderRow: {
-      flexDirection: "row",
-      marginBottom: spacing.sm,
-      marginTop: spacing.xs,
-    },
-    sectionHeaderBlur: {
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.xs,
-      borderRadius: radius.pill,
-      overflow: "hidden",
-      backgroundColor: c.cardSoft,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-    },
+    body: { flex: 1, minWidth: 0, gap: 2 },
+    // DESIGN.md: Activity rows lead with the service name at 15px.
+    title: { ...typeScale.title, color: c.textPrimary },
+    secondary: { ...typeScale.label, color: c.textSecondary },
+    meta: { ...typeScale.small, color: c.textMuted },
+    value: { ...typeScale.label, flexShrink: 0 },
     sectionHeader: {
-      ...typeScale.overline,
-      color: c.textSecondary,
+      ...typeScale.small,
+      letterSpacing: 0.6,
+      color: c.textMuted,
+      paddingHorizontal: spacing.xxl,
     },
   });

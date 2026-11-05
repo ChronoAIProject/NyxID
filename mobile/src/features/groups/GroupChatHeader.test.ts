@@ -85,6 +85,7 @@ function setup({
       ChatHeaderFrame: "ChatHeaderFrame",
       ChatIdentity: "ChatIdentity",
     },
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "Stack",
@@ -514,5 +515,18 @@ test("a legacy crew still requires an agent recipient", () => {
   input().props.onChangeText("hello");
   h.flush();
   assert.equal(submit().props.disabled, true);
+  h.unmount();
+});
+
+test("a crew's first load shows a transcript skeleton", () => {
+  const { h, chat } = setup();
+  chat.isPending = true;
+  h.render();
+  const list = nodes(h.value()).find((n) => n.type === "FlatList")!;
+  assert.equal(list.props.ListEmptyComponent.type, "SkeletonRows");
+  assert.equal(
+    list.props.ListEmptyComponent.props.accessibilityLabel,
+    "Loading crew",
+  );
   h.unmount();
 });

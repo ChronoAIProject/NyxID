@@ -22,7 +22,7 @@ export function GrantRevokeDescription({
         reclaimed. Other allocations and purchased credits are unaffected. This
         cannot be undone.
       </span>
-      <span className="block break-all text-11">
+      <span className="block break-all text-13">
         Allocation {grant.id} · created{" "}
         {new Date(grant.created_at).toLocaleString()}
       </span>

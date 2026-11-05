@@ -702,7 +702,23 @@ pub async fn send_approval_notification(
     request: &ApprovalRequest,
     org_name: Option<&str>,
 ) -> AppResult<NotificationResult> {
-    let channel = get_or_create_channel(db, user_id).await?;
+    let proposal = request.execution_proposal.is_some();
+    let channel = if proposal {
+        let Some(channel) = db
+            .collection::<NotificationChannel>(COLLECTION_NAME)
+            .find_one(doc! {"user_id":user_id})
+            .await?
+        else {
+            return Ok(NotificationResult {
+                channels: Vec::new(),
+                telegram_chat_id: None,
+                telegram_message_id: None,
+            });
+        };
+        channel
+    } else {
+        get_or_create_channel(db, user_id).await?
+    };
 
     // Only treat `org_name` as meaningful when the request itself carries
     // the org-policy flag. This keeps the "from_org_policy is the
@@ -730,29 +746,48 @@ pub async fn send_approval_notification(
                 .as_deref()
                 .unwrap_or(&request.requester_type);
 
-            match telegram_service::send_approval_message(
-                http_client,
-                bot_token,
-                chat_id,
-                &request.id,
-                &request.service_name,
-                &request.service_slug,
-                requester_label,
-                request
-                    .action_description
-                    .as_deref()
-                    .unwrap_or(&request.operation_summary),
-                channel.approval_timeout_secs,
-                effective_org_name,
-            )
-            .await
-            {
-                Ok(message_id) => {
-                    channels_used.push("telegram".to_string());
+            if proposal {
+                let link = format!(
+                    "{}{}",
+                    config.frontend_url.trim_end_matches('/'),
+                    super::assistant_links::AssistantPage::Approvals.path()
+                );
+                let text = format!(
+                    "An execution permission needs your review. Open the web app: {}",
+                    html_escape(&link)
+                );
+                if telegram_service::send_text_message(http_client, bot_token, chat_id, &text)
+                    .await
+                    .is_ok()
+                {
+                    channels_used.push("telegram".into());
                     telegram_chat_id = Some(chat_id);
-                    telegram_message_id = Some(message_id);
                 }
-                Err(e) => tracing::warn!("Telegram notification failed: {e}"),
+            } else {
+                match telegram_service::send_approval_message(
+                    http_client,
+                    bot_token,
+                    chat_id,
+                    &request.id,
+                    &request.service_name,
+                    &request.service_slug,
+                    requester_label,
+                    request
+                        .action_description
+                        .as_deref()
+                        .unwrap_or(&request.operation_summary),
+                    channel.approval_timeout_secs,
+                    effective_org_name,
+                )
+                .await
+                {
+                    Ok(message_id) => {
+                        channels_used.push("telegram".to_string());
+                        telegram_chat_id = Some(chat_id);
+                        telegram_message_id = Some(message_id);
+                    }
+                    Err(e) => tracing::warn!("Telegram notification failed: {e}"),
+                }
             }
         }
     }
@@ -768,14 +803,23 @@ pub async fn send_approval_notification(
             "deeplink".to_string(),
             format!("nyxid://challenge/{}", request.id),
         );
-        if let Some(method) = &request.http_method {
-            data.insert("http_method".to_string(), method.clone());
-        }
-        if let Some(resource) = &request.resource {
-            data.insert("resource".to_string(), resource.clone());
-        }
-        if let Some(verb) = &request.verb {
-            data.insert("verb".to_string(), verb.clone());
+        if proposal {
+            data.insert("decision_kind".into(), "execution_permission".into());
+            data.insert("can_decide".into(), "false".into());
+            data.insert(
+                "review_path".into(),
+                super::assistant_links::AssistantPage::Approvals.path(),
+            );
+        } else {
+            if let Some(method) = &request.http_method {
+                data.insert("http_method".to_string(), method.clone());
+            }
+            if let Some(resource) = &request.resource {
+                data.insert("resource".to_string(), resource.clone());
+            }
+            if let Some(verb) = &request.verb {
+                data.insert("verb".to_string(), verb.clone());
+            }
         }
         // When the request is created under an org policy, inject the
         // org context so the mobile app can render the org badge on

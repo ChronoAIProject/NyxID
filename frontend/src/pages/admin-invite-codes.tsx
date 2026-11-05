@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -278,7 +279,7 @@ export function AdminInviteCodesPage() {
         actions={null}
       />
       {publicConfig?.invite_code_required === false && (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           Invitation codes are currently not required for signup. Enable the
           invitation-code feature flag to require them again.
         </p>
@@ -314,10 +315,10 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   Failed to load invite codes
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Please try again later.
                 </p>
               </div>
@@ -326,10 +327,10 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   No invite codes found
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Create one to allow a new user to register.
                 </p>
               </div>
@@ -352,7 +353,7 @@ export function AdminInviteCodesPage() {
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium font-mono text-foreground truncate">
+                        <p className="type-row-title font-mono text-foreground truncate">
                           {ic.code}
                         </p>
                       </div>
@@ -404,7 +405,7 @@ export function AdminInviteCodesPage() {
                         </DropdownMenu>
                       </div>
                     </div>
-                    <div className="mt-2 text-xs text-muted-foreground">
+                    <div className="mt-2 text-13 text-muted-foreground">
                       <span className="tabular-nums">
                         {String(ic.used_count)}/{String(ic.max_uses)} uses
                       </span>
@@ -415,7 +416,7 @@ export function AdminInviteCodesPage() {
                         </>
                       )}
                     </div>
-                    <div className="mt-1.5 text-xs text-muted-foreground">
+                    <div className="mt-1.5 text-13 text-muted-foreground">
                       <span>Created {formatDate(ic.created_at)}</span>
                     </div>
                   </div>
@@ -449,19 +450,19 @@ export function AdminInviteCodesPage() {
                         )}
                       >
                         <TableCell>
-                          <span className="font-mono text-sm font-medium text-foreground">
+                          <span className="font-mono type-row-title text-foreground">
                             {ic.code}
                           </span>
                         </TableCell>
                         <TableCell>
-                          <span className="text-sm tabular-nums text-muted-foreground">
+                          <span className="text-14 tabular-nums text-muted-foreground">
                             {String(ic.used_count)}/{String(ic.max_uses)}
                           </span>
                         </TableCell>
                         <TableCell>{getStatusBadge(ic)}</TableCell>
                         <TableCell>
                           {ic.note ? (
-                            <span className="text-11 text-text-tertiary">
+                            <span className="text-13 text-text-tertiary">
                               {ic.note}
                             </span>
                           ) : (
@@ -540,10 +541,10 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">
+                <p className="type-row-title text-muted-foreground">
                   Failed to load invite codes
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Please try again later.
                 </p>
               </div>
@@ -583,11 +584,11 @@ export function AdminInviteCodesPage() {
           {createdCode ? (
             <div className="space-y-4">
               <div className="rounded-md border border-border bg-muted/30 p-4">
-                <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
+                <p className="mb-2 text-13 uppercase tracking-wider text-text-tertiary">
                   Invite code
                 </p>
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-mono text-lg font-medium text-foreground">
+                  <span className="font-mono type-card-title text-foreground">
                     {createdCode.code}
                   </span>
                   <Button
@@ -613,7 +614,7 @@ export function AdminInviteCodesPage() {
                     )}
                   </Button>
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">
+                <p className="mt-2 text-13 text-muted-foreground">
                   Up to {String(createdCode.max_uses)} registrations.
                 </p>
               </div>
@@ -650,7 +651,7 @@ export function AdminInviteCodesPage() {
                           ref={field.ref}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Maximum number of registrations this code can grant
                         (1-1000).
                       </p>
@@ -671,7 +672,7 @@ export function AdminInviteCodesPage() {
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Optional reminder of who this code is for. Visible to
                         admins only.
                       </p>
@@ -812,9 +813,9 @@ export function AdminInviteCodesPage() {
                 </div>
               </SheetHeader>
 
-              <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-sm">
+              <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-14">
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
+                  <p className="text-13 uppercase tracking-wider text-text-tertiary">
                     Uses
                   </p>
                   <p className="mt-1 tabular-nums">
@@ -823,7 +824,7 @@ export function AdminInviteCodesPage() {
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
+                  <p className="text-13 uppercase tracking-wider text-text-tertiary">
                     Created
                   </p>
                   <p className="mt-1 text-muted-foreground">
@@ -831,7 +832,7 @@ export function AdminInviteCodesPage() {
                   </p>
                 </div>
                 <div className="col-span-2">
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
+                  <p className="text-13 uppercase tracking-wider text-text-tertiary">
                     Created by
                   </p>
                   {(() => {
@@ -852,15 +853,15 @@ export function AdminInviteCodesPage() {
                       <>
                         <p
                           className={cn(
-                            "mt-1 truncate text-sm text-foreground",
+                            "mt-1 truncate text-14 text-foreground",
                             isUuidFallback &&
-                              "font-mono text-xs text-muted-foreground",
+                              "font-mono text-13 text-muted-foreground",
                           )}
                         >
                           {primary}
                         </p>
                         {showEmailLine && (
-                          <p className="truncate text-xs text-muted-foreground">
+                          <p className="truncate text-13 text-muted-foreground">
                             {creator.email}
                           </p>
                         )}
@@ -871,12 +872,11 @@ export function AdminInviteCodesPage() {
               </div>
 
               <div className="space-y-2">
-                <label
+                <Label
                   htmlFor="invite-code-note"
-                  className="text-sm font-medium"
                 >
                   Note
-                </label>
+                </Label>
                 <Input
                   id="invite-code-note"
                   value={noteDraft}
@@ -886,7 +886,7 @@ export function AdminInviteCodesPage() {
                   readOnly={!canWrite}
                 />
                 <div className="flex items-center justify-between">
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {canWrite
                       ? "Visible to admins only. Leave blank to clear."
                       : "Read-only — only admins can edit notes."}
@@ -906,13 +906,13 @@ export function AdminInviteCodesPage() {
 
               <div className="space-y-3">
                 <div className="flex items-baseline justify-between">
-                  <h3 className="text-sm font-medium">Redemptions</h3>
-                  <span className="text-xs text-muted-foreground">
+                  <h3 className="type-row-title">Redemptions</h3>
+                  <span className="text-13 text-muted-foreground">
                     {selectedCode.usages.length} total
                   </span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-11 text-text-tertiary">
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-13 text-text-tertiary">
                     No redemptions yet.
                   </div>
                 ) : (
@@ -931,22 +931,22 @@ export function AdminInviteCodesPage() {
                           className="flex items-start justify-between gap-4 px-3 py-2"
                         >
                           <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm text-foreground">
+                            <p className="truncate text-14 text-foreground">
                               {primary}
                             </p>
                             {showEmailLine && (
-                              <p className="truncate text-xs text-muted-foreground">
+                              <p className="truncate text-13 text-muted-foreground">
                                 {usage.user_email}
                               </p>
                             )}
                             {usage.user_email === null &&
                               usage.user_display_name === null && (
-                                <p className="truncate font-mono text-xs text-muted-foreground">
+                                <p className="truncate font-mono text-13 text-muted-foreground">
                                   account deleted
                                 </p>
                               )}
                           </div>
-                          <span className="shrink-0 text-xs text-muted-foreground">
+                          <span className="shrink-0 text-13 text-muted-foreground">
                             {formatDate(usage.used_at)}
                           </span>
                         </li>
@@ -973,7 +973,7 @@ function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
   // A deleted account loses its users join, leaving both fields null.
   if (email === null) {
     return (
-      <span className="font-mono text-xs text-muted-foreground">
+      <span className="font-mono text-13 text-muted-foreground">
         account deleted
       </span>
     );
@@ -983,7 +983,7 @@ function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
     <Link
       to="/admin/users/$userId"
       params={{ userId }}
-      className="inline-flex items-center gap-1 text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer"
+      className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer"
     >
       <span className="truncate max-w-[200px]">{displayName || email}</span>
       <ArrowUpRight className="h-3 w-3 shrink-0" />
@@ -1012,10 +1012,10 @@ function InviteCodesByUserView({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-12 font-medium text-muted-foreground">
+          <p className="type-row-title text-muted-foreground">
             No redemptions found
           </p>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Invite codes will appear here once they are redeemed by users.
           </p>
         </div>
@@ -1043,7 +1043,7 @@ function InviteCodesByUserView({
                   displayName={r.userDisplayName}
                 />
                 {r.userDisplayName && r.userEmail && (
-                  <p className="truncate text-xs text-muted-foreground max-w-[250px]">
+                  <p className="truncate text-13 text-muted-foreground max-w-[250px]">
                     {r.userEmail}
                   </p>
                 )}
@@ -1051,13 +1051,13 @@ function InviteCodesByUserView({
               <button
                 type="button"
                 onClick={() => onOpenCode(r.codeId)}
-                className="font-mono text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
+                className="font-mono type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer shrink-0 text-left focus:outline-none"
                 disabled={isSaving}
               >
                 {r.code}
               </button>
             </div>
-            <div className="mt-2 text-xs text-muted-foreground flex items-center justify-between">
+            <div className="mt-2 text-13 text-muted-foreground flex items-center justify-between">
               <div className="truncate flex-1 min-w-0 mr-4 text-left">
                 {r.note ? (
                   <span>{r.note}</span>
@@ -1107,7 +1107,7 @@ function InviteCodesByUserView({
                   <button
                     type="button"
                     onClick={() => onOpenCode(r.codeId)}
-                    className="font-mono text-sm font-medium text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
+                    className="font-mono type-row-title text-primary-text hover:underline underline-offset-2 cursor-pointer text-left focus:outline-none"
                     disabled={isSaving}
                   >
                     {r.code}
@@ -1115,7 +1115,7 @@ function InviteCodesByUserView({
                 </TableCell>
                 <TableCell>
                   {r.note ? (
-                    <span className="text-11 text-text-tertiary">
+                    <span className="text-13 text-text-tertiary">
                       {r.note}
                     </span>
                   ) : (

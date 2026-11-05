@@ -118,7 +118,7 @@ export function UserCredentialsDialog({
         </DialogHeader>
 
         {isLoading ? (
-          <div className="py-8 text-center text-12 text-muted-foreground">
+          <div className="py-8 text-center text-14 text-muted-foreground">
             Loading...
           </div>
         ) : (
@@ -137,7 +137,7 @@ export function UserCredentialsDialog({
                 href={provider.documentation_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-12 text-primary-text hover:underline"
+                className="inline-flex items-center gap-1.5 type-row-title text-primary-text hover:underline"
               >
                 How to create an OAuth app
                 <ExternalLink className="h-3 w-3" />
@@ -150,7 +150,7 @@ export function UserCredentialsDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -187,7 +187,7 @@ export function UserCredentialsDialog({
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Leave blank for public clients that do not use a client
                         secret.
                       </p>
@@ -276,9 +276,9 @@ function ExistingCredentialsInfo({
   if (!credentials?.has_credentials) return null;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-12">
+    <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-14">
       <Badge variant="success">Configured</Badge>
-      <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
+      <div className="flex flex-col gap-0.5 text-13 text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}
         {credentials.updated_at && (
           <span>Updated {formatDate(credentials.updated_at)}</span>

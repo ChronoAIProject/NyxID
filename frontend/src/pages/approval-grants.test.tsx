@@ -343,9 +343,7 @@ describe("ApprovalGrantsPage", () => {
   });
 
   it("explains dominant org policies and links members to policy settings", () => {
-    fixtures.dominantOrgPolicies = [
-      { org_id: "org-1", service_id: "svc-1" },
-    ];
+    fixtures.dominantOrgPolicies = [{ org_id: "org-1", service_id: "svc-1" }];
 
     render(<ApprovalGrantsPage />);
 
@@ -437,4 +435,54 @@ describe("ApprovalGrantsPage", () => {
       });
     });
   });
+});
+
+it("inspects an enduring execution permission without showing the TTL sentinel and revokes it", async () => {
+  fixtures.grants = [
+    makeGrant({
+      id: "execution-grant",
+      expires_at: "9999-12-31T23:59:59Z",
+      execution: {
+        supported: true,
+        validity: "persistent",
+        valid_until: null,
+        source_review_path: "/assistant?conversation=source&card=request",
+        review: {
+          agent: "Researcher",
+          connection: "My exact account",
+          operation: "GET /status",
+          audience: "This conversation",
+          scope: "Only this path",
+          inputs: "{}",
+          existing_permission: "No covering permission",
+          added_permission: "Personal review",
+          reusable_unavailable: null,
+        },
+        last_dispatched_at: null,
+      },
+    }),
+  ];
+  fixtures.total = 1;
+  render(<ApprovalGrantsPage />);
+  expect(screen.getAllByText(/Until revoked or binding changes/)).toHaveLength(
+    2,
+  );
+  expect(screen.queryByText(/9999/)).not.toBeInTheDocument();
+  expect(screen.getAllByText("My exact account")).toHaveLength(2);
+  expect(
+    screen.getAllByRole("link", { name: "View source permission request" })[0],
+  ).toHaveAttribute("href", "/assistant?conversation=source&card=request");
+  await userEvent.click(
+    screen.getAllByRole("button", { name: "Revoke grant for OpenAI" })[0]!,
+  );
+  await userEvent.click(
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Revoke Grant",
+    }),
+  );
+  await waitFor(() =>
+    expect(mockRevokeMutateAsync).toHaveBeenCalledWith({
+      grantId: "execution-grant",
+    }),
+  );
 });

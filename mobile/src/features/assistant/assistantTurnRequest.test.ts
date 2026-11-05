@@ -76,3 +76,29 @@ test("native new turns use the server default and strip legacy selection fields"
     text: "Hello",
   });
 });
+
+test("a continuation names its allowed card only inside an existing chat", () => {
+  const card = "d9428888-122b-41e1-b85c-61cd3cbb3210";
+  assert.deepEqual(
+    assistantTurnBody({
+      conversationId: id,
+      text: "Confirmed: done. Retry it now.",
+      acknowledgementId: card,
+    }),
+    {
+      conversation_id: id,
+      text: "Confirmed: done. Retry it now.",
+      acknowledgement_id: card,
+    },
+  );
+  assert.throws(() =>
+    assistantTurnBody({ text: "Continue", acknowledgementId: card }),
+  );
+  assert.throws(() =>
+    assistantTurnBody({
+      conversationId: id,
+      text: "Continue",
+      acknowledgementId: "not-a-uuid",
+    }),
+  );
+});

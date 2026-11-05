@@ -105,12 +105,12 @@ export function BillingActivity() {
             onRetry={() => void activity.refetch()}
           />
         ) : points.length === 0 ? (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             No agent activity in this window.
           </p>
         ) : (
           <>
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-11">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-13">
               <p className="font-mono tabular-nums">
                 {number(requests)} requests · {number(errors)} errors
               </p>
@@ -146,7 +146,7 @@ export function BillingActivity() {
                     axisLine={false}
                     tickFormatter={dateLabel}
                     tick={{
-                      fontSize: 10,
+                      fontSize: "var(--text-13)",
                       fill: "var(--color-muted-foreground)",
                     }}
                     interval="preserveStartEnd"
@@ -181,7 +181,7 @@ export function BillingActivity() {
                 </LineChart>
               </ChartContainer>
             </div>
-            <details className="mt-3 text-11">
+            <details className="mt-3 text-13">
               <summary className="text-muted-foreground">
                 View daily values
               </summary>

@@ -262,6 +262,7 @@ async fn call(f: &Fixture, id: &str, mcp: bool) -> crate::errors::AppResult<u16>
         .unwrap();
     let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &request())?;
     let context = mcp_service::McpExecContext {
+        execution_permission: None,
         assistant_chat: f.auth.api_key_id.as_ref().map(|_| &f.chat),
         response_body_limit: None,
         actor_user_id: None,

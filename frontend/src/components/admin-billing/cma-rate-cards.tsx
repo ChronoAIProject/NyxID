@@ -37,7 +37,7 @@ export function CmaRateCards({ canWrite }: { readonly canWrite: boolean }) {
     <Card>
       <CardHeader>
         <CardTitle>CMA Sandbox rates</CardTitle>
-        <p className="text-12 text-muted-foreground">
+        <p className="type-body text-muted-foreground">
           Prices apply to allocated CPU, RAM and retained disk. Publishing a
           rate does not enable billing. Use Feature Flags to enable CMA billing
           globally or for selected people.
@@ -123,7 +123,7 @@ function PublishForm({ latest }: { readonly latest: CmaRateCard }) {
         }}
         className="space-y-4"
       >
-        <p className="text-12 text-muted-foreground">
+        <p className="type-body text-muted-foreground">
           Publish a new version with at least 301 seconds’ notice. Existing
           charges keep their original rates. Sandboxes need a fresh quote and
           authorized operation at the price change.

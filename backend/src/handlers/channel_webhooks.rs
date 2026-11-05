@@ -1952,6 +1952,7 @@ mod tests {
         };
 
         let api_key = crate::models::api_key::ApiKey {
+            permission_policy_id: None,
             id: api_key_id.clone(),
             user_id: user_id.clone(),
             name: "agent".to_string(),

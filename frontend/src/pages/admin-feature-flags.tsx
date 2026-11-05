@@ -63,7 +63,7 @@ import {
 } from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite, canCreateFeatureFlags } from "@/types/api";
-import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { isGlobalOnlyFlag } from "@/lib/feature-flags";
 import { FlagOrganizationEditor } from "@/components/admin/feature-flags/flag-organization-editor";
 import {
   FlagBrowserControls,
@@ -390,7 +390,7 @@ export function AdminFeatureFlagsPage() {
 
       {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-20 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/30 bg-card px-3 py-2 shadow-sm">
-          <span className="flex items-center gap-2 text-12 font-medium text-foreground">
+          <span className="flex items-center gap-2 type-row-title text-foreground">
             <span
               aria-hidden
               className="size-1.5 shrink-0 rounded-full bg-warning"
@@ -435,7 +435,7 @@ export function AdminFeatureFlagsPage() {
                 : view === "sunset"
                   ? "Sunset"
                   : "All flags"}
-              <span className="text-11 tabular-nums text-text-tertiary">
+              <span className="text-13 tabular-nums text-text-tertiary">
                 {lifecycleCounts[view]}
               </span>
             </TabsTrigger>
@@ -462,14 +462,14 @@ export function AdminFeatureFlagsPage() {
             {error && data && (
               <p
                 role="alert"
-                className="flex items-center gap-2 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-12 text-destructive"
+                className="flex items-center gap-2 border-b border-destructive/25 bg-destructive/5 px-3 py-2.5 text-14 text-destructive"
               >
                 <AlertTriangle className="size-4 shrink-0" aria-hidden />
                 Unable to refresh feature flags. Your drafts are retained.
               </p>
             )}
             {lifecycle === "sunset" && (
-              <p className="flex items-start gap-2 border-b border-warning/30 bg-warning/5 px-3 py-2.5 text-12 text-muted-foreground">
+              <p className="flex items-start gap-2 border-b border-warning/30 bg-warning/5 px-3 py-2.5 text-14 text-muted-foreground">
                 <Sunset
                   className="mt-0.5 size-4 shrink-0 text-warning"
                   aria-hidden
@@ -479,7 +479,7 @@ export function AdminFeatureFlagsPage() {
               </p>
             )}
             {hiddenSunsetMatches > 0 && hasFilters && (
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-warning/30 bg-warning/5 px-3 py-1.5 text-12 text-muted-foreground">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-warning/30 bg-warning/5 px-3 py-1.5 text-14 text-muted-foreground">
                 <span className="flex items-center gap-2">
                   <Sunset
                     className="size-4 shrink-0 text-warning"
@@ -655,7 +655,7 @@ function CreateFlagForm({
             disabled={create.isPending}
           />
           {form.formState.errors.key && (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {form.formState.errors.key.message}
             </p>
           )}
@@ -669,7 +669,7 @@ function CreateFlagForm({
             disabled={create.isPending}
           />
           {form.formState.errors.description && (
-            <p role="alert" className="text-12 text-destructive">
+            <p role="alert" className="text-14 text-destructive">
               {form.formState.errors.description.message}
             </p>
           )}
@@ -798,7 +798,7 @@ function FlagTableRows({
         <TableRow className="bg-muted/30 hover:bg-muted/30">
           <TableCell
             colSpan={FLAG_TABLE_COLUMNS}
-            className="py-1.5 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+            className="py-1.5 type-group-label uppercase tracking-[1.5px] text-text-tertiary"
           >
             {section.label}
             <span className="ml-2 font-normal tabular-nums">
@@ -830,14 +830,14 @@ function FlagTableRows({
                   onClick={onToggle}
                   aria-expanded={open}
                   aria-controls={editorId}
-                  className="rounded-sm text-left font-mono text-13 font-semibold text-foreground [overflow-wrap:anywhere] underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                  className="rounded-sm text-left font-mono type-card-title text-foreground [overflow-wrap:anywhere] underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
                 >
                   <BreakableKey value={flag.key} />
                 </button>
                 {flag.sunset && <Badge variant="warning">Sunset</Badge>}
               </div>
               <p
-                className="line-clamp-1 break-words text-12 text-muted-foreground"
+                className="line-clamp-1 break-words text-14 text-muted-foreground"
                 title={flag.description}
               >
                 {flag.description}
@@ -906,7 +906,7 @@ function FlagTableRows({
               ))}
               {flag.tags.length > shownTags.length && (
                 <span
-                  className="text-11 text-text-tertiary"
+                  className="text-13 text-text-tertiary"
                   title={flag.tags.join(", ")}
                 >
                   +{flag.tags.length - shownTags.length}
@@ -992,7 +992,7 @@ function FlagTableRows({
                 />
               </Group>
 
-              {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+              {!isGlobalOnlyFlag(flag.key) && (
                 <Group label="By organization">
                   {canWrite && (
                     <AccountSearchPicker
@@ -1028,7 +1028,7 @@ function FlagTableRows({
                 </Group>
               )}
 
-              {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
+              {!isGlobalOnlyFlag(flag.key) && (
                 <Group label="By user">
                   {canWrite && (
                     <AccountSearchPicker
@@ -1158,13 +1158,13 @@ function FlagMetadataEditor({
 
   if (!canWrite) {
     return (
-      <dl className="space-y-2 text-12">
+      <dl className="space-y-2 text-14">
         <div className="space-y-0.5">
-          <dt className="text-11 text-muted-foreground">Description</dt>
+          <dt className="text-13 text-muted-foreground">Description</dt>
           <dd className="text-foreground">{flag.description}</dd>
         </div>
         <div className="space-y-0.5">
-          <dt className="text-11 text-muted-foreground">Owner</dt>
+          <dt className="text-13 text-muted-foreground">Owner</dt>
           <dd className={cn(!flag.owner && "text-muted-foreground")}>
             {flag.owner ?? "Unassigned"}
           </dd>
@@ -1190,7 +1190,6 @@ function FlagMetadataEditor({
       <div className="space-y-1">
         <Label
           htmlFor={`flag-description-${flag.key}`}
-          className="text-11 font-normal"
         >
           Description — what this flag controls
         </Label>
@@ -1201,13 +1200,12 @@ function FlagMetadataEditor({
           maxLength={MAX_FEATURE_FLAG_DESCRIPTION_LENGTH}
           onChange={(event) => setDescription(event.target.value)}
           placeholder={flag.codeDescription}
-          className="h-8 text-12"
+          className="h-8 text-14"
         />
       </div>
       <div className="space-y-1">
         <Label
           htmlFor={`flag-owner-${flag.key}`}
-          className="text-11 font-normal"
         >
           Owner — who to ask about it
         </Label>
@@ -1218,11 +1216,11 @@ function FlagMetadataEditor({
           maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
           onChange={(event) => setOwner(event.target.value)}
           placeholder="Unassigned — e.g. Platform team"
-          className="h-8 text-12"
+          className="h-8 text-14"
         />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {flag.customDescription == null
             ? "Using the original description."
             : flag.metadataUpdatedAt
@@ -1345,17 +1343,17 @@ function AccountSearchPicker({
           aria-label={
             isOrg ? "Search organizations by name" : "Search users by email"
           }
-          className="h-8 pl-8 text-12"
+          className="h-8 pl-8 text-14"
         />
       </div>
       {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
+            <p className="px-3 py-2 text-13 text-muted-foreground">
               Searching…
             </p>
           ) : results.length === 0 ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
+            <p className="px-3 py-2 text-13 text-muted-foreground">
               {isOrg
                 ? "No organizations match this search."
                 : "No users match this search."}
@@ -1375,11 +1373,11 @@ function AccountSearchPicker({
         showDefaults && (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
             {defaultsLoading ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">
+              <p className="px-3 py-2 text-13 text-muted-foreground">
                 Loading…
               </p>
             ) : defaults.length === 0 ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">
+              <p className="px-3 py-2 text-13 text-muted-foreground">
                 {isOrg
                   ? "No organizations to suggest."
                   : "No users to suggest."}
@@ -1395,7 +1393,7 @@ function AccountSearchPicker({
                   />
                 ))}
                 {hasMoreSuggestions && (
-                  <p className="border-t border-border/40 px-3 py-2 text-11 text-muted-foreground">
+                  <p className="border-t border-border/40 px-3 py-2 text-13 text-muted-foreground">
                     More accounts — keep typing to narrow
                   </p>
                 )}
@@ -1423,7 +1421,7 @@ function AccountOption({
       // Suppress the input's blur so the click lands before the dropdown closes.
       onMouseDown={(event) => event.preventDefault()}
       onClick={() => onPick(account)}
-      className="block w-full border-b border-border/40 px-3 py-2 text-left text-xs last:border-b-0 hover:bg-muted/50"
+      className="block w-full border-b border-border/40 px-3 py-2 text-left text-13 last:border-b-0 hover:bg-muted/50"
     >
       <span className="block truncate font-medium">
         {accountLabel(account, isOrg)}
@@ -1468,13 +1466,13 @@ function FlagsEmptyState({
       <div>
         <p
           className={cn(
-            "text-sm font-medium",
+            "type-row-title ",
             error ? "text-destructive" : "text-foreground",
           )}
         >
           {title}
         </p>
-        <p className="text-xs text-muted-foreground">{subtitle}</p>
+        <p className="text-13 text-muted-foreground">{subtitle}</p>
       </div>
     </div>
   );
@@ -1489,7 +1487,7 @@ function Group({
 }) {
   return (
     <div className="grid gap-2 border-t border-border/40 pt-4 first:border-t-0 first:pt-0 sm:grid-cols-[8rem_minmax(0,1fr)] sm:gap-4">
-      <p className="text-11 font-semibold text-text-tertiary sm:pt-1.5">
+      <p className="type-secondary-strong text-text-tertiary sm:pt-1.5">
         {label}
       </p>
       <div className="min-w-0">{children}</div>
@@ -1517,7 +1515,7 @@ function ScopeRow({
         pending && "bg-primary/[0.07]",
       )}
     >
-      <span className="flex min-w-0 items-center gap-1.5 text-12 font-medium text-foreground">
+      <Label asChild><span className="flex min-w-0 items-center gap-1.5 text-foreground">
         {/* Dot slot is always reserved so labels don't shift when a row
             becomes pending; only its color/visibility changes. */}
         <span
@@ -1528,13 +1526,13 @@ function ScopeRow({
           )}
         />
         <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
-      </span>
+      </span></Label>
       <Select
         value={state}
         disabled={disabled}
         onValueChange={(s) => onChange(s as ScopeState)}
       >
-        <SelectTrigger className="h-7 w-30 shrink-0 text-12" aria-label={label}>
+        <SelectTrigger className="h-7 w-30 shrink-0 text-14" aria-label={label}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

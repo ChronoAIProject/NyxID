@@ -210,7 +210,7 @@ export function UpstreamScopePicker({
 
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-xs">Scopes</Label>
+      <Label>Scopes</Label>
       {pills.length > 0 ? (
         <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
@@ -236,7 +236,7 @@ export function UpstreamScopePicker({
                   toggle(p.scope);
                 }}
                 className={
-                  "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-12 transition-colors " +
+                  "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-14 transition-colors " +
                   (gated
                     ? "cursor-not-allowed border-dashed border-border/60 bg-transparent text-muted-foreground/50"
                     : p.locked || isRequired
@@ -261,19 +261,19 @@ export function UpstreamScopePicker({
                 ) : null}
                 <span className="truncate">{p.label}</span>
                 {gated ? (
-                  <span className="shrink-0 text-11 italic text-text-tertiary">
+                  <span className="shrink-0 text-13 italic text-text-tertiary">
                     own app
                   </span>
                 ) : isRequired ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">
+                  <span className="shrink-0 text-13 text-muted-foreground">
                     required
                   </span>
                 ) : p.locked ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">
+                  <span className="shrink-0 text-13 text-muted-foreground">
                     granted
                   </span>
                 ) : p.isDefault ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">
+                  <span className="shrink-0 text-13 text-muted-foreground">
                     default
                   </span>
                 ) : null}
@@ -287,7 +287,7 @@ export function UpstreamScopePicker({
       ) : null}
 
       {pills.some((p) => p.sensitive) ? (
-        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
+        <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
           <span
             aria-hidden="true"
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
@@ -297,7 +297,7 @@ export function UpstreamScopePicker({
       ) : null}
 
       {allowset !== null && pills.some((p) => isGated(p.scope, p.locked)) ? (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Scopes marked “own app” aren’t offered on NyxID’s shared{" "}
           {providerName ?? "provider"} app. Connect with your own OAuth app to
           request them.
@@ -320,7 +320,7 @@ export function UpstreamScopePicker({
           placeholder={customPlaceholder}
           autoComplete="off"
           spellCheck={false}
-          className="h-9 text-12"
+          className="h-9 text-14"
         />
         <Button
           type="button"
@@ -334,11 +334,11 @@ export function UpstreamScopePicker({
         </Button>
       </div>
       {customError ? (
-        <p className="text-11 text-destructive">{customError}</p>
+        <p className="text-13 text-destructive">{customError}</p>
       ) : null}
       {grantedSet && hasChanges ? (
-        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-12">
-          <span className="text-11 font-medium uppercase tracking-wide text-muted-foreground">
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-14">
+          <span className="type-secondary-emphasis uppercase tracking-wide text-muted-foreground">
             Changes
           </span>
           {added.length > 0 ? (
@@ -353,7 +353,7 @@ export function UpstreamScopePicker({
                 <span className="text-destructive">− Removing:</span>{" "}
                 {removed.map(labelFor).join(", ")}
               </p>
-              <p className="text-11 text-warning">
+              <p className="text-13 text-warning">
                 Removing a permission re-authorizes this connection and will
                 stop any app that relies on it. NyxID will use only the
                 remaining permissions; the old access at{" "}
@@ -365,7 +365,7 @@ export function UpstreamScopePicker({
         </div>
       ) : null}
 
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {locked.size > 0
           ? "Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above."
           : grantedSet

@@ -1626,6 +1626,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/requests/{request_id}/decide",
             post(handlers::approvals::decide_request),
         )
+        .route(
+            "/requests/{request_id}/execution-decision",
+            post(handlers::approvals::decide_execution_request),
+        )
         .route("/grants", get(handlers::approvals::list_grants))
         .route(
             "/grants/{grant_id}/authorization",
@@ -2593,6 +2597,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_desktop::contexts),
         )
         .route("/nyxagent/live", get(handlers::assistant_nyxagent::live))
+        .route("/nyxagent/cma-sessions", get(handlers::cma_sessions::list))
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),
@@ -2784,6 +2789,15 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::update_settings),
         )
         .route(
+            "/nyxagent/onboarding",
+            get(handlers::assistant_onboarding::get_onboarding)
+                .put(handlers::assistant_onboarding::save_onboarding),
+        )
+        .route(
+            "/nyxagent/onboarding/suggestions/hide",
+            post(handlers::assistant_onboarding::hide_suggestions),
+        )
+        .route(
             "/nyxagent/channels",
             get(handlers::nyxbot::list_channels).post(handlers::nyxbot::connect_channel),
         )
@@ -2880,6 +2894,28 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/channels/{id}/org-specialist",
+            get(handlers::org_specialist_channels::get)
+                .put(handlers::org_specialist_channels::update),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link",
+            post(handlers::org_specialist_channels::issue)
+                .delete(handlers::org_specialist_channels::revoke_self),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link/{challenge}",
+            get(handlers::org_specialist_channels::challenge),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link/{challenge}/confirm",
+            post(handlers::org_specialist_channels::confirm),
+        )
+        .route(
+            "/nyxagent/channels/{id}/retry-native-gateway",
+            post(handlers::nyxbot::gateway_retry::retry_channel),
         )
         .route(
             "/nyxagent/channels/{id}/chats/{chat_id}/threads",
@@ -3512,6 +3548,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/openai-apps-challenge",
             get(handlers::oidc_discovery::openai_apps_challenge),
+        )
+        .route(
+            "/apple-app-site-association",
+            get(handlers::oidc_discovery::apple_app_site_association),
         );
 
     let public_oauth = Router::new()

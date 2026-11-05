@@ -797,6 +797,34 @@ Status exposes `gateway_native_phase`, `gateway_native_activation` and
 through relay fallback and included in connect/transport audit metadata and an
 info log with the channel agent ID. Upstream prose, URLs and credentials are
 never retained; a new preparation or successful activation clears the detail.
+
+Native Discord fallback visibility (#2183): `nyxbot_channel_connected` records
+the persisted transport after setup/fallback, plus `gateway_native_activation`
+and the bounded detail when present. A successful relay message is not native
+acceptance. The channel-agent API and bot settings retain these fields and add
+`gateway_next_retry_at` (last attempt plus 23 hours; a legacy fallback without
+an attempt timestamp is already eligible from its fallback time)
+and `gateway_retry_available_at` (last attempt plus ten minutes), plus a plain
+`gateway_fallback_reason`. The automatic
+time is an eligibility time, not a guarantee: the flag must remain enabled,
+the owner must be verified, the bot must be idle, and the bounded sweep rotates
+among eligible channels.
+
+An owner can use **Retry native gateway now** in the channel bot list or agent
+details, or ask NyxBot to call `nyxid__retry_channel_gateway`. The first-party
+human REST action is `POST /api/v1/assistant/nyxagent/channels/{id}/retry-native-gateway`.
+The tool is NyxBot-only (no guests/specialists) and follows the existing
+channel-management access-mode confirmation. Both paths require the linking
+owner's live org-admin authority, the existing gateway flag, an active verified
+Discord channel on direct transport, and no answer in progress. A timestamp CAS
+coordinates with the sweep and enforces ten minutes between attempts, including
+connect-time attempts; a pending preparation cannot be replaced. Retry reuses
+source verification, preparation, release/drain and build-beside-then-swap. A
+rejection keeps the relay and persists code/detail, with metadata-only
+`nyxbot_channel_native_gateway_retried` audit. Selecting native transport does
+not prove a Discord send: inspect native activation and delivery separately.
+Re-linking to another agent still does not trigger transport migration.
+
 Intake refusals/unavailability and response failures
 use stable codes. Activation reflects CMA's bounded activation codes;
 `response_ready` means the provider answer is available, **not** a confirmed
@@ -1313,3 +1341,16 @@ channel/key, use `delivery_id` for idempotency, and report closed outcomes
 `confirmed`, `rejected`, or `unknown` (no message text, tool data, tokens or opaque
 event/reply refs). `unknown` must remain terminal for sending. This is a proposed
 cross-service extension, not an endpoint implemented by this change.
+
+### Org-specialist execution behind the provider
+
+Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
+Provider/creator keys stay on the linking admin and route keys stay org-owned;
+CMA source contracts are unchanged. NyxID resolves each verified sender to a
+live org member or an explicitly delegated, budgeted org-paid guest. Optional
+versioned origins carry that actor through replay/queues/async replies. Native
+and relay events use the same authority checks and dedup namespace. There is no
+CMA-provided membership/payer and no fallback to a personal agent. See
+[org-specialist channel rules](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots)
+for verification, public transcript isolation, payer rules and mandatory rollout
+readiness.

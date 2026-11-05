@@ -38,6 +38,7 @@ use crate::{
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
+    super::org_channel_service::FLAG,
     "assistant:shared-agents",
     super::collaboration_group_service::READINESS,
     super::shared_agent_transport::READINESS,
@@ -48,6 +49,9 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:live-turn-gate",
     PLATFORM_POLICY,
     super::feature_flag_service::ORG_INSTRUCTION_FLAG_KEY,
+    super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
+    "permissions:execution-dispatch-v1",
+    "permissions:execution-authoring-v1",
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.

@@ -67,14 +67,14 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
     <Card className="space-y-4 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-display text-15 font-semibold">
+          <h3 className="font-display type-card-title">
             Weekly real work
           </h3>
-          <p className="mt-1 text-12 text-muted-foreground">
+          <p className="mt-1 text-14 text-muted-foreground">
             Merchants with at least {data.threshold} completed tasks using their
             own connected business systems.
           </p>
-          <p className="mt-1 text-11 text-text-tertiary">
+          <p className="mt-1 text-13 text-text-tertiary">
             Monday–Sunday · Asia/Singapore · partial weeks use only the selected
             dates.
           </p>
@@ -132,7 +132,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
           </BarChart>
         </ResponsiveContainer>
       </div>
-      <Table className="text-12" aria-label="Weekly real work totals">
+      <Table className="text-14" aria-label="Weekly real work totals">
         <TableHeader>
           <TableRow>
             {[
@@ -154,12 +154,12 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
               <TableCell>
                 {w.week}
                 {w.partial && (
-                  <span className="ml-2 text-10 text-text-tertiary">
+                  <span className="ml-2 text-12 text-text-tertiary">
                     Partial
                   </span>
                 )}
               </TableCell>
-              <TableCell className="font-medium tabular-nums">
+              <TableCell className="font-normal tabular-nums">
                 {w.merchants}
               </TableCell>
               <TableCell>{w.internal_owners}</TableCell>
@@ -175,12 +175,12 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
         </TableBody>
       </Table>
       {data.weeks.map((w) => (
-        <details key={w.week} className="text-12">
+        <details key={w.week} className="text-14">
           <summary className="cursor-pointer">
             {w.week} · Owners and activation
           </summary>
           <div className="mt-3 space-y-4">
-            <p className="text-11 text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Internal owners: {w.internal_completed} completed ·{" "}
               {rate(w.internal_triggered, w.internal_completed)} from triggers ·{" "}
               {rate(w.internal_completed, w.internal_attempted)} success ·{" "}
@@ -189,7 +189,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
             </p>
             {w.owners.length ? (
               <Table
-                className="text-12"
+                className="text-14"
                 aria-label={`Work per owner ${w.week}`}
               >
                 <TableHeader>
@@ -209,7 +209,7 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
                 <TableBody>
                   {w.owners.map((o) => (
                     <TableRow key={o.owner_id}>
-                      <TableCell className="font-mono text-11">
+                      <TableCell className="font-mono text-14">
                         {o.owner_id}
                       </TableCell>
                       <TableCell>
@@ -229,14 +229,14 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
               </p>
             )}
             {w.owners_truncated && (
-              <p className="text-11 text-text-tertiary">
+              <p className="text-13 text-text-tertiary">
                 Showing the top 100 owners. Weekly totals include every owner.
               </p>
             )}
             <h4 className="font-medium">New-owner activation</h4>
             {w.funnel.length ? (
               <Table
-                className="text-12"
+                className="text-14"
                 aria-label={`Activation funnel ${w.week}`}
               >
                 <TableHeader>
@@ -280,14 +280,14 @@ export function NyxbotRealWork({ data }: { data: WeeklyRealWork }) {
           </div>
         </details>
       ))}
-      <p className="text-11 leading-relaxed text-text-tertiary">
+      <p className="text-13 text-text-tertiary">
         Success is completed tasks divided by settled tasks with a successful
         business call, including tasks that later failed or stopped. Helpful
         feedback uses votes on completed real work. Model calls, platform
         credentials and chat alone do not count. Each triggered run and mirrored
         voice reply counts once.
       </p>
-      <p className="text-11 leading-relaxed text-text-tertiary">
+      <p className="text-13 text-text-tertiary">
         Activation includes each prior stage, observed through the selected end
         date; organization assistants count as having NyxBot. The median is
         estimated for owners reaching every stage. Reports use retained records
@@ -315,7 +315,7 @@ function InternalOwners() {
           </DialogDescription>
         </DialogHeader>
         {query.isPending ? (
-          <p className="text-12">Loading owners…</p>
+          <p className="text-14">Loading owners…</p>
         ) : query.isError ? (
           <ErrorBanner
             message="Could not load internal owners."
@@ -328,7 +328,7 @@ function InternalOwners() {
             onSaved={() => setOpen(false)}
           />
         ) : (
-          <p className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-11">
+          <p className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-13">
             {query.data.owner_ids.join("\n") ||
               "No internal owners configured."}
           </p>

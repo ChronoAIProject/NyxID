@@ -8,10 +8,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+import { GroupedSelectTrigger } from "@/components/ui/grouped-list";
+
 const PERSONAL_VALUE = "__personal__";
 
 interface OrgScopeSelectProps {
   readonly id?: string;
+  readonly grouped?: boolean;
   readonly "aria-describedby"?: string;
   /** `null` means personal; `all` selects every scope when allowAll is set. */
   readonly value: string | null;
@@ -41,6 +44,7 @@ interface OrgScopeSelectProps {
  */
 export function OrgScopeSelect({
   id,
+  grouped = false,
   "aria-describedby": ariaDescribedBy,
   value,
   onChange,
@@ -56,6 +60,7 @@ export function OrgScopeSelect({
     (o) => !adminOnly || o.your_role === "admin",
   );
 
+  const Trigger = grouped ? GroupedSelectTrigger : SelectTrigger;
   return (
     <Select
       value={value ?? PERSONAL_VALUE}
@@ -64,9 +69,9 @@ export function OrgScopeSelect({
       }
       disabled={disabled || isLoading}
     >
-      <SelectTrigger id={id} aria-label={label} aria-describedby={ariaDescribedBy}>
+      <Trigger id={id} aria-label={label} aria-describedby={ariaDescribedBy}>
         <SelectValue placeholder={personalLabel} />
-      </SelectTrigger>
+      </Trigger>
       <SelectContent>
         {allowAll && (
           <>

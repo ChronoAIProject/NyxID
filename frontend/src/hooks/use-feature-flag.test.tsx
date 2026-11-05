@@ -112,6 +112,7 @@ describe("feature flag catalog", () => {
   it("pins the backend registry key literals", () => {
     expect(FEATURE_FLAG).toEqual({
       INVITATION_CODE: "auth:invitation-code",
+      MOBILE_NEW_DOMAINS: "mobile:new-domains",
       MOBILE_MFA: "auth:mobile-mfa",
       AI_ASSISTANT: "experimental:ai-assistant",
       ASSISTANT_VOICE: "assistant:voice",
@@ -125,9 +126,10 @@ describe("feature flag catalog", () => {
       MACHINE_CAPABILITIES: "assistant:machine-capabilities",
       MACHINE_CONTEXTS: "assistant:machine-contexts",
       ORG_INSTRUCTION: "assistant:org-instruction-v1",
+      ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
       HOSTED_CONNECT_INTENT: "assistant:hosted-connect-intent-v1",
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
-  GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
+      GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
       CHANNEL_MEDIA: "assistant:channel-media",
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",
@@ -144,6 +146,7 @@ describe("feature flag catalog", () => {
       NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",
       NYXBOT_RELAY_RESPONSE_RECOVERY: "nyxbot:relay-response-recovery",
       DISCORD_GATEWAY: "channel:discord-gateway",
+      EXECUTION_PERMISSIONS: "permissions:execution-v1",
       NYXBOT_GATEWAY_LARK: "nyxbot:gateway-lark",
       NYXBOT_GATEWAY_FEISHU: "nyxbot:gateway-feishu",
       NYXBOT_GATEWAY_DISCORD: "nyxbot:gateway-discord",

@@ -571,6 +571,7 @@ fn resolve_social_login(
     let email_lower = profile.email.to_lowercase();
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id,
         email: email_lower,
         password_hash: None,
@@ -1076,6 +1077,7 @@ mod tests {
     ) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: Uuid::new_v4().to_string(),
             email: email.to_string(),
             password_hash: Some("hashed".to_string()),

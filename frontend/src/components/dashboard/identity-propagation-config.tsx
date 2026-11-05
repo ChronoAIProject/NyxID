@@ -59,7 +59,7 @@ export function IdentityPropagationConfig({
             </button>
           ))}
         </div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           {PROPAGATION_MODES.find((m) => m.value === mode)?.description ??
             "Select how user identity is forwarded to this service"}
         </p>
@@ -67,9 +67,9 @@ export function IdentityPropagationConfig({
 
       {showFieldToggles && (
         <div className="space-y-3 rounded-lg border p-3">
-          <p className="text-12 font-medium">Include Fields</p>
+          <p className="type-row-title">Include Fields</p>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-user-id" className="text-12 font-normal">
+            <Label htmlFor="include-user-id">
               User ID
             </Label>
             <Switch
@@ -79,7 +79,7 @@ export function IdentityPropagationConfig({
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-email" className="text-12 font-normal">
+            <Label htmlFor="include-email">
               Email
             </Label>
             <Switch
@@ -89,7 +89,7 @@ export function IdentityPropagationConfig({
             />
           </div>
           <div className="flex items-center justify-between">
-            <Label htmlFor="include-name" className="text-12 font-normal">
+            <Label htmlFor="include-name">
               Display Name
             </Label>
             <Switch
@@ -111,7 +111,7 @@ export function IdentityPropagationConfig({
             onChange={(e) => onJwtAudienceChange(e.target.value)}
             maxLength={500}
           />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Custom audience claim for the identity JWT. Defaults to the service
             base URL if left empty.
           </p>

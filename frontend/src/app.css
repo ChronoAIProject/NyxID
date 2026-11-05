@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./typography.css";
 
 /* Class-based `dark:` variant. By default Tailwind v4 binds `dark:` to
    `@media (prefers-color-scheme: dark)`; we rebind it to the dashboard's
@@ -25,11 +26,15 @@
 @custom-variant very-short (@media (max-height: 679.98px));
 
 @utility min-h-control {
-  min-height: calc(1lh + var(--spacing) * 2);
+  min-height: max(24px, calc(1lh + var(--spacing) * 2));
+}
+
+@utility min-w-control {
+  min-width: max(24px, 1.5rem);
 }
 
 @utility min-h-input {
-  min-height: calc(1lh + var(--spacing) * 3 + 2px);
+  min-height: max(24px, calc(1lh + var(--spacing) * 3 + 2px));
 }
 
 @theme {
@@ -127,24 +132,6 @@
      size changes the root font size. */
   --spacing: 4px;
 
-  /* ── Text scale (rem → follows the root font size set by Appearance) ──
-     `text-12` = 12px at the default 100%. Matches the DESIGN.md scale; use
-     these instead of `text-[12px]` so every size responds to the setting. */
-  --text-9: 0.5625rem;
-  --text-10: 0.625rem;
-  --text-11: 0.6875rem;
-  --text-12: 0.75rem;
-  --text-13: 0.8125rem;
-  --text-14: 0.875rem;
-  --text-15: 0.9375rem;
-  --text-16: 1rem;
-  --text-17: 1.0625rem;
-  --text-20: 1.25rem;
-  --text-22: 1.375rem;
-  --text-24: 1.5rem;
-  --text-28: 1.75rem;
-  --text-36: 2.25rem;
-
   /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
   --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
   --font-display: "Mona Sans", system-ui, -apple-system, sans-serif;
@@ -162,6 +149,28 @@
   --color-landing-surface: #171717;
   --color-landing-surface-raised: #262626;
   --color-landing-border-subtle: rgba(90, 42, 241, 0.15);
+}
+
+/* Keep every canonical size available to runtime canvas and audit consumers. */
+@theme static {
+  /* ── Text scale (rem → follows the root font size set by Appearance) ──
+     Every token is its nominal size divided by 16: text-N = N/16rem.
+     The themed root applies the 0.85 display baseline. Use tokens instead of
+     `text-[12px]` so every size responds to the setting. */
+  --text-9: 0.5625rem;
+  --text-10: 0.625rem;
+  --text-11: 0.6875rem;
+  --text-12: 0.75rem;
+  --text-13: 0.8125rem;
+  --text-14: 0.875rem;
+  --text-15: 0.9375rem;
+  --text-16: 1rem;
+  --text-17: 1.0625rem;
+  --text-20: 1.25rem;
+  --text-22: 1.375rem;
+  --text-24: 1.5rem;
+  --text-28: 1.75rem;
+  --text-36: 2.25rem;
 }
 
 /* ───────────────────────────────────────────────────────────────────────
@@ -201,7 +210,7 @@ html.theme-light {
   --color-muted-foreground: #3F3F46;
 
   /* Destructive */
-  --color-destructive: #DC2626;
+  --color-destructive: #B91C1C;
 
   /* Borders & input — dividers clearly visible on both tones; control edges
      meet the 3:1 non-text contrast minimum on white */
@@ -265,88 +274,214 @@ html.theme-dark {
   --color-chat-bubble-foreground: #EFEFF1;
 }
 
-/* Assistant reading scale, shared by the shell and its portaled settings,
-   menus and dialogs. Rem values preserve the full user-selected text scale. */
-html.assistant-display {
-  --assistant-density: 1;
-  --text-9: 0.75rem;
-  --text-10: 0.75rem;
-  --text-11: 0.8125rem;
-  --text-12: 0.875rem;
-  --text-13: 0.9375rem;
+html:is(.theme-light, .theme-dark) body {
+  @apply type-body;
 }
 
-html.assistant-display body {
-  line-height: 1.5;
+html:is(.theme-light, .theme-dark) {
+  --display-density: 1;
+}
+
+/* Custom actions share the same hit-area floor as Button, including Studio
+   and body portals. Keep switches and checkboxes on their own primitives. */
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], summary) {
+  min-width: max(24px, 1.5rem);
+  min-height: max(24px, 1.5rem);
 }
 
 /* Compact spacing must still leave room for enlarged labels and usable
    pointer targets. The tab strip must contain the same padding as its tabs. */
-html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tablist"], input:not([type="checkbox"]):not([type="radio"]), select, textarea) {
   height: auto;
-  min-height: max(1.5rem, calc(1lh + var(--spacing) * 2));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
-html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) {
-  min-width: max(1.5rem, calc(1lh + var(--spacing) * 2));
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) {
+  min-width: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
-/* Interface icons follow the surrounding text, independently of density.
+/* Shared interface icons follow the surrounding text, independently of density.
    Brand marks and illustrations retain their own proportions. */
-html.assistant-display :where(button:not([role="switch"]):not([role="checkbox"]), a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) svg.lucide,
-html.assistant-display svg[data-ui-icon] {
+html:is(.theme-light, .theme-dark) :where(button:not([role="switch"]):not([role="checkbox"]), a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"]) svg.lucide,
+html:is(.theme-light, .theme-dark) svg[data-ui-icon] {
   width: max(0.75rem, 1.125em);
   height: max(0.75rem, 1.125em);
   flex-shrink: 0;
 }
 
-html.assistant-display :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .assistant-icon-button)):has(> :is(svg.lucide, svg[data-ui-icon])) {
-  column-gap: calc(0.5em * var(--assistant-density));
-  padding-inline: calc(0.75em * var(--assistant-density));
-  padding-block: calc(0.375em * var(--assistant-density));
+/* Page geometry is shared by both shells; transcript/composer layout is separate. */
+.shell-page-content {
+  padding: calc(var(--spacing) * 4);
+  padding-bottom: max(2rem, var(--sab, 0px));
+}
+@media (min-width: 640px) { .shell-page-content { padding-top: calc(var(--spacing) * 6); padding-inline: calc(var(--spacing) * 6); } }
+@media (min-width: 768px) { .shell-page-content { padding-inline: calc(var(--spacing) * 8); } }
+@media (min-width: 1024px) { .shell-page-content { padding-inline: calc(var(--spacing) * 10); } }
+.shell-page-stack { display: flex; flex-direction: column; gap: calc(var(--spacing) * 6); }
+.shell-card-grid { gap: calc(var(--spacing) * 4); }
+.shell-nav-stack { display: flex; flex-direction: column; gap: calc(var(--spacing) * 0.5); }
+.shell-user-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 0; }
+.shell-user-avatar { display: flex; flex-shrink: 0; align-items: center; justify-content: center; padding: 0.375em; border-radius: var(--radius-lg); }
+html:is(.theme-light, .theme-dark) .shell-user-avatar svg { width: max(0.75rem, 1.125em); height: max(0.75rem, 1.125em); }
+html:is(.theme-light, .theme-dark) .shell-user-block { min-width: 0; min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2)); display: flex; align-items: center; gap: calc(var(--spacing) * 3); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); border-radius: var(--radius-lg); text-align: left; }
+
+/* Shared shell roles keep navigation and account typography identical in
+   Studio and the assistant, including Studio's mobile navigation. */
+.shell-nav-item {
+  min-width: 0;
+  @apply type-nav-item;
+  column-gap: calc(0.5em * var(--display-density, 1));
+  padding: calc(0.375em * var(--display-density, 1)) calc(0.75em * var(--display-density, 1));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+  border-radius: var(--radius-lg);
+}
+.shell-nav-item[aria-current="page"] {
+  @apply type-active-nav-item;
+}
+html:is(.theme-light, .theme-dark) .shell-nav-item[data-nav-collapsed="true"] {
+  justify-content: center;
+  column-gap: 0;
+  padding-inline: 0;
+}
+
+html:is(.theme-light, .theme-dark) .shell-nav-item > svg:is(.lucide, [data-ui-icon]) {
+  width: max(0.75rem, 1.125em);
+  height: max(0.75rem, 1.125em);
+  flex-shrink: 0;
+}
+
+.shell-group-label {
+  min-height: 0;
+  min-width: 0;
+  display: block;
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
+  @apply type-group-label;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--color-text-tertiary);
+}
+
+.shell-account-heading { display: flex; flex-direction: column; gap: 0; padding: calc(var(--spacing) * 1.5) calc(var(--spacing) * 3); }
+
+.shell-user-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  @apply type-account-name;
+  color: var(--color-foreground);
+}
+
+.shell-user-email {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  @apply type-account-email;
+  color: var(--color-text-tertiary);
+}
+
+html:is(.theme-light, .theme-dark) :where(button, a, [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"]):not(:where([data-icon-button], .ui-icon-button, [data-grouped-row], .shell-user-block)):has(> :is(svg.lucide, svg[data-ui-icon])) {
+  column-gap: calc(0.5em * var(--display-density));
+  padding-inline: calc(0.75em * var(--display-density));
+  padding-block: calc(0.375em * var(--display-density));
   height: auto;
   max-width: 100%;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
-html.assistant-display button:has(> svg.lucide):not([data-icon-button]) {
+/* Grouped rows own their insets; icon-button density must not shift their text. */
+html:is(.theme-light, .theme-dark) [data-grouped-row] {
+  min-height: max(24px, calc(var(--spacing) * 11));
+  padding-inline: calc(var(--spacing) * 4);
+  padding-block: calc(var(--spacing) * 2.5);
+}
+
+html:is(.theme-light, .theme-dark) [data-grouped-list] [data-slot="grouped-select"] {
+  padding-inline: 0;
+}
+
+/* Focus belongs to the entire row, including its borderless field or accessory. */
+[data-grouped-row]:focus-within {
+  background-color: var(--color-overlay);
+}
+
+[data-grouped-row]:not(:has(input, textarea, [contenteditable])):focus-visible,
+[data-grouped-row]:has(:focus-visible):not(:has(input, textarea, [contenteditable])) {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--color-input-focus);
+}
+
+[data-grouped-list] > [data-grouped-row]:first-child,
+[data-grouped-list] > :first-child:not([data-grouped-row]) > [data-grouped-row]:nth-child(1 of [data-grouped-row]) {
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+
+[data-grouped-list] > [data-grouped-row]:last-child,
+[data-grouped-list] > :last-child:not([data-grouped-row]) > [data-grouped-row]:nth-last-child(1 of [data-grouped-row]) {
+  border-bottom-left-radius: var(--radius-xl);
+  border-bottom-right-radius: var(--radius-xl);
+}
+
+[data-grouped-row].grouped-field > span:first-child,
+[data-grouped-row].grouped-field > label,
+[data-grouped-row].grouped-field > label > span:first-child {
+  @apply type-field-label;
+  color: var(--color-text-tertiary);
+}
+
+[data-grouped-row].grouped-field {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+
+html:is(.theme-light, .theme-dark) [data-grouped-row] > * { margin-block: 0; }
+
+html:is(.theme-light, .theme-dark) button:has(> svg.lucide):not([data-icon-button]):not(.shell-nav-item) {
   flex-wrap: wrap;
 }
 
-html.assistant-display :is([data-icon-button], .assistant-icon-button) {
-  display: inline-flex;
+/* Display utilities still decide which responsive actions are present. */
+@layer base {
+  html:is(.theme-light, .theme-dark) :is([data-icon-button], .ui-icon-button) {
+    display: inline-flex;
+  }
+}
+
+html:is(.theme-light, .theme-dark) :is([data-icon-button], .ui-icon-button) {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   width: auto;
   height: auto;
-  padding: calc(0.5em * var(--assistant-density));
+  padding: calc(0.5em * var(--display-density));
 }
 
-html.assistant-display .assistant-icon-button {
-  min-width: max(1.5rem, calc(1lh + var(--spacing) * 2));
-  min-height: max(1.5rem, calc(1lh + var(--spacing) * 2));
+html:is(.theme-light, .theme-dark) .ui-icon-button {
+  min-width: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 2));
 }
 
-html.assistant-display [role="option"]:has(> [data-select-indicator]) {
-  padding-right: calc(1.125em + 1.25em * var(--assistant-density));
+html:is(.theme-light, .theme-dark) [role="option"]:has(> [data-select-indicator]) {
+  padding-right: calc(1.125em + 1.25em * var(--display-density));
 }
 
-html.assistant-display [data-select-indicator] {
-  right: calc(0.75em * var(--assistant-density));
+html:is(.theme-light, .theme-dark) [data-select-indicator] {
+  right: calc(0.75em * var(--display-density));
   width: max(0.75rem, 1.125em);
   height: max(0.75rem, 1.125em);
 }
 
-html.assistant-display [role="tablist"] {
+html:is(.theme-light, .theme-dark) [role="tablist"] {
   height: auto;
   flex-shrink: 0;
-  min-height: max(1.5rem, calc(1lh + var(--spacing) * 4));
+  min-height: max(24px, 1.5rem, calc(1lh + var(--spacing) * 4));
 }
 
-html.assistant-display input[type="range"] {
-  min-height: 1.5rem;
+html:is(.theme-light, .theme-dark) input[type="range"] {
+  min-height: max(24px, 1.5rem);
 }
 
 /* Helper-class light variants — these effects were authored as white-on-dark
@@ -471,7 +606,7 @@ body {
 
 body {
   font-family: var(--font-sans);
-  line-height: 1.4;
+  line-height: var(--line-public-body);
 }
 
 /* Label-to-input spacing */
@@ -577,11 +712,12 @@ input[type="number"] {
   input,
   select,
   textarea,
+  [role="combobox"][contenteditable="true"] {
+    font-size: max(16px, var(--text-14)) !important;
+  }
   [data-composer-textbox],
-  [data-composer-text-measure],
-  [role="combobox"],
-  [role="option"] {
-    font-size: max(16px, 1rem) !important;
+  [data-composer-text-measure] {
+    font-size: max(16px, var(--text-16)) !important;
   }
 }
 
@@ -1030,114 +1166,54 @@ html.theme-dark .assistant-halo--visible {
   }
 }
 
-/* ── Sidebar nav easter eggs (`sidebar-nav-glyphs.tsx`) ──
-   Played only while the glyph carries `data-playing`, which the component
-   sets on row hover (never under reduced motion) and clears at an iteration
-   boundary after two plays or once the pointer has left, so every loop
-   starts and ends on the lucide rest frame.
-   Transform origins are viewBox units. The plugin tile is drawn per frame
-   in the component instead. */
-
-/* The Home chimney follows hover exactly (`data-hovering`): it pops up
-   from below the roof line with an overshoot and sinks back on leave.
-   Transitions rather than keyframes, so a quick leave-and-return reverses
-   from wherever it is. The smoke runs while the component keeps the puffs
-   mounted; they wait for the chimney (delay set inline) and scale about
-   their own centre. */
-.nav-glyph-chimney {
-  transform: translateY(5px);
-  transition: transform 180ms ease-in;
+/* Workspace glyphs play one activation cycle, then restore lucide's rest
+   frame. A negative delay resumes the same timeline after SPA navigation. */
+.nav-glyph-chimney { transform: translateY(5px); }
+[data-playing] .nav-glyph-chimney {
+  animation: nav-glyph-chimney var(--nav-glyph-duration) ease-out 1 both;
+  animation-delay: var(--nav-glyph-offset);
 }
-
-[data-hovering] .nav-glyph-chimney {
-  transform: none;
-  transition: transform 520ms cubic-bezier(0.34, 1.8, 0.64, 1);
+@keyframes nav-glyph-chimney {
+  0%, 100% { transform: translateY(5px); }
+  13% { transform: translateY(-0.5px); }
+  21%, 86% { transform: translateY(0); }
 }
-
-.nav-glyph-smoke {
-  opacity: 0;
-  transition: opacity 250ms ease-in;
-}
-
-[data-hovering] > .nav-glyph-smoke {
-  opacity: 1;
-  transition: none;
-}
-
 .nav-glyph-smoke-puff {
   transform-box: fill-box;
   transform-origin: center;
   opacity: 0;
-  animation: nav-glyph-smoke 2.2s ease-out 2 backwards;
+  animation: nav-glyph-smoke 1.5s ease-out 1 both;
 }
-
 @keyframes nav-glyph-smoke {
-  0% {
-    opacity: 0;
-    transform: translate(0, 0) scale(0.6);
-  }
-  15% {
-    opacity: 0.9;
-  }
-  50% {
-    transform: translate(0.6px, -3.5px) scale(1.1);
-  }
-  100% {
-    opacity: 0;
-    transform: translate(2.5px, -7px) scale(1.6);
-  }
+  0% { opacity: 0; transform: translate(0, 0) scale(0.6); }
+  15% { opacity: 0.9; }
+  50% { transform: translate(0.6px, -3.5px) scale(1.1); }
+  100% { opacity: 0; transform: translate(2.5px, -7px) scale(1.6); }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .nav-glyph-chimney,
-  [data-hovering] .nav-glyph-chimney {
-    transition: none;
-  }
-}
-
-/* A short bright segment of the trace runs left to right across the screen,
-   then the screen stays dark for a beat. `pathLength=100` on the path makes
-   the dash units percentages of the trace; with a 28-unit dash, offset 28
-   parks it wholly before the start and -100 wholly past the end. */
 .nav-glyph-heartbeat {
   opacity: 0;
   stroke-dasharray: 28 200;
   stroke-dashoffset: 28;
 }
-
 [data-playing] > .nav-glyph-heartbeat {
   opacity: 1;
-  animation: nav-glyph-heartbeat 2s linear infinite;
+  animation: nav-glyph-heartbeat var(--nav-glyph-duration) linear 1 both;
+  animation-delay: var(--nav-glyph-offset);
 }
-
 @keyframes nav-glyph-heartbeat {
-  0% {
-    stroke-dashoffset: 28;
-  }
-  70%,
-  100% {
-    stroke-dashoffset: -100;
-  }
+  0% { stroke-dashoffset: 28; }
+  70%, 100% { stroke-dashoffset: -100; }
 }
-
-[data-playing] > .nav-glyph-minute-hand,
-[data-playing] > .nav-glyph-hour-hand {
+[data-playing] .nav-glyph-minute-hand,
+[data-playing] .nav-glyph-hour-hand {
   transform-origin: 16px 16.2px;
-  animation: nav-glyph-hand 2.2s ease-in-out infinite;
+  animation: nav-glyph-hand var(--nav-glyph-duration) ease-in-out 1 both;
+  animation-delay: var(--nav-glyph-offset);
 }
-
-[data-playing] > .nav-glyph-minute-hand {
-  --nav-glyph-hand-turn: 720deg;
-}
-
-[data-playing] > .nav-glyph-hour-hand {
-  --nav-glyph-hand-turn: 360deg;
-}
-
+[data-playing] .nav-glyph-minute-hand { --nav-glyph-hand-turn: 720deg; }
+[data-playing] .nav-glyph-hour-hand { --nav-glyph-hand-turn: 360deg; }
 @keyframes nav-glyph-hand {
-  to {
-    transform: rotate(var(--nav-glyph-hand-turn));
-  }
+  to { transform: rotate(var(--nav-glyph-hand-turn)); }
 }
 
 /* ── Card hover glow ── */
@@ -1227,9 +1303,7 @@ html.theme-dark .assistant-halo--visible {
   background: color-mix(in srgb, var(--color-primary) 13%, transparent);
   color: var(--color-foreground);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 24%, transparent);
-  font-weight: 500;
-  font-size: 0.92em;
-  line-height: inherit;
+  @apply type-chat-mention;
 }
 .composer-mention[data-composer-mention="agent"] {
   color: var(--color-primary);
@@ -1351,19 +1425,32 @@ html.theme-dark .assistant-halo--visible {
 [data-scroll-edges~="left"] { --scroll-fade-left: 20px; }
 [data-scroll-edges~="right"] { --scroll-fade-right: 20px; }
 
-[data-chat-index-rail] {
-  mask-image: linear-gradient(to bottom,
-    transparent, rgb(0 0 0 / 20%) calc(var(--scroll-fade-top) * .4),
-    black var(--scroll-fade-top),
-    black calc(100% - var(--scroll-fade-bottom)),
-    rgb(0 0 0 / 20%) calc(100% - var(--scroll-fade-bottom) * .4), transparent);
+/* The index is a dense graphical navigator, not a row of text controls.
+   Its measured pitch must also be its rendered pitch at every reading size. */
+:root {
+  --chat-index-pitch: calc(0.4375rem / 0.85);
+  --chat-index-tick-width: calc(1rem / 0.85);
+  --chat-index-tick-thickness: calc(var(--chat-index-tick-width) / 16);
+  --chat-index-track-width: calc(var(--chat-index-tick-width) * 1.5);
 }
-[data-chat-index-rail][data-scroll-edges~="top"] { --scroll-fade-top: min(64px, 20%); }
-[data-chat-index-rail][data-scroll-edges~="bottom"] { --scroll-fade-bottom: min(64px, 20%); }
+
+@media (max-resolution: 1dppx) {
+  :root { --chat-index-tick-thickness: calc(var(--chat-index-tick-width) * 3 / 32); }
+}
+
+html.assistant-display [data-chat-index-target] {
+  min-height: 0;
+  min-width: 0;
+  padding-block: 0;
+  flex: none;
+}
+
+[data-chat-index-rail][data-scroll-edges~="top"] { --scroll-fade-top: min(calc(var(--chat-index-pitch) * 4), 20%); }
+[data-chat-index-rail][data-scroll-edges~="bottom"] { --scroll-fade-bottom: min(calc(var(--chat-index-pitch) * 4), 20%); }
 
 @media (min-width: 768px) {
   [data-chat-content-layout]:has([data-chat-index-rail]) {
-    --chat-index-width: calc(var(--spacing) * 7);
+    --chat-index-width: var(--chat-index-track-width);
   }
 }
 
@@ -1394,4 +1481,75 @@ html.theme-dark .assistant-halo--visible {
    theirs. Unlayered so it wins over the utility that greyed the icon. */
 :is(a, button, summary, [role="button"], [role="menuitem"], [role="option"], [role="tab"]):hover svg:is(.text-text-tertiary, .text-muted-foreground) {
   color: inherit;
+}
+
+/* Search reveals retain row focus without moving content. */
+[data-drawer-search-target][data-search-highlight]:not(:has(input, textarea, [contenteditable])) {
+  background-color: var(--color-overlay);
+  outline: 2px solid var(--color-input-focus);
+  outline-offset: -2px;
+  border-radius: var(--radius-xl);
+}
+@media (prefers-reduced-motion: no-preference) {
+  [data-drawer-search-target] { transition: background-color 160ms ease; }
+}
+
+[data-viewport-save-bar] { position: relative; flex-shrink: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .compact-title-bar { transition: opacity 120ms ease, translate 120ms ease; }
+  .compact-title-bar[data-visible="false"] { translate: 0 -0.25rem; }
+}
+
+[data-compact-scroll] > [aria-hidden="true"] { margin: 0 !important; }
+
+/* Header controls keep their position while identity chrome compacts. */
+.agent-header-icon {
+  display: inline-flex;
+  width: calc(var(--spacing) * 8);
+  height: calc(var(--spacing) * 8);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--color-overlay);
+  color: var(--color-text-secondary);
+}
+.agent-header-icon:hover { background: var(--color-overlay-strong); }
+.agent-header-icon:focus-visible { outline: 2px solid var(--color-input-focus); outline-offset: 2px; }
+.agent-header-icon[hidden] { display: none; }
+.agent-header-search { position: relative; min-width: 0; }
+.agent-header-search-field { width: 100%; transform-origin: right center; }
+.agent-header-search[data-open="false"] .agent-header-search-field { position: absolute; right: 0; top: 0; width: 0; opacity: 0; visibility: hidden; overflow: hidden; }
+.agent-header-name, .agent-header-avatar { transform-origin: left center; }
+[data-agent-header][data-compact="true"] .agent-header-name { transform: scale(.867); }
+[data-agent-header][data-compact="true"] .agent-header-avatar { transform: translateX(6px) scale(.625); }
+[data-agent-header][data-compact="true"] .agent-header-subtitle { opacity: 0; transform: translateY(-8px); visibility: hidden; }
+.agent-details-sheet { container: agent-details / inline-size; }
+@container agent-details (width < 480px) {
+  [data-agent-header][data-search-open="true"] .agent-header-avatar,
+  [data-agent-header][data-search-open="true"] .agent-header-name {
+    position: absolute;
+    left: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(-0.25rem) scale(.95);
+  }
+  [data-agent-header][data-search-open="true"] .agent-header-name { left: calc(var(--spacing) * 10); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .agent-header-name, .agent-header-avatar, .agent-header-subtitle { transition: transform 240ms ease-out, opacity 240ms ease-out, visibility 240ms; }
+  .agent-header-search[data-open="true"] .agent-header-search-field { animation: agent-search-open 200ms ease-out; }
+  @keyframes agent-search-open { from { clip-path: inset(0 0 0 100%); opacity: 0; } to { clip-path: inset(0); opacity: 1; } }
+}
+
+/* Shared hit areas include portaled Studio controls at the smallest Display size. */
+html:is(.theme-light, .theme-dark) [data-icon-button] {
+  min-width: max(24px, 1.5rem);
+  min-height: max(24px, 1.5rem);
+}
+
+/* Field-label role is identical for shared and manually authored forms. */
+html:is(.theme-light, .theme-dark) [data-field-label] {
+  @apply type-field-label;
 }

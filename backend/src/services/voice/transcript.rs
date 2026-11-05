@@ -256,7 +256,8 @@ pub async fn persist(
                 doc!{"_id":&call.conversation_id,"user_id":&call.user_id},doc!{"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now()}})
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::NotFound("Voice conversation unavailable".into()))?;
-            messages.insert_one(AssistantMessage{delegated_images:Default::default(),
+            messages.insert_one(AssistantMessage{
+                execution_task: None,delegated_images:Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
         media_pending: None,

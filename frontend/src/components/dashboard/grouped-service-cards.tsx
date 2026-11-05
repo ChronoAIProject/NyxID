@@ -41,6 +41,7 @@ import {
   matchingConnections,
 } from "@/lib/service-view";
 import { ServiceIcon } from "@/components/service-icon";
+import { ServiceCardSummary } from "@/components/shared/service-card-summary";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -168,7 +169,11 @@ function GroupCard({
       );
     };
     update();
-    const observer = new ResizeObserver(update);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    });
     observer.observe(card);
     observer.observe(header);
     observer.observe(scroller);
@@ -178,6 +183,7 @@ function GroupCard({
     scroller.addEventListener("scroll", update, { passive: true });
     return () => {
       observer.disconnect();
+      cancelAnimationFrame(frame);
       scroller.removeEventListener("scroll", update);
       headerOffset.current = 0;
       header.style.translate = "";
@@ -351,40 +357,33 @@ function GroupCard({
           }}
           className={cn(
             "relative flex flex-col bg-card",
-            expanded ? "border border-border" : "h-72",
+            expanded ? "border border-border" : "min-h-72",
           )}
         >
           <div className="flex min-h-0 flex-1 flex-col gap-2 p-4">
-            <Glide className="flex items-start gap-3">
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background/50">
-                <ServiceIcon
-                  slug={group.iconSlug}
-                  iconUrl={group.iconUrl}
-                  size="md"
-                />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h3
-                  id={headingId}
-                  className="text-15 font-semibold tracking-tight"
-                >
-                  <button
-                    type="button"
-                    onClick={() => onToggle(cardRef.current)}
-                    aria-expanded={expanded}
-                    aria-controls={contentId}
-                    className="max-w-full cursor-pointer truncate text-left hover:text-primary-text focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
-                  >
-                    {group.name}
-                  </button>
-                </h3>
-                <p className="mt-0.5 text-xs text-muted-foreground">
+            <ServiceCardSummary
+              wrap={(content) => <Glide>{content}</Glide>}
+              hideDescription={expanded}
+              description={search.trim()
+                ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
+                : group.description}
+              name={group.name}
+              titleId={headingId}
+              icon={<ServiceIcon slug={group.iconSlug} iconUrl={group.iconUrl} size="md" />}
+              titleAction={{
+                onClick: () => onToggle(cardRef.current),
+                "aria-expanded": expanded,
+                "aria-controls": contentId,
+              }}
+              subtitle={
+                <>
                   {matchingCount < count
                     ? `${matchingCount} of ${count}`
                     : count}{" "}
                   {count === 1 ? "connection" : "connections"}
-                </p>
-              </div>
+                </>
+              }
+            >
               {group.connections.some((connection) => connection.offering_kind === "tool") && (
                 <Badge variant="secondary">Tool · your key</Badge>
               )}
@@ -408,19 +407,10 @@ function GroupCard({
               {disabled > 0 && (
                 <Badge variant="secondary">{disabled} disabled</Badge>
               )}
-            </Glide>
-            {!expanded && (
-              <Glide className="shrink-0">
-                <p className="line-clamp-2 h-8 text-xs leading-4 text-muted-foreground">
-                  {search.trim()
-                    ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
-                    : group.description}
-                </p>
-              </Glide>
-            )}
+            </ServiceCardSummary>
             <div
               className={cn(
-                "mt-auto text-xs",
+                "mt-auto text-13",
                 expanded
                   ? "grid items-center gap-x-6 gap-y-2 md:grid-cols-2"
                   : "space-y-0.5",
@@ -461,7 +451,7 @@ function GroupCard({
                         aria-expanded={expanded}
                         aria-controls={contentId}
                         aria-label={`Show agent keys and use for ${group.name}`}
-                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                        className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <Clock3
                           className="size-3.5 shrink-0 text-muted-foreground"
@@ -483,7 +473,7 @@ function GroupCard({
                     </TooltipTrigger>
                     <TooltipContent
                       collisionPadding={12}
-                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words leading-relaxed [overflow-wrap:anywhere]"
+                      className="max-w-[min(22rem,calc(100vw-2rem))] whitespace-pre-line break-words [overflow-wrap:anywhere]"
                     >
                       {agents.title}
                     </TooltipContent>
@@ -503,7 +493,7 @@ function GroupCard({
                       ? `${lastEdit.edit.action_label ?? "Last edited"} · ${lastEdit.edit.at} · ${lastEdit.edit.actor.name} · ${lastEdit.connection.label}`
                       : "No edit attribution was reported for these connections"
                   }
-                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
+                  className="flex min-w-0 items-center gap-2 rounded-sm text-left text-13 focus-visible:outline-2 focus-visible:outline-ring"
                 >
                   <History
                     className="size-3.5 shrink-0 text-muted-foreground"
@@ -554,7 +544,7 @@ function GroupCard({
             </Glide>
             <Glide className="ml-auto flex flex-wrap items-center gap-2 pr-2">
               {matchingCount < count && (
-                <span className="text-11 text-muted-foreground">
+                <span className="text-13 text-muted-foreground">
                   {matchingCount} of {count} match
                 </span>
               )}
@@ -562,7 +552,7 @@ function GroupCard({
                 to="/keys/services/$groupId"
                 params={{ groupId: group.id }}
                 aria-label={`View all ${group.name} service details`}
-                className="text-xs text-primary-text hover:underline"
+                className="type-row-title text-primary-text hover:underline"
               >
                 Service details
               </Link>
@@ -605,7 +595,7 @@ function GroupCard({
         <CardReveal open={open || isOrdering} onClosed={onClosed}>
           <div className="bg-background/30">
             {ordering && (
-              <p className="p-3 text-11 text-muted-foreground">
+              <p className="p-3 text-13 text-muted-foreground">
                 Kept visible while ordering
               </p>
             )}
@@ -636,7 +626,7 @@ function GroupCard({
                           ? selectedPool.user_id
                           : undefined,
                     }}
-                    className="ml-auto text-xs text-primary-text hover:underline"
+                    className="ml-auto type-row-title text-primary-text hover:underline"
                   >
                     Manage in Service Pools
                   </Link>
@@ -649,7 +639,7 @@ function GroupCard({
                     insights={insights}
                   />
                 ) : (
-                  <p className="p-4 text-xs text-muted-foreground">
+                  <p className="p-4 text-13 text-muted-foreground">
                     {routing.loading
                       ? "Loading saved pools…"
                       : routing.incomplete
@@ -658,7 +648,7 @@ function GroupCard({
                   </p>
                 )}
                 {selectedPool && routing.incomplete && (
-                  <p className="px-4 pb-4 text-xs text-muted-foreground">
+                  <p className="px-4 pb-4 text-13 text-muted-foreground">
                     Additional organization pools may require admin access.
                   </p>
                 )}
@@ -769,12 +759,20 @@ export function GroupedServiceCards({
       updateShadow();
     };
     measure();
-    const observer = new ResizeObserver(measure);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      // Updating the sticky filter height can resize the observed main. Commit
+      // those CSS variables after delivery, rather than resizing its ancestor
+      // during the same ResizeObserver notification cycle.
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    });
     observer.observe(surface);
     if (scroller) observer.observe(scroller);
     scroller?.addEventListener("scroll", updateShadow, { passive: true });
     return () => {
       observer.disconnect();
+      cancelAnimationFrame(frame);
       scroller?.removeEventListener("scroll", updateShadow);
     };
   }, [view.accountId]);
@@ -822,7 +820,7 @@ export function GroupedServiceCards({
         stuck={filtersStuck}
         actions={actions}
       >
-        <span className="text-xs text-muted-foreground" aria-live="polite">
+        <span className="text-13 text-muted-foreground" aria-live="polite">
           {visible.length} {visible.length === 1 ? "service" : "services"} ·{" "}
           {matchingKeys.length} matching{" "}
           {matchingKeys.length === 1 ? "connection" : "connections"}
@@ -844,7 +842,7 @@ export function GroupedServiceCards({
           renderTable(matchingKeys)
         ) : (
           <MotionConfig reducedMotion="user">
-            <div className="grid items-start gap-6 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="shell-card-grid grid items-start sm:grid-cols-2 xl:grid-cols-3">
               {visible.map(({ group, matches }) => (
                 <GroupCard
                   key={group.id}
@@ -878,7 +876,7 @@ export function GroupedServiceCards({
           </MotionConfig>
         )
       ) : (
-        <p className="py-10 text-center text-sm text-muted-foreground">
+        <p className="py-10 text-center text-14 text-muted-foreground">
           {keys.length
             ? filters.source === "personal"
               ? "No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform."

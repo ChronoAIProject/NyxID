@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "./assistantHookTestHarness";
-import { activitySchema, messageSchema } from "./assistantTypes";
+import {
+  acknowledgementSchema,
+  activitySchema,
+  messageSchema,
+} from "./assistantTypes";
 
 type Element = { type: unknown; props: Record<string, any> };
 function nodes(value: unknown): Element[] {
@@ -34,10 +38,12 @@ function setup(file: string, name: string, props: Record<string, any>) {
     },
     "lucide-react-native": {
       Check: "Check",
+      ShieldCheck: "ShieldCheck",
       X: "X",
       ChevronDown: "ChevronDown",
       ChevronRight: "ChevronRight",
     },
+    "../../components/workspace/FirstLineIcon": { FirstLineIcon: "FirstLineIcon" },
     "../../components/workspace/WorkspaceUI": {
       Label: "Label",
       Notice: "Notice",
@@ -105,6 +111,88 @@ test("real activity disclosure exposes elapsed tool failure copy, truncation and
   assert.equal(toggles, 1);
   x.h.unmount();
 });
+test("a call refused only to ask for confirmation is not counted or shown as a failure", () => {
+  const gated = activitySchema.parse({
+    id: "tool",
+    label: "nyxid__create_schedule",
+    status: "error",
+    started_at: at,
+    ended_at: at,
+    failure: { kind: "tool_error" },
+  });
+  const broken = activitySchema.parse({
+    id: "other",
+    label: "api-github__get_issue",
+    status: "error",
+    started_at: at,
+    ended_at: at,
+    failure: { kind: "service_status", status: 503 },
+  });
+  const card = acknowledgementSchema.parse({
+    id: "d9428888-122b-41e1-b85c-61cd3cbb3210",
+    conversation_id: `nyxa-${"a".repeat(32)}`,
+    activity_id: "tool",
+    kind: "action",
+    status: "allowed",
+    summary: "Create a scheduled automation",
+    service_slug: null,
+    service_name: null,
+    tool_name: "nyxid__create_schedule",
+    created_at: at,
+    expires_at: "2099-01-01T00:00:00Z",
+  });
+  const only = setup(
+    "./AssistantActivityDisclosure.tsx",
+    "AssistantActivityDisclosure",
+    { activities: [gated], decisions: [card], onToggle: () => {} },
+  );
+  assert.doesNotMatch(only.text(), /failed/);
+  const statuses = () =>
+    only
+      .nodes()
+      .map((node) => node.props.status)
+      .filter(Boolean)
+      .join(",");
+  assert.equal(statuses(), "completed");
+  only.press(
+    only
+      .nodes()
+      .find((node) =>
+        /^Turn details:/.test(node.props.accessibilityLabel ?? ""),
+      )!.props.accessibilityLabel,
+  );
+  assert.match(only.text(), /Asked for your confirmation/);
+  assert.doesNotMatch(only.text(), /continue after a failed step/);
+  assert.equal(statuses(), "completed,confirmation");
+  assert.ok(
+    only
+      .nodes()
+      .some((node) =>
+        /Confirmation requested/.test(node.props.accessibilityLabel ?? ""),
+      ),
+  );
+  only.h.unmount();
+  const mixed = setup(
+    "./AssistantActivityDisclosure.tsx",
+    "AssistantActivityDisclosure",
+    { activities: [gated, broken], decisions: [card], onToggle: () => {} },
+  );
+  assert.match(mixed.text(), /1 failed/);
+  mixed.h.unmount();
+  // While the card is still pending the screen passes no decided rows.
+  const pending = setup(
+    "./AssistantActivityDisclosure.tsx",
+    "AssistantActivityDisclosure",
+    {
+      activities: [gated],
+      confirmationActivityIds: new Set(["tool"]),
+      turnLabel: "Working…",
+      onToggle: () => {},
+    },
+  );
+  assert.doesNotMatch(pending.text(), /failed/);
+  pending.h.unmount();
+});
 test("real turn-status row announces approval and interruption; queued capacity has the web acknowledgement", () => {
   const props = {
     turn: { turn_id: "t", started_at: at, activities: [] },
@@ -157,8 +245,17 @@ test("real failure UI discloses metadata and original request without retrying u
   });
   assert.match(x.text(), /A tool may have taken effect/);
   assert.doesNotMatch(x.text(), /Original request/);
+  const closed = x.nodes().find((node) => node.props.label === "Details")!;
+  assert.equal(closed.props.expanded, false, "Details is a disclosure for an in-chat panel");
   x.press("Details");
   assert.match(x.text(), /stage: stream/);
+  const open = x.nodes().find((node) => node.props.label === "Hide details")!;
+  assert.equal(open.props.expanded, true, "it says it can be closed again");
+  assert.ok(
+    x.nodes().some((node) => node.props.label === "Usage & credits" && node.props.opens) ||
+      !x.nodes().some((node) => node.props.label === "Usage & credits"),
+    "Usage & credits, when shown, is marked as leaving the chat",
+  );
   x.press("Copy diagnostic ID");
   await x.h.settle();
   assert.equal(x.copies[0], "turn t / request req");

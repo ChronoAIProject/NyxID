@@ -366,6 +366,9 @@ fn reserve_and_open_durable_once<'a>(
                     return Err(AppError::Conflict("Managed funding authority changed".into()));
                 }
             }
+            if let Some(guest) = &ctx.org_channel_guest {
+                crate::services::org_channel_service::budget::reserve(&db, session, guest, &rows, &reservation.layers).await?;
+            }
             if !rows.is_empty() {
                 if let Some(admission)=&ctx.managed_admission {
                     let mut documents = Vec::with_capacity(rows.len());
@@ -421,6 +424,9 @@ pub async fn release_usage_reservations(
         return Err(AppError::BillingProviderUnavailable(
             "Machine liability requires evidence-backed settlement, including zero usage".into(),
         ));
+    }
+    if row.org_channel_guest.is_some() {
+        crate::services::org_channel_service::budget::settle(db, &row.id, Credits::ZERO).await?;
     }
     let Some(funding) = row.funding.as_ref() else {
         return Ok(());
@@ -1016,6 +1022,14 @@ pub fn settle_usage_funding<'a>(
             "funding.settled_at": settled_at,
             "updated_at": settled_at,
         };
+        if claimed.org_channel_guest.is_some() {
+            crate::services::org_channel_service::budget::settle(
+                db,
+                &claimed.id,
+                total.checked_add(tax)?,
+            )
+            .await?;
+        }
         super::lago_carry::commit_settlement(
             db,
             &claimed,
@@ -1897,6 +1911,7 @@ mod tests {
             .expect("insert grant");
 
         let row = UsageMeterRow {
+            org_channel_guest: None,
             rollup_pending: true,
             id: row_id.to_string(),
             transaction_id: "funding-tx-1".to_string(),

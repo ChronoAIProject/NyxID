@@ -8,7 +8,7 @@ export function LazyVoicePanel(props: ComponentProps<typeof VoicePanel>) {
   return (
     <Suspense
       fallback={
-        <p role="status" className="p-4 text-sm text-muted-foreground">
+        <p role="status" className="p-4 text-14 text-muted-foreground">
           Loading voice…
         </p>
       }

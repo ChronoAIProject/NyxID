@@ -7,7 +7,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  ActivityIndicator,
   Alert,
   AppState,
   Keyboard,
@@ -34,6 +33,7 @@ import {
   Notice,
   WorkspacePage,
 } from "../../components/workspace/WorkspaceUI";
+import { SkeletonCards, SkeletonRows } from "../../components/Skeleton";
 import { agentsApi } from "../../lib/api/agentsApi";
 import {
   AgentCollaborationPanel,
@@ -44,6 +44,17 @@ import { servicesApi } from "../../lib/api/servicesApi";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { fonts } from "../../theme/designTokens";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
+import {
+  SettingsGroup,
+  SettingsMenuRow,
+  SettingsPage,
+  SettingsRow,
+  SettingsTextField,
+} from "../../components/settings/SettingsList";
+import {
+  agentProfileFieldTitle,
+  type AgentProfileField,
+} from "./AgentProfileEditScreen";
 import {
   AgentPermissionsField,
   type AgentPermissions,
@@ -82,6 +93,7 @@ export function AgentsScreen({
   onOpenSkills,
   onOpenAutomations,
   onOpenMachines,
+  onEditProfile,
   onClose,
   listHeader,
   initialCreate = false,
@@ -93,6 +105,8 @@ export function AgentsScreen({
   onOpenSkills?: (agentId: string) => void;
   onOpenAutomations?: (agentId: string) => void;
   onOpenMachines?: (agentId: string) => void;
+  /** Opens the focused edit page for one profile value. */
+  onEditProfile?: (agentId: string, field: AgentProfileField) => void;
   onClose?: () => void;
   listHeader?: ReactNode;
   initialCreate?: boolean;
@@ -118,9 +132,7 @@ export function AgentsScreen({
   const [closeRequested, setCloseRequested] = useState(false);
   const [error, setError] = useState<string>();
   const [notice, setNotice] = useState<string>();
-  const [confirmation, setConfirmation] = useState<"destroy" | "delete">();
   const [editorVersion, setEditorVersion] = useState(0);
-  const [profileVersion, setProfileVersion] = useState(0);
   const [grantsVersion, setGrantsVersion] = useState(0);
   const lock = useRef(false);
   const refreshLock = useRef(false);
@@ -198,7 +210,6 @@ export function AgentsScreen({
     setCreating(false);
     setCreationDirty(false);
     setError(undefined);
-    setConfirmation(undefined);
   }
   function back() {
     if (creating && creationDirty) {
@@ -241,7 +252,7 @@ export function AgentsScreen({
   async function run(
     action: () => Promise<void>,
     success?: string,
-    refreshForm?: "profile" | "grants",
+    refreshForm?: "grants",
   ): Promise<boolean> {
     if (lock.current) return false;
     lock.current = true;
@@ -251,7 +262,6 @@ export function AgentsScreen({
     try {
       await action();
       await reload();
-      if (refreshForm === "profile") setProfileVersion((value) => value + 1);
       if (refreshForm === "grants") setGrantsVersion((value) => value + 1);
       if (success) setNotice(success);
       return true;
@@ -268,6 +278,59 @@ export function AgentsScreen({
     setEditorVersion((value) => value + 1);
     setError(undefined);
     setNotice(undefined);
+  }
+  // A choice applies at once, with the same live-state and conflict checks
+  // as the profile form had before it was split into rows.
+  function changeConfirmationMode(
+    agent: AssistantAgent,
+    mode: AgentProfile["access_mode_override"],
+  ) {
+    if ((agent.access_mode_override ?? null) === mode) return;
+    void run(async () => {
+      const patch = buildAgentPatch(agent, {
+        ...agentProfile(agent),
+        access_mode_override: mode,
+      });
+      if (!Object.keys(patch).length) return;
+      const latest = (await agentsApi.detail(agent.id)).agent;
+      if (latest.can_maintain !== true || latest.status === "destroyed")
+        throw new Error(
+          "This agent can no longer be changed. Reload to review its current state.",
+        );
+      if (profileHasConflict(agent, latest, patch))
+        throw new Error(
+          "This profile changed elsewhere. Reload the agent and review those changes before saving.",
+        );
+      await agentsApi.update(agent.id, patch);
+    }, "Confirmation mode saved.");
+  }
+  function confirmLifecycle(agent: AssistantAgent, destroy: boolean) {
+    Alert.alert(
+      destroy
+        ? `Destroy “${agent.display_name ?? agent.name}”?`
+        : "Permanently delete this agent and all conversation history?",
+      destroy
+        ? "Stops its running threads and disconnects channel bots. Conversation history remains available."
+        : "This cannot be undone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: destroy ? "Destroy" : "Delete permanently",
+          style: "destructive",
+          onPress: () =>
+            void run(
+              async () => {
+                if (destroy) await agentsApi.destroy(agent.id);
+                else {
+                  await agentsApi.remove(agent.id);
+                  back();
+                }
+              },
+              destroy ? "Agent destroyed." : "Agent deleted.",
+            ),
+        },
+      ],
+    );
   }
 
   if (creating)
@@ -337,98 +400,68 @@ export function AgentsScreen({
     const agent = detail.data?.agent;
     const maintain = agent?.can_maintain === true;
     const alive = agent && agent.status !== "destroyed";
+    const profileEditable = !!agent && maintain && !!alive && !busy;
+    const editProfile = (field: AgentProfileField) =>
+      agent && profileEditable && onEditProfile
+        ? () => onEditProfile(agent.id, field)
+        : undefined;
+    const name = agent ? agent.display_name || agent.name : "Agent";
+    const subtitle = agent?.share_role
+      ? `${agent.owner_name ?? "Shared agent"} · shared ${agent.share_role}`
+      : agent?.owner_kind === "org"
+        ? `${agent.owner_name ?? "Organization"} · ${agent.org_role ?? "member"}`
+        : "Personal agent";
+    const confirmationMode = agent?.access_mode_override ?? null;
+    const memory = detail.data?.memory ?? [];
+    const threads = detail.data?.threads ?? [];
+    const destinations =
+      !!agent &&
+      !!alive &&
+      ((agent.can_use === true && !!onOpenChat) ||
+        (maintain && !agent.share_role && !!(onOpenSkills || onOpenMachines)) ||
+        (!agent.share_role && agent.owner_kind !== "org" && !!onOpenAutomations));
     return (
-      <WorkspacePage
-        title={agent?.display_name || agent?.name || "Agent"}
-        subtitle={
-          agent?.share_role
-            ? `${agent.owner_name ?? "Shared agent"} · shared ${agent.share_role}`
-            : agent?.owner_kind === "org"
-              ? `${agent.owner_name ?? "Organization"} · ${agent.org_role ?? "member"}`
-              : "Personal agent"
-        }
+      <SettingsPage
+        refreshing={pullRefreshing}
+        onRefresh={() => {
+          if (busy || detail.isFetching || refreshLock.current) return;
+          refreshLock.current = true;
+          setPullRefreshing(true);
+          void refreshEditor().finally(() => {
+            refreshLock.current = false;
+            setPullRefreshing(false);
+          });
+        }}
       >
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {detail.isPending && (
-          <ActivityIndicator
-            accessibilityLabel="Loading agent"
-            color={colors.primary}
-          />
+          <SkeletonRows rows={4} title accessibilityLabel="Loading agent" />
         )}
         {detail.isError && (
           <>
             <Notice message={errorMessage(detail.error)} tone="error" />
-            <ActionButton label="Retry" onPress={() => void detail.refetch()} />
+            <SettingsGroup inset={false}>
+              <SettingsRow
+                tone="action"
+                label="Retry"
+                onPress={() => void detail.refetch()}
+              />
+            </SettingsGroup>
           </>
         )}
         {agent && (
           <>
-            <Card>
-              <View style={styles.row}>
-                <AgentAvatar agent={agent} size="xl" />
-                <View style={styles.flex}>
-                  <Text style={[styles.title, { color: colors.textPrimary }]}>
-                    {agent.display_name ?? agent.name}
-                  </Text>
-                  <Label mono muted>
-                    @{agent.name} · {agent.status}
-                  </Label>
-                  <Label muted>
-                    {agent.kind === "nyxbot"
-                      ? "Your orchestrator"
-                      : "Specialist"}{" "}
-                    · {agent.memory_count} memories
-                  </Label>
-                </View>
-              </View>
-              <Label muted>
-                {agent.description || "Your assistant for everyday work."}
-              </Label>
-              {agent.pending_acknowledgements > 0 && (
-                <Notice
-                  message={`${agent.pending_acknowledgements} requests waiting for a decision.`}
-                />
-              )}
-              {alive && agent.can_use === true && onOpenChat && (
-                <ActionButton
-                  label="Chat with agent"
-                  onPress={() =>
-                    onOpenChat({
-                      agentId: agent.id,
-                      openLatest: true,
-                    })
-                  }
-                />
-              )}
-              {alive && maintain && !agent.share_role && onOpenSkills && (
-                <ActionButton
-                  label="Agent skills"
-                  variant="secondary"
-                  onPress={() => onOpenSkills(agent.id)}
-                  disabled={busy}
-                />
-              )}
-              {alive && maintain && !agent.share_role && onOpenMachines && (
-                <ActionButton
-                  label="Agent machine access"
-                  variant="secondary"
-                  onPress={() => onOpenMachines(agent.id)}
-                  disabled={busy}
-                />
-              )}
-              {alive &&
-                !agent.share_role &&
-                agent.owner_kind !== "org" &&
-                onOpenAutomations && (
-                  <ActionButton
-                    label="Agent automations"
-                    variant="secondary"
-                    onPress={() => onOpenAutomations(agent.id)}
-                    disabled={busy}
-                  />
-                )}
-            </Card>
+            <AgentIdentityHeader
+              agent={agent}
+              title={name}
+              subtitle={subtitle}
+            />
+            {agent.pending_acknowledgements > 0 && (
+              <Notice
+                message={`${agent.pending_acknowledgements} requests waiting for a decision.`}
+              />
+            )}
             {agent.share_role && (
               <Notice
                 message={
@@ -444,39 +477,103 @@ export function AgentsScreen({
             {!alive && (
               <Notice message="This agent is destroyed. Its threads are read only until you delete it permanently." />
             )}
-            <AgentCollaborationPanel
-              key={`${getAuthEpoch()}:${agent.id}:sharing:${editorVersion}`}
-              agent={agent}
-            />
+            {destinations && (
+              <SettingsGroup inset={false}>
+                {alive && agent.can_use === true && onOpenChat && (
+                  <SettingsRow
+                    tone="action"
+                    label="Chat with agent"
+                    onPress={() =>
+                      onOpenChat({ agentId: agent.id, openLatest: true })
+                    }
+                  />
+                )}
+                {alive && maintain && !agent.share_role && onOpenSkills && (
+                  <SettingsRow
+                    label="Skills"
+                    accessibilityLabel="Agent skills"
+                    disabled={busy}
+                    onPress={() => onOpenSkills(agent.id)}
+                  />
+                )}
+                {alive && maintain && !agent.share_role && onOpenMachines && (
+                  <SettingsRow
+                    label="Machine access"
+                    accessibilityLabel="Agent machine access"
+                    disabled={busy}
+                    onPress={() => onOpenMachines(agent.id)}
+                  />
+                )}
+                {alive &&
+                  !agent.share_role &&
+                  agent.owner_kind !== "org" &&
+                  onOpenAutomations && (
+                    <SettingsRow
+                      label="Automations"
+                      accessibilityLabel="Agent automations"
+                      disabled={busy}
+                      onPress={() => onOpenAutomations(agent.id)}
+                    />
+                  )}
+              </SettingsGroup>
+            )}
             {!agent.share_role && (
-              <AgentProfileForm
-                key={`profile:${agent.id}:${editorVersion}:${profileVersion}`}
-                agent={agent}
-                busy={busy}
-                onSave={(baseline, values) =>
-                  void run(
-                    async () => {
-                      const patch = buildAgentPatch(baseline, values);
-                      if (!Object.keys(patch).length) return;
-                      const latest = (await agentsApi.detail(agent.id)).agent;
-                      if (
-                        latest.can_maintain !== true ||
-                        latest.status === "destroyed"
-                      )
-                        throw new Error(
-                          "This agent can no longer be changed. Reload to review its current state.",
-                        );
-                      if (profileHasConflict(baseline, latest, patch))
-                        throw new Error(
-                          "This profile changed elsewhere. Reload the agent and review those changes before saving.",
-                        );
-                      await agentsApi.update(agent.id, patch);
-                    },
-                    "Profile saved.",
-                    "profile",
-                  )
+              <SettingsGroup
+                inset={false}
+                title="Profile"
+                footer={
+                  confirmationMode === "autopilot"
+                    ? "Autopilot may act without asking. Server policy and granted permissions still apply."
+                    : "Confirmation mode controls when this agent asks before acting."
                 }
-              />
+              >
+                <SettingsRow
+                  label="Handle"
+                  value={`@${agent.name}`}
+                  onPress={
+                    agent.kind === "nyxbot" ? undefined : editProfile("name")
+                  }
+                />
+                <SettingsRow
+                  label="Display name"
+                  value={agent.display_name || "None"}
+                  onPress={editProfile("display_name")}
+                />
+                <SettingsRow
+                  label={agentProfileFieldTitle(
+                    "description",
+                    agent.kind === "nyxbot",
+                  )}
+                  value={profilePreview(agent.description)}
+                  onPress={editProfile("description")}
+                />
+                <SettingsRow
+                  label="Personality and tone"
+                  value={profilePreview(agent.persona)}
+                  onPress={editProfile("persona")}
+                />
+                {profileEditable ? (
+                  <SettingsMenuRow
+                    label="Confirmation mode"
+                    value={confirmationMode ?? "workspace"}
+                    options={CONFIRMATION_MODES.map((mode) => ({
+                      value: (mode ?? "workspace") as ConfirmationChoice,
+                      label: CONFIRMATION_MODE_LABEL[mode ?? "workspace"],
+                    }))}
+                    onChange={(mode) =>
+                      changeConfirmationMode(
+                        agent,
+                        mode === "workspace" ? null : mode,
+                      )
+                    }
+                  />
+                ) : (
+                  <SettingsRow
+                    label="Confirmation mode"
+                    value={CONFIRMATION_MODE_LABEL[confirmationMode ?? "workspace"]}
+                  />
+                )}
+              </SettingsGroup>
             )}
             {agent.kind === "specialist" && !agent.share_role && (
               <AgentGrantsForm
@@ -513,6 +610,10 @@ export function AgentsScreen({
                 }
               />
             )}
+            <AgentCollaborationPanel
+              key={`${getAuthEpoch()}:${agent.id}:sharing:${editorVersion}`}
+              agent={agent}
+            />
             <AgentOperationControls
               key={`${getAuthEpoch()}:${agent.id}:operations:${editorVersion}`}
               agent={agent}
@@ -523,151 +624,116 @@ export function AgentsScreen({
               }
             />
             {!agent.share_role && (
-              <Card>
-                <Label>Memory</Label>
-                <Label muted>
-                  Notes this agent remembers across conversations.
-                </Label>
-                {detail.data?.memory.map((note) => (
-                  <MemoryNote
+              <SettingsGroup
+                inset={false}
+                title="Memory"
+                footer={
+                  maintain && alive && memory.length
+                    ? "Notes this agent remembers across conversations. Tap a memory to forget it."
+                    : "Notes this agent remembers across conversations."
+                }
+              >
+                {memory.map((note) => (
+                  <SettingsRow
                     key={note.id}
-                    text={note.text}
-                    busy={busy}
-                    editable={maintain && Boolean(alive)}
-                    onForget={() =>
-                      void run(async () => {
-                        await agentsApi.forget(agent.id, note.id);
-                      }, "Memory forgotten.")
+                    label={note.text}
+                    chevron={false}
+                    disabled={busy && maintain && !!alive}
+                    accessibilityHint={
+                      maintain && alive ? "Asks to forget this memory" : undefined
+                    }
+                    onPress={
+                      maintain && alive
+                        ? () =>
+                            Alert.alert(
+                              "Forget this memory?",
+                              note.text,
+                              [
+                                { text: "Keep memory", style: "cancel" },
+                                {
+                                  text: "Forget",
+                                  style: "destructive",
+                                  onPress: () =>
+                                    void run(async () => {
+                                      await agentsApi.forget(agent.id, note.id);
+                                    }, "Memory forgotten."),
+                                },
+                              ],
+                            )
+                        : undefined
                     }
                   />
                 ))}
-                {!detail.data?.memory.length && (
-                  <Label muted>No memories yet.</Label>
-                )}
-                {maintain && alive && (
-                  <RememberForm
-                    busy={busy}
-                    onRemember={(text) =>
-                      run(async () => {
-                        await agentsApi.remember(agent.id, text);
-                      }, "Memory saved.")
-                    }
-                  />
-                )}
-              </Card>
+                {!memory.length && <SettingsRow label="No memories yet" disabled />}
+              </SettingsGroup>
+            )}
+            {!agent.share_role && maintain && alive && (
+              <RememberForm
+                busy={busy}
+                onRemember={(text) =>
+                  run(async () => {
+                    await agentsApi.remember(agent.id, text);
+                  }, "Memory saved.")
+                }
+              />
             )}
             {!!agent.channels.length && (
-              <Card>
-                <Label>Connected channels</Label>
+              <SettingsGroup inset={false} title="Connected channels">
                 {agent.channels.map((channel) => (
-                  <Label key={channel.id} muted>
-                    {channel.bot_label} · {channel.platform} · {channel.status}
-                  </Label>
+                  <SettingsRow
+                    key={channel.id}
+                    label={channel.bot_label}
+                    detail={channel.platform}
+                    value={channel.status}
+                  />
                 ))}
-              </Card>
+              </SettingsGroup>
             )}
-            <Card>
-              <Label>Recent threads</Label>
-              {!detail.data?.threads.length && (
-                <Label muted>No conversations yet.</Label>
+            <SettingsGroup inset={false} title="Recent threads">
+              {!threads.length && (
+                <SettingsRow label="No conversations yet" disabled />
               )}
-              {detail.data?.threads.map((thread) => (
-                <Pressable
+              {threads.map((thread) => (
+                <SettingsRow
                   key={thread.id}
-                  accessibilityRole="button"
+                  label={thread.title}
+                  detail={
+                    thread.running
+                      ? "Running"
+                      : new Date(thread.last_message_at).toLocaleString()
+                  }
+                  chevron
                   disabled={!onOpenChat || agent.can_use !== true}
-                  style={[styles.thread, { borderColor: colors.borderSoft }]}
                   onPress={() =>
                     onOpenChat?.({
                       agentId: agent.id,
                       conversationId: thread.id,
                     })
                   }
-                >
-                  <View style={styles.flex}>
-                    <Label>{thread.title}</Label>
-                    <Label muted>
-                      {thread.running
-                        ? "Running"
-                        : new Date(thread.last_message_at).toLocaleString()}
-                    </Label>
-                  </View>
-                  <ChevronRight size={18} color={colors.textMuted} />
-                </Pressable>
+                />
               ))}
-            </Card>
+            </SettingsGroup>
             {maintain && !agent.share_role && agent.kind === "specialist" && (
-              <Card>
-                <Label>
-                  {alive ? "Destroy agent" : "Permanently delete agent"}
-                </Label>
-                <Label muted>
-                  {alive
+              <SettingsGroup
+                inset={false}
+                footer={
+                  alive
                     ? "Stops its running threads and disconnects channel bots. Conversation history remains available."
-                    : "Deletes this destroyed agent and all its threads. This cannot be undone."}
-                </Label>
-                {confirmation ? (
-                  <>
-                    <Notice
-                      message={
-                        confirmation === "destroy"
-                          ? `Destroy “${agent.display_name ?? agent.name}”?`
-                          : "Permanently delete this agent and all conversation history?"
-                      }
-                    />
-                    <ActionButton
-                      label={
-                        confirmation === "destroy"
-                          ? "Confirm destroy"
-                          : "Delete permanently"
-                      }
-                      variant="danger"
-                      loading={busy}
-                      onPress={() =>
-                        void run(
-                          async () => {
-                            if (confirmation === "destroy")
-                              await agentsApi.destroy(agent.id);
-                            else {
-                              await agentsApi.remove(agent.id);
-                              back();
-                            }
-                            setConfirmation(undefined);
-                          },
-                          confirmation === "destroy"
-                            ? "Agent destroyed."
-                            : "Agent deleted.",
-                        )
-                      }
-                    />
-                    <ActionButton
-                      label="Cancel"
-                      variant="secondary"
-                      disabled={busy}
-                      onPress={() => setConfirmation(undefined)}
-                    />
-                  </>
-                ) : (
-                  <ActionButton
-                    label={alive ? "Destroy agent" : "Delete permanently"}
-                    variant="danger"
-                    disabled={busy}
-                    onPress={() =>
-                      setConfirmation(alive ? "destroy" : "delete")
-                    }
-                  />
-                )}
-              </Card>
+                    : "Deletes this destroyed agent and all its threads. This cannot be undone."
+                }
+              >
+                <SettingsRow
+                  centered
+                  destructive
+                  label={alive ? "Destroy Agent" : "Delete Permanently"}
+                  disabled={busy}
+                  onPress={() => confirmLifecycle(agent, !!alive)}
+                />
+              </SettingsGroup>
             )}
-            <ActionButton
-              label="Reload agent and discard form changes"
-              variant="secondary"
-              disabled={busy || detail.isFetching}
-              onPress={() => void refreshEditor()}
-            />
           </>
         )}
-      </WorkspacePage>
+      </SettingsPage>
     );
   }
 
@@ -794,12 +860,7 @@ export function AgentsScreen({
           onClose={() => setShowFilters(false)}
         />
       )}
-      {list.isPending && (
-        <ActivityIndicator
-          color={colors.primary}
-          accessibilityLabel="Loading agents"
-        />
-      )}
+      {list.isPending && <SkeletonCards accessibilityLabel="Loading agents" />}
       {list.isError && (
         <>
           <Notice message={errorMessage(list.error)} tone="error" />
@@ -1016,66 +1077,6 @@ function CreateAgentForm({
   );
 }
 
-function AgentProfileForm({
-  agent,
-  busy,
-  onSave,
-}: {
-  agent: AssistantAgent;
-  busy: boolean;
-  onSave: (baseline: AssistantAgent, values: AgentProfile) => void;
-}) {
-  const baseline = useRef(agent).current;
-  const [value, setValue] = useState(() => agentProfile(agent));
-  const disabled =
-    busy || agent.can_maintain !== true || agent.status === "destroyed";
-  const dirty =
-    JSON.stringify(value) !== JSON.stringify(agentProfile(baseline));
-  return (
-    <Card>
-      <Label>Profile</Label>
-      <ProfileFields
-        value={value}
-        disabled={disabled}
-        nyxbot={agent.kind === "nyxbot"}
-        onChange={(patch) => setValue((old) => ({ ...old, ...patch }))}
-      />
-      <Label>Confirmation mode</Label>
-      <Label muted>Controls when this agent asks before acting.</Label>
-      {([null, "nyxmode", "ask_every_time", "autopilot"] as const).map(
-        (mode) => (
-          <Choice
-            key={mode ?? "workspace"}
-            label={
-              mode === null
-                ? "Follow workspace"
-                : mode === "nyxmode"
-                  ? "NyxMode · sensitive actions"
-                  : mode === "ask_every_time"
-                    ? "Ask · every change"
-                    : "Autopilot"
-            }
-            selected={(value.access_mode_override ?? null) === mode}
-            disabled={disabled}
-            onPress={() =>
-              setValue((old) => ({ ...old, access_mode_override: mode }))
-            }
-          />
-        ),
-      )}
-      {value.access_mode_override === "autopilot" && (
-        <Notice message="Autopilot may act without asking. Server policy and granted permissions still apply." />
-      )}
-      <ActionButton
-        label="Save profile"
-        loading={busy}
-        disabled={disabled || !dirty}
-        onPress={() => onSave(baseline, value)}
-      />
-    </Card>
-  );
-}
-
 function AgentGrantsForm({
   agent,
   connections,
@@ -1131,52 +1132,6 @@ function AgentGrantsForm({
   );
 }
 
-function Choice({
-  label,
-  selected,
-  disabled,
-  checkbox,
-  onPress,
-}: {
-  label: string;
-  selected: boolean;
-  disabled: boolean;
-  checkbox?: boolean;
-  onPress: () => void;
-}) {
-  const { colors } = useTheme();
-  return (
-    <Pressable
-      accessibilityRole={checkbox ? "checkbox" : "radio"}
-      accessibilityState={{ checked: selected, disabled }}
-      onPress={onPress}
-      disabled={disabled}
-      style={[
-        styles.choice,
-        {
-          backgroundColor: selected ? colors.primaryTone.bg : colors.cardSoft,
-          borderColor: selected ? colors.primaryTone.border : colors.border,
-          opacity: disabled ? 0.55 : 1,
-        },
-      ]}
-    >
-      <View
-        style={[
-          styles.check,
-          {
-            borderRadius: checkbox ? 4 : 10,
-            borderColor: selected ? colors.primary : colors.textMuted,
-            backgroundColor: selected ? colors.primary : "transparent",
-          },
-        ]}
-      />
-      <Text style={[styles.choiceLabel, { color: colors.textPrimary }]}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
 function RememberForm({
   busy,
   onRemember,
@@ -1186,17 +1141,20 @@ function RememberForm({
 }) {
   const [text, setText] = useState("");
   return (
-    <>
-      <Field
-        label="Add a memory"
+    <SettingsGroup inset={false} title="Add a memory">
+      <SettingsTextField
+        accessibilityLabel="Add a memory"
         value={text}
         onChangeText={setText}
         multiline
+        clearButtonMode="never"
         editable={!busy}
         maxLength={2000}
         placeholder="Something this agent should remember"
+        style={styles.memoryField}
       />
-      <ActionButton
+      <SettingsRow
+        tone="action"
         label="Remember"
         disabled={busy || !text.trim()}
         onPress={() => {
@@ -1205,50 +1163,66 @@ function RememberForm({
           });
         }}
       />
-    </>
+    </SettingsGroup>
   );
 }
 
-function MemoryNote({
-  text,
-  busy,
-  editable,
-  onForget,
+const CONFIRMATION_MODES = [
+  null,
+  "nyxmode",
+  "ask_every_time",
+  "autopilot",
+] as const;
+const CONFIRMATION_MODE_LABEL = {
+  workspace: "Follow workspace",
+  nyxmode: "NyxMode · sensitive actions",
+  ask_every_time: "Ask · every change",
+  autopilot: "Autopilot",
+} as const;
+type ConfirmationChoice = keyof typeof CONFIRMATION_MODE_LABEL;
+
+/** One line of a long profile value, as a row's value. */
+function profilePreview(text: string | null | undefined, limit = 40) {
+  const line = (text ?? "").replace(/\s+/g, " ").trim();
+  if (!line) return "None";
+  return line.length > limit ? `${line.slice(0, limit - 1).trimEnd()}…` : line;
+}
+
+/** The agent's avatar and name, shown once at the top of its page. */
+function AgentIdentityHeader({
+  agent,
+  title,
+  subtitle,
 }: {
-  text: string;
-  busy: boolean;
-  editable: boolean;
-  onForget: () => void;
+  agent: AssistantAgent;
+  title: string;
+  subtitle: string;
 }) {
-  const [confirm, setConfirm] = useState(false);
+  const { colors } = useTheme();
   return (
-    <View style={styles.memory}>
-      <Label>{text}</Label>
-      {editable &&
-        (confirm ? (
-          <>
-            <Label muted>Forget this memory?</Label>
-            <ActionButton
-              label="Confirm forget"
-              variant="danger"
-              disabled={busy}
-              onPress={onForget}
-            />
-            <ActionButton
-              label="Keep memory"
-              variant="secondary"
-              disabled={busy}
-              onPress={() => setConfirm(false)}
-            />
-          </>
-        ) : (
-          <ActionButton
-            label="Forget"
-            variant="secondary"
-            disabled={busy}
-            onPress={() => setConfirm(true)}
-          />
-        ))}
+    <View style={styles.identity}>
+      <AgentAvatar agent={agent} size="xl" />
+      <Text
+        accessibilityRole="header"
+        style={[styles.identityName, { color: colors.textPrimary }]}
+      >
+        {title}
+      </Text>
+      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
+        @{agent.name} · {agent.status} ·{" "}
+        {agent.kind === "nyxbot" ? "Your orchestrator" : "Specialist"} ·{" "}
+        {agent.memory_count} memories
+      </Text>
+      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
+        {subtitle}
+      </Text>
+      {agent.share_role && agent.description ? (
+        <Text
+          style={[styles.identityAbout, { color: colors.textSecondary }]}
+        >
+          {agent.description}
+        </Text>
+      ) : null}
     </View>
   );
 }
@@ -1301,23 +1275,31 @@ const styles = StyleSheet.create({
     right: 6,
   },
   title: { fontSize: 18, fontFamily: fonts.displaySemi },
-  thread: {
-    flexDirection: "row",
+  memoryField: { minHeight: 88, textAlignVertical: "top" },
+  identity: {
     alignItems: "center",
-    gap: 12,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
+    gap: 4,
+    paddingTop: 8,
+    paddingHorizontal: 16,
   },
-  choice: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    padding: 12,
-    minHeight: 44,
-    borderRadius: 10,
-    borderWidth: 1,
+  identityName: {
+    marginTop: 8,
+    fontSize: 22,
+    lineHeight: 28,
+    fontFamily: fonts.displaySemi,
+    textAlign: "center",
   },
-  choiceLabel: { flex: 1, fontFamily: fonts.body, fontSize: 12 },
-  check: { width: 16, height: 16, borderWidth: 1 },
-  memory: { gap: 8, paddingVertical: 10 },
+  identityMeta: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontFamily: fonts.body,
+    textAlign: "center",
+  },
+  identityAbout: {
+    marginTop: 4,
+    fontSize: 14,
+    lineHeight: 20,
+    fontFamily: fonts.body,
+    textAlign: "center",
+  },
 });
