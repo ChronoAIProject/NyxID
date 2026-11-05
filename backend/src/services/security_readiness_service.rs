@@ -52,6 +52,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
     "permissions:execution-dispatch-v1",
     "permissions:execution-authoring-v1",
+    super::execution_permission_enrollment::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
@@ -132,6 +133,27 @@ pub async fn observe_with_automation(
     platform_policy_required: bool,
     automation_enabled: bool,
 ) -> AppResult<()> {
+    let mut capabilities = CAPABILITIES.to_vec();
+    if automation_enabled {
+        capabilities.push(AUTOMATION_COMPLETION);
+    }
+    observe_with_capabilities(
+        db,
+        identity,
+        config,
+        platform_policy_required,
+        &capabilities,
+    )
+    .await
+}
+
+async fn observe_with_capabilities(
+    db: &Database,
+    identity: &ReplicaIdentity,
+    config: &RolloutConfig,
+    platform_policy_required: bool,
+    capabilities: &[&str],
+) -> AppResult<()> {
     if platform_policy_required {
         db.collection::<bson::Document>(ROLLOUTS)
             .update_one(
@@ -141,16 +163,12 @@ pub async fn observe_with_automation(
             .upsert(true)
             .await?;
     }
-    let mut capabilities: Vec<String> = CAPABILITIES.iter().map(|s| (*s).to_owned()).collect();
-    if automation_enabled {
-        capabilities.push(AUTOMATION_COMPLETION.to_owned());
-    }
     let row = SecurityReplica {
         id: identity.generation_id.clone(),
         instance_name: identity.instance_name.clone(),
         generation_id: identity.generation_id.clone(),
         protocol: 1,
-        capabilities,
+        capabilities: capabilities.iter().map(|s| (*s).to_owned()).collect(),
         expected_replicas: config.expected_replicas.clone(),
         drained: config.drained,
         platform_policy_required,

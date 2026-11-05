@@ -17,14 +17,14 @@ use axum::{
 use tower::ServiceExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any as any_request};
 
-struct Fixture {
-    state: crate::AppState,
-    owner: String,
-    key: String,
-    raw: String,
-    connection: String,
-    catalog: String,
-    server: MockServer,
+pub(super) struct Fixture {
+    pub(super) state: crate::AppState,
+    pub(super) owner: String,
+    pub(super) key: String,
+    pub(super) raw: String,
+    pub(super) connection: String,
+    pub(super) catalog: String,
+    pub(super) server: MockServer,
 }
 impl Fixture {
     async fn new(name: &str) -> Self {
@@ -139,7 +139,7 @@ impl Fixture {
         .await
         .unwrap();
     }
-    async fn auth(&self) -> crate::mw::auth::AuthUser {
+    pub(super) async fn auth(&self) -> crate::mw::auth::AuthUser {
         let key = self
             .state
             .db
@@ -197,7 +197,7 @@ impl Fixture {
         };
         grant
     }
-    async fn store(&self, grant: &ApprovalGrant) {
+    pub(super) async fn store(&self, grant: &ApprovalGrant) {
         self.state
             .db
             .collection::<ApprovalGrant>("approval_grants")
@@ -230,7 +230,7 @@ impl Fixture {
             ))
             .with_state(self.state.clone())
     }
-    async fn call(&self, path: &str) -> (StatusCode, String) {
+    pub(super) async fn call(&self, path: &str) -> (StatusCode, String) {
         let response = self
             .router()
             .oneshot(
@@ -252,7 +252,7 @@ impl Fixture {
         .unwrap();
         (status, text)
     }
-    async fn no_prompts(&self) {
+    pub(super) async fn no_prompts(&self) {
         for collection in [
             "assistant_acknowledgements",
             "assistant_agent_consents",
@@ -323,7 +323,7 @@ impl Fixture {
         .unwrap()
         .expect("covering permission")
     }
-    async fn cleanup(self) {
+    pub(super) async fn cleanup(self) {
         self.state.db.drop().await.unwrap();
     }
 }
@@ -429,12 +429,16 @@ async fn twenty_duplicate_operation_claims_send_once_and_uncertain_never_replays
             actor: f.owner.clone(),
             principal: Principal::ApiKey(f.key.clone()),
             operation_id: initial.operation_id.clone(),
+            voice_task: false,
+            native: None,
+            descendant: None,
             authoring: std::sync::atomic::AtomicBool::new(false),
             generated_correlation: OnceLock::new(),
             resume: None,
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
+            admission: OnceCell::new(),
             snapshot: OnceCell::new(),
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
@@ -491,12 +495,16 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
         actor: f.owner.clone(),
         principal: Principal::ApiKey(f.key.clone()),
         operation_id: initial.operation_id.clone(),
+        voice_task: false,
+        native: None,
+        descendant: None,
         authoring: std::sync::atomic::AtomicBool::new(false),
         generated_correlation: OnceLock::new(),
         resume: None,
         drain: OnceLock::new(),
         authenticated_key: OnceLock::new(),
         source_credential: OnceLock::new(),
+        admission: OnceCell::new(),
         snapshot: OnceCell::new(),
         authority: OnceCell::new(),
         policies: tokio::sync::Mutex::new(Vec::new()),
@@ -621,6 +629,40 @@ async fn unmarked_coordinator_adds_zero_database_commands() {
         count.load(Ordering::SeqCst),
         0,
         "count every DB command, including unrelated collections"
+    );
+    let mut native_key = key.clone();
+    native_key.purpose = crate::models::api_key::ApiKeyPurpose::PermissionBound;
+    let native = crate::mw::auth::api_key_auth_user(&f.state.db, &native_key, None, None, None)
+        .await
+        .unwrap();
+    assert!(native.execution_permission.is_none());
+    assert_eq!(
+        count.swap(0, Ordering::SeqCst),
+        1,
+        "native key auth retains only its existing person read"
+    );
+    admit_http(
+        &f.state,
+        &native,
+        Some(&f.connection),
+        Some(&f.owner),
+        &mut target,
+        "GET",
+        "status",
+        None,
+        b"",
+        &Default::default(),
+        None,
+        &descriptor,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        count.load(Ordering::SeqCst),
+        0,
+        "unenrolled native dispatch adds no DB commands"
     );
     f.cleanup().await;
 }
@@ -834,15 +876,7 @@ async fn owner_ask_turn_covered_suppresses_risk_card_and_preserves_live_turn_fen
     )
     .await
     .unwrap();
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let key = f
         .state
         .db
@@ -1421,12 +1455,16 @@ async fn operation_candidates_use_independent_claims_and_prefer_reusable_coverag
         actor: f.owner.clone(),
         principal: Principal::ApiKey(f.key.clone()),
         operation_id: original.operation_id.clone(),
+        voice_task: false,
+        native: None,
+        descendant: None,
         authoring: std::sync::atomic::AtomicBool::new(false),
         generated_correlation: OnceLock::new(),
         resume: None,
         drain: OnceLock::new(),
         authenticated_key: OnceLock::new(),
         source_credential: OnceLock::new(),
+        admission: OnceCell::new(),
         snapshot: OnceCell::new(),
         authority: OnceCell::new(),
         policies: tokio::sync::Mutex::new(Vec::new()),
@@ -1467,15 +1505,7 @@ async fn covered_risk_keeps_webhook_policy_delegation_and_org_instruction_floors
         "https://example.com",
     )
     .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let key = f
         .state
         .db
@@ -1550,15 +1580,7 @@ async fn message_root_admission_recovery_and_stop_fence_persistent_permission() 
     use super::super::assistant_nyxagent as engine;
     let f = super::super::assistant_authority_tests::orchestrator_fixture("execution_task_runtime")
         .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
         conversation_id: None,
         text: "One logical task".into(),
@@ -1895,15 +1917,7 @@ async fn invocation_admission_has_a_server_root_and_cancel_fences_recovery() {
     let f =
         super::super::assistant_authority_tests::orchestrator_fixture("execution_invocation_root")
             .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
         conversation_id: None,
         text: "One invocation".into(),
@@ -1966,15 +1980,7 @@ async fn message_delegation_preserves_root_but_new_human_input_does_not_inherit_
     let f =
         super::super::assistant_authority_tests::orchestrator_fixture("execution_delegation_root")
             .await;
-    f.state
-        .db
-        .collection::<Document>("users")
-        .update_one(
-            doc! {"_id":&f.owner},
-            doc! {"$set":{"execution_permission_enrollment":1_i32}},
-        )
-        .await
-        .unwrap();
+    super::phase_b_tests::enroll(&f.state.db, &f.owner).await;
     let mut start = engine::TurnStart::from(&engine::TurnRequest {
         conversation_id: None,
         text: "A parent task".into(),
@@ -2550,4 +2556,7 @@ async fn mcp_denial_and_gap_keep_transport_parity_without_provider_effects() {
 }
 
 #[path = "proposal_tests.rs"]
-mod proposal_tests;
+pub(super) mod proposal_tests;
+
+#[path = "enrollment_tests.rs"]
+mod enrollment_tests;

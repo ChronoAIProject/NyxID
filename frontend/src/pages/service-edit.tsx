@@ -1,3 +1,4 @@
+import { SandboxBillingSettings } from "@/components/services/sandbox-billing-settings";
 import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
 import { canManageCatalog, canWriteTool } from "@/types/api";
 import { ServiceToolFields } from "@/components/services/service-tool-fields";
@@ -1198,6 +1199,7 @@ function ServiceEditForm({ source }: { readonly source: DownstreamService }) {
           </fieldset>
           </form>
         </Form>
+        {user?.is_admin && service.slug === "cma" && <SandboxBillingSettings key={serviceId} serviceId={serviceId} />}
         {user?.is_admin && <ServiceConcurrency key={serviceId} serviceId={serviceId} />}
       </div>
     </div>

@@ -10,9 +10,17 @@ use crate::services::{
     assistant_settings_service,
 };
 
-async fn assistant(name: &str) -> (Fixture, AssistantConversation) {
+pub(in crate::services::execution_permission_dispatch) async fn assistant(
+    name: &str,
+) -> (Fixture, AssistantConversation) {
+    assistant_for_cohort(name, false).await
+}
+pub(in crate::services::execution_permission_dispatch) async fn assistant_for_cohort(
+    name: &str,
+    global: bool,
+) -> (Fixture, AssistantConversation) {
     let mut f = Fixture::new(name).await;
-    f.enroll(true).await;
+    super::super::phase_b_tests::enroll_cohort(&f.state.db, &f.owner, global).await;
     assistant_settings_service::update(
         &f.state.db,
         &f.owner,
@@ -147,103 +155,105 @@ async fn count(f: &Fixture, collection: &str) -> u64 {
 
 #[tokio::test]
 async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exact() {
-    let (f, row) = assistant("execution_proposal_proxy").await;
-    let first = write_call(&f).await;
-    assert_ne!(first.0, StatusCode::OK, "{}", first.1);
-    let request = proposal(&f).await;
-    let p = proposals::proposal(&request).unwrap();
-    assert_eq!(
-        p.choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-        ["operation", "task", "window", "persistent"]
-    );
-    assert!(
-        p.contract
-            .satisfies
-            .contains(&ExecutionFloor::AccessModeRisk)
-    );
-    assert!(
-        p.contract
-            .satisfies
-            .contains(&ExecutionFloor::PersonalServiceApproval)
-    );
-    assert_eq!(count(&f, "assistant_acknowledgements").await, 0);
-    assert!(f.server.received_requests().await.unwrap().is_empty());
-    for _ in 0..3 {
-        let _ = write_call(&f).await;
-    }
-    assert_eq!(count(&f, "approval_requests").await, 1);
-    let input = decision(&request, "operation");
-    assert!(
-        proposals::decide(&f.state, &Uuid::new_v4().to_string(), &request.id, &input)
+    for global in [false, true] {
+        let (f, row) = assistant_for_cohort("execution_proposal_proxy", global).await;
+        let first = write_call(&f).await;
+        assert_ne!(first.0, StatusCode::OK, "{}", first.1);
+        let request = proposal(&f).await;
+        let p = proposals::proposal(&request).unwrap();
+        assert_eq!(
+            p.choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["operation", "task", "window", "persistent"]
+        );
+        assert!(
+            p.contract
+                .satisfies
+                .contains(&ExecutionFloor::AccessModeRisk)
+        );
+        assert!(
+            p.contract
+                .satisfies
+                .contains(&ExecutionFloor::PersonalServiceApproval)
+        );
+        assert_eq!(count(&f, "assistant_acknowledgements").await, 0);
+        assert!(f.server.received_requests().await.unwrap().is_empty());
+        for _ in 0..3 {
+            let _ = write_call(&f).await;
+        }
+        assert_eq!(count(&f, "approval_requests").await, 1);
+        let input = decision(&request, "operation");
+        assert!(
+            proposals::decide(&f.state, &Uuid::new_v4().to_string(), &request.id, &input)
+                .await
+                .is_err()
+        );
+        let key_auth = f.auth().await;
+        assert!(
+            crate::handlers::approvals::decide_execution_request(
+                axum::extract::State(f.state.clone()),
+                key_auth,
+                axum::extract::Path(request.id.clone()),
+                axum::Json(decision(&request, "operation"))
+            )
             .await
             .is_err()
-    );
-    let key_auth = f.auth().await;
-    assert!(
-        crate::handlers::approvals::decide_execution_request(
+        );
+        let approved = proposals::decide(&f.state, &f.owner, &request.id, &input)
+            .await
+            .unwrap();
+        assert_eq!(approved.status, "approved");
+        let replay = proposals::decide(&f.state, &f.owner, &request.id, &input)
+            .await
+            .unwrap();
+        assert_eq!(
+            proposals::proposal(&approved).unwrap().grant_id,
+            proposals::proposal(&replay).unwrap().grant_id
+        );
+        assert_eq!(count(&f, "approval_grants").await, 1);
+        let grant_id = proposals::proposal(&approved)
+            .unwrap()
+            .grant_id
+            .clone()
+            .unwrap();
+        let key_view = crate::handlers::approvals::get_grant_authorization(
             axum::extract::State(f.state.clone()),
-            key_auth,
-            axum::extract::Path(request.id.clone()),
-            axum::Json(decision(&request, "operation"))
+            f.auth().await,
+            axum::extract::Path(grant_id.clone()),
         )
         .await
-        .is_err()
-    );
-    let approved = proposals::decide(&f.state, &f.owner, &request.id, &input)
-        .await
-        .unwrap();
-    assert_eq!(approved.status, "approved");
-    let replay = proposals::decide(&f.state, &f.owner, &request.id, &input)
-        .await
-        .unwrap();
-    assert_eq!(
-        proposals::proposal(&approved).unwrap().grant_id,
-        proposals::proposal(&replay).unwrap().grant_id
-    );
-    assert_eq!(count(&f, "approval_grants").await, 1);
-    let grant_id = proposals::proposal(&approved)
         .unwrap()
-        .grant_id
-        .clone()
-        .unwrap();
-    let key_view = crate::handlers::approvals::get_grant_authorization(
-        axum::extract::State(f.state.clone()),
-        f.auth().await,
-        axum::extract::Path(grant_id.clone()),
-    )
-    .await
-    .unwrap()
-    .0;
-    assert!(key_view.execution.unwrap().review.is_none());
-    let human_view = crate::handlers::approvals::get_grant_authorization(
-        axum::extract::State(f.state.clone()),
-        test_utils::test_auth_user(&f.owner),
-        axum::extract::Path(grant_id),
-    )
-    .await
-    .unwrap()
-    .0;
-    assert!(human_view.execution.unwrap().review.is_some());
-    finish(&f, &row, "Waiting for your permission").await;
-    let resumed = event_turn(&f, &row).await;
-    let text = resume(&f, &resumed).await;
-    assert!(text.contains("HTTP 200"), "{text}");
-    assert!(text.contains("ok"));
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(resume(&f, &resumed).await, text);
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(
-        proposals::proposal(&proposal(&f).await).unwrap().state,
-        "completed"
-    );
-    finish(&f, &resumed, &text).await;
-    assert!(
-        proposals::proposal(&proposal(&f).await)
-            .unwrap()
-            .delivered_turn_id
-            .is_some()
-    );
-    f.cleanup().await;
+        .0;
+        assert!(key_view.execution.unwrap().review.is_none());
+        let human_view = crate::handlers::approvals::get_grant_authorization(
+            axum::extract::State(f.state.clone()),
+            test_utils::test_auth_user(&f.owner),
+            axum::extract::Path(grant_id),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(human_view.execution.unwrap().review.is_some());
+        finish(&f, &row, "Waiting for your permission").await;
+        let resumed = event_turn(&f, &row).await;
+        let text = resume(&f, &resumed).await;
+        assert!(text.contains("HTTP 200"), "{text}");
+        assert!(text.contains("ok"));
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(resume(&f, &resumed).await, text);
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            proposals::proposal(&proposal(&f).await).unwrap().state,
+            "completed"
+        );
+        finish(&f, &resumed, &text).await;
+        assert!(
+            proposals::proposal(&proposal(&f).await)
+                .unwrap()
+                .delivered_turn_id
+                .is_some()
+        );
+        f.cleanup().await;
+    }
 }
 
 #[tokio::test]

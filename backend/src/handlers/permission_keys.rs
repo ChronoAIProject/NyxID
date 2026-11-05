@@ -187,6 +187,7 @@ impl BackendTransport {
         &self,
         request: &nyxid_permissions::Request,
         origin: Option<&str>,
+        auth: &AuthUser,
     ) -> AppResult<Response> {
         policies::check_live(&self.state.db, &self.binding).await?;
         let resolved = proxy_service::resolve_proxy_target_by_user_service_id(
@@ -225,7 +226,7 @@ impl BackendTransport {
         proxy_request.extensions_mut().insert(self.billing);
         super::proxy::execute_permission_request(
             &self.state,
-            &self.auth,
+            auth,
             &self.binding,
             origin,
             resolved,
@@ -238,6 +239,47 @@ impl BackendTransport {
 
 #[async_trait]
 impl Transport for BackendTransport {
+    async fn send_verified(
+        &self,
+        verified: nyxid_permissions::VerifiedPlan<'_>,
+        dispatch: nyxid_permissions::DispatchMark,
+    ) -> Result<nyxid_permissions::Response, Error> {
+        let Some(context) = &self.auth.execution_permission else {
+            dispatch.dispatched();
+            return self
+                .send_to(&verified.plan().request, verified.plan().origin.as_deref())
+                .await;
+        };
+        let mut auth = self.auth.clone();
+        auth.execution_permission = Some(
+            context
+                .for_native(&self.binding, &verified, dispatch.clone())
+                .map_err(|_| Error::Denied("native admission refused"))?,
+        );
+        let result = self
+            .forward(
+                &verified.plan().request,
+                verified.plan().origin.as_deref(),
+                &auth,
+            )
+            .await;
+        let response = result.map_err(|error| {
+            if dispatch.was_dispatched() {
+                Error::Upstream
+            } else if error.is_forbidden()
+                || matches!(
+                    error,
+                    AppError::ApprovalRequired { .. } | AppError::ApprovalFailed { .. }
+                )
+            {
+                Error::Denied("native execution approval is required or was refused")
+            } else {
+                Error::Upstream
+            }
+        })?;
+        native_response(response).await
+    }
+
     async fn send(
         &self,
         request: &nyxid_permissions::Request,
@@ -250,26 +292,37 @@ impl Transport for BackendTransport {
         request: &nyxid_permissions::Request,
         origin: Option<&str>,
     ) -> Result<nyxid_permissions::Response, Error> {
+        // Adapter verification reads keep their existing policy and approval
+        // checks, but cannot select or consume the primary execution permission.
+        let verification = self.auth.execution_permission.as_ref().map(|_| {
+            let mut auth = self.auth.clone();
+            crate::services::execution_permission_dispatch::exclude(&mut auth);
+            auth
+        });
         let response = self
-            .forward(request, origin)
+            .forward(request, origin, verification.as_ref().unwrap_or(&self.auth))
             .await
             .map_err(|_| Error::Upstream)?;
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
-        let body = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
-            .await
-            .map_err(|_| Error::ResponseTooLarge)?;
-        Ok(nyxid_permissions::Response {
-            status,
-            content_type,
-            body,
-        })
+        native_response(response).await
     }
+}
+
+async fn native_response(response: Response) -> Result<nyxid_permissions::Response, Error> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    let body = to_bytes(response.into_body(), MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|_| Error::ResponseTooLarge)?;
+    Ok(nyxid_permissions::Response {
+        status,
+        content_type,
+        body,
+    })
 }
 
 async fn prepare(

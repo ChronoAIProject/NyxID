@@ -3802,12 +3802,7 @@ impl PreparedProxyCall {
         service: &McpToolService,
         endpoint: &McpToolEndpoint,
     ) -> AppResult<()> {
-        if auth.execution_permission.is_none()
-            || endpoint.async_operation.is_some()
-            || self.async_submission.is_some()
-            || self.async_continuation.is_some()
-            || self.managed_base.is_some()
-        {
+        if auth.execution_permission.is_none() || self.managed_base.is_some() {
             return Ok(());
         }
         // Only retain calls whose exact prepared bytes can use the ordinary
@@ -3821,7 +3816,10 @@ impl PreparedProxyCall {
                 retained_headers.insert(name, value);
             }
         }
-        if self.acknowledgement_id.is_none()
+        if endpoint.async_operation.is_none()
+            && self.async_submission.is_none()
+            && self.async_continuation.is_none()
+            && self.acknowledgement_id.is_none()
             && self.lark_message.is_none()
             && self.attachment_binding.is_none()
             && self.resource_source.is_none()
@@ -9722,6 +9720,7 @@ mod tests {
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
+            execution_voice_task: false,
             execution_task: None,
             execution_permission: None,
             business_system_success: false,

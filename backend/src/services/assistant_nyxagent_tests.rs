@@ -5586,6 +5586,7 @@ async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work
         .unwrap();
     let job = |id: &str, issuing_turn: Option<String>| MachineJob {
         automation_run_id: None,
+        execution_task: None,
         id: id.into(),
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),
@@ -5847,6 +5848,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        execution_task: None,
         instruction_receipt_version: 0,
         shared_execution: None,
         secret_context_versions: Default::default(),

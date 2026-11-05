@@ -1998,9 +1998,6 @@ pub(crate) fn test_app_config() -> AppConfig {
         cloud_response_cache_max_entries: 256,
         billing_enabled: false,
         billing_allocations_enabled: false,
-        cma_billing_enabled: false,
-        cma_billing_service_account_id: None,
-        cma_billing_service_id: None,
         lago_api_url: None,
         lago_api_key: None,
         lago_plan_code: "starter".to_string(),
@@ -2200,6 +2197,8 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         std::time::Duration::from_secs(config.cluster_slot_renew_secs),
     );
 
+    let execution_enrollment =
+        crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
         local_machine_platform: None,
         db: db.clone(),
@@ -2413,6 +2412,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
+        execution_enrollment,
         telemetry: None,
     }
 }

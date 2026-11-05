@@ -259,7 +259,16 @@ pub(super) async fn for_group(
     }
     Ok(RequestAccess {
         execution_enrolled: users.iter().any(|u| {
-            u.id == actor && u.user_type.is_person() && u.execution_permission_enrollment == Some(1)
+            u.id == actor
+                && svc::execution_permission_enrollment::snapshot::candidate(
+                    db,
+                    u,
+                    &memberships
+                        .iter()
+                        .filter(|m| m.member_user_id == actor)
+                        .map(|m| (m.org_user_id.clone(), m.role))
+                        .collect::<Vec<_>>(),
+                )
         }),
         participants: super::people::project(&group, &users),
         group,

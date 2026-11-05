@@ -891,7 +891,16 @@ pub(crate) async fn api_key_auth_user_for_watch(
         false
     };
     let mut auth = api_key_auth_user_inner(db, key, None, None, None, shared_resume).await?;
-    crate::services::execution_permission_dispatch::exclude(&mut auth);
+    if watch.execution_task.is_some() {
+        crate::services::execution_permission_dispatch::descendants::attach(
+            &mut auth,
+            crate::services::execution_permission_dispatch::descendants::Descendant::Watch(
+                Box::new(watch.clone()),
+            ),
+        )?;
+    } else {
+        crate::services::execution_permission_dispatch::exclude(&mut auth);
+    }
     Ok(auth)
 }
 
@@ -979,9 +988,17 @@ async fn api_key_auth_user_inner(
     let marker = user
         .as_ref()
         .filter(|u| {
-            u.user_type.is_person() && key.purpose == crate::models::api_key::ApiKeyPurpose::General
+            u.user_type.is_person()
+                && matches!(
+                    key.purpose,
+                    crate::models::api_key::ApiKeyPurpose::General
+                        | crate::models::api_key::ApiKeyPurpose::PermissionBound
+                )
         })
-        .and_then(|u| u.execution_permission_enrollment);
+        .filter(|u| {
+            crate::services::execution_permission_enrollment::snapshot::candidate(db, u, &[])
+        })
+        .map(|_| 1);
     let execution_permission =
         crate::services::execution_permission_dispatch::RequestContext::enrolled(
             marker.or_else(|| {
@@ -1526,7 +1543,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
                     let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
-                        execution_enrolled: first_party_session && user.execution_permission_enrollment == Some(1),
+                        execution_enrolled: first_party_session && state.execution_enrollment.candidate(&user, &[]),
                         execution_permission: None,
                         mfa_assured,
                         mfa_enabled: (first_party_session
@@ -1617,7 +1634,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
-                                    execution_enrolled: u.execution_permission_enrollment == Some(1),
+                                    execution_enrolled: state.execution_enrollment.candidate(&u, &[]),
                                     execution_permission: None,
                                     mfa_assured: sess.mfa_assured == Some(true),
                                     mfa_enabled: (u.user_type == crate::models::user::UserType::Person)

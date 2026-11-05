@@ -34,6 +34,9 @@ impl std::fmt::Debug for VoiceClientKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// Non-authorizing enrollment hint copied from the authenticated person.
+    #[serde(default)]
+    pub execution_enrolled: bool,
     #[serde(flatten)]
     pub responses: super::voice_responses::ResponsesState,
     /// Accepted work suspends user-idle expiry, but never heartbeat or hard limits.

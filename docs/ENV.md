@@ -853,16 +853,18 @@ serve historical versions. See [the explicit migration API procedure](SECURITY.m
 
 ### CMA Sandbox prepaid admission
 
-`CMA_BILLING_ENABLED` defaults to `false`. The independent
-`experimental:cma-sandbox-billing` feature flag also defaults to false and supports
-the existing admin global/per-user overrides. Enabling new quotes/windows also
+`experimental:cma-sandbox-billing` is the sole CMA admission rollout control.
+The admin feature flag defaults to false and resolves global, matching organization,
+then personal overrides. Enabling new quotes/windows also
 requires `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, a configured Lago
 client, exact-accounting readiness, the owner's existing billing rollout and
 subscription entitlement, and a synchronized effective CMA rate card.
-`CMA_BILLING_SERVICE_ID` selects the catalog identity for entitlements/funding.
-`CMA_BILLING_SERVICE_ACCOUNT_ID` selects one General-purpose producer account;
-its issued token and live account must both allow `billing:sandbox:write`.
-Missing identities fail closed. Neither setting is a credential.
+CMA billing has no dedicated environment configuration. The unique active `cma`
+catalog service owns its Sandbox billing settings. A platform admin selects its
+authorized General-purpose producer service account on the service edit page;
+the issued token and live account must both allow `billing:sandbox:write`.
+Missing or ambiguous service/producer settings fail closed. Producer changes are
+transactionally audited and the selected account becomes platform-protected.
 
 Receipt recovery and evidence finalization remain available to the configured
 producer when new admission is disabled. Keep its authority and the existing

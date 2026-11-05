@@ -597,6 +597,7 @@ fn authority(
         automation_work: turn.automation_work.clone(),
         execution_group_id: None,
         execution_unsupported: true,
+        execution_voice_task: false,
         execution_task: None,
         execution_permission: None,
         business_system_success: false,
@@ -1727,6 +1728,7 @@ fn stop_job(
 ) -> crate::models::machine_job::MachineJob {
     crate::models::machine_job::MachineJob {
         automation_run_id: run.map(str::to_owned),
+        execution_task: None,
         id: id.into(),
         user_id: OWNER.into(),
         node_id: "offline-node".into(),
