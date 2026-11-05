@@ -521,3 +521,5 @@ pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;
+
+pub mod assistant_feedback_thread;

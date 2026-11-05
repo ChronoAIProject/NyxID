@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuthStore } from "@/stores/auth-store";
 import { api } from "@/lib/api-client";
 import {
   type BillingWalletResponse,
@@ -35,13 +36,16 @@ export function billingUsagePath(
 }
 
 export function useBillingWallet() {
+  const userId = useAuthStore((state) => state.user?.id);
   return useQuery({
-    queryKey: BILLING_WALLET_KEY,
+    queryKey: [...BILLING_WALLET_KEY, userId],
     queryFn: async (): Promise<BillingWalletResponse> => {
       const response = await api.get<unknown>("/billing/wallet");
       return billingWalletResponseSchema.parse(response);
     },
     retry: false,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 
@@ -55,7 +59,10 @@ export function useProvisionBillingWallet() {
       return billingWalletResponseSchema.parse(response);
     },
     onSuccess: (wallet) => {
-      queryClient.setQueryData(BILLING_WALLET_KEY, wallet);
+      queryClient.setQueryData(
+        [...BILLING_WALLET_KEY, wallet.owner_id],
+        wallet,
+      );
       void queryClient.invalidateQueries({ queryKey: BILLING_USAGE_KEY });
       void queryClient.invalidateQueries({ queryKey: BILLING_BILL_KEY });
       void queryClient.invalidateQueries({ queryKey: BILLING_INVOICES_KEY });

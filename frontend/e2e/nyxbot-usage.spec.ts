@@ -4,7 +4,7 @@ import { newView } from "../src/lib/usage-analytics";
 import { nyxbotModelFixture } from "../src/test/nyxbot-model-fixture";
 import { usageFixture } from "../src/test/admin-usage-fixture";
 
-async function setup(page: Page) {
+async function setup(page: Page, preview = true) {
   await page.clock.setFixedTime(new Date("2026-10-16T12:00:00Z"));
   await mockDashboard(page);
   await page.route("**/api/v1/admin/usage/identities?**", (route) =>
@@ -21,6 +21,58 @@ async function setup(page: Page) {
   await page.route("**/api/v1/admin/usage?**", (route) =>
     route.fulfill({ json: usageFixture() }),
   );
+  await page.route("**/api/v1/admin/usage/free-grants?**", (route) =>
+    route.fulfill({
+      json: {
+        window: { from: "2026-10-10T00:00:00Z", to: "2026-10-17T00:00:00Z" },
+        generated_at: "2026-10-16T12:00:00Z",
+        issued: "0",
+        grants: 0,
+        total_accounts: 0,
+        accounts: [],
+        page: 1,
+        per_page: 50,
+      },
+    }),
+  );
+  await page.route("**/api/v1/admin/assistant/feedback/*/thread**", (route) => {
+    const previous = new URL(route.request().url()).searchParams.has("cursor");
+    return route.fulfill({
+      json: {
+        messages: previous
+          ? [
+              {
+                id: "previous",
+                role: "user",
+                text: "Please include the project dates.",
+                created_at: "2026-10-16T11:19:00Z",
+                rated: false,
+                truncated: false,
+              },
+            ]
+          : [
+              {
+                id: "prompt",
+                role: "user",
+                text: "Summarize the project schedule.",
+                created_at: "2026-10-16T11:20:00Z",
+                rated: false,
+                truncated: false,
+              },
+              {
+                id: "reply-negative",
+                role: "assistant",
+                text: "The project is progressing as planned.",
+                created_at: "2026-10-16T11:21:00Z",
+                rated: true,
+                truncated: false,
+              },
+            ],
+        next_cursor: previous ? null : "previous-page",
+        unavailable: false,
+      },
+    });
+  });
   await page.route("**/api/v1/admin/assistant/model-usage?**", (route) => {
     const params = new URL(route.request().url()).searchParams;
     return route.fulfill({
@@ -63,6 +115,7 @@ async function setup(page: Page) {
     const filter = new URL(route.request().url()).searchParams.get("vote");
     const recent = [
       {
+        id: "rating-negative",
         message_id: "reply-negative",
         vote: "down",
         comment:
@@ -79,6 +132,7 @@ async function setup(page: Page) {
         },
       },
       {
+        id: "rating-positive",
         message_id: "reply-positive",
         vote: "up",
         comment:
@@ -102,6 +156,7 @@ async function setup(page: Page) {
     ].filter((row) => !filter || row.vote === filter);
     return route.fulfill({
       json: {
+        can_preview_threads: preview,
         counts: [3, 5, 4, 8, 6, 9, 10].map((up, i) => ({
           day: `2026-10-${10 + i}`,
           up,
@@ -230,10 +285,49 @@ test("feedback remains useful when activity fails, with an honest empty helpful 
   ).toBeVisible();
 });
 
-test("usage viewers see the full NyxBot tab", async ({
+test("feedback overview labels failed refreshes and clears cached totals on authorization loss", async ({
   page,
 }) => {
   await setup(page);
+  await page.goto("/admin/usage?tab=nyxbot");
+  await expect(page.getByText("88%", { exact: true })).toBeVisible();
+  await page
+    .getByRole("button", { name: "Preview message thread" })
+    .first()
+    .click();
+  await expect(page.getByText("Summarize the project schedule.")).toBeVisible();
+  let status = 503;
+  await page.route("**/api/v1/admin/assistant/feedback?**", (route) =>
+    route.fulfill({
+      status,
+      json: { error: "unavailable", error_code: 1003, message: "Unavailable" },
+    }),
+  );
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(
+    page.getByText(
+      "Showing previously loaded feedback totals. Refresh failed.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Unable to load assistant feedback. Matching totals are from the previous successful refresh.",
+    ),
+  ).toBeVisible();
+  await expect(page.getByText("88%", { exact: true })).toBeVisible();
+  status = 403;
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(page.getByText("Unable to load feedback totals.")).toBeVisible();
+  await expect(page.getByText("88%", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Feedback is unavailable.")).toBeVisible();
+  await expect(page.getByLabel("Matching feedback totals")).toHaveCount(0);
+  await expect(page.getByText("Summarize the project schedule.")).toHaveCount(
+    0,
+  );
+});
+
+test("usage viewers see the full NyxBot tab", async ({ page }) => {
+  await setup(page, false);
   await page.route("**/api/v1/users/me", (route) =>
     route.fulfill({
       json: {
@@ -269,6 +363,9 @@ test("usage viewers see the full NyxBot tab", async ({
   await expect(
     page.getByText("Found the right document", { exact: false }),
   ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Preview message thread" }),
+  ).toHaveCount(0);
   for (const endpoint of ["model-usage", "analytics", "feedback"])
     expect(
       assistantRequests.some((url) =>
@@ -401,5 +498,128 @@ for (const mobile of [false, true]) {
     await expect(
       page.getByRole("heading", { name: "Top billing accounts", exact: true }),
     ).toHaveCount(0);
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`feedback review and anchored context are discoverable at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await setup(page);
+    const requests: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/thread")) requests.push(r.url());
+    });
+    await page.goto("/admin/usage?tab=nyxbot");
+    const review = page.getByRole("heading", { name: "Recent feedback" });
+    await expect(review).toBeVisible();
+    await expect(
+      page.getByLabel("Free grants issued", { exact: true }),
+    ).toHaveCount(0);
+    const model = page.getByRole("heading", {
+      name: "Cost and billing by model",
+    });
+    expect((await review.boundingBox())!.y).toBeLessThan(
+      (await model.boundingBox())!.y,
+    );
+    expect(requests).toHaveLength(0);
+    await page
+      .getByRole("button", { name: "Preview message thread" })
+      .first()
+      .click();
+    const thread = page.getByRole("region", {
+      name: "Feedback message thread",
+    });
+    await expect(thread).toContainText("Assistant · Rated reply");
+    await expect(thread).toContainText("Summarize the project schedule.");
+    await thread
+      .getByRole("button", { name: "Load previous messages" })
+      .click();
+    await expect(thread.locator("ol > li").first()).toContainText(
+      "Please include the project dates.",
+    );
+    await expect(thread.locator("ol > li")).toHaveCount(3);
+    await expect(
+      thread.getByRole("button", { name: "Load previous messages" }),
+    ).toHaveCount(0);
+    await thread.scrollIntoViewIfNeeded();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: `test-results/feedback-thread-${width}.png`,
+      animations: "disabled",
+    });
+    await page.getByRole("button", { name: "Hide message thread" }).click();
+    await expect(thread).toHaveCount(0);
+  });
+}
+
+for (const width of [1440, 390]) {
+  test(`free-grant issuance stays complete and account-separated at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await setup(page);
+    const requests: URLSearchParams[] = [];
+    await page.route("**/api/v1/admin/usage/free-grants?**", (route) => {
+      const params = new URL(route.request().url()).searchParams;
+      requests.push(params);
+      const currentPage = Number(params.get("page"));
+      return route.fulfill({
+        json: {
+          window: { from: "2026-10-10T00:00:00Z", to: "2026-10-16T12:00:00Z" },
+          generated_at: "2026-10-16T12:00:00Z",
+          issued: "73.000000000001",
+          grants: 68,
+          total_accounts: 51,
+          per_page: 50,
+          page: currentPage,
+          accounts: [
+            {
+              owner_id: currentPage === 1 ? "person-id" : "org-id",
+              label:
+                currentPage === 1
+                  ? "Personal " + "longlabel".repeat(30)
+                  : "Research organization",
+              account_kind: currentPage === 1 ? "person" : "org",
+              issued: "1.000000000001",
+              grants: 1,
+            },
+          ],
+        },
+      });
+    });
+    await page.goto("/admin/usage");
+    const report = page.getByLabel("Free grants issued", { exact: true });
+    await expect(report).toContainText("68 grants across 51 billing accounts");
+    await expect(report.getByTitle("73.000000000001")).toBeVisible();
+    await report.getByText("Issued by account", { exact: true }).click();
+    await expect(report).toContainText("Personal account · 1 grant");
+    await expect(report.getByTitle("1.000000000001")).toHaveText(
+      "1 credit issued",
+    );
+    await report.getByRole("button", { name: "Next accounts" }).click();
+    await expect(report).toContainText("Research organization");
+    await expect(report).toContainText("Page 2 of 2");
+    await expect(report.getByTitle("73.000000000001")).toBeVisible();
+    expect(requests.at(-1)!.has("period")).toBe(false);
+    await page.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect.poll(() => requests.at(-1)!.get("page")).toBe("1");
+    expect(requests.at(-1)!.get("period")).toBe("7d");
+    await report.getByText("Issued by account", { exact: true }).click();
+    await expect(report).toContainText("Personal account");
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await report.screenshot({
+      path: `test-results/free-grants-${width}.png`,
+      animations: "disabled",
+    });
   });
 }

@@ -587,18 +587,25 @@ fn sensitive_text(input: &str) -> String {
     text
 }
 
-fn redact(input: &str) -> String {
+pub(crate) struct RedactedExcerpt {
+    pub text: String,
+    pub truncated: bool,
+}
+
+pub(crate) fn redacted_excerpt(input: &str) -> RedactedExcerpt {
     // Detect before truncation so a PEM block or multiline field cannot be split
     // into a fragment that escapes the detector. Tool bodies never enter here.
     let text = sensitive_text(input);
-    crate::telemetry::scrub::scrub_string(&text)
-        .lines()
-        .take(80)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .chars()
-        .take(MAX_EXCERPT_CHARS)
-        .collect()
+    let scrubbed = crate::telemetry::scrub::scrub_string(&text);
+    let lines = scrubbed.lines().take(80).collect::<Vec<_>>().join("\n");
+    RedactedExcerpt {
+        truncated: scrubbed.lines().count() > 80 || lines.chars().count() > MAX_EXCERPT_CHARS,
+        text: lines.chars().take(MAX_EXCERPT_CHARS).collect(),
+    }
+}
+
+fn redact(input: &str) -> String {
+    redacted_excerpt(input).text
 }
 
 fn build_input(
@@ -1475,6 +1482,24 @@ mod tests {
         assert!(!value.contains("secret@example.com"));
         assert!(value.len() <= MAX_EXCERPT_CHARS);
         assert!(!redact("password: one\npassword: two").contains("two"));
+    }
+
+    #[test]
+    fn excerpt_truncation_tracks_redacted_output() {
+        let shortened = redacted_excerpt(&format!("password: {}", "x".repeat(3_000)));
+        assert_eq!(shortened.text, "[SECRET_REDACTED]");
+        assert!(!shortened.truncated);
+
+        let expanded = redacted_excerpt(&"sk-a ".repeat(200));
+        assert_eq!(expanded.text.chars().count(), MAX_EXCERPT_CHARS);
+        assert!(expanded.truncated);
+        assert!(!expanded.text.contains("sk-a"));
+
+        assert!(redacted_excerpt(&"short line\n".repeat(81)).truncated);
+        assert!(!redacted_excerpt(&"short line\n".repeat(80)).truncated);
+        let unicode = redacted_excerpt(&"\u{754c}".repeat(MAX_EXCERPT_CHARS + 1));
+        assert_eq!(unicode.text.chars().count(), MAX_EXCERPT_CHARS);
+        assert!(unicode.truncated);
     }
 
     #[test]

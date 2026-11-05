@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { useAssistantAnalytics } from "@/hooks/use-assistant-analytics";
 import { useAssistantFeedbackAdmin } from "@/hooks/use-assistant-feedback-admin";
+import { ApiError } from "@/lib/api-client";
 import {
   nyxbotDailyData,
   nyxbotDateRange,
@@ -107,12 +108,16 @@ export function NyxbotUsage() {
   );
   const feedback = useAssistantFeedbackAdmin(feedbackParams, Boolean(window));
   const data = analytics.data;
-  const votes = feedback.data?.counts.reduce(
+  const feedbackDenied =
+    feedback.error instanceof ApiError &&
+    [403, 404].includes(feedback.error.status);
+  const feedbackData = feedbackDenied ? undefined : feedback.data;
+  const votes = feedbackData?.counts.reduce(
     (total, row) => ({ up: total.up + row.up, down: total.down + row.down }),
     { up: 0, down: 0 },
   );
   const totalVotes = votes ? votes.up + votes.down : 0;
-  const daily = window ? nyxbotDailyData(from, to, data, feedback.data) : [];
+  const daily = window ? nyxbotDailyData(from, to, data, feedbackData) : [];
   const outcomes = data?.outcomes;
   const totalTurns = outcomes
     ? outcomes.completed + outcomes.failed + outcomes.stopped
@@ -182,7 +187,6 @@ export function NyxbotUsage() {
         </p>
       ) : (
         <>
-          <NyxbotModelUsage from={from} to={to} />
           <div
             className="flex flex-wrap items-center gap-2 text-11 text-text-tertiary"
             role="status"
@@ -210,7 +214,11 @@ export function NyxbotUsage() {
           {feedback.isError && (
             <div role="alert">
               <ErrorBanner
-                message="Unable to load feedback totals."
+                message={
+                  feedbackData
+                    ? "Showing previously loaded feedback totals. Refresh failed."
+                    : "Unable to load feedback totals."
+                }
                 onRetry={() => void feedback.refetch()}
               />
             </div>
@@ -255,6 +263,15 @@ export function NyxbotUsage() {
               }
             />
           </div>
+          <p className="text-11 leading-relaxed text-text-tertiary">
+            Helpful rate reflects people who chose to leave feedback, not task
+            success. Review a rating and preview its conversation to understand
+            what worked or needs attention.
+          </p>
+          <AssistantFeedbackPanel
+            key={`${from}:${to}`}
+            range={feedbackParams}
+          />
           <div className="grid min-w-0 gap-3 lg:grid-cols-2">
             <Card className="analytics-panel analytics-chart min-w-0 p-4">
               <h3 className="font-display text-15 font-semibold leading-none tracking-tight">
@@ -588,10 +605,7 @@ export function NyxbotUsage() {
               </div>
             </details>
           )}
-          <AssistantFeedbackPanel
-            key={`${from}:${to}`}
-            range={feedbackParams}
-          />
+          <NyxbotModelUsage from={from} to={to} />
           <p className="text-11 leading-relaxed text-text-tertiary">
             Sessions are conversation threads with user input, including channel
             input. Turn outcomes include specialist and automated work; mirrored

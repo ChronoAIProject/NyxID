@@ -33,18 +33,26 @@ const mocks = vi.hoisted(() => ({
   provision: vi.fn(),
   topup: vi.fn(),
   receipt: vi.fn(),
+  benefits: vi.fn(),
   openExternal: vi.fn(),
 }));
 vi.mock("@/hooks/use-billing", () => ({
   BILLING_INVOICES_PAGE_SIZE: 10,
   useCurrentBill: () => ({ isLoading: false, isError: false, data: undefined }),
-  useBillingInvoices: () => ({ isLoading: false, isError: false, data: { invoices: [], total: 0 } }),
+  useBillingInvoices: () => ({
+    isLoading: false,
+    isError: false,
+    data: { invoices: [], total: 0 },
+  }),
   useBillingWallet: mocks.wallet,
   useBillingUsage: mocks.usage,
   useTopUpHistory: mocks.history,
   useProvisionBillingWallet: () => ({ mutateAsync: mocks.provision }),
   useTopUpBilling: () => ({ mutateAsync: mocks.topup }),
   openInvoiceReceipt: mocks.receipt,
+}));
+vi.mock("@/hooks/use-billing-benefits", () => ({
+  useBillingBenefits: mocks.benefits,
 }));
 vi.mock("@/hooks/use-billing-credits", () => ({
   useActiveCreditGrants: mocks.grants,
@@ -67,18 +75,32 @@ let pageRoute: (typeof PAGE_ROUTES)[number] = "/billing";
 async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   if (pageRoute === "/assistant") {
     const old = new URL(url, "https://nyxid.test");
-    const params = new URLSearchParams({ panel: "billing", c: "chat", mock: "1" });
-    for (const [key, value] of old.searchParams) params.set(`panel${key.charAt(0).toUpperCase()}${key.slice(1)}`, value);
+    const params = new URLSearchParams({
+      panel: "billing",
+      c: "chat",
+      mock: "1",
+    });
+    for (const [key, value] of old.searchParams)
+      params.set(`panel${key.charAt(0).toUpperCase()}${key.slice(1)}`, value);
     url = `/assistant?${params}`;
   }
   const root = createRootRoute();
   const route = createRoute({
     getParentRoute: () => root,
     path: pageRoute,
-    validateSearch: pageRoute === "/billing" ? billingSearchSchema.parse : withAccountPanelSearch((search) => ({ c: search.c, mock: search.mock })),
-    component: () => pageRoute === "/billing"
-      ? <BillingPage />
-      : <BillingPage presentation="panel" />,
+    validateSearch:
+      pageRoute === "/billing"
+        ? billingSearchSchema.parse
+        : withAccountPanelSearch((search) => ({
+            c: search.c,
+            mock: search.mock,
+          })),
+    component: () =>
+      pageRoute === "/billing" ? (
+        <BillingPage />
+      ) : (
+        <BillingPage presentation="panel" />
+      ),
   });
   const history = createMemoryHistory({ initialEntries: [url] });
   const router = createRouter({
@@ -92,7 +114,8 @@ async function renderPage(url = "/billing?tab=usage", exploreGroups = true) {
   );
   await act(() => router.load());
   await screen.findByRole("tab", { name: "Billing", hidden: true });
-  if (pageRoute === "/assistant") expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
+  if (pageRoute === "/assistant")
+    expect(router.state.location.search).toMatchObject({ c: "chat", mock: 1 });
   expect(history.location.pathname).toBe(pageRoute);
   if (exploreGroups) {
     const disclosure = screen.queryByText("Explore by service, model or agent");
@@ -120,7 +143,9 @@ async function selectServices(names: string[]) {
   await userEvent.click(picker().getByRole("button", { name: "Done" }));
 }
 function servicesParam(history: { location: { search: string } }) {
-  const raw = new URLSearchParams(history.location.search).get(pageRoute === "/assistant" ? "panelServices" : "services");
+  const raw = new URLSearchParams(history.location.search).get(
+    pageRoute === "/assistant" ? "panelServices" : "services",
+  );
   return raw === null ? undefined : (JSON.parse(raw) as string[]);
 }
 function twoServiceRows() {
@@ -138,6 +163,24 @@ function twoServiceRows() {
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.benefits.mockReturnValue(
+    query({
+      summary: {
+        unreserved: "0",
+        held: "0",
+        pending_activation: "0",
+        pending_reclaim: "0",
+        expired_awaiting_cleanup: "0",
+        restricted: "0",
+        generated_at: "2026-10-01T00:00:00Z",
+      },
+      grants: [],
+      allowances: [],
+      total_grants: 0,
+      page: 1,
+      per_page: 50,
+    }),
+  );
   mocks.wallet.mockReturnValue(query(billingWallet()));
   mocks.usage.mockReturnValue(query(usage()));
   mocks.history.mockReturnValue(query({ topups: [], total: 0 }));
@@ -147,7 +190,9 @@ beforeEach(() => {
   mocks.activity.mockReturnValue(query([]));
 });
 describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
-  beforeEach(() => { pageRoute = route; });
+  beforeEach(() => {
+    pageRoute = route;
+  });
   it("opens on visual quantities and funding with the grouped list collapsed", async () => {
     await renderPage("/billing?tab=usage", false);
     expect(screen.getByText("Usage overview", { exact: true })).toBeVisible();
@@ -177,7 +222,11 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       "data-state",
       "active",
     );
-    expect(screen.getByText("95 credits")).toBeVisible();
+    expect(
+      within(screen.getByRole("tabpanel", { name: "Billing" })).getByText(
+        "95 credits",
+      ),
+    ).toBeVisible();
     expect(screen.queryByText("Usage overview")).not.toBeInTheDocument();
     await userEvent.click(
       screen.getByRole("button", { name: "View breakdown" }),
@@ -443,9 +492,13 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
       const { history } = await renderPage(url);
       // Usage has settled, so legacy/stale filters are cleaned up first...
       await waitFor(() =>
-        expect(history.location.search).not.toMatch(/(?:service|services|panelService|panelServices)=/),
+        expect(history.location.search).not.toMatch(
+          /(?:service|services|panelService|panelServices)=/,
+        ),
       );
-      expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelAction=topup" : "action=topup");
+      expect(history.location.search).toContain(
+        pageRoute === "/assistant" ? "panelAction=topup" : "action=topup",
+      );
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
       // ...and the wallet arrives later: Add credits opens exactly once.
       act(() => {
@@ -485,7 +538,11 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     const { history } = await renderPage("/billing?tab=billing&action=topup");
     // The user picks Usage while the wallet is still loading.
     await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
-    await waitFor(() => expect(history.location.search).toContain(pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage"));
+    await waitFor(() =>
+      expect(history.location.search).toContain(
+        pageRoute === "/assistant" ? "panelTab=usage" : "tab=usage",
+      ),
+    );
     expect(history.location.pathname).toBe(pageRoute);
     expect(history.location.search).not.toMatch(/(?:action|panelAction)=/);
     act(() => {
@@ -529,24 +586,28 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
   it("includes voice and dictation charges and audio quantities in Usage settings", async () => {
-    mocks.usage.mockReturnValue(query(usage([
-      row({
-        metric: "voice_seconds",
-        model: "gpt-live-1",
-        quantity: 60,
-        estimated_credits_micros: 600_000,
-        wallet_credits_micros: 600_000,
-        grant_credits_micros: 0,
-      }),
-      row({
-        metric: "voice_seconds",
-        model: "gpt-live-transcribe",
-        quantity: 12,
-        estimated_credits_micros: 120_000,
-        wallet_credits_micros: 120_000,
-        grant_credits_micros: 0,
-      }),
-    ])));
+    mocks.usage.mockReturnValue(
+      query(
+        usage([
+          row({
+            metric: "voice_seconds",
+            model: "gpt-live-1",
+            quantity: 60,
+            estimated_credits_micros: 600_000,
+            wallet_credits_micros: 600_000,
+            grant_credits_micros: 0,
+          }),
+          row({
+            metric: "voice_seconds",
+            model: "gpt-live-transcribe",
+            quantity: 12,
+            estimated_credits_micros: 120_000,
+            wallet_credits_micros: 120_000,
+            grant_credits_micros: 0,
+          }),
+        ]),
+      ),
+    );
     await renderPage();
     const spend = screen.getByRole("heading", { name: "Spend" }).parentElement!;
     expect(

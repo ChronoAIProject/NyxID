@@ -119,6 +119,7 @@ pub struct CreditGrantResponse {
     pub reclaimed: String,
     pub terminal_amount: String,
     pub held: String,
+    pub available: String,
     pub revoke_requested_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
     pub reason: Option<String>,
@@ -239,6 +240,8 @@ pub struct UserAllowanceBalanceResponse {
     pub consumed_quantity: i64,
     pub reserved_quantity: i64,
     pub remaining_quantity: i64,
+    pub held_quantity: i64,
+    pub total_quantity: i64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -726,7 +729,7 @@ pub async fn user_list_allowances(
     }))
 }
 
-fn grant_response(
+pub(super) fn grant_response(
     grant: CreditGrant,
     user: Option<&User>,
     recipient_billing_enabled: Option<bool>,
@@ -741,6 +744,16 @@ fn grant_response(
         .as_ref()
         .map(|origin| origin.period_start);
     let held = billing::service_limits::held(&grant)?.to_string();
+    let available = if grant.status == CreditGrantStatus::Active
+        && grant.issued_ledgered_at.is_some()
+        && grant.revoke_requested_at.is_none()
+        && grant.expires_at.is_none_or(|expiry| expiry > Utc::now())
+    {
+        billing::service_limits::realizable(&grant)?
+    } else {
+        crate::models::credits::Credits::ZERO
+    }
+    .to_string();
     let service_limits = grant
         .service_limits
         .iter()
@@ -781,6 +794,7 @@ fn grant_response(
         },
         terminal_amount: grant.terminal_amount.to_string(),
         held,
+        available,
         revoke_requested_at: grant.revoke_requested_at,
         service_limits,
         amount: grant.amount.to_string(),
@@ -822,17 +836,31 @@ fn allowance_response(allowance: UsageAllowance) -> UsageAllowanceResponse {
     }
 }
 
-fn user_allowance_response(
+pub(super) fn user_allowance_response(
     allowance: UsageAllowance,
     period: UsageAllowancePeriod,
 ) -> UserAllowanceBalanceResponse {
+    let extra = period
+        .active_settlement
+        .as_ref()
+        .filter(|l| !l.applied)
+        .map_or(0, |l| {
+            l.consume_quantity
+                .saturating_sub(l.reserved_quantity)
+                .max(0)
+        });
+    let remaining = billing::allowances::available_period_quantity(&period)
+        .saturating_sub(extra)
+        .max(0);
     UserAllowanceBalanceResponse {
+        total_quantity: period.total_quantity,
+        held_quantity: period.reserved_quantity.saturating_add(extra),
         allowance: allowance_response(allowance),
         period_start: period.period_start,
         period_end: period.period_end,
         consumed_quantity: period.consumed_quantity,
         reserved_quantity: period.reserved_quantity,
-        remaining_quantity: billing::allowances::available_period_quantity(&period),
+        remaining_quantity: remaining,
     }
 }
 
@@ -905,6 +933,39 @@ mod tests {
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use axum::extract::{Path, Query, State};
     use uuid::Uuid;
+
+    #[test]
+    fn allowance_preview_counts_unapplied_extra_holds_against_frozen_period_limit() {
+        let now = bson::DateTime::now();
+        let allowance: UsageAllowance = bson::from_document(doc! {
+            "_id": "allowance", "service_id": "svc", "service_slug": "svc", "metric": "requests",
+            "quantity": 200_i64, "recurrence": "daily", "target_kind": "all_users",
+            "is_active": true, "created_by": "admin", "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        let mut period: UsageAllowancePeriod = bson::from_document(doc! {
+            "_id": "period", "allowance_id": "allowance", "owner_user_id": "owner",
+            "total_quantity": 100_i64, "consumed_quantity": 20_i64, "reserved_quantity": 10_i64,
+            "period_start": now, "created_at": now, "updated_at": now,
+            "active_settlement": {"operation_id": "op", "usage_row_id": "row", "reserved_quantity": 10_i64,
+                "consume_quantity": 15_i64, "applied": false, "updated_at": now},
+        }).unwrap();
+        let pending = user_allowance_response(allowance.clone(), period.clone());
+        assert_eq!(
+            (
+                pending.total_quantity,
+                pending.held_quantity,
+                pending.remaining_quantity
+            ),
+            (100, 15, 65)
+        );
+        period.active_settlement.as_mut().unwrap().applied = true;
+        let applied = user_allowance_response(allowance, period);
+        assert_eq!(
+            (applied.held_quantity, applied.remaining_quantity),
+            (10, 70)
+        );
+    }
 
     pub(super) async fn setup(prefix: &str) -> Option<(AppState, String, String, String)> {
         let db = connect_test_database(prefix).await?;

@@ -48,6 +48,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import type { AdminUsageSearch } from "@/types/admin";
+import { FreeGrantsReport } from "@/components/admin/free-grants-report";
 import { NyxbotUsage } from "@/components/admin/nyxbot-usage";
 import { canReadAdminUsage } from "@/types/api";
 
@@ -177,6 +178,7 @@ export function AnalyticsWorkspace({
   const view = sample
     ? config.draft
     : { ...config.draft, layout: "operations" as const };
+  const [grantsRefresh, setGrantsRefresh] = useState(0);
   const [localTab, setLocalTab] = useState<"dashboard" | "list">("dashboard");
   const activeTab = tab ?? localTab;
   const canReadNyxbot = useAuthStore((state) => canReadAdminUsage(state.user));
@@ -204,7 +206,7 @@ export function AnalyticsWorkspace({
     new TextEncoder().encode(name.trim()).length <= 100;
   return (
     <div className="space-y-5 pb-6">
-      <UsageHeader />
+      <UsageHeader onRefresh={() => setGrantsRefresh((n) => n + 1)} />
       <fieldset
         disabled={Boolean(workspace.pendingRecovery)}
         className="min-w-0 space-y-2"
@@ -241,6 +243,9 @@ export function AnalyticsWorkspace({
           </span>
           <span>Interactive filters · charts · saved views</span>
         </div>
+      )}
+      {!sample && (activeTab === "dashboard" || activeTab === "list") && (
+        <FreeGrantsReport filters={view.filters} refreshKey={grantsRefresh} />
       )}
       <Tabs
         value={activeTab}
@@ -554,7 +559,7 @@ function UsageTabList({ canReadNyxbot }: { canReadNyxbot: boolean }) {
   );
 }
 
-function UsageHeader() {
+function UsageHeader({ onRefresh }: { onRefresh?: () => void }) {
   const client = useQueryClient();
   return (
     <PageHeader
@@ -563,20 +568,22 @@ function UsageHeader() {
       actions={
         <Button
           variant="outline"
-          onClick={() =>
+          onClick={() => {
+            onRefresh?.();
             void Promise.all([
               client.invalidateQueries({
                 queryKey: ["usage-analytics", useAuthStore.getState().user?.id],
               }),
               client.invalidateQueries({ queryKey: ["admin", "usage"] }),
+              client.invalidateQueries({ queryKey: ["admin", "free-grants"] }),
               client.invalidateQueries({
                 queryKey: ["admin", "assistant-analytics"],
               }),
               client.invalidateQueries({
                 queryKey: ["admin", "assistant-feedback"],
               }),
-            ])
-          }
+            ]);
+          }}
         >
           <RefreshCw className="size-3" />
           Refresh

@@ -284,6 +284,7 @@ pub struct AdminQuery {
 }
 #[derive(Serialize)]
 pub struct AdminResponse {
+    pub can_preview_threads: bool,
     pub counts: Vec<feedback_service::AdminCount>,
     pub recent: Vec<AdminFeedbackRow>,
     pub next_cursor: Option<String>,
@@ -348,6 +349,7 @@ impl From<FeedbackReplyContext> for FeedbackContextResponse {
 
 #[derive(Serialize)]
 pub struct AdminFeedbackRow {
+    pub id: String,
     pub context: Option<FeedbackContextResponse>,
     pub message_id: String,
     pub vote: String,
@@ -360,8 +362,9 @@ pub async fn admin(
     auth: AuthUser,
     Query(q): Query<AdminQuery>,
 ) -> AppResult<Json<AdminResponse>> {
-    super::admin_helpers::require_admin_usage_read(&state, &auth, "admin.assistant.feedback")
-        .await?;
+    let role =
+        super::admin_helpers::require_admin_usage_read(&state, &auth, "admin.assistant.feedback")
+            .await?;
     let mut filter = doc! {};
     if let Some(v) = q.vote {
         filter.insert("vote", v);
@@ -411,6 +414,7 @@ pub async fn admin(
     let recent = rows
         .iter()
         .map(|r| AdminFeedbackRow {
+            id: r.id.clone(),
             context: r.context.clone().map(Into::into),
             message_id: r.message_id.clone(),
             vote: r.vote.clone(),
@@ -431,6 +435,7 @@ pub async fn admin(
         })
         .flatten();
     Ok(Json(AdminResponse {
+        can_preview_threads: role.has_admin_read(),
         counts,
         recent,
         next_cursor,
@@ -544,4 +549,38 @@ mod input_tests {
     fn sanitize_comment_strips_controls_and_bidi() {
         assert_eq!(sanitize_comment("ok\u{0007}\u{202e}text"), "oktext");
     }
+}
+
+#[derive(Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ThreadQuery {
+    pub cursor: Option<String>,
+}
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct ThreadResponse {
+    pub messages: Vec<crate::services::assistant_feedback_thread::Message>,
+    pub next_cursor: Option<String>,
+    pub unavailable: bool,
+}
+#[utoipa::path(get, path = "/api/v1/admin/assistant/feedback/{id}/thread", tag = "Admin", params(("id" = String, Path), ThreadQuery), responses((status = 200, body = ThreadResponse), (status = 403, description = "Admin or Operator required")), security(("bearer_auth" = [])))]
+pub async fn thread(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(q): Query<ThreadQuery>,
+) -> AppResult<Json<ThreadResponse>> {
+    super::admin_helpers::require_admin_or_operator(
+        &state,
+        &auth,
+        "admin.assistant.feedback.thread",
+    )
+    .await?;
+    let page =
+        crate::services::assistant_feedback_thread::preview(&state.db, &id, q.cursor.as_deref())
+            .await?;
+    Ok(Json(ThreadResponse {
+        messages: page.messages,
+        next_cursor: page.next_cursor,
+        unavailable: page.unavailable,
+    }))
 }

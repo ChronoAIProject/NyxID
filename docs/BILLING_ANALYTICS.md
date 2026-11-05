@@ -13,9 +13,40 @@ its members: platform-key requests bill the acting person. Choose the last
 
 NyxBot shows assistant activity, turn outcomes, and reply feedback using the same
 chart styling. Its date range and feedback filters are independent of the billing
-workspace, and access requires an admin or operator role. See the
+workspace. Admins, operators and Usage Viewers can read metadata; thread
+previews require Admin or Operator. See the
 [NyxBot activity contract](chat/08-nyxagent-engine.md#admin-nyxbot-activity) for
 metric definitions, endpoint bounds, and feedback semantics.
+
+## Free-grant issuance by billing account
+
+Dashboard and List include **Free grants issued**, independent of consumption and
+remaining balances. `GET /api/v1/admin/usage/free-grants` uses the existing
+`require_admin_usage_read` authorization. It accepts only `period` (24h/7d/30d),
+`from`/`to`, `owners` (billing-account UUIDs), and one-based `page` (1–100000).
+The positive UTC window is at most 31 days, with inclusive start and exclusive end.
+Acting-user and service filters do not apply; the UI labels this explicitly.
+
+A bounded snapshot aggregation reads actual immutable ledger issuance: legacy
+`grant_issued` amounts and exact v2 `grant_issued` credits to `platform:promotions`.
+Consumption, expiry, revocation, pending/unledgered grants and future schedules
+are excluded. A scheduled disbursement counts once through its existing grant
+issuance deduplication identity. Account ownership comes from ledger `owner_id`;
+no group or organization membership expansion participates. Personal and
+organization accounts stay separate, including historical deleted accounts.
+
+The response includes exact decimal `issued`, grant count, full-population
+`total_accounts`, effective window and generated time. The same aggregation
+returns 50 accounts ranked by issued amount descending then owner ID ascending.
+Totals include all matching accounts on every page, never just the loaded rows.
+Identity labels are resolved only for those 50 accounts. Database execution is
+limited to 20 seconds with an outer 22-second deadline; timeout returns 12200.
+
+Paging pins the effective window. Polling can refresh that fixed report; explicit
+Usage Refresh returns to page one and resolves a new current relative window.
+The UI shows readable UTC boundaries and update time, preserves the disclosure
+while paging, and labels stale refreshes. Authorization loss clears its totals
+and account details.
 
 ## Design and library decision
 

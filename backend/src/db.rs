@@ -3533,6 +3533,14 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
     ensure_billing_ledger_dedupe_index(&billing_ledger).await?;
+    for keys in [
+        doc! { "event_type": 1, "created_at": 1, "owner_id": 1 },
+        doc! { "movement": 1, "created_at": 1, "owner_id": 1 },
+    ] {
+        billing_ledger
+            .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
     billing_ledger
         .create_index(
             IndexModel::builder()

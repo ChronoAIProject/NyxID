@@ -1,6 +1,9 @@
 import { BillingBill } from "@/components/billing/billing-bill";
 import { useAccountPanel } from "@/hooks/use-account-panel";
-import { billingPanelSearch, type AccountPanelParams } from "@/lib/assistant/account-panel-search";
+import {
+  billingPanelSearch,
+  type AccountPanelParams,
+} from "@/lib/assistant/account-panel-search";
 import { useEffect, useEffectEvent, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -13,7 +16,7 @@ import {
   useTopUpBilling,
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
-import { BillingBenefits } from "@/components/billing/billing-benefits";
+import { AvailableBenefits } from "@/components/billing/available-benefits";
 import { BillingMachines } from "@/components/billing/billing-machines";
 import { BillingWalletCard } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
@@ -45,7 +48,10 @@ export function BillingPage({
 } = {}) {
   const account = useAccountPanel();
   const locationSearch: Record<string, unknown> = useSearch({ strict: false });
-  const rawSearch = presentation === "panel" ? billingPanelSearch(account.current) : locationSearch;
+  const rawSearch =
+    presentation === "panel"
+      ? billingPanelSearch(account.current)
+      : locationSearch;
   const search = normalizeBillingSearch(rawSearch);
   const navigate = useNavigate();
   const { tab, period } = search;
@@ -81,7 +87,14 @@ export function BillingPage({
       const params: AccountPanelParams = {
         ...("tab" in patch ? { panelTab: patch.tab } : {}),
         ...("period" in patch ? { panelPeriod: patch.period } : {}),
-        ...("services" in patch ? { panelServices: patch.services?.length ? patch.services : undefined, panelService: undefined } : {}),
+        ...("services" in patch
+          ? {
+              panelServices: patch.services?.length
+                ? patch.services
+                : undefined,
+              panelService: undefined,
+            }
+          : {}),
         ...("action" in patch ? { panelAction: patch.action } : {}),
       };
       void account.update(params, replace ? "replace" : "push");
@@ -109,11 +122,20 @@ export function BillingPage({
   const selectionStale =
     selected.length !== search.services.length ||
     rawSearch.service !== undefined;
-  const pruneSelection = useEffectEvent(() => updateSearch({ services: selected }, true));
+  const pruneSelection = useEffectEvent(() =>
+    updateSearch({ services: selected }, true),
+  );
   const selectionKey = JSON.stringify(selected);
   useEffect(() => {
-    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale) pruneSelection();
-  }, [usageQuery.isSuccess, usageQuery.isFetching, selectionStale, selectionKey, search.tab]);
+    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale)
+      pruneSelection();
+  }, [
+    usageQuery.isSuccess,
+    usageQuery.isFetching,
+    selectionStale,
+    selectionKey,
+    search.tab,
+  ]);
   const topUpReady = Boolean(wallet) && billingReady;
   const topUpSettled =
     !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
@@ -128,7 +150,9 @@ export function BillingPage({
   } else if (!search.action && topUpHandled) {
     setTopUpHandled(false);
   }
-  const consumeTopUp = useEffectEvent(() => updateSearch({ tab: "billing", action: undefined }, true));
+  const consumeTopUp = useEffectEvent(() =>
+    updateSearch({ tab: "billing", action: undefined }, true),
+  );
   useEffect(() => {
     if (wantsTopUp) consumeTopUp();
   }, [wantsTopUp]);
@@ -155,10 +179,12 @@ export function BillingPage({
 
   return (
     <div className="billing-page space-y-6">
-      {presentation === "page" && <PageHeader
-        title="Billing & Usage"
-        description="Your balance, benefits, and usage in one place."
-      />}
+      {presentation === "page" && (
+        <PageHeader
+          title="Billing & Usage"
+          description="Your balance, benefits, and usage in one place."
+        />
+      )}
       <Tabs
         value={tab}
         onValueChange={(value) =>
@@ -170,6 +196,7 @@ export function BillingPage({
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
         </TabsList>
+        <AvailableBenefits catalog={catalog} />
         {billingCapability && !billingReady && (
           <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-12 text-warning">
             Billing is not available on this deployment.
@@ -213,7 +240,6 @@ export function BillingPage({
             topUpOpen={topUpOpen}
             onTopUpOpenChange={setTopUpOpen}
           />
-          <BillingBenefits catalog={catalog} />
           <BillingMachines />
           <BillingBill enabled={billingReady} />
           <BillingTopUpHistory />

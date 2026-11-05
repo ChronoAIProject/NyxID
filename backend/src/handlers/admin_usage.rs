@@ -129,3 +129,16 @@ pub async fn save_workspace(
         .await?,
     ))
 }
+
+/// Free credits actually issued, independently of their subsequent use.
+#[utoipa::path(get, path = "/api/v1/admin/usage/free-grants", tag = "Admin", params(admin_usage_service::free_grants::Query), responses((status = 200, body = admin_usage_service::free_grants::Response)), security(("bearer_auth" = [])))]
+pub async fn get_free_grants(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<admin_usage_service::free_grants::Query>,
+) -> AppResult<Json<admin_usage_service::free_grants::Response>> {
+    require_admin_usage_read(&state, &auth, "admin.usage.free_grants").await?;
+    Ok(Json(
+        admin_usage_service::free_grants::report(&state.db, query, Utc::now()).await?,
+    ))
+}
