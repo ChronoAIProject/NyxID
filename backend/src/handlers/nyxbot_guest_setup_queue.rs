@@ -6,6 +6,8 @@ use crate::services::assistant_guest_model_setup as setup;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WaitingGuest {
+    #[serde(default)]
+    channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
     conversation: String,
     agent: String,
     profile: String,
@@ -92,6 +94,7 @@ pub(super) async fn wait(
         .or(start.new_id.as_deref())
         .ok_or(AppError::AssistantTurnRequired)?;
     let payload = WaitingGuest {
+        channel_context: start.channel_context.clone(),
         conversation: conversation.into(),
         agent: agent_id.into(),
         profile: profile.into(),
@@ -344,6 +347,7 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     start.channel = Some(payload.origin);
     start.reply_channel = payload.reply_channel;
     start.channel_event_id = Some(id.into());
+    start.channel_context = payload.channel_context;
     start.note = payload.note;
     start.title = payload.title;
     start.question = payload.question;

@@ -576,6 +576,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             let event = AgentEvent {
                 execution_task: None,
+                channel_contexts: Vec::new(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,

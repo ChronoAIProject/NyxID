@@ -355,6 +355,13 @@ async fn crew_removal_concurrent_settlement_and_admission_cannot_leave_authority
     for n in 0..3 {
         let group = group_with(&state, &format!("Crew{n}"), &[&a, &b]).await;
         let row = begin(&state, &group, &a).await;
+        let key_before = state
+            .db
+            .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+            .find_one(doc! {"_id": &row.credential_api_key_id, "user_id": OWNER})
+            .await
+            .unwrap()
+            .unwrap();
         let (removal, settlement) = tokio::join!(
             groups::update(
                 &state.db,
@@ -365,8 +372,71 @@ async fn crew_removal_concurrent_settlement_and_admission_cannot_leave_authority
             ),
             finish(&state, &row),
         );
-        removal.unwrap();
         assert!(settlement.is_ok() || matches!(settlement, Err(AppError::NotFound(_))));
+        match removal {
+            Ok(_) => {}
+            Err(AppError::AssistantTurnActive) => {
+                // A conservative transaction snapshot can still see the turn
+                // while its concurrent settlement completes. Rejection must
+                // preserve the original roster, thread and credential authority.
+                assert_eq!(
+                    groups::get(&state.db, OWNER, &group.id)
+                        .await
+                        .unwrap()
+                        .member_agent_ids,
+                    group.member_agent_ids
+                );
+                let retained = groups::member_thread(&state.db, OWNER, &group.id, &a.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(retained.id, row.id);
+                assert!(retained.credential_api_key_id == row.credential_api_key_id);
+                assert!(
+                    retained.active_turn.is_none(),
+                    "concurrent turn must settle"
+                );
+                let binding = state
+                    .db
+                    .collection::<crate::models::assistant_agent_credential::AssistantAgentCredential>(
+                        crate::models::assistant_agent_credential::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"user_id": OWNER, "conversation_id": &row.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(binding.api_key_id == row.credential_api_key_id);
+                let key_after = state
+                    .db
+                    .collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME)
+                    .find_one(doc! {"_id": &row.credential_api_key_id, "user_id": OWNER})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                // Do not print credential/hash fields if equality fails.
+                assert!(
+                    key_before == key_after,
+                    "rejected removal changed the key row"
+                );
+                groups::update(
+                    &state.db,
+                    OWNER,
+                    &group.id,
+                    None,
+                    Some(std::slice::from_ref(&b.id)),
+                )
+                .await
+                .unwrap();
+            }
+            Err(error) => panic!("unexpected removal error: {error}"),
+        }
+        assert_eq!(
+            groups::get(&state.db, OWNER, &group.id)
+                .await
+                .unwrap()
+                .member_agent_ids,
+            vec![b.id.clone()]
+        );
         assert!(
             groups::member_thread(&state.db, OWNER, &group.id, &a.id)
                 .await

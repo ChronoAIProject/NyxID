@@ -1273,6 +1273,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         message_count: 0,
         active_turn: Some(ActiveTurn {
             execution_task: None,
+            channel_context: None,
             business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),

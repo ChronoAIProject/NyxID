@@ -1452,6 +1452,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         let start = TurnStart {
             execution_enrollment: false,
             execution_parent: None,
+            channel_context: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -1936,19 +1937,27 @@ async fn shared_agents_in_personal_crews_list_route_handoff_and_revalidate() {
         fallback["addressed_agent_ids"],
         json!([group.lead_agent_id])
     );
-    let rows = groups::messages(&state.db, OWNER, &group.id, 200, None)
-        .await
-        .unwrap();
     // Wait for the lead's response before measuring the revoked-member refusal.
-    settled(&state, &group.id, rows.len()).await;
+    settled(
+        &state,
+        &group.id,
+        fallback["message"]["seq"].as_u64().unwrap() as usize + 1,
+    )
+    .await;
     let before = calls.lock().await.len();
-    send(&state, &group.id, "hello", Some(vec![shared.id.clone()]))
+    let refused = send(&state, &group.id, "hello", Some(vec![shared.id.clone()]))
         .await
         .unwrap();
     assert_eq!(calls.lock().await.len(), before);
-    let rows = groups::messages(&state.db, OWNER, &group.id, 200, None)
-        .await
-        .unwrap();
+    // A concurrent completion hook can claim the pending member before this
+    // post's advance runs. Wait for its notice, not merely the owner's message.
+    let rows = settled(
+        &state,
+        &group.id,
+        refused["message"]["seq"].as_u64().unwrap() as usize + 1,
+    )
+    .await;
+    assert_eq!(calls.lock().await.len(), before);
     assert_eq!(
         rows.last().unwrap().text,
         "Ask this agent's owner to share it with you."
