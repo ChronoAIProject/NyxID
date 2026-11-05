@@ -1,3 +1,4 @@
+import { useVisibleCrmQuery } from "@/lib/crm/query-visibility";
 import { z } from "zod";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assistantJson } from "@/lib/assistant/assistant-http";
@@ -6,6 +7,7 @@ import {
   type CrmValidationError,
   type CrmViewEnvelope,
 } from "@/lib/crm/views/schema";
+import { crmActorSchema } from "@/schemas/crm";
 import { useAuthStore } from "@/stores/auth-store";
 
 const CRM_VIEWS_PATH = "/assistant/crm/views";
@@ -23,10 +25,12 @@ const crmSavedViewSummarySchema = z.object({
 
 const crmSavedViewSchema = crmSavedViewSummarySchema.extend({
   envelope: z.unknown(),
+  created_by: crmActorSchema.optional(),
 });
 
 const crmSavedViewsResponseSchema = z.object({
   views: z.array(crmSavedViewSummarySchema),
+  next_cursor: z.string().nullish(),
 });
 
 const crmViewValidationResponseSchema = z.object({
@@ -116,34 +120,46 @@ function useCrmViewMutationContext(ownerId?: string) {
   return { actor, owner, invalidate };
 }
 
-export function useCrmViews(ownerId?: string) {
+export function useCrmViews(ownerId?: string, cursor?: string) {
   const { actor, owner } = useCrmViewOwner(ownerId);
-  return useQuery({
-    queryKey: crmViewQueryKeys.list(owner),
-    queryFn: async () =>
-      parseCrmSavedViewsResponse(
-        await assistantJson(`${CRM_VIEWS_PATH}${ownerSearch(owner, actor)}`),
-      ),
-    enabled: Boolean(actor && owner),
-    retry: false,
-    refetchInterval: 30_000,
-  });
+  return useVisibleCrmQuery(
+    useQuery({
+      queryKey: [...crmViewQueryKeys.list(owner), cursor, "actor", actor],
+      queryFn: async () =>
+        crmSavedViewsResponseSchema.parse(
+          await assistantJson(
+            `${CRM_VIEWS_PATH}${ownerSearch(owner, actor)}${cursor ? `${ownerSearch(owner, actor) ? "&" : "?"}cursor=${encodeURIComponent(cursor)}` : ""}`,
+          ),
+        ),
+      enabled: Boolean(actor && owner),
+      retry: false,
+      refetchInterval: 30_000,
+    }),
+    owner,
+  );
 }
 
 export function useCrmView(viewId: string | undefined, ownerId?: string) {
   const { actor, owner } = useCrmViewOwner(ownerId);
-  return useQuery({
-    queryKey: crmViewQueryKeys.detail(owner, viewId ?? ""),
-    queryFn: async () =>
-      parseCrmSavedViewResponse(
-        await assistantJson(
-          `${CRM_VIEWS_PATH}/${encodeURIComponent(viewId ?? "")}${ownerSearch(owner, actor)}`,
+  return useVisibleCrmQuery(
+    useQuery({
+      queryKey: [
+        ...crmViewQueryKeys.detail(owner, viewId ?? ""),
+        "actor",
+        actor,
+      ],
+      queryFn: async () =>
+        parseCrmSavedViewResponse(
+          await assistantJson(
+            `${CRM_VIEWS_PATH}/${encodeURIComponent(viewId ?? "")}${ownerSearch(owner, actor)}`,
+          ),
         ),
-      ),
-    enabled: Boolean(actor && owner && viewId),
-    retry: false,
-    refetchInterval: 30_000,
-  });
+      enabled: Boolean(actor && owner && viewId),
+      retry: false,
+      refetchInterval: 30_000,
+    }),
+    owner,
+  );
 }
 
 export function useValidateCrmView(ownerId?: string) {
@@ -239,5 +255,33 @@ export function useDeleteCrmView(ownerId?: string) {
       return response.id;
     },
     onSuccess: (id) => context.invalidate(id),
+  });
+}
+
+const crmGenerationSchema = z.object({
+  envelope: z.unknown(),
+  valid: z.boolean(),
+  errors: z.array(crmValidationErrorSchema),
+});
+export function useGenerateCrmView(ownerId?: string) {
+  const { actor, owner } = useCrmViewOwner(ownerId);
+  return useMutation({
+    mutationFn: async (input: {
+      object: string;
+      prompt: string;
+      draft?: unknown;
+      idempotencyKey: string;
+    }) =>
+      crmGenerationSchema.parse(
+        await assistantJson(`${CRM_VIEWS_PATH}/generate`, {
+          method: "POST",
+          headers: mutationHeaders(input.idempotencyKey),
+          body: ownerBody(
+            { object: input.object, prompt: input.prompt, draft: input.draft },
+            owner,
+            actor,
+          ),
+        }),
+      ),
   });
 }

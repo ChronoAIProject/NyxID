@@ -3,6 +3,7 @@ import {
   crmActivitiesResponseSchema,
   crmAggregateQuerySchema,
   crmFieldSchema,
+  crmSelectOptionSchema,
   crmAggregateResultSchema,
   crmSavedViewEnvelopeSchema,
   crmTableQuerySchema,
@@ -179,4 +180,23 @@ describe("CRM schemas", () => {
     });
     expect(result.activities[0]?.body).toBeUndefined();
   });
+});
+
+it("accepts the server's empty option color while bounding metadata", () => {
+  expect(
+    crmSelectOptionSchema.parse({
+      value: "_1",
+      label: "Option",
+      color: "",
+      archived: false,
+    }).color,
+  ).toBe("");
+  expect(
+    crmSelectOptionSchema.safeParse({
+      value: "1_option",
+      label: "Option",
+      archived: false,
+      color: "x".repeat(65),
+    }).success,
+  ).toBe(false);
 });

@@ -14,6 +14,7 @@ import recordOpportunityCreateRaw from "../../../docs/fixtures/crm/record_opport
 import recordPatchRaw from "../../../docs/fixtures/crm/record_patch.json?raw";
 import recordRevisionConflictRaw from "../../../docs/fixtures/crm/record_revision_conflict.json?raw";
 import recordValidationErrorRaw from "../../../docs/fixtures/crm/record_validation_error.json?raw";
+import recordBlankRequiredTextRaw from "../../../docs/fixtures/crm/record_blank_required_text.json?raw";
 import relatedRaw from "../../../docs/fixtures/crm/related.json?raw";
 import tablePage1Raw from "../../../docs/fixtures/crm/table_page_1.json?raw";
 import tablePage2Raw from "../../../docs/fixtures/crm/table_page_2.json?raw";
@@ -63,9 +64,12 @@ const successFixtures = [
 ] as const;
 
 describe("CRM real-route fixtures", () => {
-  it.each(successFixtures)("parses %s with its production schema", (_, raw, schema) => {
-    expect(() => schema.parse(body(raw))).not.toThrow();
-  });
+  it.each(successFixtures)(
+    "parses %s with its production schema",
+    (_, raw, schema) => {
+      expect(() => schema.parse(body(raw))).not.toThrow();
+    },
+  );
 
   it("parses record_revision_conflict through the UI conflict path", () => {
     const response = body(recordRevisionConflictRaw) as ApiErrorResponse;
@@ -85,6 +89,14 @@ describe("CRM real-route fixtures", () => {
     expect(crmValidationErrors(new ApiError(422, response))).toEqual({
       email: "must be a string",
       name: "is required",
+    });
+  });
+
+  it("preserves the server's blank required-text error for the field editor", () => {
+    const response = body(recordBlankRequiredTextRaw) as ApiErrorResponse;
+
+    expect(crmValidationErrors(new ApiError(422, response))).toEqual({
+      name: "required text cannot be blank",
     });
   });
 });

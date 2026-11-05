@@ -61,6 +61,7 @@ describe("CRM pipeline query refinement", () => {
           { field: "field_19", op: "eq", value: "value-19" },
           { field: "stage", op: "eq", value: "new" },
         ],
+        include_archived: false,
         page_size: 50,
         cursor: undefined,
       },

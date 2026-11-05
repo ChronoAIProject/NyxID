@@ -10,6 +10,8 @@ import type {
   NyxAgentSettingsUpdate,
 } from "@/schemas/assistant-nyxagent";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 
@@ -119,10 +121,28 @@ export function useUpdateNyxBotAgent() {
 }
 
 export function useSetNyxBotAgentGrants() {
+  const crmEnabled = useFeature(FEATURE_FLAG.CRM);
   const client = useQueryClient();
   return useAgentOwnerMutation({
-    mutationFn: ({ id, ...grants }: AssistantAgentGrantsRequest & { id: string }, guard) =>
-      nyxBotApi.setGrants(id, grants, guard),
+    mutationFn: (
+      {
+        id,
+        crmEdited,
+        ...grants
+      }: AssistantAgentGrantsRequest & {
+        id: string;
+        crmEdited?: boolean;
+      },
+      guard,
+    ) => {
+      const ordinaryGrants = { ...grants };
+      delete ordinaryGrants.crm;
+      return nyxBotApi.setGrants(
+        id,
+        crmEnabled && crmEdited ? grants : ordinaryGrants,
+        guard,
+      );
+    },
     onSettled: (owner) => client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
   });
 }

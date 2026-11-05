@@ -62,10 +62,7 @@ describe("CRM field-kind registry", () => {
 
   it("uses minute precision only when a datetime is edited", () => {
     const field: CrmField = { ...base, key: "meeting", type: "datetime" };
-    const editorValue = formatCrmFieldInput(
-      field,
-      "2026-11-04T12:34:56.789Z",
-    );
+    const editorValue = formatCrmFieldInput(field, "2026-11-04T12:34:56.789Z");
     expect(editorValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
 
     const parsed = parseCrmFieldInput(field, editorValue);
@@ -104,4 +101,29 @@ describe("CRM field-kind registry", () => {
     ]);
     expect(isCrmFilterOperatorAllowed(record, "contains")).toBe(false);
   });
+});
+
+it.each(["plain", "percent"] as const)(
+  "rejects nonempty malformed %s input rather than clearing data",
+  (format) => {
+    const field: CrmField = { ...base, key: "number", type: "number", format };
+    for (const invalid of ["abc", "NaN", "Infinity", "-Infinity", "1e999"])
+      expect(() => parseCrmFieldInput(field, invalid)).toThrow();
+    expect(parseCrmFieldInput(field, "")).toBeNull();
+  },
+);
+it("parses supported boundary cents exactly and rejects multiple signs", () => {
+  const field: CrmField = {
+    ...base,
+    key: "amount",
+    type: "currency",
+    currency: "USD",
+  };
+  expect(parseCrmFieldInput(field, "90071992547409.91")).toBe(
+    Number.MAX_SAFE_INTEGER,
+  );
+  expect(parseCrmFieldInput(field, "-90071992547409.91")).toBe(
+    -Number.MAX_SAFE_INTEGER,
+  );
+  expect(() => parseCrmFieldInput(field, "--1")).toThrow();
 });

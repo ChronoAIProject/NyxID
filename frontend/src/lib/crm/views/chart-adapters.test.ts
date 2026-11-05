@@ -9,6 +9,7 @@ describe("aggregateResultToChartPoints", () => {
   it("maps literal aggregate points to literal Recharts data", () => {
     expect(
       aggregateResultToChartPoints({
+        truncated: true,
         points: [
           {
             key: "qualified",
@@ -27,17 +28,72 @@ describe("aggregateResultToChartPoints", () => {
       }),
     ).toEqual([
       {
-        key: "qualified",
+        key: "string:qualified",
         label: "Qualified (archived)",
         value: 125_000,
         archived: true,
       },
-      { key: "__none__", label: "None", value: 500, archived: false },
+      { key: "null", label: "None", value: 500, archived: false },
       {
-        key: "__other__",
+        key: "remainder",
         label: "Other",
         value: 250,
         archived: false,
+      },
+    ]);
+  });
+
+  it("distinguishes literal sentinel values from null and the trailing remainder", () => {
+    const result = crmAggregateResultSchema.parse({
+      points: [
+        { key: null, label: "None", value: 1, archived: false },
+        { key: "__none__", label: "Literal none", value: 2, archived: false },
+        { key: "__other__", label: "Literal other", value: 3, archived: true },
+        { key: "__other__", label: "Other", value: 4, archived: false },
+      ],
+      unit: { format: "count" },
+      total: 10,
+      truncated: true,
+    });
+    const original = structuredClone(result);
+
+    const points = aggregateResultToChartPoints(result);
+
+    expect(points.map((point) => point.key)).toEqual([
+      "null",
+      "string:__none__",
+      "string:__other__",
+      "remainder",
+    ]);
+    expect(new Set(points.map((point) => point.key)).size).toBe(4);
+    expect(points.map((point) => point.label)).toEqual([
+      "None",
+      "Literal none",
+      "Literal other (archived)",
+      "Other",
+    ]);
+    expect(result).toEqual(original);
+  });
+
+  it("keeps an untruncated final literal Other group as a real archived group", () => {
+    expect(
+      aggregateResultToChartPoints({
+        points: [
+          {
+            key: "__other__",
+            label: "Literal other",
+            value: 3,
+            archived: true,
+          },
+        ],
+        truncated: false,
+      }),
+    ).toEqual([
+      {
+        key: "string:__other__",
+        label: "Literal other (archived)",
+        value: 3,
+        archived: true,
       },
     ]);
   });

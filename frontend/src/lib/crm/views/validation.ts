@@ -161,7 +161,40 @@ function validateQueryBinding(
     });
     return;
   }
+  if (
+    componentType === "PipelineBoard" &&
+    query.kind === "table" &&
+    query.query.include_archived
+  )
+    errors.push({
+      path,
+      message:
+        "Pipeline boards exclude archived records; use ObjectTable for archived records",
+    });
+  if (
+    componentType === "ObjectTable" &&
+    query.kind === "table" &&
+    query.query.select &&
+    Array.isArray(props.columns) &&
+    props.columns.some(
+      (column) =>
+        typeof column === "string" && !query.query.select?.includes(column),
+    )
+  )
+    errors.push({
+      path: `spec.elements.${elementId}.props.columns`,
+      message: "Table columns must be included in query.select",
+    });
   if (requirement.kind === "aggregate" && query.kind === "aggregate") {
+    if (
+      componentType === "PieChart" &&
+      !["count", "sum"].includes(query.query.measure.op)
+    ) {
+      errors.push({
+        path,
+        message: "Pie charts require count or sum measures",
+      });
+    }
     const grouped = query.query.group_by !== undefined;
     if (grouped !== requirement.grouped) {
       errors.push({
@@ -201,9 +234,7 @@ function validateLiveFields(
   const object = objects.find((candidate) => candidate.key === objectKey);
   if (!object) return;
   const liveFields = new Set(
-    object.fields
-      .filter((field) => !field.archived)
-      .map((field) => field.key),
+    object.fields.filter((field) => !field.archived).map((field) => field.key),
   );
   selectedFields.forEach((field, index) => {
     if (typeof field === "string" && !liveFields.has(field)) {

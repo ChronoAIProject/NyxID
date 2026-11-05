@@ -464,6 +464,14 @@ export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
 });
 
 
+export const assistantCrmGrantSchema = z.object({
+  owner_id: z.string(),
+  object: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
+  capabilities: z
+    .array(z.enum(["read", "write", "schema"]))
+    .min(1)
+    .max(3),
+});
 export const assistantAgentSchema = z.object({
   guest_readiness: guestReadinessSchema.nullish(),
   share_role: z.enum(["manager", "user"]).nullable().optional(),
@@ -492,6 +500,7 @@ export const assistantAgentSchema = z.object({
   services: z.array(z.string()).default([]),
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean().default(false),
   /** What guests (other members of the agent's chats) may do with each service. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema.catch("use")).default({}),
@@ -602,6 +611,7 @@ export const assistantAgentCreateSchema = z.object({
   machines: z.array(z.string()).max(64).optional(),
   logins: z.array(z.string()).max(64).optional(),
   services: z.array(z.string()),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean(),
 });
 export type AssistantAgentCreate = z.infer<typeof assistantAgentCreateSchema>;
@@ -652,6 +662,7 @@ export const assistantAgentGrantsSchema = z.object({
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean(),
   /** Guest access by service slug; services left out keep their level. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema),
@@ -661,6 +672,7 @@ export const assistantAgentGrantsRequestSchema = z.object({
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean(),
   guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),
 });

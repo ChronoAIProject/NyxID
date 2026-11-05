@@ -14,6 +14,7 @@ export const NYXAGENT_LIVE_PATH = "/assistant/nyxagent/live";
 
 const liveEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }),
+  z.object({ type: z.literal("crm"), owner_id: z.string() }),
   z.object({
     type: z.literal("conversation"),
     id: z.string(),
@@ -24,8 +25,13 @@ const liveEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("group"), id: z.string() }),
   z.object({ type: z.literal("channels") }),
-  z.object({ type: z.literal("channel_thread"), id: z.string(), channel_id: z.string(),
-    parent_id: z.string().nullable(), conversation_id: z.string().nullable() }),
+  z.object({
+    type: z.literal("channel_thread"),
+    id: z.string(),
+    channel_id: z.string(),
+    parent_id: z.string().nullable(),
+    conversation_id: z.string().nullable(),
+  }),
   z.object({ type: z.literal("resync") }),
 ]);
 export type NyxAgentLiveEvent = z.infer<typeof liveEventSchema>;
@@ -34,21 +40,30 @@ export type NyxAgentLiveEvent = z.infer<typeof liveEventSchema>;
 export type NyxAgentLiveStatus = "idle" | "connecting" | "live" | "unsupported";
 
 /** Reconnect delays after errors; a stream the server closes reopens at once. */
-export const NYXAGENT_LIVE_BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000] as const;
+export const NYXAGENT_LIVE_BACKOFF_MS = [
+  1000, 2000, 5000, 10_000, 30_000,
+] as const;
 /** An unsupported answer (e.g. an older replica mid-deploy) is retried this late. */
 export const NYXAGENT_LIVE_UNSUPPORTED_RETRY_MS = 5 * 60_000;
 const REOPEN_MS = 250;
 export const NYXAGENT_LIVE_IDLE_MS = 45_000;
 
-async function deadline<T>(operation: Promise<T>, milliseconds: number, controller: AbortController): Promise<T> {
+async function deadline<T>(
+  operation: Promise<T>,
+  milliseconds: number,
+  controller: AbortController,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await Promise.race([operation, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        reject(new Error("The live connection stopped responding."));
-        controller.abort();
-      }, milliseconds);
-    })]);
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error("The live connection stopped responding."));
+          controller.abort();
+        }, milliseconds);
+      }),
+    ]);
   } finally {
     clearTimeout(timer);
   }
@@ -72,7 +87,9 @@ function setStatus(next: NyxAgentLiveStatus) {
   for (const listener of statusListeners) listener();
 }
 
-export function parseNyxAgentLiveEvent(payload: string): NyxAgentLiveEvent | undefined {
+export function parseNyxAgentLiveEvent(
+  payload: string,
+): NyxAgentLiveEvent | undefined {
   try {
     const parsed = liveEventSchema.safeParse(JSON.parse(payload));
     return parsed.success ? parsed.data : undefined;
@@ -94,14 +111,18 @@ function wait(ms: number, signal: AbortSignal) {
   });
 }
 
-let connection: { readonly controller: AbortController; users: number } | undefined;
+let connection:
+  | { readonly controller: AbortController; users: number }
+  | undefined;
 const eventListeners = new Set<(event: NyxAgentLiveEvent) => void>();
 
 /**
  * Receive live events. The first listener opens the one shared stream; the
  * last one to leave closes it.
  */
-export function listenNyxAgentLive(listener: (event: NyxAgentLiveEvent) => void): () => void {
+export function listenNyxAgentLive(
+  listener: (event: NyxAgentLiveEvent) => void,
+): () => void {
   eventListeners.add(listener);
   if (!connection) {
     const controller = new AbortController();
@@ -134,12 +155,18 @@ async function run(signal: AbortSignal) {
     signal.addEventListener("abort", abort, { once: true });
     if (status !== "live" && status !== "unsupported") setStatus("connecting");
     try {
-      const response = await deadline(assistantHttp(NYXAGENT_LIVE_PATH, {
-        headers: { Accept: "text/event-stream" },
-        signal: request.signal,
-      }), 15_000, request);
+      const response = await deadline(
+        assistantHttp(NYXAGENT_LIVE_PATH, {
+          headers: { Accept: "text/event-stream" },
+          signal: request.signal,
+        }),
+        15_000,
+        request,
+      );
       if (signal.aborted) return;
-      if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+      if (
+        !response.headers.get("content-type")?.includes("text/event-stream")
+      ) {
         // Something other than the live stream answered (an older server).
         setStatus("unsupported");
         await wait(NYXAGENT_LIVE_UNSUPPORTED_RETRY_MS, signal);
@@ -154,12 +181,17 @@ async function run(signal: AbortSignal) {
       let buffer = "";
       try {
         for (;;) {
-          const { done, value } = await deadline(reader.read(), NYXAGENT_LIVE_IDLE_MS, request);
+          const { done, value } = await deadline(
+            reader.read(),
+            NYXAGENT_LIVE_IDLE_MS,
+            request,
+          );
           if (done || signal.aborted) break;
           buffer += decoder.decode(value, { stream: true });
           const drained = drainDirectSseBuffer(buffer);
           buffer = drained.rest;
-          if (buffer.length > 64 * 1024) throw new Error("The live event exceeded its limit.");
+          if (buffer.length > 64 * 1024)
+            throw new Error("The live event exceeded its limit.");
           for (const payload of drained.payloads) {
             const event = parseNyxAgentLiveEvent(payload);
             if (!event) continue;
@@ -176,7 +208,8 @@ async function run(signal: AbortSignal) {
         await reader.cancel().catch(() => undefined);
         reader.releaseLock();
       }
-      if (!ready && !signal.aborted) throw new Error("The live stream closed before it was ready.");
+      if (!ready && !signal.aborted)
+        throw new Error("The live stream closed before it was ready.");
       // The server closes streams after a while: reopen promptly. The next
       // `ready` makes views re-read anything that changed in between.
       if (signal.aborted) return;
@@ -192,8 +225,9 @@ async function run(signal: AbortSignal) {
       }
       setStatus("connecting");
       const delay =
-        NYXAGENT_LIVE_BACKOFF_MS[Math.min(attempt, NYXAGENT_LIVE_BACKOFF_MS.length - 1)] ??
-        NYXAGENT_LIVE_BACKOFF_MS[0];
+        NYXAGENT_LIVE_BACKOFF_MS[
+          Math.min(attempt, NYXAGENT_LIVE_BACKOFF_MS.length - 1)
+        ] ?? NYXAGENT_LIVE_BACKOFF_MS[0];
       attempt += 1;
       await wait(delay, signal);
     } finally {

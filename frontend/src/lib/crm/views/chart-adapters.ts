@@ -1,3 +1,4 @@
+import { formatCrmMoney } from "@/lib/crm/money";
 import type {
   CrmAggregatePoint,
   CrmAggregateResult,
@@ -14,29 +15,26 @@ export function aggregatePointToChartPoint(
   point: CrmAggregatePoint,
 ): CrmChartPoint {
   const label =
-    typeof point.key === "boolean"
-      ? point.key
-        ? "Yes"
-        : "No"
-      : point.label;
+    typeof point.key === "boolean" ? (point.key ? "Yes" : "No") : point.label;
   return {
     key:
-      typeof point.key === "boolean"
-        ? `boolean:${String(point.key)}`
-        : (point.key ?? "__none__"),
-    label:
-      point.archived && point.key !== "__other__"
-        ? `${label} (archived)`
-        : label,
+      point.key === null ? "null" : `${typeof point.key}:${String(point.key)}`,
+    label: point.archived ? `${label} (archived)` : label,
     value: point.value,
     archived: point.archived,
   };
 }
 
 export function aggregateResultToChartPoints(
-  result: Pick<CrmAggregateResult, "points">,
+  result: Pick<CrmAggregateResult, "points" | "truncated">,
 ): readonly CrmChartPoint[] {
-  return result.points.map(aggregatePointToChartPoint);
+  return result.points.map((point, index) => {
+    const chartPoint = aggregatePointToChartPoint(point);
+    // Truncated results append the synthetic remainder after all real groups.
+    return result.truncated && index === result.points.length - 1
+      ? { ...chartPoint, key: "remainder" }
+      : chartPoint;
+  });
 }
 
 export function formatAggregateValue(
@@ -46,13 +44,11 @@ export function formatAggregateValue(
   if (value === null) return "No value";
 
   if (unit.format === "currency" && unit.currency) {
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: unit.currency,
-    }).format(value / 100);
+    return formatCrmMoney(value, unit.currency);
   }
 
   return new Intl.NumberFormat(undefined, {
+    style: unit.format === "percent" ? "percent" : "decimal",
     maximumFractionDigits: unit.format === "count" ? 0 : 2,
   }).format(value);
 }

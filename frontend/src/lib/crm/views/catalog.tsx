@@ -38,6 +38,7 @@ import {
   useCrmNamedTableQuery,
 } from "@/lib/crm/views/query-runner";
 import { useCrmObject } from "@/hooks/use-crm";
+import { useCrmRecordNavigation } from "@/lib/crm/record-navigation";
 
 export type CrmViewQueryRequirement =
   | { readonly kind: "none" }
@@ -261,7 +262,10 @@ interface AggregateChartFrameProps {
   readonly title: string;
   readonly height: "small" | "medium" | "large";
   readonly result: CrmAggregateResult;
-  readonly children: (points: ReturnType<typeof aggregateResultToChartPoints>) => ReactNode;
+  readonly children: (
+    points: ReturnType<typeof aggregateResultToChartPoints>,
+    unit: CrmAggregateResult["unit"],
+  ) => ReactNode;
 }
 
 function AggregateChartFrame({
@@ -284,8 +288,16 @@ function AggregateChartFrame({
             config={chartConfig}
             className={cn("aspect-auto w-full", chartHeightClasses[height])}
           >
-            {children(points)}
+            {children(points, result.unit)}
           </ChartContainer>
+          <dl className="sr-only" aria-label={`${title} values`}>
+            {points.map((point) => (
+              <div key={point.key}>
+                <dt>{point.label}</dt>
+                <dd>{formatAggregateValue(point.value, result.unit)}</dd>
+              </div>
+            ))}
+          </dl>
           {result.truncated ? (
             <p className="mt-2 text-11 text-text-tertiary">
               Additional groups are combined into Other.
@@ -302,11 +314,13 @@ function AggregateChartState({
   title,
   height,
   render,
+  pie = false,
 }: {
   readonly queryId: string;
   readonly title: string;
   readonly height?: "small" | "medium" | "large";
   readonly render: AggregateChartFrameProps["children"];
+  readonly pie?: boolean;
 }) {
   const { namedQuery, result } = useCrmNamedAggregateQuery(queryId);
   if (!namedQuery) {
@@ -328,6 +342,18 @@ function AggregateChartState({
   if (result.isError || !result.data) {
     return <ComponentQueryError message={`Could not load ${title}.`} />;
   }
+  if (
+    pie &&
+    (!["count", "sum"].includes(namedQuery.query.measure.op) ||
+      (result.data.total !== null && result.data.total < 0) ||
+      result.data.points.some(
+        (point) => point.value !== null && point.value < 0,
+      ))
+  ) {
+    return (
+      <ComponentQueryError message="Pie charts require nonnegative count or sum values that form parts of a whole." />
+    );
+  }
   return (
     <AggregateChartFrame
       title={title}
@@ -347,7 +373,7 @@ function BarChartComponent({
       queryId={props.queryId}
       title={props.title}
       height={props.height}
-      render={(points) => (
+      render={(points, unit) => (
         <RechartsBarChart data={points} accessibilityLayer>
           <CartesianGrid vertical={false} strokeDasharray="3 3" />
           <XAxis
@@ -356,10 +382,20 @@ function BarChartComponent({
             axisLine={false}
             tickMargin={8}
           />
-          <YAxis tickLine={false} axisLine={false} width={48} />
+          <YAxis
+            tickLine={false}
+            axisLine={false}
+            width={88}
+            tickFormatter={(value: number) => formatAggregateValue(value, unit)}
+          />
           <ChartTooltip
             cursor={{ fill: "var(--color-muted)", opacity: 0.4 }}
-            content={<ChartTooltipContent hideLabel />}
+            content={
+              <ChartTooltipContent
+                hideLabel
+                formatter={(value) => formatAggregateValue(Number(value), unit)}
+              />
+            }
           />
           <Bar dataKey="value" fill="var(--color-value)" radius={4} />
         </RechartsBarChart>
@@ -376,9 +412,17 @@ function PieChartComponent({
       queryId={props.queryId}
       title={props.title}
       height={props.height}
-      render={(points) => (
+      pie
+      render={(points, unit) => (
         <RechartsPieChart accessibilityLayer>
-          <ChartTooltip content={<ChartTooltipContent nameKey="label" />} />
+          <ChartTooltip
+            content={
+              <ChartTooltipContent
+                nameKey="label"
+                formatter={(value) => formatAggregateValue(Number(value), unit)}
+              />
+            }
+          />
           <Pie
             data={points}
             dataKey="value"
@@ -404,6 +448,7 @@ function ObjectTableComponent({
   props,
 }: BaseComponentProps<z.infer<typeof objectTablePropsSchema>>) {
   const { namedQuery, ownerId } = useCrmNamedTableQuery(props.queryId);
+  const onSelectRecord = useCrmRecordNavigation();
   if (!namedQuery) {
     return <ComponentQueryError message="This table query is unavailable." />;
   }
@@ -412,6 +457,7 @@ function ObjectTableComponent({
       query={namedQuery.query}
       columns={props.columns}
       ownerId={ownerId}
+      onSelectRecord={onSelectRecord}
     />
   );
 }
@@ -420,10 +466,19 @@ function PipelineBoardComponent({
   props,
 }: BaseComponentProps<z.infer<typeof pipelineBoardPropsSchema>>) {
   const { namedQuery, ownerId } = useCrmNamedTableQuery(props.queryId);
+  const onSelectRecord = useCrmRecordNavigation();
   if (!namedQuery) {
-    return <ComponentQueryError message="This pipeline query is unavailable." />;
+    return (
+      <ComponentQueryError message="This pipeline query is unavailable." />
+    );
   }
-  return <CrmPipelineBoard query={namedQuery.query} ownerId={ownerId} />;
+  return (
+    <CrmPipelineBoard
+      query={namedQuery.query}
+      ownerId={ownerId}
+      onSelectRecord={onSelectRecord}
+    />
+  );
 }
 
 function defineCatalogEntry<PropsSchema extends z.ZodType>(

@@ -1,3 +1,5 @@
+import { CrmPersonName } from "@/components/crm/people-picker";
+import { currencyDecimal, formatCrmMoney } from "@/lib/crm/money";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import type { CrmField, CrmFilterOperator, CrmRecordLink } from "@/schemas/crm";
@@ -83,6 +85,13 @@ function finiteNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseNumberInput(value: unknown): number | null {
+  if (empty(value) || (typeof value === "string" && !value.trim())) return null;
+  const parsed = finiteNumber(value);
+  if (parsed === null) throw new Error("Enter a finite number.");
+  return parsed;
+}
+
 function currencyMinor(value: unknown): number | null {
   if (typeof value === "number" && Number.isSafeInteger(value)) return value;
   if (
@@ -122,25 +131,26 @@ function parseCurrencyInput(field: CrmField, value: unknown): number | null {
   const match = /^(-?)(\d+)(?:\.(\d{0,2}))?$/.exec(input);
   if (!match?.[2])
     throw new Error("Enter an amount with at most 2 decimal places.");
-  const whole = Number(match[2]);
-  const minor = Number((match[3] ?? "").padEnd(2, "0"));
-  const amount = whole * 100 + minor;
+  const whole = BigInt(match[2]);
+  const minor = BigInt((match[3] ?? "").padEnd(2, "0"));
+  const amount = whole * 100n + minor;
   const signed = match[1] === "-" ? -amount : amount;
-  if (!Number.isSafeInteger(signed))
+  if (
+    signed > BigInt(Number.MAX_SAFE_INTEGER) ||
+    signed < -BigInt(Number.MAX_SAFE_INTEGER)
+  )
     throw new Error("This amount is too large.");
-  return signed;
+  return Number(signed);
 }
 
 function formatCurrencyInput(value: unknown): string {
   const minor = currencyMinor(value);
   if (minor === null) return "";
-  const sign = minor < 0 ? "-" : "";
-  const absolute = Math.abs(minor);
-  return `${sign}${Math.floor(absolute / 100)}.${String(absolute % 100).padStart(2, "0")}`;
+  return currencyDecimal(minor);
 }
 
 function parsePercentInput(value: unknown): number | null {
-  const parsed = finiteNumber(value);
+  const parsed = parseNumberInput(value);
   return parsed === null ? null : parsed / 100;
 }
 
@@ -214,7 +224,7 @@ const numberDefinition: CrmFieldKindDefinition = {
   parseInput: (field, value) =>
     field.type === "number" && field.format === "percent"
       ? parsePercentInput(value)
-      : finiteNumber(value),
+      : parseNumberInput(value),
   renderCell: (field, { value }) => {
     const parsed = finiteNumber(value);
     if (parsed === null) return plainCell(null);
@@ -231,16 +241,14 @@ const currencyDefinition: CrmFieldKindDefinition = {
   renderCell: (field, { value }) => {
     const minor = currencyMinor(value);
     if (minor === null || field.type !== "currency") return plainCell(null);
-    return new Intl.NumberFormat(undefined, {
-      style: "currency",
-      currency: field.currency,
-    }).format(minor / 100);
+    return formatCrmMoney(minor, field.currency);
   },
 };
 
 const booleanDefinition: CrmFieldKindDefinition = {
   filterOperators: BOOLEAN_OPERATORS,
-  formatInput: (_field, value) => value === true,
+  formatInput: (field, value) =>
+    empty(value) ? (field.required ? false : null) : value === true,
   parseInput: (_field, value) =>
     empty(value) ? null : value === true || value === "true",
   renderCell: (_field, { value }) =>
@@ -303,7 +311,9 @@ const userDefinition: CrmFieldKindDefinition = {
   filterOperators: ENUM_OPERATORS,
   formatInput: (_field, value) => text(value),
   parseInput: (_field, value) => (empty(value) ? null : String(value)),
-  renderCell: (_field, { value }) => plainCell(value),
+  renderCell: (_field, { value }) => (
+    <CrmPersonName id={typeof value === "string" ? value : undefined} />
+  ),
 };
 
 export const CRM_FIELD_KINDS: Readonly<

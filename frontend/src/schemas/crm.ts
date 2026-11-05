@@ -26,7 +26,7 @@ export const crmCurrencyCodeSchema = z.enum([
 export const crmSelectOptionSchema = z.object({
   value: crmOptionValueSchema,
   label: z.string().min(1),
-  color: z.string().min(1).nullable().optional(),
+  color: z.string().max(64).nullable().optional(),
   archived: z.boolean(),
 });
 
@@ -141,7 +141,17 @@ export const crmActorSchema = z.object({
   kind: z.enum(["human", "agent"]),
   user_id: crmIdSchema,
   agent_id: crmIdSchema.nullable().optional(),
+  agent_name: z.string().nullable().optional(),
   api_key_id: crmIdSchema.nullable().optional(),
+  source: z
+    .object({
+      conversation_id: crmIdSchema,
+      turn_id: z.string(),
+      run_id: z.string().nullable(),
+      ordered_at: crmInstantSchema,
+    })
+    .nullable()
+    .optional(),
 });
 
 export const crmRecordRowSchema = z.object({
@@ -156,6 +166,9 @@ export const crmRecordRowSchema = z.object({
 export const crmRecordSchema = crmRecordRowSchema.extend({
   owner_id: crmIdSchema,
   object_key: crmKeySchema,
+  created_by: crmActorSchema.nullish(),
+  updated_by: crmActorSchema.nullish(),
+  field_sources: z.record(z.string(), crmInstantSchema).optional(),
   created_at: crmInstantSchema,
   updated_at: crmInstantSchema,
 });
@@ -214,6 +227,13 @@ export const crmAggregateQuerySchema = z.object({
   object: crmKeySchema,
   filters: z.array(crmFilterSchema).max(20),
   group_by: crmKeySchema.optional(),
+  date_bucket: z
+    .object({
+      unit: z.enum(["day", "week", "month"]),
+      timezone: z.string().min(1).max(100),
+    })
+    .strict()
+    .optional(),
   measure: crmAggregateMeasureSchema,
   order: z.enum(["option_order", "value_desc", "label_asc"]),
 });
@@ -228,7 +248,7 @@ export const crmAggregateResultSchema = z.object({
     }),
   ),
   unit: z.object({
-    format: z.enum(["count", "number", "currency"]),
+    format: z.enum(["count", "number", "percent", "currency"]),
     currency: crmCurrencyCodeSchema
       .nullish()
       .transform((value) => value ?? undefined),

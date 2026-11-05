@@ -45,6 +45,7 @@ export function crmPipelineLaneQuery(
   const laneQuery: CrmTableQuery = {
     ...query,
     cursor: undefined,
+    include_archived: false,
     page_size: Math.min(query.page_size ?? 50, 50),
     filters,
   };
@@ -80,7 +81,9 @@ export function crmPipelineStageMatches(
       if (filter.op === "in")
         return Array.isArray(filter.value) && filter.value.includes(stageValue);
       if (filter.op === "nin")
-        return Array.isArray(filter.value) && !filter.value.includes(stageValue);
+        return (
+          Array.isArray(filter.value) && !filter.value.includes(stageValue)
+        );
       if (filter.op === "is_set") return true;
       if (filter.op === "is_unset") return false;
       return false;

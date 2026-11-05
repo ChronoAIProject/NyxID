@@ -70,6 +70,13 @@ export const crmAggregateQuerySchema = z
     object: crmFieldKeySchema,
     filters: z.array(crmFilterSchema).max(20),
     group_by: crmFieldKeySchema.optional(),
+    date_bucket: z
+      .object({
+        unit: z.enum(["day", "week", "month"]),
+        timezone: z.string().min(1).max(100),
+      })
+      .strict()
+      .optional(),
     measure: crmAggregateMeasureSchema,
     order: z.enum(["option_order", "value_desc", "label_asc"]),
   })
@@ -160,7 +167,7 @@ export const crmAggregateResultSchema = z
     points: z.array(crmAggregatePointSchema),
     unit: z
       .object({
-        format: z.enum(["count", "number", "currency"]),
+        format: z.enum(["count", "number", "percent", "currency"]),
         currency: z.string().optional(),
       })
       .strict(),

@@ -71,7 +71,7 @@ beforeEach(() => {
 describe("CRM saved-view hooks", () => {
   it("lists and opens views through their distinct GET routes", async () => {
     mockAssistantJson
-      .mockResolvedValueOnce({ views: [savedView] })
+      .mockResolvedValueOnce({ views: [savedView], next_cursor: null })
       .mockResolvedValueOnce(savedView);
 
     const listed = renderHook(() => useCrmViews(), { wrapper: wrapper() });
