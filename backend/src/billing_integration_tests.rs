@@ -1,5 +1,6 @@
 mod bills;
 mod operations;
+mod org_wallet;
 mod taxes;
 mod usage;
 mod wallet_view;
@@ -213,6 +214,7 @@ pub(crate) struct FakeLago {
     invoice_data: Option<serde_json::Value>,
     invoice: Option<crate::services::billing::lago_client::InvoiceSummary>,
     wallet_creates: AtomicUsize,
+    topup_wallets: std::sync::Mutex<Vec<String>>,
     wallet_balance: Option<crate::models::credits::Credits>,
     wallet_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
 }
@@ -291,6 +293,20 @@ impl LagoApi for FakeLago {
             balance_credits: self
                 .wallet_balance
                 .unwrap_or_else(|| crate::models::credits::Credits::from_whole(10_000)),
+        })
+    }
+
+    async fn create_wallet_topup(
+        &self,
+        wallet_id: &str,
+        _: &crate::services::billing::lago_client::WalletTopUpInput,
+    ) -> AppResult<crate::services::billing::lago_client::WalletTopUpCheckout> {
+        self.topup_wallets.lock().unwrap().push(wallet_id.into());
+        Ok(crate::services::billing::lago_client::WalletTopUpCheckout {
+            wallet_transaction_id: format!("{wallet_id}:topup"),
+            lago_invoice_id: Some(format!("{wallet_id}:invoice")),
+            payment_url: "https://pay.example/checkout".into(),
+            payment_provider: Some("stripe".into()),
         })
     }
 

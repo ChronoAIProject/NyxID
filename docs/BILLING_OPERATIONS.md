@@ -2,9 +2,12 @@
 
 This runbook covers the manual v0 merchant rollout. NyxID owns admission and
 exact wallet accounting; Lago owns tax configuration, invoices and prepaid
-credits. The Billing page shows the acting person's current bill and finalized
-usage invoices. The bill and invoice APIs also accept an authorized organization
-`owner_id`; managing an organization wallet requires organization admin access.
+credits. Billing in Studio and the assistant account panel has a **Billing owner**
+selector: Personal and organizations where the signed-in person is an admin.
+Balance, setup, top-ups/history, usage, grants/allowances, current bill and finalized
+usage invoices follow that selection. Organization wallet management and views
+require live organization admin access; members retain their existing consumption
+and benefit-read access, without wallet-management access.
 
 ## Deployment order
 
@@ -38,12 +41,46 @@ For an organization wallet it resolves the selected organization's member
 baseline, then the actor's platform user override. Legacy role/user scopes are
 retained in the resolver, though new rollout authoring uses platform scopes.
 
-Platform-key execution, including NyxBot usage, always bills the **acting
-person** through `BillingOwnerResolver::resolve_for_execution`. Enabling the
-demo organization's flag enables personal billing through membership resolution;
-it does not redirect that traffic into the organization's wallet. The web Billing
-page remains personal. Check that the actual Lago customer corresponds to the
-owner who will execute the demo, rather than assuming it is the organization.
+Ordinary platform-key execution keeps the acting billing principal through
+`BillingOwnerResolver::resolve_for_execution`; org members' platform-key usage
+bills the person. The explicit org-specialist channel **guest** lane is the
+exception: live, admin-enabled guests bill the org wallet for the model and
+services, including platform keys, subject to the binding budget and rate limit.
+Enabling the billing flag alone never changes an execution's payer. Check that
+the Lago customer corresponds to the owner of that execution.
+
+## Organization wallets in the web app
+
+Open `/billing?ownerId=<org UUID>` in Studio or
+`/assistant?panel=billing&panelOwnerId=<org UUID>` in the assistant. Owner selection
+uses normal URL/history state and resets owner-specific service filters and
+pending top-up actions. Only administered organizations appear; an unauthorized
+explicit selection is refused, without falling back to a personal wallet.
+
+- `GET /api/v1/billing/wallet?owner_id=<org UUID>` returns the existing wallet or
+  JSON `null` for **not provisioned**. It never creates a wallet or subscription.
+  Omitting `owner_id` preserves personal GET's existing auto-provisioning.
+- **Provision Wallet** calls `POST /api/v1/billing/wallet` with `owner_id`. An
+  existing wallet missing its subscription offers **Finish wallet setup**, using
+  the same explicit POST to ensure the Lago subscription without changing balances.
+- **Add credits** calls the existing `POST /api/v1/billing/topup` with `owner_id`
+  and an idempotency key. Lago checkout and payment confirmation remain unchanged.
+  Lago's existing `/billing` return restores the selected org and originating shell
+  from single-use, account-bound session storage (navigation metadata only, two-hour
+  expiry, same tab). Explicit URL selections take precedence. No Lago configuration
+  change is needed; a different tab or expired metadata lands on ordinary Billing.
+- `GET /api/v1/billing/topups?owner_id=<org UUID>` and
+  `GET /api/v1/billing/usage?owner_id=<org UUID>` require the same management ACL;
+  existing pagination/period filters still apply. Bills, invoices/receipts and
+  grants/allowances use their existing owner-aware APIs. All existing wallet and
+  top-up rollout checks still apply; explicit org usage also checks rollout.
+- Org-specialist channel guest settings link admins here when wallet/subscription
+  setup is missing or the wallet is suspended. Guest admission continues to fail
+  closed until ready; enabling a UI view never changes that authority.
+
+CLI parity already exists: `nyxid billing wallet --owner-id <org UUID>` and
+`nyxid billing topup --owner-id <org UUID> ...`. Platform-admin credit recipient
+pickers already explicitly include organizations.
 
 ## Configure Lago taxes
 
