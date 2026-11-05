@@ -1017,3 +1017,24 @@ test("post-call task cancellation is aborted on scope exit and late errors canno
   await cancelling;
   assert.equal(e.harness.flush().error, undefined);
 });
+
+test("the call clock begins on the first active snapshot, survives updates and resets for a new attempt", async (context) => {
+  const f = setup(context);
+  await f.start();
+  assert.equal(f.harness.value().connectedAt, undefined);
+  f.clients.at(-1)!.options.onSnapshot(snapshot({ state: "starting" }));
+  assert.equal(f.harness.flush().connectedAt, undefined);
+  const before = Date.now();
+  f.clients.at(-1)!.options.onSnapshot(snapshot());
+  const connectedAt = f.harness.flush().connectedAt!;
+  assert.ok(connectedAt >= before && connectedAt <= Date.now());
+  f.clients.at(-1)!.options.onSnapshot(snapshot({ observed_seconds: 8 }));
+  assert.equal(f.harness.flush().connectedAt, connectedAt);
+  f.clients.at(-1)!.closed();
+  const ended = f.harness.flush().disconnectedAt!;
+  assert.ok(ended >= connectedAt);
+  assert.equal(f.harness.value().connectedAt, connectedAt);
+  await f.start();
+  assert.equal(f.harness.value().connectedAt, undefined);
+  assert.equal(f.harness.value().disconnectedAt, undefined);
+});

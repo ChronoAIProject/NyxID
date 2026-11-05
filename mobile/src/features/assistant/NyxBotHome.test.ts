@@ -68,6 +68,7 @@ function setup() {
     agentsError: false,
     crewsError: false,
   };
+  const onboarding: any = { data: undefined, isError: false, refetch: async () => { calls.push(["retry-intro"]); } };
   const calls: unknown[][] = [];
   const queries = new Map<string, Record<string, any>>();
   const harness = hookHarness<Element>({
@@ -96,7 +97,7 @@ function setup() {
       useQueryClient: () => ({ setQueryData: () => undefined }),
       useMutation: () => ({ mutate: () => undefined }),
       useQuery: (options: Record<string, any>) => {
-        if (options.queryKey.includes("onboarding")) return { data: undefined };
+        if (options.queryKey.includes("onboarding")) return onboarding;
         const name = options.queryKey.includes("agents")
           ? "agents"
           : options.queryKey.includes("groups")
@@ -173,6 +174,7 @@ function setup() {
     onOpenCrew: (id: string) => calls.push(["crew", id]),
     onNewAgent: () => calls.push(["new-agent"]),
     onNewCrew: () => calls.push(["new-crew"]),
+    onStartNextStep: (step: unknown) => calls.push(["next-step", step]),
   };
   harness.mount(() => Home(props));
   const elements = (node: Element): Element[] =>
@@ -211,7 +213,7 @@ function setup() {
     assert.ok(found, `Expected ${name}`);
     return found.props;
   };
-  return { state, calls, queries, harness, all, text, button };
+  return { state, calls, queries, harness, all, text, button, onboarding };
 }
 
 test("home renders real requests, completed replies, owner sections and crews with exact navigation", () => {
@@ -364,4 +366,19 @@ test("revocation, removed requests and inactive views fence retained callbacks a
   h.harness.render();
   assert.equal(h.queries.get("agents")!.refetchInterval, 30_000);
   h.harness.unmount();
+});
+
+test("onboarding load failures expose retry and the intro remains reachable with hidden or empty suggestions", () => {
+  const f = setup();
+  f.onboarding.isError = true; f.harness.render();
+  const retry = f.all().find(n => n.props.label === "Retry intro")!;
+  assert.ok(retry); retry.props.onPress();
+  assert.equal(f.calls.at(-1)?.[0], "retry-intro");
+  f.onboarding.isError = false;
+  f.onboarding.data = { show_intro: false, suggestions_hidden: true, recommendations: [] };
+  f.harness.render();
+  f.all().find(n => n.props.label === "Replay intro")!.props.onPress();
+  f.harness.flush();
+  assert.equal(f.all().find(n => n.type === "FirstRunIntro")!.props.entryPoint, "home");
+  f.harness.unmount();
 });

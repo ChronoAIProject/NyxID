@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Feather } from "@expo/vector-icons";
 import {
   Image,
+  Keyboard,
   LayoutAnimation,
   Modal,
   Pressable,
   ScrollView,
   StyleSheet,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -26,6 +28,8 @@ import {
   type OnboardingAnswers,
   type OnboardingChoice,
 } from "./onboardingContracts";
+import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
+import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { NextStepList } from "./NextStepList";
 
 /** The screens after the greeting; the progress bar counts these. */
@@ -38,9 +42,18 @@ type Step = "welcome" | (typeof STEPS)[number];
  */
 const PILL_LAYOUT = {
   duration: 280,
-  create: { type: LayoutAnimation.Types.easeOut, property: LayoutAnimation.Properties.opacity, duration: 200, delay: 120 },
+  create: {
+    type: LayoutAnimation.Types.easeOut,
+    property: LayoutAnimation.Properties.opacity,
+    duration: 200,
+    delay: 120,
+  },
   update: { type: LayoutAnimation.Types.spring, springDamping: 0.9 },
-  delete: { type: LayoutAnimation.Types.easeIn, property: LayoutAnimation.Properties.opacity, duration: 120 },
+  delete: {
+    type: LayoutAnimation.Types.easeIn,
+    property: LayoutAnimation.Properties.opacity,
+    duration: 120,
+  },
 };
 
 /**
@@ -67,10 +80,22 @@ export function FirstRunIntro({
   onStart: (step: NextStep) => void;
 }) {
   const { colors } = useTheme();
+  const { fontScale } = useWindowDimensions();
   const queryClient = useQueryClient();
+  const reducedMotion = useReducedMotion();
+  const epoch = getAuthEpoch();
+  const mounted = useRef(true);
+  const saving = useRef(false);
+  const presentation = useRef(0);
+  const [saveError, setSaveError] = useState<string>();
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const save = useMutation({
     mutationFn: (answers: OnboardingAnswers) => onboardingApi.save(answers),
-    onSuccess: (next) => queryClient.setQueryData(onboardingKey, next),
   });
   const [index, setIndex] = useState(0);
   const [topics, setTopics] = useState<readonly string[]>([]);
@@ -79,14 +104,18 @@ export function FirstRunIntro({
   const saved = useRef<string | undefined>(undefined);
   const openedAt = useRef(0);
   // Only a first-timer is greeted; a replay starts at the questions.
-  const flow: readonly Step[] = entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
+  const flow: readonly Step[] =
+    entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
   const LAST = flow.length - 1;
   const step: Step = flow[index] ?? "interests";
   const progress = (STEPS as readonly string[]).indexOf(step);
 
   useEffect(() => {
+    presentation.current++;
     if (!visible) return;
+    Keyboard.dismiss();
     saved.current = undefined;
+    setSaveError(undefined);
     openedAt.current = Date.now();
     setIndex(0);
     setSteps(null);
@@ -102,19 +131,44 @@ export function FirstRunIntro({
 
   // Saves when the answers differ from the last save, so revisiting a step
   // and changing a pick after reaching the end is kept too.
-  function persist(outcome: OnboardingAnswers["outcome"]) {
+  async function persist(outcome: OnboardingAnswers["outcome"]) {
+    if (saving.current || !online) return false;
+    const opened = presentation.current;
     const answers = { outcome, topics, work_style: workStyle };
     const key = JSON.stringify(answers);
-    if (saved.current === key) return Promise.resolve(undefined);
-    saved.current = key;
-    return save.mutateAsync(answers).catch(() => {
-      // The server still shows the intro next time.
-      saved.current = undefined;
-      return undefined;
-    });
+    if (saved.current === key) return true;
+    saving.current = true;
+    setSaveError(undefined);
+    try {
+      const result = await save.mutateAsync(answers);
+      if (
+        !mounted.current ||
+        epoch !== getAuthEpoch() ||
+        opened !== presentation.current
+      )
+        return false;
+      queryClient.setQueryData(onboardingKey, result);
+      saved.current = key;
+      setSteps(result.recommendations);
+      return true;
+    } catch {
+      if (
+        mounted.current &&
+        epoch === getAuthEpoch() &&
+        opened === presentation.current
+      )
+        setSaveError(
+          "Your intro could not be saved. Check your connection and try again.",
+        );
+      return false;
+    } finally {
+      saving.current = false;
+    }
   }
 
-  function skip() {
+  async function skip() {
+    const finished = index === LAST || state.profile?.outcome === "completed";
+    if (!(await persist(finished ? "completed" : "skipped"))) return;
     void capture({
       name: "ui.mobile_dialog_abandoned",
       props: {
@@ -123,9 +177,6 @@ export function FirstRunIntro({
         duration_ms: Date.now() - openedAt.current,
       },
     });
-    // Closing a replay early keeps an earlier completion.
-    const finished = index === LAST || state.profile?.outcome === "completed";
-    void persist(finished ? "completed" : "skipped");
     onClose();
   }
 
@@ -133,23 +184,24 @@ export function FirstRunIntro({
     if (index >= LAST) return;
     void capture({
       name: "ui.mobile_dialog_step_completed",
-      props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
+      props: {
+        dialog_id: "nyxbot_intro",
+        step: index,
+        total_steps: flow.length,
+      },
     });
     goTo(index + 1);
   }
 
   function goTo(target: number) {
-    if (target < 0 || target > LAST || target === index) return;
+    if (saving.current || target < 0 || target > LAST || target === index)
+      return;
     setIndex(target);
-    if (target === LAST)
-      // The current suggestions show at once; the save refreshes them.
-      void persist("completed").then((result) => {
-        if (result) setSteps(result.recommendations);
-      });
+    if (target === LAST) void persist("completed");
   }
 
-  function start(nextStep: NextStep) {
-    void persist("completed");
+  async function start(nextStep: NextStep) {
+    if (!(await persist("completed"))) return;
     onClose();
     onStart(nextStep);
   }
@@ -160,7 +212,7 @@ export function FirstRunIntro({
       topicsFor(state.topics, next ?? "solo").map((topic) => topic.id),
     );
     // Pills shared by both audiences stay; only the ones that differ animate.
-    LayoutAnimation.configureNext(PILL_LAYOUT);
+    if (!reducedMotion) LayoutAnimation.configureNext(PILL_LAYOUT);
     setWorkStyle(next);
     setTopics((current) => current.filter((topic) => kept.has(topic)));
   }
@@ -175,13 +227,13 @@ export function FirstRunIntro({
   return (
     <Modal
       visible={visible}
-      animationType="slide"
+      animationType={reducedMotion ? "none" : "slide"}
       presentationStyle="pageSheet"
       onRequestClose={skip}
     >
       <SafeAreaView
         style={[styles.fill, { backgroundColor: colors.bg }]}
-        edges={["top", "bottom"]}
+        edges={["top", "bottom", "left", "right"]}
       >
         {step === "welcome" ? null : (
           <View style={styles.progress} accessibilityRole="tablist">
@@ -190,7 +242,11 @@ export function FirstRunIntro({
                 key={item}
                 accessibilityRole="tab"
                 accessibilityLabel={`Step ${position + 1} of ${STEPS.length}`}
-                accessibilityState={{ selected: position === progress }}
+                accessibilityState={{
+                  selected: position === progress,
+                  disabled: save.isPending,
+                }}
+                disabled={save.isPending}
                 hitSlop={{ top: 12, bottom: 12, left: 2, right: 2 }}
                 onPress={() => goTo(flow.indexOf(item))}
                 style={styles.dotTarget}
@@ -201,7 +257,9 @@ export function FirstRunIntro({
                     {
                       width: position === progress ? 24 : 12,
                       backgroundColor:
-                        position <= progress ? colors.textPrimary : colors.border,
+                        position <= progress
+                          ? colors.textPrimary
+                          : colors.border,
                     },
                   ]}
                 />
@@ -210,12 +268,19 @@ export function FirstRunIntro({
           </View>
         )}
         <ScrollView
-          key={step}
+          key={`${step}:${fontScale}`}
           style={styles.fill}
           contentContainerStyle={styles.body}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="on-drag"
         >
           {step === "welcome" ? (
-            <Welcome firstName={firstName} onStart={next} onSkip={skip} />
+            <Welcome
+              firstName={firstName}
+              onStart={next}
+              onSkip={() => void skip()}
+              disabled={!online || save.isPending}
+            />
           ) : step === "interests" ? (
             <>
               <Heading
@@ -229,6 +294,7 @@ export function FirstRunIntro({
                 choices={state.work_styles}
                 selected={workStyle ? [workStyle] : []}
                 onToggle={chooseWorkStyle}
+                disabled={save.isPending}
               />
               <Label muted style={styles.overline}>
                 WHAT SHOULD IT HELP WITH?
@@ -237,6 +303,7 @@ export function FirstRunIntro({
                 choices={topicsFor(state.topics, workStyle ?? "solo")}
                 selected={topics}
                 onToggle={toggle}
+                disabled={save.isPending}
                 multi
               />
             </>
@@ -288,41 +355,55 @@ export function FirstRunIntro({
               <NextStepList
                 steps={steps ?? state.recommendations}
                 onStart={start}
-                disabled={!online}
+                disabled={!online || save.isPending}
               />
             </>
           )}
+          {saveError || !online ? (
+            <Label accessibilityRole="alert" style={{ color: colors.danger }}>
+              {saveError ?? "You’re offline. Reconnect to save your intro."}
+            </Label>
+          ) : null}
+          {step === "welcome" ? null : (
+            <View style={[styles.footer, { borderColor: colors.borderSoft }]}>
+              {index < LAST ? (
+                <ActionButton
+                  label="Skip intro"
+                  variant="secondary"
+                  compact
+                  disabled={!online || save.isPending}
+                  onPress={() => void skip()}
+                />
+              ) : null}
+              <View style={styles.spacer} />
+              {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
+                <ActionButton
+                  label="Back"
+                  variant="secondary"
+                  compact
+                  disabled={save.isPending}
+                  onPress={() => goTo(index - 1)}
+                />
+              ) : null}
+              <ActionButton
+                label={
+                  index === LAST
+                    ? "Explore on my own"
+                    : step === "interests"
+                      ? topics.length || workStyle
+                        ? "Continue"
+                        : "Continue without picking"
+                      : "Next"
+                }
+                variant={index === LAST ? "secondary" : "primary"}
+                compact
+                disabled={!online || save.isPending}
+                loading={save.isPending}
+                onPress={index === LAST ? () => void skip() : next}
+              />
+            </View>
+          )}
         </ScrollView>
-        {step === "welcome" ? null : (
-        <View style={[styles.footer, { borderColor: colors.borderSoft }]}>
-          {index < LAST ? (
-            <ActionButton label="Skip intro" variant="secondary" compact onPress={skip} />
-          ) : null}
-          <View style={styles.spacer} />
-          {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
-            <ActionButton
-              label="Back"
-              variant="secondary"
-              compact
-              onPress={() => goTo(index - 1)}
-            />
-          ) : null}
-          <ActionButton
-            label={
-              index === LAST
-                ? "Explore on my own"
-                : step === "interests"
-                  ? topics.length || workStyle
-                    ? "Continue"
-                    : "Continue without picking"
-                  : "Next"
-            }
-            variant={index === LAST ? "secondary" : "primary"}
-            compact
-            onPress={index === LAST ? skip : next}
-          />
-        </View>
-        )}
       </SafeAreaView>
     </Modal>
   );
@@ -333,15 +414,20 @@ function Welcome({
   firstName,
   onStart,
   onSkip,
+  disabled,
 }: {
   firstName?: string;
   onStart: () => void;
   onSkip: () => void;
+  disabled: boolean;
 }) {
   const { colors } = useTheme();
   return (
     <View style={styles.welcome}>
-      <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
+      <AgentAvatar
+        agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
+        size="lg"
+      />
       <View style={styles.heading}>
         <Label accessibilityRole="header" style={[styles.title, styles.center]}>
           {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
@@ -359,7 +445,10 @@ function Welcome({
         ].map(([icon, text]) => (
           <View
             key={text}
-            style={[styles.pointCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+            style={[
+              styles.pointCard,
+              { backgroundColor: colors.card, borderColor: colors.border },
+            ]}
           >
             <Feather
               name={icon as keyof typeof Feather.glyphMap}
@@ -370,8 +459,18 @@ function Welcome({
           </View>
         ))}
       </View>
-      <ActionButton label="Let's get started" onPress={onStart} />
-      <ActionButton label="Skip for now" variant="secondary" compact onPress={onSkip} />
+      <ActionButton
+        label="Let's get started"
+        disabled={disabled}
+        onPress={onStart}
+      />
+      <ActionButton
+        label="Skip for now"
+        variant="secondary"
+        compact
+        disabled={disabled}
+        onPress={onSkip}
+      />
     </View>
   );
 }
@@ -419,22 +518,28 @@ function Chips({
   selected,
   onToggle,
   multi,
+  disabled,
 }: {
   choices: readonly OnboardingChoice[];
   selected: readonly string[];
   onToggle: (id: string) => void;
   multi?: boolean;
+  disabled?: boolean;
 }) {
   const { colors } = useTheme();
   return (
-    <View style={styles.chips} accessibilityRole={multi ? undefined : "radiogroup"}>
+    <View
+      style={styles.chips}
+      accessibilityRole={multi ? undefined : "radiogroup"}
+    >
       {choices.map((choice) => {
         const active = selected.includes(choice.id);
         return (
           <Pressable
             key={choice.id}
             accessibilityRole={multi ? "checkbox" : "radio"}
-            accessibilityState={{ checked: active }}
+            accessibilityState={{ checked: active, disabled: !!disabled }}
+            disabled={disabled}
             onPress={() => onToggle(choice.id)}
             style={({ pressed }) => [
               styles.chip,
@@ -448,7 +553,10 @@ function Chips({
             <View
               style={[
                 styles.chipIcon,
-                { backgroundColor: colors.cardSoft, borderColor: colors.border },
+                {
+                  backgroundColor: colors.cardSoft,
+                  borderColor: colors.border,
+                },
               ]}
             >
               <Feather
@@ -457,7 +565,7 @@ function Chips({
                 color={active ? colors.textPrimary : colors.textSecondary}
               />
             </View>
-            <Label style={styles.small}>
+            <Label style={[styles.small, { flexShrink: 1 }]}>
               {choice.label}
               {active ? "  ✓" : ""}
             </Label>
@@ -477,14 +585,28 @@ const styles = StyleSheet.create({
     paddingTop: 16,
   },
   dot: { height: 4, borderRadius: 2 },
-  dotTarget: { paddingVertical: 8 },
-  body: { padding: 20, gap: 16 },
+  dotTarget: {
+    minWidth: 44,
+    minHeight: 44,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  body: {
+    padding: 20,
+    gap: 16,
+    flexGrow: 1,
+    width: "100%",
+    maxWidth: 680,
+    alignSelf: "center",
+  },
   heading: { gap: 6 },
   title: { fontFamily: fonts.displaySemi, fontSize: 22, lineHeight: 28 },
   bodyText: { fontSize: 14, lineHeight: 20 },
   overline: { fontFamily: fonts.bodySemi, fontSize: 11, letterSpacing: 1.5 },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   chip: {
+    maxWidth: "100%",
+    minHeight: 44,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
@@ -507,13 +629,13 @@ const styles = StyleSheet.create({
   small: { fontSize: 13, lineHeight: 19 },
   footer: {
     flexDirection: "row",
+    flexWrap: "wrap",
     alignItems: "center",
     gap: 8,
-    paddingHorizontal: 20,
     paddingVertical: 12,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  spacer: { flex: 1 },
+  spacer: { flexGrow: 1 },
   welcome: { alignItems: "center", gap: 20, paddingVertical: 32 },
   center: { textAlign: "center" },
   points: { alignSelf: "stretch", gap: 8 },

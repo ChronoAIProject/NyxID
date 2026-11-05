@@ -42,11 +42,21 @@ const SMOOTH_FOLLOW_SCREENS = 1.25;
 export function useTranscriptScrollFollow(
   list: RefObject<ScrollableTranscript | null>,
   scopeKey: string | undefined,
-  { reducedMotion = false }: { reducedMotion?: boolean } = {},
+  {
+    reducedMotion = false,
+    loading = false,
+  }: { reducedMotion?: boolean; loading?: boolean } = {},
 ) {
   const follower = useRef(createTranscriptScrollFollower()).current;
   const [following, setFollowing] = useState(true);
   const [showJump, setShowJump] = useState(false);
+  const [revealed, setRevealed] = useState<number>();
+  const initial = useRef({ viewport: false, content: false, done: false });
+  const revealFrame = useRef<
+    ReturnType<typeof requestAnimationFrame> | undefined
+  >(undefined);
+  const currentLoading = useRef(loading);
+  currentLoading.current = loading;
   const currentScope = useRef({ key: scopeKey, generation: 0 });
   if (currentScope.current.key !== scopeKey) {
     currentScope.current = {
@@ -73,22 +83,63 @@ export function useTranscriptScrollFollow(
         (kind === "grow" &&
           distance > 2 &&
           distance <= follower.viewport() * SMOOTH_FOLLOW_SCREENS));
-    list.current?.scrollToOffset({ offset, animated });
+    list.current?.scrollToOffset({
+      offset,
+      animated: initial.current.done && animated,
+    });
+  };
+
+  const cancelReveal = () => {
+    if (revealFrame.current !== undefined)
+      cancelAnimationFrame(revealFrame.current);
+    revealFrame.current = undefined;
+  };
+  const settleOpening = () => {
+    if (
+      !available() ||
+      initial.current.done ||
+      currentLoading.current ||
+      !initial.current.viewport ||
+      !initial.current.content
+    )
+      return;
+    cancelReveal();
+    // A native scroll acknowledgement proves the virtualized tail is in place.
+    if (follower.distanceToEnd() > 2) return;
+    revealFrame.current = requestAnimationFrame(() => {
+      if (!available()) return;
+      scrollToFollowedEnd("layout");
+      revealFrame.current = requestAnimationFrame(() => {
+        revealFrame.current = undefined;
+        if (!available() || currentLoading.current) return;
+        initial.current.done = true;
+        setRevealed(generation);
+      });
+    });
   };
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      cancelReveal();
     };
   }, []);
   useLayoutEffect(() => {
+    cancelReveal();
+    initial.current = { viewport: false, content: false, done: false };
+    setRevealed(undefined);
     follower.reset();
     setFollowing(true);
     setShowJump(false);
   }, [follower, scopeKey]);
 
+  useEffect(() => {
+    if (!loading) settleOpening();
+  }, [loading, scopeKey]);
+
   return {
+    ready: revealed === generation,
     following,
     showJump,
     pause: () => {
@@ -105,19 +156,24 @@ export function useTranscriptScrollFollow(
     listProps: {
       onLayout: (event: { nativeEvent: { layout: { height: number } } }) => {
         if (!available()) return;
+        initial.current.viewport = event.nativeEvent.layout.height > 0;
         follower.layout(event.nativeEvent.layout.height);
         scrollToFollowedEnd("layout");
+        settleOpening();
         sync();
       },
       onContentSizeChange: (_width: number, height: number) => {
         if (!available()) return;
+        initial.current.content = true;
         follower.contentSize(height);
         scrollToFollowedEnd("grow");
+        settleOpening();
         sync();
       },
       onScroll: (event: ScrollEvent) => {
         if (available()) {
           follower.scroll(sample(event));
+          settleOpening();
           sync();
         }
       },

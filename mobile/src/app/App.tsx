@@ -1,4 +1,5 @@
 import "react-native-gesture-handler";
+import { useNotificationNavigation } from "./useNotificationNavigation";
 import {
   WorkspaceAccessibilityContext,
   workspaceAccessibilityState,
@@ -67,16 +68,12 @@ import {
 import { JetBrainsMono_400Regular } from "@expo-google-fonts/jetbrains-mono";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { AppNavigator, RootStackParamList } from "./AppNavigator";
-import {
-  appLinking,
-  extractChallengeIdFromNotificationResponse,
-} from "./linking";
+import { appLinking, notificationLinkConfig } from "./linking";
 import {
   isWorkspaceSidebarRoot,
   openWorkspaceSheetAction,
   workspaceDestinationMatches,
   workspaceContentIdentity,
-  challengeNavigationAction,
   workspaceNavigateAction,
 } from "./navigationHierarchy";
 import type {
@@ -173,29 +170,14 @@ export default function App() {
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,
   );
-  const pendingChallengeFromTapRef = useRef<string | null>(null);
   const navigationGuardsRef = useRef(new Set<symbol>());
   const criticalNavigationGuards = useRef(new Set<symbol>());
   const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
   const [pushToast, setPushToast] = useState<ToastState | null>(null);
 
-  const flushPendingChallengeTapNavigation = useCallback(() => {
-    if (!navigationRef.isReady()) return;
-
-    const pendingChallengeId = pendingChallengeFromTapRef.current;
-    if (!pendingChallengeId) return;
-
-    const action = challengeNavigationAction(
-      navigationRef.getRootState(),
-      pendingChallengeId,
-      navigationGuardsRef.current.size > 0,
-    );
-    if (!action) return;
-
-    pendingChallengeFromTapRef.current = null;
-    navigationRef.dispatch(action);
-  }, [navigationRef]);
+  const { open: openNotification, flush: flushPendingNotificationNavigation } =
+    useNotificationNavigation(navigationRef, navigationGuardsRef);
 
   const onNavigationGuardChange = useCallback<WorkspaceNavigationGuardChange>(
     (id, blocked, critical = false) => {
@@ -215,8 +197,8 @@ export default function App() {
   // Guard cleanup schedules a normal effect; it never dispatches during the
   // header's layout effect or re-enters an in-progress navigation transition.
   useEffect(() => {
-    flushPendingChallengeTapNavigation();
-  }, [navigationGuardRevision, flushPendingChallengeTapNavigation]);
+    flushPendingNotificationNavigation();
+  }, [navigationGuardRevision, flushPendingNotificationNavigation]);
 
   // Tapping the in-app toast resolves to exactly the same navigation as
   // tapping an OS notification, including the "Activity route not mounted
@@ -224,10 +206,11 @@ export default function App() {
   // and `onStateChange` flushes it.
   const openChallengeFromNotification = useCallback(
     (challengeId: string) => {
-      pendingChallengeFromTapRef.current = challengeId;
-      flushPendingChallengeTapNavigation();
+      openNotification(
+        `${notificationLinkConfig.scheme}://activity?${new URLSearchParams({ challengeId })}`,
+      );
     },
-    [flushPendingChallengeTapNavigation],
+    [openNotification],
   );
 
   const [fontsLoaded] = useFonts({
@@ -343,37 +326,6 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    const handleResponse = (
-      response: Notifications.NotificationResponse | null,
-    ) => {
-      const challengeId = extractChallengeIdFromNotificationResponse(response);
-      if (!challengeId) return;
-
-      pendingChallengeFromTapRef.current = challengeId;
-      flushPendingChallengeTapNavigation();
-    };
-
-    const responseSubscription =
-      Notifications.addNotificationResponseReceivedListener((response) => {
-        handleResponse(response);
-      });
-
-    void Notifications.getLastNotificationResponseAsync()
-      .then((response) => {
-        handleResponse(response);
-      })
-      .catch((error) => {
-        if (__DEV__) {
-          console.warn("[push] getLastNotificationResponseAsync failed", error);
-        }
-      });
-
-    return () => {
-      responseSubscription.remove();
-    };
-  }, [flushPendingChallengeTapNavigation]);
-
   // In-app replacement for the OS banner suppressed while the app is
   // foregrounded (see `configureNotificationHandler`). Without this, a push
   // arriving with the app open would be silent to the user. Reuses the same
@@ -393,10 +345,17 @@ export default function App() {
               label: "Review",
               onPress: () => openChallengeFromNotification(challengeId),
             }
-          : undefined,
+          : notification.url
+            ? {
+                label: "Open",
+                onPress: () => {
+                  openNotification(notification.url!);
+                },
+              }
+            : undefined,
       });
     });
-  }, [openChallengeFromNotification]);
+  }, [openChallengeFromNotification, openNotification]);
 
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal | null) => {
@@ -461,8 +420,8 @@ export default function App() {
                       navigationRef={navigationRef}
                       currentRouteName={currentRouteName}
                       setCurrentRouteName={setCurrentRouteName}
-                      flushPendingChallengeTapNavigation={
-                        flushPendingChallengeTapNavigation
+                      flushPendingNotificationNavigation={
+                        flushPendingNotificationNavigation
                       }
                       onNavigationGuardChange={onNavigationGuardChange}
                       navigationBlocked={
@@ -485,7 +444,7 @@ function ThemedAppShell({
   navigationRef,
   currentRouteName,
   setCurrentRouteName,
-  flushPendingChallengeTapNavigation,
+  flushPendingNotificationNavigation,
   onNavigationGuardChange,
   navigationBlocked = false,
   pushToast,
@@ -495,7 +454,7 @@ function ThemedAppShell({
   >;
   currentRouteName: string | undefined;
   setCurrentRouteName: (name: string | undefined) => void;
-  flushPendingChallengeTapNavigation: () => void;
+  flushPendingNotificationNavigation: () => void;
   onNavigationGuardChange: WorkspaceNavigationGuardChange;
   navigationBlocked?: boolean;
   pushToast: ToastState | null;
@@ -775,11 +734,11 @@ function ThemedAppShell({
         linking={appLinking}
         onReady={() => {
           trackCurrentRoute();
-          flushPendingChallengeTapNavigation();
+          flushPendingNotificationNavigation();
         }}
         onStateChange={() => {
           trackCurrentRoute();
-          flushPendingChallengeTapNavigation();
+          flushPendingNotificationNavigation();
         }}
       >
         <StatusBar style={mode === "dark" ? "light" : "dark"} />

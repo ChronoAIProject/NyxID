@@ -13,7 +13,7 @@ type Element = {
   };
 };
 
-function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
+function setup(initialKeyboard?: Frame, safeAreaTop = 0, platform = "android") {
   const keyboardListeners = new Map<
     string,
     (event: { endCoordinates: Frame }) => void
@@ -24,9 +24,11 @@ function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
   const harness = hookHarness<Element>({
     "react-native": {
       View: "View",
+      Platform: { OS: platform },
       StyleSheet: { create: (styles: unknown) => styles },
       Keyboard: {
         metrics: () => metrics,
+        scheduleLayoutAnimation: () => {},
         addListener: (
           name: string,
           callback: (event: { endCoordinates: Frame }) => void,
@@ -54,12 +56,10 @@ function setup(initialKeyboard?: Frame, safeAreaTop = 0) {
       }),
     },
   });
-  const { AndroidKeyboardAvoidingView } = harness.load(
-    fileURLToPath(
-      new URL("./AndroidKeyboardAvoidingView.tsx", import.meta.url),
-    ),
-  ) as { AndroidKeyboardAvoidingView: (props: object) => Element };
-  const element = harness.mount(() => AndroidKeyboardAvoidingView({}));
+  const { KeyboardViewport } = harness.load(
+    fileURLToPath(new URL("./KeyboardViewport.tsx", import.meta.url)),
+  ) as { KeyboardViewport: (props: object) => Element };
+  const element = harness.mount(() => KeyboardViewport({}));
   element.props.ref.current = {
     measureInWindow: (callback) => measurements.push(callback),
   };
@@ -162,4 +162,30 @@ test("unmount removes all listeners and ignores pending measurement callbacks", 
   assert.equal(env.bottom(), 0);
   assert.equal(env.keyboardListeners.size, 0);
   assert.equal(env.hasDimensionListener(), false);
+});
+
+test("iOS measures the actual page or sheet origin without a guessed header or status-bar offset", () => {
+  const env = setup(undefined, 59, "ios");
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 552, height: 300 },
+  });
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(
+    env.bottom(),
+    266,
+    "only the page covered by the keyboard is reserved",
+  );
+  env.layout();
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(
+    env.bottom(),
+    266,
+    "padding does not accumulate when the child remeasures",
+  );
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 852, height: 0 },
+  });
+  env.measurements.shift()!(0, 119, 393, 699);
+  assert.equal(env.bottom(), 0);
+  env.harness.unmount();
 });

@@ -5,13 +5,24 @@ import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 type E = { type: any; props: Record<string, any> };
 const nodes = (n: any): E[] =>
-  n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
+  n?.props
+    ? typeof n.type === "function" &&
+      [
+        "ChatComposerInput",
+        "ChatComposerToolbar",
+        "TranscriptViewport",
+      ].includes(n.type.name)
+      ? nodes(n.type(n.props))
+      : [n, ...[n.props.children].flat(Infinity).flatMap(nodes)]
+    : [];
 
 function setup({
   draftStore = createAssistantDraftStore(() => 1),
   missingResearch = false,
 } = {}) {
   let options: any;
+  let dictationOptions: any;
+  const dictation = { active: false, phase: "idle" };
   const members = [
     { id: "bot", name: "nyxbot", display_name: "NyxBot", kind: "nyxbot" },
     {
@@ -46,6 +57,7 @@ function setup({
     },
   };
   const h = hookHarness<E>({
+    "./CrewVoiceComposer": { CrewVoiceComposer: "CrewVoice" },
     "./CollaborationGroupControls": {
       CollaborationCards: "CollaborationCards",
       GroupAgentAccessRequest: "GroupAgentAccessRequest",
@@ -74,6 +86,10 @@ function setup({
         ].map((n) => [n, n]),
       ),
       StyleSheet: { create: (v: unknown) => v },
+      LayoutAnimation: {
+        configureNext: () => {},
+        Presets: { easeInEaseOut: {} },
+      },
     },
     "lucide-react-native": {
       Check: "Check",
@@ -158,7 +174,12 @@ function setup({
       }),
     },
     "../assistant/useComposerDictation": {
-      useComposerDictation: () => ({ active: false }),
+      useComposerDictation: (options: any) => {
+        dictationOptions = options;
+        return dictation;
+      },
+      appendDictation: (draft: string, text: string) =>
+        `${draft}${draft ? " " : ""}${text}`,
     },
     "../assistant/ComposerDictation": {
       ComposerDictationButton: "Dictation",
@@ -172,6 +193,29 @@ function setup({
       groupKeys: () => [],
       useGroupChat: () => chat,
     },
+  });
+  h.mock("./AssistantMentionInput", { AssistantMentionInput: "Input" });
+  h.mock("./ComposerDictation", {
+    ComposerDictationButton: "Dictation",
+    ComposerDictationReview: "DictationReview",
+  });
+  h.mock("./ChatComposer", {
+    ChatComposerRow: "ChatComposerRow",
+    ComposerAttachButton: "ComposerAttachButton",
+  });
+  h.mock(
+    "../assistant/ChatComposerInput",
+    h.load(
+      fileURLToPath(
+        new URL("../assistant/ChatComposerInput.tsx", import.meta.url),
+      ),
+    ),
+  );
+  h.mock("../assistant/TranscriptViewport", {
+    TranscriptViewport: (p: any) => ({
+      type: "View",
+      props: { ...p, style: { flex: 1, minHeight: 0 } },
+    }),
   });
   const Screen = h.load(
     fileURLToPath(new URL("./GroupChatScreen.tsx", import.meta.url)),
@@ -191,7 +235,16 @@ function setup({
     nodes(input().props.renderActions()).find(
       (n) => n.type === "ComposerSubmitButton",
     )!;
-  return { h, chat, posted, identity, input, submit };
+  return {
+    h,
+    chat,
+    posted,
+    identity,
+    input,
+    submit,
+    dictation,
+    dictationOptions: () => dictationOptions,
+  };
 }
 
 test("crew header shows member identity and narrows recipients through its picker without losing draft", () => {
@@ -529,4 +582,145 @@ test("a crew's first load shows a transcript skeleton", () => {
     "Loading crew",
   );
   h.unmount();
+});
+
+test("crew shares dictation, review, attachments and settings with private chat while retaining routed recipients", async () => {
+  const f = setup();
+  f.input().props.onChangeText("Draft");
+  f.h.flush();
+  const actions = nodes(
+    f.input().props.renderActions({ type: "Mentions", props: {} }),
+  );
+  for (const type of [
+    "ComposerAttachButton",
+    "Mentions",
+    "Dictation",
+    "ComposerSubmitButton",
+  ])
+    assert.ok(
+      actions.some((n) => n.type === type),
+      type,
+    );
+  assert.ok(actions.some((n) => n.props.label === "Crew composer settings"));
+  f.dictation.active = true;
+  f.h.render();
+  assert.equal(f.submit().props.disabled, true);
+  assert.ok(
+    nodes(f.h.value()).some(
+      (n) => n.type === "DictationReview" && n.props.dictation.active,
+    ),
+  );
+  f.dictation.active = false;
+  f.dictationOptions().onInsert("spoken words");
+  f.h.flush();
+  assert.equal(f.input().props.value, "Draft spoken words");
+  f.submit().props.onPress();
+  await f.h.settle();
+  assert.equal(f.posted[0].text, "Draft spoken words");
+  assert.deepEqual(Array.from(f.posted[0].recipient_agent_ids), ["bot"]);
+  f.h.unmount();
+});
+
+test("empty collaboration decisions reserve no transcript space and real decisions never grow into free space", () => {
+  const f = setup();
+  f.chat.data.group.collaboration = collaboration;
+  f.h.render();
+  assert.equal(
+    nodes(f.h.value()).some(
+      (n) => n.props.accessibilityLabel === "Collaboration decisions",
+    ),
+    false,
+  );
+  f.chat.data.collaboration_decisions = [{ id: "decision" }];
+  f.h.render();
+  const decisions = nodes(f.h.value()).find(
+    (n) => n.props.accessibilityLabel === "Collaboration decisions",
+  )!;
+  assert.equal(decisions.props.style.flexGrow, 0);
+  assert.equal(decisions.props.style.maxHeight, 180);
+  f.h.unmount();
+});
+
+test("crew voice starts from the composer, routes spoken turns through selected recipients, and keeps running when minimized", async () => {
+  const f = setup();
+  assert.equal(f.submit().props.kind, "voice");
+  assert.equal(f.submit().props.label, "Start crew voice");
+  f.submit().props.onPress();
+  f.h.flush();
+  let panel = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.ok(panel);
+  assert.equal(f.dictationOptions().enabled, false);
+  assert.equal(await panel.props.onSend("@researcher review the launch"), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.posted[0])), {
+    text: "@researcher review the launch",
+    recipient_agent_ids: ["research"],
+  });
+  nodes(f.h.value())
+    .find((n) => n.props.onTouchStart)!
+    .props.onTouchStart();
+  f.h.flush();
+  panel = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(panel.props.minimized, true);
+  panel.props.onExpand();
+  f.h.flush();
+  assert.equal(
+    nodes(f.h.value()).find((n) => n.type === "CrewVoice")!.props.minimized,
+    false,
+  );
+  f.chat.recoveryRequired = true;
+  f.h.render();
+  panel = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(panel.props.enabled, false);
+  assert.equal(await panel.props.onSend("do not send again"), false);
+  assert.equal(f.posted.length, 1);
+  panel.props.onClose();
+  f.h.flush();
+  assert.equal(f.submit().props.kind, "voice");
+  f.h.unmount();
+});
+
+test("a refused spoken mention retains its exact recipient binding when the roster changes", async () => {
+  const f = setup();
+  f.chat.post = async () => false;
+  f.submit().props.onPress();
+  f.h.flush();
+  const voice = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  assert.equal(
+    await voice.props.onSend("@researcher review the launch"),
+    false,
+  );
+  f.h.flush();
+  nodes(f.h.value())
+    .find((n) => n.type === "CrewVoice")!
+    .props.onClose();
+  f.h.flush();
+  assert.equal(f.input().props.value, "@researcher review the launch");
+  f.chat.data.group.members = [
+    { id: "replacement", name: "researcher", kind: "specialist" },
+  ];
+  f.h.render();
+  assert.equal(f.submit().props.disabled, true);
+  assert.ok(
+    nodes(f.h.value()).some((n) =>
+      n.props.accessibilityLabel?.startsWith("Remove unavailable recipient"),
+    ),
+  );
+  f.h.unmount();
+});
+
+test("typing into crew voice pauses capture until the draft is empty, including whitespace", () => {
+  const f = setup();
+  f.submit().props.onPress();
+  f.h.flush();
+  const panel = () => nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
+  panel().props.onChangeText(" ");
+  f.h.flush();
+  assert.equal(panel().props.enabled, false);
+  panel().props.onChangeText("typed draft");
+  f.h.flush();
+  assert.equal(panel().props.enabled, false);
+  panel().props.onChangeText("");
+  f.h.flush();
+  assert.equal(panel().props.enabled, true);
+  f.h.unmount();
 });

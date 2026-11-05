@@ -254,6 +254,7 @@ function setup(
       ),
       Platform: { OS: platform },
       Alert: { alert: () => {} },
+      LayoutAnimation: { configureNext() {}, Presets: { easeInEaseOut: {} } },
       Keyboard: { dismiss: () => events.push(["dismissKeyboard"]) },
       StyleSheet: { create: (value: unknown) => value },
     },
@@ -463,6 +464,18 @@ function setup(
       fileURLToPath(new URL("./ChatIdentityHeader.tsx", import.meta.url)),
     ),
   );
+  harness.mock(
+    "./ChatComposerInput",
+    harness.load(
+      fileURLToPath(new URL("./ChatComposerInput.tsx", import.meta.url)),
+    ),
+  );
+  harness.mock("./TranscriptViewport", {
+    TranscriptViewport: ({ children, onTouchStart, viewportRef }: any) => ({
+      type: "View",
+      props: { style: { flex: 1 }, onTouchStart, ref: viewportRef, children },
+    }),
+  });
   const Screen = harness.load(
     fileURLToPath(new URL("./AssistantScreen.tsx", import.meta.url)),
   ).AssistantScreen as (input: typeof props) => Element;
@@ -655,14 +668,18 @@ test("voice slides up in the composer's place and closing it keeps the transcrip
     x.button("Open voice call")!.props.onPress();
     if (!initialId) x.draft.resolve(A);
     await x.harness.settle();
-    const children = x.harness.value().props.children as Element[];
     assert.ok(
-      children.some((child) => child?.key === "transcript-column"),
+      x.all().some((child) => child.type === "FlatList"),
       "the chat stays on screen above the call",
     );
     assert.ok(x.voice(), "voice is mounted");
     assert.equal(
-      x.all().some((element) => element.props?.accessibilityLabel === "Message to assistant"),
+      x
+        .all()
+        .some(
+          (element) =>
+            element.props?.accessibilityLabel === "Message to assistant",
+        ),
       false,
       "the voice composer takes the message composer's place",
     );
@@ -672,7 +689,12 @@ test("voice slides up in the composer's place and closing it keeps the transcrip
     x.harness.flush();
     assert.equal(x.voice(), undefined);
     assert.ok(
-      x.all().some((element) => element.props?.accessibilityLabel === "Message to assistant"),
+      x
+        .all()
+        .some(
+          (element) =>
+            element.props?.accessibilityLabel === "Message to assistant",
+        ),
       "the message composer returns",
     );
     assert.equal(
@@ -891,29 +913,32 @@ test("unmount aborts pending draft creation and late success cannot navigate", a
   );
 });
 
-test("voice review returns to its exact saved chat and closing restores the entry button", async () => {
+test("transcript interaction minimizes voice in place, tapping expands it and closing restores the entry", async () => {
   const x = setup(A);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   assert.equal(x.button("Open voice call"), undefined);
   x.voice()!.props.onUpdate();
-  x.voice()!.props.onReview("ack-123");
-  assert.deepEqual(
-    x.events.find(([name]) => name === "open"),
-    ["open", A, "ack-123"],
-  );
-  assert.deepEqual(
-    x.events.find(([name]) => name === "params"),
-    [
-      "params",
-      { conversationId: A, acknowledgementId: "ack-123", openLatest: false },
-    ],
-  );
   assert.equal(x.events.filter(([name]) => name === "recover").length, 1);
+  const voiceKey = x.voice()!.key;
+  const viewport = x
+    .all()
+    .find((n) => typeof n.props.onTouchStart === "function")!;
+  viewport.props.onTouchStart();
+  x.harness.flush();
+  assert.equal(x.voice()!.props.minimized, true);
+  assert.equal(x.voice()!.key, voiceKey);
+  x.voice()!.props.onExpand();
+  x.harness.flush();
+  assert.equal(x.voice()!.props.minimized, false);
+  x.voice()!.props.onChangeText("A typed note");
+  x.harness.flush();
+  assert.equal(x.voice()!.props.draft, "A typed note");
+  assert.equal(x.voice()!.props.canSendText, true);
   x.voice()!.props.onClose();
   x.harness.flush();
   assert.equal(x.voice(), undefined);
-  assert.ok(x.button("Open voice call"));
+  assert.equal(x.input().props.value, "A typed note");
   x.harness.unmount();
 });
 
@@ -1857,4 +1882,3 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
     x.harness.unmount();
   }
 });
-

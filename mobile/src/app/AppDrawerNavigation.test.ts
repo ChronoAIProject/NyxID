@@ -240,7 +240,7 @@ function setup(deferFade = false) {
           navigationRef,
           currentRouteName: "Assistant",
           setCurrentRouteName: () => {},
-          flushPendingChallengeTapNavigation: () => {},
+          flushPendingNotificationNavigation: () => {},
           onNavigationGuardChange: () => {},
           pushToast: null,
         });

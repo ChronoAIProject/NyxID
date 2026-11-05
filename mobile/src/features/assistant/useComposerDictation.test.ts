@@ -51,7 +51,10 @@ function recognizer(events: string[]) {
   return module;
 }
 
-function setup({ chosen }: { chosen?: string } = {}) {
+function setup({
+  chosen,
+  continuous = true,
+}: { chosen?: string; continuous?: boolean } = {}) {
   let state = "active",
     focused = true,
     sheetOpen = false,
@@ -64,6 +67,7 @@ function setup({ chosen }: { chosen?: string } = {}) {
   const locales: [string | undefined, readonly string[]][] = [];
   const props = {
     scope: "agent:chat:0",
+    continuous,
     enabled: true,
     onInsert: (text: string) => {
       inserted.push(text);
@@ -317,7 +321,9 @@ test("permission denial links to Settings and never starts recognition", async (
     await x.h.settle();
     assert.match(
       x.h.value().error!,
-      restricted ? /restricted.*Screen Time/ : /microphone and speech recognition.*Settings/,
+      restricted
+        ? /restricted.*Screen Time/
+        : /microphone and speech recognition.*Settings/,
     );
     assert.equal(x.h.value().permissionDenied, true);
     assert.equal(x.h.value().active, false);
@@ -382,7 +388,11 @@ test("a new attempt waits for an aborted session's end before listening", async 
   await pending;
   await x.h.settle();
   assert.equal(x.events.at(-1), "start");
-  assert.equal(x.h.value().phase, "connecting", "the stale end did not settle it");
+  assert.equal(
+    x.h.value().phase,
+    "connecting",
+    "the stale end did not settle it",
+  );
   x.emit("start", null);
   assert.equal(x.h.value().phase, "listening");
   x.h.unmount();
@@ -435,7 +445,11 @@ test("recognizer errors explain themselves; text heard before a failure still jo
   late.emit("end", null);
   assert.equal(late.h.value().phase, "idle");
   assert.deepEqual(late.inserted, ["Heard"]);
-  assert.equal(late.h.value().error, undefined, "no-speech after words is not an error");
+  assert.equal(
+    late.h.value().error,
+    undefined,
+    "no-speech after words is not an error",
+  );
   late.h.unmount();
 });
 
@@ -449,4 +463,36 @@ test("a chosen dictation language the recognizer supports wins over the phone's"
   await unsupported.begin();
   assert.equal(unsupported.native.options?.lang, "en-GB");
   unsupported.h.unmount();
+});
+
+test("crew speech uses native utterance boundaries and delivers the final words once", async () => {
+  const x = setup({ continuous: false });
+  await x.begin();
+  assert.equal(x.native.options?.continuous, false);
+  x.native.emit("result", {
+    isFinal: true,
+    results: [{ transcript: "Review the launch" }],
+  });
+  x.native.emit("end");
+  x.h.flush();
+  x.native.emit("end");
+  assert.deepEqual(x.inserted, ["Review the launch"]);
+  x.h.unmount();
+});
+
+test("crew speech never dispatches an interrupted or still-interim utterance", async () => {
+  for (const failed of [false, true]) {
+    const x = setup({ continuous: false });
+    await x.begin();
+    x.native.emit("result", {
+      isFinal: failed,
+      results: [{ transcript: "unfinished words" }],
+    });
+    if (failed) x.native.emit("error", { error: "interrupted" });
+    x.native.emit("end");
+    x.h.flush();
+    assert.deepEqual(x.inserted, []);
+    assert.ok(x.h.value().error);
+    x.h.unmount();
+  }
 });

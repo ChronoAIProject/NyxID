@@ -24,7 +24,7 @@ export function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-export function hookHarness<T>(mocks: Record<string, unknown>) {
+export function hookHarness<T>(mocks: Record<string, unknown>, globals: Record<string, unknown> = {}) {
   const slots: unknown[] = [];
   const effects = new Map<number, Effect>();
   let pendingEffects: number[] = [];
@@ -110,6 +110,7 @@ export function hookHarness<T>(mocks: Record<string, unknown>) {
     return value;
   }
   return {
+    mock: (name: string, value: unknown) => { mocks[name] = value; },
     load: (filename: string) => {
       const require = createRequire(filename);
       const output = ts.transpileModule(readFileSync(filename, "utf8"), {
@@ -142,6 +143,7 @@ export function hookHarness<T>(mocks: Record<string, unknown>) {
           // Polling is not advanced by these lifecycle/terminal-refresh tests.
           setInterval: () => 1,
           clearInterval: () => {},
+          ...globals,
         },
         { filename },
       );

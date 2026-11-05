@@ -1,5 +1,5 @@
 import { Feather } from "@expo/vector-icons";
-import { Pressable, StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
@@ -16,18 +16,23 @@ export function NextStepList({
   disabled?: boolean;
 }) {
   const { colors } = useTheme();
+  const { fontScale } = useWindowDimensions();
   return (
     <View style={styles.list}>
       {steps.map((step) => (
         <View
-          key={step.id}
-          style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
+          key={`${step.id}:${fontScale}`}
+          style={[
+            styles.card,
+            { backgroundColor: colors.card, borderColor: colors.border },
+          ]}
         >
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={step.title}
             accessibilityHint={step.description}
             disabled={disabled}
+            accessibilityState={{ disabled: !!disabled }}
             onPress={() => onStart(step)}
             style={({ pressed }) => [
               styles.main,
@@ -37,7 +42,10 @@ export function NextStepList({
             <View
               style={[
                 styles.icon,
-                { backgroundColor: colors.cardSoft, borderColor: colors.border },
+                {
+                  backgroundColor: colors.cardSoft,
+                  borderColor: colors.border,
+                },
               ]}
             >
               <Feather
@@ -85,7 +93,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  text: { flex: 1, gap: 2 },
+  text: { flex: 1, minWidth: 0, gap: 2 },
   title: { fontFamily: fonts.bodySemi, fontSize: 14, lineHeight: 19 },
   description: { fontSize: 12, lineHeight: 17 },
   arrow: { fontSize: 14, lineHeight: 19 },

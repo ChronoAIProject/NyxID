@@ -1,3 +1,5 @@
+import { TranscriptViewport } from "./TranscriptViewport";
+import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import {
   AssistantApprovalCard,
@@ -40,6 +42,7 @@ import {
   FlatList,
   findNodeHandle,
   Keyboard,
+  LayoutAnimation,
   Modal,
   Platform,
   Pressable,
@@ -75,7 +78,10 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
-import { chatBubbleColors, userBubbleCorners } from "../../theme/chatAppearance";
+import {
+  chatBubbleColors,
+  userBubbleCorners,
+} from "../../theme/chatAppearance";
 import { fonts, radius } from "../../theme/designTokens";
 import { useAssistant } from "./useAssistant";
 import { NyxBotHome } from "./NyxBotHome";
@@ -102,19 +108,10 @@ import { isReported } from "../../lib/api/replyReportTransport";
 import { AssistantMessageFooter } from "./AssistantMessageFooter";
 import { AssistantAttachmentView } from "./AssistantAttachmentView";
 import { AssistantPendingUploads } from "./AssistantPendingUploads";
-import {
-  ChatComposerFrame,
-  ChatComposerRow,
-  ComposerAttachButton,
-  ComposerSubmitButton,
-} from "./ChatComposer";
+import { ChatComposerFrame, ComposerSubmitButton } from "./ChatComposer";
 import { AssistantMentionInput } from "./AssistantMentionInput";
 import { useAssistantUploads } from "./useAssistantUploads";
 import { appendDictation, useComposerDictation } from "./useComposerDictation";
-import {
-  ComposerDictationButton,
-  ComposerDictationReview,
-} from "./ComposerDictation";
 import { AssistantCmaOperation } from "./AssistantCmaOperation";
 import { AssistantAcknowledgementCard } from "./AssistantAcknowledgementCard";
 import { AssistantTurnStatus } from "./AssistantTurnStatus";
@@ -197,6 +194,13 @@ export function AssistantScreen({
   const [sheet, setSheet] = useState<"agents" | "permissions">();
   const [localError, setLocalError] = useState<string>();
   const [voiceThread, setVoiceThread] = useState<string>();
+  const [voiceMinimized, setVoiceMinimized] = useState(false);
+  function changeVoiceSize(minimized: boolean) {
+    if (minimized === voiceMinimized) return;
+    if (!reducedMotion)
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setVoiceMinimized(minimized);
+  }
   const [openingVoice, setOpeningVoice] = useState(false);
   const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
@@ -211,7 +215,7 @@ export function AssistantScreen({
   const transcriptScroll = useTranscriptScrollFollow(
     transcript,
     assistant.conversationId,
-    { reducedMotion },
+    { reducedMotion, loading: assistant.loading },
   );
   const conversation = assistant.history?.conversation;
   const currentAgent = assistant.agent ?? conversation?.agent;
@@ -463,6 +467,7 @@ export function AssistantScreen({
           openLatest: false,
         });
       }
+      setVoiceMinimized(false);
       setVoiceThread(id);
     } catch (cause) {
       if (current())
@@ -777,7 +782,13 @@ export function AssistantScreen({
     const body = (
       <>
         {attribution ? (
-          <Label muted style={[styles.messageLabel, isUser && { color: bubble.foreground }]}>
+          <Label
+            muted
+            style={[
+              styles.messageLabel,
+              isUser && { color: bubble.foreground },
+            ]}
+          >
             {attribution}
           </Label>
         ) : null}
@@ -918,7 +929,9 @@ export function AssistantScreen({
             {item.status === "failed" && item.error_code !== "cancelled" ? (
               <QuietButton
                 label="Check retry availability"
-                disabled={running || !assistant.online || assistant.loadingOlder}
+                disabled={
+                  running || !assistant.online || assistant.loadingOlder
+                }
                 onPress={() =>
                   void perform(() => assistant.checkRecovery(item.id))
                 }
@@ -931,40 +944,40 @@ export function AssistantScreen({
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
     const footer = (
-        <AssistantMessageFooter
-          key={`${assistant.conversationId}:${item.id}`}
-          text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
-          timestamp={item.created_at}
-          user={isUser}
-          report={
-            item.role === "assistant" &&
-            item.status === "completed" &&
-            assistant.conversationId
-              ? {
-                  kind: "conversation",
-                  id: assistant.conversationId,
-                  messageId: item.id,
-                  reported: isReported(item.feedback),
-                }
-              : undefined
-          }
-        />
+      <AssistantMessageFooter
+        key={`${assistant.conversationId}:${item.id}`}
+        text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
+        timestamp={item.created_at}
+        user={isUser}
+        report={
+          item.role === "assistant" &&
+          item.status === "completed" &&
+          assistant.conversationId
+            ? {
+                kind: "conversation",
+                id: assistant.conversationId,
+                messageId: item.id,
+                reported: isReported(item.feedback),
+              }
+            : undefined
+        }
+      />
     );
     if (isUser)
       return (
         <View style={styles.userTurn}>
           {notes}
           <View style={styles.userRow}>
-          <View
-            style={[
-              styles.message,
-              styles.userMessage,
-              { backgroundColor: bubble.background },
-            ]}
-          >
-            {body}
-          </View>
-          {footer}
+            <View
+              style={[
+                styles.message,
+                styles.userMessage,
+                { backgroundColor: bubble.background },
+              ]}
+            >
+              {body}
+            </View>
+            {footer}
           </View>
         </View>
       );
@@ -1067,11 +1080,13 @@ export function AssistantScreen({
           <Notice message={`Opening ${agentName}'s latest chat…`} />
         </View>
       ) : null}
-      <View
+      <TranscriptViewport
         key="transcript-column"
-        ref={transcriptViewport}
-        collapsable={false}
-        style={styles.fill}
+        ready={homeVisible || transcriptScroll.ready}
+        onTouchStart={() => {
+          if (voiceThread) changeVoiceSize(true);
+        }}
+        viewportRef={transcriptViewport}
       >
         {homeVisible ? (
           <NyxBotHome
@@ -1111,7 +1126,9 @@ export function AssistantScreen({
             }}
             onStartNextStep={(step) => {
               if (newChatDisabled || running || uploads.session.sending) {
-                setLocalError("NyxBot is busy. Start this step once it finishes.");
+                setLocalError(
+                  "NyxBot is busy. Start this step once it finishes.",
+                );
                 return;
               }
               void perform(() => assistant.send(step.prompt));
@@ -1240,7 +1257,12 @@ export function AssistantScreen({
                       },
                     ]}
                   >
-                    <Label style={[styles.messageLabel, { color: bubble.foreground }]}>
+                    <Label
+                      style={[
+                        styles.messageLabel,
+                        { color: bubble.foreground },
+                      ]}
+                    >
                       Sending…
                     </Label>
                     {assistant.inputText ? (
@@ -1408,7 +1430,7 @@ export function AssistantScreen({
           onPress={transcriptScroll.follow}
         />
         <ScrollEdgeFades edges={transcriptEdges.edges} color={colors.bg} />
-      </View>
+      </TranscriptViewport>
       <View style={styles.composerInset}>
         {/* Voice mode slides up in place of the composer; the chat above stays
             on screen, so its cards and links work during the call. */}
@@ -1418,75 +1440,70 @@ export function AssistantScreen({
               key={`voice:${voiceThread}`}
               thread={voiceThread}
               agentName={agentName}
+              minimized={voiceMinimized}
+              onExpand={() => changeVoiceSize(false)}
+              draft={draft}
+              onChangeText={updateDraft}
+              onSendText={() => void sendDraft()}
+              canSendText={canSend || canGuideSend}
               onClose={() => setVoiceThread(undefined)}
               onUpdate={() => void assistant.recover()}
-              onReview={(acknowledgementId) => {
-                assistant.openConversation(voiceThread, acknowledgementId);
-                navigation.setParams({
-                  conversationId: voiceThread,
-                  acknowledgementId,
-                  openLatest: false,
-                });
-              }}
             />
           </View>
         ) : (
-        <ChatComposerFrame style={[styles.composer, chatColumn]}>
-          {guidance.canSteer ? (
-            <Label muted style={styles.composerHint}>
-              Still replying. What you send now steers this reply; Stop ends it.
-            </Label>
-          ) : null}
-          {guidance.notice ? (
-            <View style={{ gap: 4, paddingHorizontal: 8 }}>
-              <Label
-                muted
-                accessibilityLiveRegion="polite"
-                style={{ fontSize: 12 }}
-              >
-                {steeringNotice(guidance.notice.code, guidance.notice.outcome)}
+          <ChatComposerFrame style={[styles.composer, chatColumn]}>
+            {guidance.canSteer ? (
+              <Label muted style={styles.composerHint}>
+                Still replying. What you send now steers this reply; Stop ends
+                it.
               </Label>
-              {guidance.notice.code === "no_active_turn" &&
-              guidance.notice.text ? (
-                <ActionButton
-                  label="Send as new message"
-                  compact
-                  variant="secondary"
-                  disabled={running || guidance.submitting || !canCompose}
-                  onPress={() =>
-                    void guidance.sendAsMessage((text) => assistant.send(text))
-                  }
-                />
-              ) : null}
-            </View>
-          ) : null}
-          <ComposerConnectionPicker state={connection} />
-          <AssistantPendingUploads
-            files={uploads.files}
-            remove={uploads.remove}
-            disabled={running || uploads.session.sending}
-            showMentionHandles={false}
-          />
-          {uploads.error || uploads.notice ? (
-            <Label
-              style={{
-                color: uploads.error ? colors.danger : colors.textSecondary,
-              }}
-            >
-              {uploads.error ?? uploads.notice}
-            </Label>
-          ) : null}
-          <ComposerDictationReview dictation={dictation} draft={draft} />
-          {/* Collapsed rather than unmounted: a held microphone press must still
-              receive its release while dictation takes the field's place. */}
-          <View
-            style={dictation.active ? styles.dictationHidden : undefined}
-            accessibilityElementsHidden={dictation.active}
-            importantForAccessibility={
-              dictation.active ? "no-hide-descendants" : "auto"
-            }
-          >
-            <AssistantMentionInput
+            ) : null}
+            {guidance.notice ? (
+              <View style={{ gap: 4, paddingHorizontal: 8 }}>
+                <Label
+                  muted
+                  accessibilityLiveRegion="polite"
+                  style={{ fontSize: 12 }}
+                >
+                  {steeringNotice(
+                    guidance.notice.code,
+                    guidance.notice.outcome,
+                  )}
+                </Label>
+                {guidance.notice.code === "no_active_turn" &&
+                guidance.notice.text ? (
+                  <ActionButton
+                    label="Send as new message"
+                    compact
+                    variant="secondary"
+                    disabled={running || guidance.submitting || !canCompose}
+                    onPress={() =>
+                      void guidance.sendAsMessage((text) =>
+                        assistant.send(text),
+                      )
+                    }
+                  />
+                ) : null}
+              </View>
+            ) : null}
+            <ComposerConnectionPicker state={connection} />
+            <AssistantPendingUploads
+              files={uploads.files}
+              remove={uploads.remove}
+              disabled={running || uploads.session.sending}
+              showMentionHandles={false}
+            />
+            {uploads.error || uploads.notice ? (
+              <Label
+                style={{
+                  color: uploads.error ? colors.danger : colors.textSecondary,
+                }}
+              >
+                {uploads.error ?? uploads.notice}
+              </Label>
+            ) : null}
+            <ChatComposerInput
+              dictation={dictation}
               value={draft}
               onChangeText={updateDraft}
               generation={`${draftKey}:${composerGeneration}`}
@@ -1503,54 +1520,55 @@ export function AssistantScreen({
                   : `Message ${agentName}`
               }
               renderActions={(mentionAction) => (
-                <ChatComposerRow>
-                  <ComposerAttachButton
-                    label="Attach photos or files, or take a photo"
-                    busy={uploads.picking}
-                    disabled={
+                <ChatComposerToolbar
+                  dictation={dictation}
+                  dictationDisabled={
+                    !canCompose ||
+                    uploads.picking ||
+                    uploads.session.sending ||
+                    openingVoice ||
+                    !!voiceThread
+                  }
+                  attach={{
+                    label: "Attach photos or files, or take a photo",
+                    busy: uploads.picking,
+                    disabled:
                       !canCompose ||
                       dictation.active ||
                       uploads.picking ||
                       uploads.session.sending ||
-                      uploads.files.length >= 10
-                    }
-                    onPress={() =>
+                      uploads.files.length >= 10,
+                    onPress: () =>
                       uploads.choose([
-                        { label: "Use a connection", onPress: connection.choose },
-                      ])
-                    }
-                  />
-                  {mentionAction}
-                  <AssistantComposerSettings
-                    scope={`${getAuthEpoch()}:${draftKey}`}
-                    agentOverride={assistant.agent?.access_mode_override}
-                    activeTurn={permissionsLocked}
-                    disabled={
-                      !assistant.online ||
-                      !assistant.agent ||
-                      !!destroyed ||
-                      assistant.loading ||
-                      assistant.recoveryRequired ||
-                      uploads.picking ||
-                      openingVoice ||
-                      !!voiceThread
-                    }
-                    visible={sheet === "permissions"}
-                    onOpenChange={(open) =>
-                      setSheet(open ? "permissions" : undefined)
-                    }
-                  />
-                  <View style={{ flex: 1 }} />
-                  <ComposerDictationButton
-                    dictation={dictation}
-                    disabled={
-                      !canCompose ||
-                      uploads.picking ||
-                      uploads.session.sending ||
-                      openingVoice ||
-                      !!voiceThread
-                    }
-                  />
+                        {
+                          label: "Use a connection",
+                          onPress: connection.choose,
+                        },
+                      ]),
+                  }}
+                  mention={mentionAction}
+                  settings={
+                    <AssistantComposerSettings
+                      scope={`${getAuthEpoch()}:${draftKey}`}
+                      agentOverride={assistant.agent?.access_mode_override}
+                      activeTurn={permissionsLocked}
+                      disabled={
+                        !assistant.online ||
+                        !assistant.agent ||
+                        !!destroyed ||
+                        assistant.loading ||
+                        assistant.recoveryRequired ||
+                        uploads.picking ||
+                        openingVoice ||
+                        !!voiceThread
+                      }
+                      visible={sheet === "permissions"}
+                      onOpenChange={(open) =>
+                        setSheet(open ? "permissions" : undefined)
+                      }
+                    />
+                  }
+                >
                   {guidance.canSteer && draft.trim() ? (
                     <ActionButton
                       label="Steer"
@@ -1571,11 +1589,13 @@ export function AssistantScreen({
                         conversation?.active_turn?.stop_requested
                       }
                       onPress={() => {
-                        if (composerPress.current("stop")) void assistant.stop();
+                        if (composerPress.current("stop"))
+                          void assistant.stop();
                       }}
                     />
                   ) : voiceAvailable &&
-                    (!voiceThread || voiceThread !== assistant.conversationId) ? (
+                    (!voiceThread ||
+                      voiceThread !== assistant.conversationId) ? (
                     <ComposerSubmitButton
                       kind="voice"
                       label="Open voice call"
@@ -1591,26 +1611,25 @@ export function AssistantScreen({
                       onPress={() => void sendDraft()}
                     />
                   )}
-                </ChatComposerRow>
+                </ChatComposerToolbar>
               )}
             />
-          </View>
-          {assistant.recoveryRequired || uploads.blocked ? (
-            <Label muted style={styles.composerHint}>
-              {assistant.recoveryRequired
-                ? "Open the saved chat before continuing."
-                : "Wait for uploads or remove failed files."}
-            </Label>
-          ) : null}
-          {[...draft].length >
-          (guidance.canSteer ? guidance.maxChars : 32768) ? (
-            <Label style={{ color: colors.danger }}>
-              {guidance.canSteer
-                ? `Guidance must be text only and at most ${guidance.maxChars.toLocaleString()} characters.`
-                : "Keep the message under 32,768 characters."}
-            </Label>
-          ) : null}
-        </ChatComposerFrame>
+            {assistant.recoveryRequired || uploads.blocked ? (
+              <Label muted style={styles.composerHint}>
+                {assistant.recoveryRequired
+                  ? "Open the saved chat before continuing."
+                  : "Wait for uploads or remove failed files."}
+              </Label>
+            ) : null}
+            {[...draft].length >
+            (guidance.canSteer ? guidance.maxChars : 32768) ? (
+              <Label style={{ color: colors.danger }}>
+                {guidance.canSteer
+                  ? `Guidance must be text only and at most ${guidance.maxChars.toLocaleString()} characters.`
+                  : "Keep the message under 32,768 characters."}
+              </Label>
+            ) : null}
+          </ChatComposerFrame>
         )}
       </View>
 
@@ -1871,7 +1890,6 @@ const styles = StyleSheet.create({
   chatPage: { paddingHorizontal: 0, paddingTop: 0, paddingBottom: 4, gap: 8 },
   composer: { marginBottom: 0 },
   composerHint: { fontSize: 11, lineHeight: 16, paddingHorizontal: 12 },
-  dictationHidden: { height: 0, overflow: "hidden", opacity: 0 },
   errorRow: { gap: 8, marginHorizontal: 12 },
   sheet: { flex: 1, paddingTop: 20 },
   sheetHeader: {

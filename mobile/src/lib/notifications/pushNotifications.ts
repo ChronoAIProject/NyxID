@@ -1,3 +1,10 @@
+import { notificationDestination } from "./notificationDestination";
+import {
+  NYXID_APP_SCHEME,
+  NYXID_TRUSTED_FRONTEND_URLS,
+  NYXID_TRUSTED_API_BASE_URLS,
+  NYXID_UNIVERSAL_LINK_HOST,
+} from "../env";
 import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import * as TaskManager from "expo-task-manager";
@@ -73,6 +80,7 @@ const PRESENT_OS_NOTIFICATION = {
  * equivalent -- the app shell renders it through `ToastOverlay`.
  */
 export type ForegroundNotification = {
+  url: string | null;
   title: string | null;
   body: string | null;
   challengeId: string | null;
@@ -193,6 +201,16 @@ function presentForegroundNotification(
   }
 
   foregroundNotificationHandler?.({
+    url: notificationDestination(content.data, {
+      scheme: NYXID_APP_SCHEME,
+      trustedUrls: [
+        ...NYXID_TRUSTED_FRONTEND_URLS,
+        ...NYXID_TRUSTED_API_BASE_URLS,
+        ...(NYXID_UNIVERSAL_LINK_HOST
+          ? [`https://${NYXID_UNIVERSAL_LINK_HOST}`]
+          : []),
+      ],
+    }),
     title,
     body,
     challengeId: signal?.challengeId ?? null,

@@ -117,17 +117,20 @@ function levelSource() {
 /**
  * Composer dictation on Apple's speech recognizer (on-device when the iPhone
  * supports it). The words appear in the composer as they are recognized and
- * join the draft when recording finishes; nothing reaches NyxID until the
- * person sends the message themselves.
+ * join the draft when recording finishes. Crew voice instead opts into native
+ * utterance boundaries and sends successful final results through its sender.
  */
 export function useComposerDictation({
   scope,
   enabled,
   onInsert,
+  continuous = true,
 }: {
   scope: string;
   enabled: boolean;
   onInsert: (text: string) => void;
+  /** Crew voice ends each utterance at native silence detection. */
+  continuous?: boolean;
 }) {
   const focused = useIsFocused();
   const { sheetOpen } = useWorkspaceAccessibility();
@@ -218,6 +221,13 @@ export function useComposerDictation({
       const text = spoken();
       setCaption({ final: "", interim: "" });
       setPhase("idle");
+      // Draft dictation can preserve an interrupted tail for review. Crew
+      // speech dispatches automatically, so only a successful native final
+      // result may cross its sender boundary.
+      if (!continuous && (failure || interimText.trim() || !finalText.trim())) {
+        setError(failure ?? NO_SPEECH);
+        return;
+      }
       if (!text) {
         setError((previous) => previous ?? failure ?? NO_SPEECH);
         return;
@@ -327,7 +337,7 @@ export function useComposerDictation({
       Recognizer.start({
         ...(lang ? { lang } : {}),
         interimResults: true,
-        continuous: true,
+        continuous,
         addsPunctuation: true,
         maxAlternatives: 1,
         iosTaskHint: "dictation",

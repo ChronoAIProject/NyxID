@@ -173,6 +173,27 @@ export function NyxBotHome({
       {!online ? (
         <Notice message="You're offline. Reconnect to refresh your agents and crews." />
       ) : null}
+      {onStartNextStep && onboarding.isError ? (
+        <View style={styles.group}>
+          <Notice
+            message="Your NyxBot intro could not load. Try again."
+            tone="error"
+          />
+          <ActionButton
+            label="Retry intro"
+            variant="secondary"
+            disabled={!online}
+            onPress={() => void onboarding.refetch()}
+          />
+        </View>
+      ) : null}
+      {onStartNextStep && onboarding.data && !nextSteps.length ? (
+        <ActionButton
+          label="Replay intro"
+          variant="secondary"
+          onPress={() => setIntro("home")}
+        />
+      ) : null}
       {nextSteps.length && onStartNextStep ? (
         // Its own header, like the other home groups; the steps are cards already.
         <View style={styles.group}>

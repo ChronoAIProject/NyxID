@@ -293,7 +293,7 @@ mobile/
 │  │  ├─ account/                 # Profile, sessions, TOTP, settings, account deletion
 │  │  └─ legal/                   # Privacy, terms
 │  ├─ components/                 # Reusable UI primitives and workspace drawer
-│  ├─ hooks/                      # useNetworkStatus, useNyxChat, etc.
+│  ├─ hooks/                      # useNetworkStatus and shared native hooks
 │  ├─ lib/
 │  │  ├─ api/                     # HTTP client (mobileApi.ts, http.ts), error mapping
 │  │  ├─ auth/                    # SecureStore session persistence, JWT parsing

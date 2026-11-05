@@ -273,6 +273,8 @@ PODS:
     - ExpoModulesCore
   - ExpoSharing (55.0.24):
     - ExpoModulesCore
+  - ExpoSpeech (55.0.18):
+    - ExpoModulesCore
   - ExpoSpeechRecognition (3.1.3):
     - ExpoModulesCore
   - ExpoSplashScreen (55.0.20):
@@ -2515,6 +2517,7 @@ DEPENDENCIES:
   - ExpoScreenOrientation (from `../node_modules/expo-screen-orientation/ios`)
   - ExpoSecureStore (from `../node_modules/expo-secure-store/ios`)
   - ExpoSharing (from `../node_modules/expo-sharing/ios`)
+  - ExpoSpeech (from `../node_modules/expo-speech/ios`)
   - ExpoSpeechRecognition (from `../node_modules/expo-speech-recognition/ios`)
   - ExpoSplashScreen (from `../node_modules/expo-splash-screen/ios`)
   - ExpoTaskManager (from `../node_modules/expo-task-manager/ios`)
@@ -2677,6 +2680,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/expo-secure-store/ios"
   ExpoSharing:
     :path: "../node_modules/expo-sharing/ios"
+  ExpoSpeech:
+    :path: "../node_modules/expo-speech/ios"
   ExpoSpeechRecognition:
     :path: "../node_modules/expo-speech-recognition/ios"
   ExpoSplashScreen:
@@ -2887,6 +2892,7 @@ SPEC CHECKSUMS:
   ExpoScreenOrientation: 706f29544097439de71cea5b9a4352bc6cb8f0a6
   ExpoSecureStore: f5fb965b5aca826e86473bf738948ab50cca66cd
   ExpoSharing: f628ba7d9d0bf72cf624ebb60d2e69de07fbc241
+  ExpoSpeech: 09255c9cd0c71c279e4827e92fbd87c83bf41f23
   ExpoSpeechRecognition: 95a6287f24fb8764ded6e9d0dd667a1e9e633dab
   ExpoSplashScreen: 3e64eed7a300d4e1131e8b419b5cea6e604adba7
   ExpoTaskManager: 563a5b3625ceea4957221b531aa11ff8300842e0

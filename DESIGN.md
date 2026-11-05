@@ -1085,28 +1085,36 @@ links, stays on screen and usable during the call. The voice composer uses the
 composer frame wrapped in an animated pastel aura (soft blush and mint glows
 and a thin gradient edge) that brightens and swells with the agent's voice,
 follows yours while listening and breathes while thinking (still under Reduce
-Motion). It keeps one size whether idle or in a call and in either mode: a
-fixed middle area holds the greeting, the live conversation or the task list
-and call notes, the mode row is always reserved, and every centre control has
-the same hint line beneath it. Its header shows the agent name, status and
-timer, a task chip (count, spinner while running, amber "Needs your OK") and,
-in a call, speaker and ⋯ (call notes, No sound? Resume audio) controls; the
-task list and call notes open inside the composer, never over the chat; the
-live conversation as chat (your words in bubbles, the agent's as text, live
-words in secondary, a working line per running task, older lines fading at the
-top); the text-only Hands-free / Hold to talk switch; and mute, a 64pt
-microphone and End. Before a call it shows the voice, "Change in Settings ›
-Voice" and the price, with Start in the centre. Hands-free is a phone call: a
-running call timer and an End that hangs up. Hold to talk is a walkie-talkie:
-the instruction ("Hold to talk", "Release to send" while held, "Muted") sits
-under the microphone, the left control is always the mute symbol, no call
-timer runs, and the timer counts only the current transmission. Holding swells
-the microphone and lifts a soft halo (no animation under Reduce Motion). The page
-aura's orbits scale with its size. Closing voice ends the call; leaving the
-chat does too; accepted agent tasks keep running. The aura is decorative and
-hidden from VoiceOver (see the 2026-11-04 decision). Composer dictation uses Apple's speech recognizer inside
-the composer (see Chat composers).
-Crew chats retain the keyboard’s own dictation.
+Motion). Expanded content scrolls within the available height while reserving
+space for the transcript. Its header shows the agent name, status and call
+timer, with speaker and ⋯ (call notes, No sound? Resume audio) controls. Only
+unsealed, unsent live captions appear in the voice panel; sent speech, completed
+replies, task receipts and approval cards belong in the transcript. Tapping the
+voice entry starts the connection immediately using the saved voice and mode.
+The timer shows “-” until connected, then counts from 00:00 in both modes.
+Hands-free listens automatically; Hold to talk retains its explicit microphone
+control and release-to-send instruction. Holding swells the microphone and
+lifts a soft halo (still under Reduce Motion).
+
+Touching or scrolling the transcript minimizes voice to a single composer row.
+Tapping that row or focusing/typing in its text field expands it without
+replacing the media engine or ending the session. Text sends through the same
+chat sender and retains its draft when voice closes. Closing voice or leaving
+the chat ends audio; accepted agent tasks keep running. The aura is decorative
+and hidden from VoiceOver (see the 2026-11-04 decision).
+
+Crew composers share Attach, mentions, dictation review and toolbar controls
+with private chats, plus recipients and crew settings. Empty crew composers
+expose Crew voice. Because realtime provider sessions exclude group/member
+threads, Crew voice uses native speech recognition with utterance boundaries,
+posts spoken text through the ordinary crew sender to the displayed recipients,
+and reads new agent replies with native speech synthesis. It releases the
+recognizer during playback, pauses on typed drafts or an unavailable crew, and
+ends on backgrounding or leaving the chat. Uncertain delivery retains the
+existing review-before-resend fence. This mode starts on entry and supports the
+same minimize/expand behavior.
+Ordinary composer dictation continues to insert words into the draft for
+explicit review and sending.
 
 The native Machines drawer supports personal machines and organization machines
 the signed-in person administers. It includes inventory, read-only local

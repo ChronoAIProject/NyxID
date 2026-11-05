@@ -26,6 +26,8 @@ export function useNativeVoice(
   const [mediaAttempt, setMediaAttempt] = useState(0);
   const [starting, setStarting] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [connectedAt, setConnectedAt] = useState<number>();
+  const [disconnectedAt, setDisconnectedAt] = useState<number>();
   const [holding, setHolding] = useState(false);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
@@ -96,6 +98,7 @@ export function useNativeVoice(
     if (mounted.current) {
       setStarting(false);
       setConnected(false);
+      setDisconnectedAt((previous) => previous ?? Date.now());
       setHolding(false);
       setEndingConflict(false);
     }
@@ -110,6 +113,8 @@ export function useNativeVoice(
     setMedia(null);
     latestSnapshot.current = null;
     setSnapshot(null);
+    setConnectedAt(undefined);
+    setDisconnectedAt(undefined);
     setConflict(null);
     reportError();
     setConnected(false);
@@ -159,6 +164,8 @@ export function useNativeVoice(
       ticket.current === generation &&
       !controller.signal.aborted;
     setStarting(true);
+    setConnectedAt(undefined);
+    setDisconnectedAt(undefined);
     reportError();
     latestSnapshot.current = null;
     setSnapshot(null);
@@ -216,6 +223,10 @@ export function useNativeVoice(
               previous.session.generation !== value.session.generation)
           )
             setHolding(false);
+          if (value.session.state === "active")
+            setConnectedAt((previous) => previous ?? Date.now());
+          if (value.session.state === "closed" || value.session.state === "failed")
+            setDisconnectedAt((previous) => previous ?? Date.now());
           setSnapshot(value);
           setStarting(value.session.state === "starting");
           setConnected(
@@ -235,6 +246,7 @@ export function useNativeVoice(
           if (current.current === next) current.current = null;
           setStarting(false);
           setConnected(false);
+          setDisconnectedAt((previous) => previous ?? Date.now());
           setHolding(false);
           refresh();
         },
@@ -338,6 +350,8 @@ export function useNativeVoice(
     mediaAttempt,
     starting,
     connected,
+    connectedAt,
+    disconnectedAt,
     snapshot,
     holding,
     speakerMuted,

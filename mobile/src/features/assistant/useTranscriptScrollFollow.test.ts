@@ -5,6 +5,25 @@ import * as scrollFollower from "./assistantTranscriptScroll";
 import { hookHarness } from "./assistantHookTestHarness";
 import type { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 
+function animationClock() {
+  let id = 0;
+  const pending = new Map<number, () => void>();
+  return {
+    globals: {
+      requestAnimationFrame: (callback: () => void) => {
+        pending.set(++id, callback);
+        return id;
+      },
+      cancelAnimationFrame: (key: number) => pending.delete(key),
+    },
+    frame: () => {
+      const callbacks = [...pending.values()];
+      pending.clear();
+      callbacks.forEach((callback) => callback());
+    },
+  };
+}
+
 function harness() {
   let scope = "conversation-1";
   const offsets: number[] = [];
@@ -182,13 +201,22 @@ test("jump only appears away from latest, and resumes follow after explicit acti
   x.h.unmount();
 });
 
-test("corrections glide: jump and small growth animate, large jumps and Reduce Motion stay instant", () => {
+test("corrections glide after opening: jump and small growth animate, large jumps and Reduce Motion stay instant", () => {
   for (const reducedMotion of [false, true]) {
     const calls: { offset: number; animated: boolean }[] = [];
-    const list = { current: { scrollToOffset: (call: { offset: number; animated: boolean }) => calls.push(call) } };
-    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>({
-      "./assistantTranscriptScroll": scrollFollower,
-    });
+    const list = {
+      current: {
+        scrollToOffset: (call: { offset: number; animated: boolean }) =>
+          calls.push(call),
+      },
+    };
+    const clock = animationClock();
+    const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>(
+      {
+        "./assistantTranscriptScroll": scrollFollower,
+      },
+      clock.globals,
+    );
     const hook = h.load(
       fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
     ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
@@ -196,18 +224,84 @@ test("corrections glide: jump and small growth animate, large jumps and Reduce M
     const p = h.value().listProps;
     p.onLayout(layout(400));
     p.onContentSizeChange(300, 4000);
-    assert.equal(calls.at(-1)!.animated, false, "opening a long chat jumps straight to the end");
+    assert.equal(
+      calls.at(-1)!.animated,
+      false,
+      "opening a long chat jumps straight to the end",
+    );
     p.onScroll(scroll(4000, 400, 3600));
+    clock.frame();
+    clock.frame();
+    h.flush();
     p.onContentSizeChange(300, 4200);
-    assert.equal(calls.at(-1)!.animated, !reducedMotion, "a growing reply is followed smoothly");
+    assert.equal(
+      calls.at(-1)!.animated,
+      !reducedMotion,
+      "a growing reply is followed smoothly",
+    );
     p.onScroll(scroll(4200, 400, 3800));
     p.onContentSizeChange(300, 6000);
-    assert.equal(calls.at(-1)!.animated, false, "a jump of several screens is instant");
+    assert.equal(
+      calls.at(-1)!.animated,
+      false,
+      "a jump of several screens is instant",
+    );
     p.onScrollBeginDrag();
     p.onScrollEndDrag(scroll(6000, 400, 100));
     p.onScroll(scroll(6000, 400, 100));
     h.value().follow();
-    assert.equal(calls.at(-1)!.animated, !reducedMotion, "jump to latest glides");
+    assert.equal(
+      calls.at(-1)!.animated,
+      !reducedMotion,
+      "jump to latest glides",
+    );
     h.unmount();
   }
+});
+
+test("opening stays hidden through loading and geometry changes until native latest is acknowledged", () => {
+  let loading = true;
+  const clock = animationClock();
+  const h = hookHarness<ReturnType<typeof useTranscriptScrollFollow>>(
+    { "./assistantTranscriptScroll": scrollFollower },
+    clock.globals,
+  );
+  const hook = h.load(
+    fileURLToPath(new URL("./useTranscriptScrollFollow.ts", import.meta.url)),
+  ).useTranscriptScrollFollow as typeof useTranscriptScrollFollow;
+  const calls: { offset: number; animated: boolean }[] = [];
+  h.mount(() =>
+    hook({ current: { scrollToOffset: (c) => calls.push(c) } }, "chat", {
+      loading,
+    }),
+  );
+  let p = h.value().listProps;
+  p.onLayout(layout(400));
+  p.onContentSizeChange(300, 1000);
+  p.onScroll(scroll(1000, 400, 600));
+  clock.frame();
+  clock.frame();
+  assert.equal(h.flush().ready, false);
+  loading = false;
+  h.render();
+  p = h.value().listProps;
+  p.onContentSizeChange(300, 1600);
+  p.onLayout(layout(300));
+  clock.frame();
+  clock.frame();
+  assert.equal(
+    h.flush().ready,
+    false,
+    "the requested offset alone cannot reveal the list",
+  );
+  assert.equal(calls.at(-1)!.offset, 1300);
+  p.onScroll(scroll(1600, 300, 1300));
+  clock.frame();
+  clock.frame();
+  assert.equal(h.flush().ready, true);
+  assert.equal(
+    calls.some((c) => c.animated),
+    false,
+  );
+  h.unmount();
 });
