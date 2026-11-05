@@ -738,6 +738,7 @@ impl McpAuthContext {
     /// retains the live-turn requirement for shared keys.
     fn from_watch_auth(auth: crate::mw::auth::AuthUser) -> Self {
         let mut context = Self::user(auth.user_id.to_string(), AuthMethod::ApiKey);
+        context.execution_permission = auth.execution_permission.clone();
         context.chat = auth.assistant_chat.as_deref().cloned();
         context.scope = auth.scope;
         context.is_api_key = true;
@@ -10899,6 +10900,7 @@ mod skill_authoring_discovery_tests {
         auth.chat = Some(ChatAuthority {
             execution_group_id: None,
             execution_unsupported: false,
+            execution_voice_task: false,
             execution_task: None,
             execution_permission: None,
             business_system_success: false,

@@ -1,4 +1,4 @@
-# Explicit execution permissions (#2193 / #2194 Phase A / #2195 Part A)
+# Explicit execution permissions (#2193 / #2194 Phases A–B / #2195 Part A)
 
 **Status: default-off contract, dispatch, and assistant permission authoring.**
 The #2195 Part A flow below adds human permission updates and exact-effect resume
@@ -163,8 +163,8 @@ old record; no widening by inference.
    rollback's unchanged TTL.
 
 #2194 Phase A does not include authoring; #2195 Part A below adds assistant
-permission cards and web UI. This release still excludes native-policy-key execution, Machine service HTTP, async/background watches,
-voice-task service calls, mandatory-org authoring or legacy migration. Tests cover
+permission cards and web UI. Phase B adds the bounded adapters below, while
+mandatory-org authoring and legacy migration remain excluded. Tests cover
 the pure contract, serialization/legacy management, real proxy/MCP/LLM admission,
 provider attempt counts, task fences, concurrent claims and the unmarked database
 command budget. The adapter matrix below defines the exact boundary.
@@ -202,13 +202,16 @@ the legacy gates. Disabling cannot downgrade already admitted coverage to Full.
 
 ### Adapter boundary
 
-| Adapter | Phase A behavior |
+| Adapter | Dispatch behavior |
 | --- | --- |
 | Ordinary bounded HTTP proxy, catalog UUID / connection slug / selected pool member | Participates after concrete resolution and existing ceilings/input checks. Coverage binds one exact connection; it cannot authorize a pool fallback account. |
 | Assistant owner, org-member and shared HTTP connection admission | One decision may satisfy the eligible risk/personal-service/shared-actor floors. Existing selection, live key/share/grants, org instruction and model-lane rules remain. |
 | MCP endpoint, generic and prepared bounded HTTP | The prepared method/path/query/body/declared headers and exact connection feed the same coordinator; the receipt is carried to final HTTP or node egress. |
 | LLM provider and translated gateways | Participates on the final translated request. Stateless model recognition, billing and provider-hosted tool restrictions are unchanged. |
-| Native permission-bound keys, Machine service HTTP, async/background watches, voice service tasks | Phase B. Explicitly excluded from new coverage and retain their existing gates. |
+| Native personal Google/Drive permission-bound REST/MCP keys | Existing policy/adapter verification precedes the coordinator. Verification reads cannot consume the primary claim. Admission refusal precedes the primary-send marker; the 90-day credential cap remains. |
+| Assistant Machine service HTTP | The signed job/runtime/service ceilings remain; coverage evaluates the actual bounded HTTP effect. External job principals cannot inherit the creator's consent. |
+| Async/background watches | Persist original actor/key/turn/TaskRef. Each leased status, result or cancel operation evaluates its own exact effect; submission is not lifecycle permission. Uncertain submissions cannot create another submission. |
+| Voice-task service HTTP/MCP | Retain the authenticated source and original request's task root through continuation/recovery. Live voice/WS/media remain excluded. |
 | Guests, platform/channel/automation turns, WS/CONNECT, streaming request bodies, SSH/native commands | No execution-permission coverage; existing authority and confirmation rules apply. |
 | Managed/composite service adapters, catalog-only calls without an exact connection, resource-policy grants needing a native adapter | No new coverage; no fabricated HTTP/resource evidence. Supported ordinary HTTP still uses its normal ceilings. |
 
@@ -286,7 +289,7 @@ through ordinary HTTP proxy or MCP endpoint/generic/prepared HTTP. Guest,
 platform/channel/automation, old in-flight turns without recorded lineage,
 ordinary API-key/external and standalone LLM-gateway callers retain their existing
 gap behavior. Unsupported managed/composite transformations also retain legacy
-prompts. This does not extend Phase B adapters.
+prompts. Phase B adapters always retain the legacy gap chain; they never create Part A proposals.
 
 The existing `ApprovalRequest` carries one versioned `execution_proposal`.
 Ceilings and prohibitions run before its creation. It consolidates only missing
@@ -386,3 +389,39 @@ behavior; they must not serve activated cohorts. Disable enrollment and drain
 pending resumes/claims on upgraded replicas before binary rollback. The unchanged
 `expires_at` TTL preserves persistent rows. #2195 Part B adds non-assistant callers;
 #2196 handles explicitly reviewed legacy mapping.
+
+
+## Dispatch integration: #2194 Phase B
+
+Phase B uses the same per-person enrollment, reader/dispatch readiness and live
+egress fences. Unmarked keys and old jobs/watches/voice requests do not load
+execution permissions or prepare their descriptors for this feature. Marked
+background work cannot fall back to an unmarked context after disabling enrollment.
+
+Native keys keep the personal, server-held Google/Drive pilot. The engine alone
+mints a verified primary plan after its adapter checks. Verification reads retain
+their existing gates, are accounted separately and never select/consume the
+primary operation permission. The provider send marks dispatch; an admission gap
+or denial before that marker is not `OutcomeUncertain`. Failure after a mutating
+send remains uncertain. Policy pause, account/epoch and live key checks still
+apply. This does not enable policy-reference issuance or extend credential life.
+
+Machine jobs and async watches persist server-owned task lineage alongside their
+existing actor, key, conversation, source turn and concrete child identity. Each
+provider attempt fences that child plus its root. A job's command approval does
+not become permission for arbitrary HTTP bodies. Status, result and cancellation
+are independent watch effects and retain the operation contract/lease ceilings.
+Recovery of an uncertain submission is observation only, never resubmission.
+Background children keep a message root alive; cancellation and hard deadlines
+fence future calls. External Machine principals retain their own authority path.
+
+Voice tasks copy the server enrollment hint before runtime startup and retain the
+original request's visible-message TaskRef through confirmation continuations and
+recovery. Cancellation fences the same root. This applies only to bounded HTTP/MCP
+calls from the isolated task thread, not the live session, WS or media stream.
+
+A Phase B gap keeps today's native/proxy/MCP/watch confirmation behavior (including
+existing background refusal when no live decision can be requested). Covered
+suppresses only the three eligible floors; independent Machine, org, webhook,
+exact-use and resource ceilings remain. No Phase B gap creates an execution
+proposal or retained resume payload; that source expansion belongs to #2195 Part B.

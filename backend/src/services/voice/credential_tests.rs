@@ -842,7 +842,7 @@ async fn specialist_platform_voice_live_revalidation_closes_revoked_key_and_bill
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {axum::serve(listener, app).await.unwrap()});
         let started = super::runtime::start_with_provider(&f.state,
-            super::runtime::StartInput { responses_billing: None,
+            super::runtime::StartInput { execution_enrolled: false, responses_billing: None,
                 client_key: None, user:&f.owner, conversation:&f.row.id, client_request_id:&Uuid::new_v4().to_string(), preferences:p,
                 sdp:"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n" },
             resolved.identity, resolved.billing,
@@ -941,7 +941,7 @@ async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let rejected_request = Uuid::new_v4().to_string();
-        let rejected = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { responses_billing: None,
+        let rejected = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { execution_enrolled: false, responses_billing: None,
                 client_key: None,
             user:&f.owner, conversation:&f.row.id, client_request_id:&rejected_request,
             preferences:p.clone(), sdp:"v=0\r\nm=audio",
@@ -973,7 +973,7 @@ async fn specialist_platform_voice_funding_new_personal_grant_immediately_allows
             doc! {"dedupe_key":format!("grant-issued:{}",grant.id)}).await.unwrap(), 1);
         // No reconcile, TTL wait, cache invalidation or BillingService rebuild.
         let resolved = credentials::resolve(&f.state, &f.owner, &f.row.id, &p).await.unwrap();
-        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { responses_billing: None,
+        let started = super::runtime::start_with_provider(&f.state, super::runtime::StartInput { execution_enrolled: false, responses_billing: None,
                 client_key: None,
             user:&f.owner, conversation:&f.row.id, client_request_id:&Uuid::new_v4().to_string(),
             preferences:p, sdp:"v=0\r\nm=audio",
@@ -1164,6 +1164,7 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
         let started = super::runtime::start_with_provider(
             &f.state,
             super::runtime::StartInput {
+                execution_enrolled: false,
                 responses_billing: None,
                 client_key: None,
                 user: &f.owner,

@@ -334,6 +334,7 @@ async fn admit_task(
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
     let request = VoiceRequest {
+        execution_enrolled: call.execution_enrolled && call.client_key.is_none(),
         model_task,
         progress: None,
         timing: Default::default(),

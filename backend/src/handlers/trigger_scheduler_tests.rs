@@ -649,6 +649,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let chat = ChatAuthority {
         execution_group_id: None,
         execution_unsupported: false,
+        execution_voice_task: false,
         execution_task: None,
         execution_permission: None,
         business_system_success: false,
@@ -686,6 +687,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let guest = ChatAuthority {
         execution_group_id: None,
         execution_unsupported: false,
+        execution_voice_task: false,
         execution_task: None,
         execution_permission: None,
         business_system_success: false,

@@ -719,7 +719,7 @@ pub async fn job_auth(
             "The machine restarted; start a new job".into(),
         ));
     }
-    let auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None).await?;
+    let mut auth = crate::mw::auth::api_key_auth_user(db, &key, None, None, None).await?;
     let agent = if let Some(access) = auth.org_agent_access.as_deref() {
         access.agent(db, &job.user_id, &job.agent_id).await?
     } else {
@@ -762,6 +762,16 @@ pub async fn job_auth(
         return Err(AppError::MachineAuthorityStale);
     }
     super::assistant_invocation_service::require_machine_job_active(db, job, &auth).await?;
+    if job.execution_task.is_some() {
+        super::execution_permission_dispatch::descendants::attach(
+            &mut auth,
+            super::execution_permission_dispatch::descendants::Descendant::Job(Box::new(
+                job.clone(),
+            )),
+        )?;
+    } else {
+        super::execution_permission_dispatch::exclude(&mut auth);
+    }
     Ok(auth)
 }
 
