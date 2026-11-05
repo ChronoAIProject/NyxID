@@ -4,7 +4,7 @@ use super::*;
 async fn crm_matched_revision_one_is_not_created_and_committed_result_survives_turn_end() {
     use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
     let f = fixture().await;
-    let existing = company(&f).await;
+    company(&f).await;
     let args = json!({"mutation_key":"unchanged-existing","input":{"object":"company","match_field":"name","values":{"name":"Company"},"expected_revision":1}});
     let first = call(&f, "crm_upsert_record", args.clone(), 1)
         .await
@@ -20,6 +20,11 @@ async fn crm_matched_revision_one_is_not_created_and_committed_result_survives_t
         .unwrap()
         .unwrap();
     assert!(live.active_turn.unwrap().crm_artifacts.is_empty());
+    let args = json!({"mutation_key":"committed-new-record","input":{"object":"company","match_field":"name","values":{"name":"Committed"}}});
+    let first = call(&f, "crm_upsert_record", args.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(first["result"]["created"], true);
     f.state
         .db
         .collection::<Document>(CONVERSATIONS)
@@ -33,10 +38,10 @@ async fn crm_matched_revision_one_is_not_created_and_committed_result_survives_t
         &f.state.db,
         &f.chat,
         Ok(TurnCrmArtifact::Record {
-            id: existing.id.clone(),
+            id: first["result"]["id"].as_str().unwrap().to_owned(),
             owner_id: f.owner.clone(),
             object_key: "company".into(),
-            title: "Company".into(),
+            title: "Committed".into(),
             role: CrmArtifactRole::Created,
         }),
         first.clone(),
@@ -57,7 +62,9 @@ async fn crm_matched_revision_one_is_not_created_and_committed_result_survives_t
         f.state
             .db
             .collection::<Document>(crate::models::crm_record::COLLECTION_NAME)
-            .count_documents(doc! {"owner_id":&f.owner,"object_key":"company"})
+            .count_documents(
+                doc! {"owner_id":&f.owner,"object_key":"company","values.name":"Committed"}
+            )
             .await
             .unwrap(),
         1
