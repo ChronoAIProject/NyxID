@@ -1553,8 +1553,14 @@ pub async fn for_key_with_access(
             super::assistant_team_service::agent_for_conversation(db, &conversation).await?;
         (conversation, agent)
     };
-    let resolved = if access.is_none() && agent.user_id != user {
-        super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
+    let resolved = if access.is_none() {
+        match super::org_channel_service::conversation_access(db, &conversation).await? {
+            Some(access) => Some(access),
+            None if agent.user_id != user => {
+                super::org_agent_service::resolve_shared_agent_access(db, user, &agent).await?
+            }
+            None => None,
+        }
     } else {
         None
     };
@@ -1580,6 +1586,9 @@ pub async fn for_key_with_access(
         .filter(|turn| !turn.stop_requested);
     let turn_live = live.is_some();
     let shared = access.is_some_and(|a| a.shared().is_some());
+    let org_guest = access
+        .and_then(|a| a.channel())
+        .is_some_and(|c| c.execution().guest);
     let (report_to, with_nyxbot) = live
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
@@ -1626,12 +1635,12 @@ pub async fn for_key_with_access(
         turn_live,
         report_to,
         with_nyxbot,
-        machine_node_ids: if shared {
+        machine_node_ids: if shared || org_guest {
             Vec::new()
         } else {
             agent.machine_node_ids.clone()
         },
-        saved_login_ids: if shared {
+        saved_login_ids: if shared || org_guest {
             Vec::new()
         } else {
             agent.saved_login_ids.clone()
@@ -1740,7 +1749,18 @@ pub(crate) async fn fence(
     }
     // Cards are execution authority. Human decisions and internal NyxBot paths
     // must enforce the same live org/group ACL as a new tool request.
-    let access = if row.collaboration.is_some() {
+    let access = if let Some(origin) = super::org_channel_service::origin(&row) {
+        let checked = Box::pin(super::org_channel_service::validate_in_session(
+            db,
+            session,
+            origin,
+            &row.user_id,
+            row.agent_id.as_deref().ok_or_else(not_found)?,
+            true,
+        ))
+        .await?;
+        Some(super::org_agent_service::RequestAccess::from_channel(db, checked).await?)
+    } else if row.collaboration.is_some() {
         // Human decisions have no inherited request snapshot. Resolve from the
         // concrete thread key so a foreign personal owner selects the shared
         // lane instead of the legacy organization-only owner-marker path.
@@ -2314,6 +2334,15 @@ async fn request_candidate_in_session(
     let now = candidate.created_at;
     let orchestrated = candidate.decider == "orchestrator";
     let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    if access
+        .as_ref()
+        .and_then(|a| a.channel())
+        .is_some_and(|c| c.execution().guest)
+    {
+        return Err(AppError::Forbidden(
+            "Organization channel guests cannot request approvals".into(),
+        ));
+    }
     // Covers every permission kind, including machine/skill/scope
     // requests and internal callers without an auth snapshot.
     // Reuse the access already resolved or reused by the fence.

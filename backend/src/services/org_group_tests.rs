@@ -356,7 +356,7 @@ async fn org_group_threads_keys_billing_uploads_and_single_auth_resolution() {
             assert!(uploads::for_chat(&f.state.db, &chat, other).await.is_err());
         }
         let payer = super::billing::owner_resolver::BillingOwnerResolver::new(f.state.db.clone())
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 actor,
                 &f.org,
                 crate::models::usage_meter::CredentialClass::NyxidManagedMaster,

@@ -2888,6 +2888,24 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
+            "/nyxagent/channels/{id}/org-specialist",
+            get(handlers::org_specialist_channels::get)
+                .put(handlers::org_specialist_channels::update),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link",
+            post(handlers::org_specialist_channels::issue)
+                .delete(handlers::org_specialist_channels::revoke_self),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link/{challenge}",
+            get(handlers::org_specialist_channels::challenge),
+        )
+        .route(
+            "/nyxagent/channels/{id}/member-link/{challenge}/confirm",
+            post(handlers::org_specialist_channels::confirm),
+        )
+        .route(
             "/nyxagent/channels/{id}/retry-native-gateway",
             post(handlers::nyxbot::gateway_retry::retry_channel),
         )

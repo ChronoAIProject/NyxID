@@ -101,13 +101,24 @@ function ChatRow({
   readonly botAgentName: string;
   readonly onError: (message: string | undefined) => void;
 }) {
-  const agentId = chat.agent_id ?? channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
-  const agentReadiness = useGuestReadiness(agentId, true);
-  const scoped = Boolean(chat.conversation_id && (
-    agentReadiness.data?.conversation_overrides_truncated ||
-    agentReadiness.data?.conversation_overrides.includes(chat.conversation_id)
-  ));
-  const chatReadiness = useGuestReadiness(agentId, scoped, chat.conversation_id ?? undefined);
+  const agentId =
+    chat.agent_id ??
+    channel.agent_id ??
+    agents.find((a) => a.kind === "nyxbot")?.id;
+  const orgSpecialist = Boolean(channel.org_specialist);
+  const agentReadiness = useGuestReadiness(agentId, !orgSpecialist);
+  const scoped = Boolean(
+    chat.conversation_id &&
+    (agentReadiness.data?.conversation_overrides_truncated ||
+      agentReadiness.data?.conversation_overrides.includes(
+        chat.conversation_id,
+      )),
+  );
+  const chatReadiness = useGuestReadiness(
+    agentId,
+    scoped && !orgSpecialist,
+    chat.conversation_id ?? undefined,
+  );
   const update = useUpdateNyxBotChannelChat();
   const [notice, setNotice] = useState<string>();
   const title = channelChatTitle(chat.kind, chat.title, channel.platform);
@@ -129,18 +140,26 @@ function ChatRow({
   }
 
   const kindLabel =
-    chat.kind === "private" ? "Private chat" : chat.kind === "channel" ? "Channel" : "Group";
-  const summary = group
-    ? `${chat.reply_mode === "all" ? "Answers every message" : "Answers when mentioned or replied to"} · ${
-        chat.members === "everyone"
-          ? "everyone here can talk to it, as guests"
-          : chat.members_setting === "owner"
-            ? "only you can talk to it"
-            : "only you until you talk to the bot here"
-      }`
-    : chat.owner
-      ? "Your private chat with the bot"
-      : `A private chat with ${title}, as a guest`;
+    chat.kind === "private"
+      ? "Private chat"
+      : chat.kind === "channel"
+        ? "Channel"
+        : "Group";
+  const summary = orgSpecialist
+    ? group
+      ? `${chat.reply_mode === "all" ? "Answers every message" : "Answers when mentioned or replied to"} · verified organization members${chat.members === "everyone" ? " and enabled guests" : " only"}`
+      : "Private conversation with the organization specialist"
+    : group
+      ? `${chat.reply_mode === "all" ? "Answers every message" : "Answers when mentioned or replied to"} · ${
+          chat.members === "everyone"
+            ? "everyone here can talk to it, as guests"
+            : chat.members_setting === "owner"
+              ? "only you can talk to it"
+              : "only you until you talk to the bot here"
+        }`
+      : chat.owner
+        ? "Your private chat with the bot"
+        : `A private chat with ${title}, as a guest`;
 
   return (
     <div className="space-y-3">
@@ -151,9 +170,9 @@ function ChatRow({
         footer={
           <>
             <p>{summary}</p>
-            <GuestReadiness
+            {!orgSpecialist ? <GuestReadiness
               readiness={scoped ? chatReadiness.data : agentReadiness.data}
-            />
+            /> : null}
             {group && chat.follow_guidance ? (
               <p>{chat.follow_guidance}</p>
             ) : null}
@@ -205,12 +224,16 @@ function ChatRow({
                   options={[
                     {
                       value: "default",
-                      label: chat.owner_seen
-                        ? "Everyone (you talk here)"
-                        : "You, until you talk here",
+                      label: orgSpecialist
+                        ? chat.owner_seen
+                          ? "Members and enabled guests (admin present)"
+                          : "Members, until an admin talks here"
+                        : chat.owner_seen
+                          ? "Everyone (you talk here)"
+                          : "You, until you talk here",
                     },
-                    { value: "everyone", label: "Everyone there" },
-                    { value: "owner", label: "Only you" },
+                    { value: "everyone", label: orgSpecialist ? "Members and enabled guests" : "Everyone there" },
+                    { value: "owner", label: orgSpecialist ? "Verified organization members" : "Only you" },
                   ]}
                   onChange={(members) => void change({ members })}
                 />
@@ -280,12 +303,16 @@ export function ChannelChats({
   const inDrawer = useDrawerSearchEnabled();
   const chats = useNyxBotChannelChats(channel.id, open || inDrawer);
   const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
-  const readiness = useGuestReadiness(agentId, open);
+  const readiness = useGuestReadiness(agentId, open && !channel.org_specialist);
   const access = useSetNyxBotPrivateChats();
   const posts = useSetNyxBotPrivateChatPosts();
   const [applyToExisting, setApplyToExisting] = useState(false);
   const rows = chats.data ?? [];
-  const roots = rows.filter((chat) => !chat.parent_chat_id || !rows.some((parent) => parent.id === chat.parent_chat_id));
+  const roots = rows.filter(
+    (chat) =>
+      !chat.parent_chat_id ||
+      !rows.some((parent) => parent.id === chat.parent_chat_id),
+  );
 
   const searchId = `channel-chats-${channel.id}`;
   useDrawerSearchEntries([
@@ -300,14 +327,20 @@ export function ChannelChats({
     try {
       await access.mutateAsync({ channelAgentId: channel.id, privateChats });
     } catch (cause) {
-      setError(errorMessage(cause, "Could not change who can talk in private chats."));
+      setError(
+        errorMessage(cause, "Could not change who can talk in private chats."),
+      );
     }
   }
 
   async function setPosts(enabled: boolean) {
     setError(undefined);
     try {
-      await posts.mutateAsync({ channelAgentId: channel.id, enabled, applyToExisting });
+      await posts.mutateAsync({
+        channelAgentId: channel.id,
+        enabled,
+        applyToExisting,
+      });
       setApplyToExisting(false);
     } catch (cause) {
       setError(errorMessage(cause, "Could not change private chat posting."));
@@ -334,12 +367,16 @@ export function ChannelChats({
           footer={
             <>
               <p>
+                {channel.org_specialist ? (
+                  "Verified members use their own membership permissions and billing. Guests can chat only when an admin enables guest access and a daily budget for this binding. An admin talking in a group opens its default audience to enabled guests; other members cannot widen it."
+                ) : <>
                 People other than you talk to the agent as guests: it never acts
                 on your account for them, NyxBot uses none of your services for
                 them, and a chat’s own specialist only reads with its services.
                 Members of a group can talk to it once you have talked to the
                 bot there. In groups it answers when mentioned or replied to
                 unless set to every message.
+                </>}
               </p>
               <p>
                 The agent can send updates after a customer first messages this
@@ -353,7 +390,7 @@ export function ChannelChats({
                   chats, including individual overrides.
                 </p>
               ) : null}
-              <GuestReadiness readiness={readiness.data} />
+              {!channel.org_specialist ? <GuestReadiness readiness={readiness.data} /> : null}
               {error ? (
                 <p role="alert" className="text-destructive">
                   {error}
@@ -370,8 +407,8 @@ export function ChannelChats({
                 value={channel.private_chats}
                 disabled={access.isPending}
                 options={[
-                  { value: "owner", label: "Only you" },
-                  { value: "everyone", label: "Anyone" },
+                  { value: "owner", label: channel.org_specialist ? "Verified organization members" : "Only you" },
+                  { value: "everyone", label: channel.org_specialist ? "Members and enabled guests" : "Anyone" },
                 ]}
                 onChange={(value) => void setAccess(value)}
               />

@@ -54,6 +54,9 @@ pub struct BillingUsageResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct BillingUsageRow {
+    /// A verified organization channel guest, never a platform sender ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_channel_guest: Option<crate::models::org_channel::GuestUsage>,
     /// Verified gateway origin, independent of the runtime running-seconds SKU.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_usage: Option<crate::models::usage_meter::MachineUsageAttribution>,
@@ -350,6 +353,7 @@ pub async fn get_usage(
                     // optional on the ledger, so absent values group together.
                     "model": "$model",
                     "api_key_id": "$api_key_id",
+                    "org_channel_guest": "$org_channel_guest",
                     "machine_usage": "$machine_usage",
                     // Rows without a wallet were metered for observability
                     // only (service not platform_billable); they carry no
@@ -438,6 +442,12 @@ pub async fn get_usage(
         .await?;
         let costs = usage_costs(&doc, billable, pricing)?;
         rows.push(BillingUsageRow {
+            org_channel_guest: id_doc
+                .get_document("org_channel_guest")
+                .ok()
+                .map(|d| bson::from_document(d.clone()))
+                .transpose()
+                .map_err(|_| AppError::Internal("Invalid guest usage attribution".into()))?,
             machine_usage: id_doc
                 .get("machine_usage")
                 .filter(|value| !matches!(value, bson::Bson::Null))

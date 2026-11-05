@@ -95,6 +95,7 @@ import {
   useForgetNyxBotMemory,
   useRememberNyxBotMemory,
   useNyxBotAgent,
+  useNyxBotChannels,
   useGuestReadiness,
   useNyxBotSettings,
   useNyxAgentModels,
@@ -406,6 +407,13 @@ function AgentDetailsContent({
   readonly detailContainer: HTMLDivElement | null;
 }) {
   const searching = Boolean(query.trim());
+  const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
+  const linkedChannels = useNyxBotChannels(agent.owner_kind === "org");
+  const hasOrgChannel = linkedChannels.data?.some(
+    (row) => row.agent_id === agent.id && row.org_specialist,
+  );
+  const canManageGuests =
+    agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
   const [active, setActive] = useState<DrawerSearchTab>(
     tab ?? (proposalId ? "skills" : "overview"),
   );
@@ -415,7 +423,7 @@ function AgentDetailsContent({
   const tabs = DRAWER_TABS.filter(([value]) =>
     value === "channels"
       ? !agent.share_role &&
-        agent.owner_kind !== "org" &&
+        (agent.owner_kind !== "org" || orgChannels || hasOrgChannel) &&
         agent.status !== "destroyed"
       : value === "memory"
         ? Boolean(agent.share_role) || agent.can_maintain !== false
@@ -557,7 +565,7 @@ function AgentDetailsContent({
                                       disabled={readOnly}
                                     />
                                   ) : null}
-                                  {agent.owner_kind !== "org" ? (
+                                  {canManageGuests ? (
                                     <AgentOperationScopes
                                       agentId={agent.id}
                                       disabled={readOnly}
@@ -955,6 +963,9 @@ function GrantsForm({
   readonly agent: AssistantAgent;
   readonly requestMode?: "denied" | "routed_to_nyxbot";
 }) {
+  const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
+  const canManageGuests =
+    agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
   const readiness = useGuestReadiness(agent.id, agent.owner_kind !== "org" && !agent.share_role && agent.can_maintain !== false);
   const grants = useSetNyxBotAgentGrants();
   const inventory = useKeys();
@@ -1064,7 +1075,7 @@ function GrantsForm({
               )}
             />
           ))}
-          {services.length && agent.owner_kind !== "org" ? (
+          {services.length && canManageGuests ? (
             <FormField
               control={form.control}
               name="guest_access"

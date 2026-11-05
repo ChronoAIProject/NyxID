@@ -531,6 +531,23 @@ pub async fn agent_for_conversation(
     db: &Database,
     row: &AssistantConversation,
 ) -> AppResult<AssistantAgent> {
+    if let Some(access) = super::org_channel_service::conversation_access(db, row).await? {
+        let mut agent = access
+            .channel()
+            .ok_or_else(super::org_channel_service::denied)?
+            .agent()
+            .clone();
+        if row.guest_turn {
+            agent.memory.clear();
+            agent.machine_node_ids.clear();
+            agent.saved_login_ids.clear();
+            agent.machine_access = None;
+            agent.home_conversation_id = None;
+            agent.grants.account_read = false;
+        }
+        return Ok(agent);
+    }
+
     if row.collaboration.is_some() {
         return Box::pin(super::collaboration_group_service::runtime::agent_for_thread(db, row))
             .await;
@@ -578,12 +595,12 @@ pub async fn agent_for_conversation(
 pub fn thread_filter_for(actor: &str, agent: &AssistantAgent) -> bson::Document {
     if agent.is_nyxbot() {
         doc! {"user_id": actor, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
-            "voice_parent_conversation_id": bson::Bson::Null, "$or": [
+            "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null, "$or": [
             {"agent_id": &agent.id}, {"agent_id": bson::Bson::Null},
         ]}
     } else {
         doc! {"user_id": actor, "agent_id": &agent.id, "collaboration": bson::Bson::Null, "guest_model_setup":{"$ne":true}, "group_id": bson::Bson::Null,
-        "voice_parent_conversation_id": bson::Bson::Null}
+        "channel.org_execution":{"$exists":false},"voice_parent_conversation_id": bson::Bson::Null}
     }
 }
 
@@ -1731,6 +1748,21 @@ pub enum MachineGrantMode {
 }
 
 impl GrantChange {
+    fn changes_guest_policy(&self, current: &AssistantAgent) -> bool {
+        match self {
+            Self::GuestOperations { base, selections } => {
+                !selections.is_empty() || base.changes_guest_policy(current)
+            }
+            Self::Machine { base, .. } => base.changes_guest_policy(current),
+            Self::Replace { guests, .. } | Self::Guests(guests) => {
+                guests.iter().any(|(id, level)| {
+                    current.guest_access.get(id).copied().unwrap_or_default() != *level
+                })
+            }
+            Self::Add(_) | Self::Remove(_) => false,
+        }
+    }
+
     /// The grants and guest access levels after this change.
     pub fn apply(
         &self,
@@ -1839,6 +1871,49 @@ pub(crate) async fn sync_thread_authority(
     for row in rows {
         let authority = if row.guest_model_setup {
             KeyAuthority::ModelSetup(agent.user_id.clone())
+        } else if let Some(origin) = super::org_channel_service::origin(row)
+            && origin.org_execution.as_ref().is_some_and(|e| e.guest)
+        {
+            // Grant maintenance must not expand a guest key to the specialist's
+            // full service/node authority. A retired binding yields no grants.
+            let execution = origin.org_execution.as_ref().expect("guest execution");
+            let channel = db
+                .collection::<crate::models::nyxbot_channel::NyxbotChannel>("nyxbot_channels")
+                .find_one(doc! {"_id":&origin.nyxbot_channel_id,"status":"active",
+                "org_specialist.revision":&execution.revision,
+                "org_specialist.guests.revision":&execution.guest_revision,
+                "org_specialist.guests.enabled":true})
+                .session(&mut *session)
+                .await?;
+            let policy = channel
+                .as_ref()
+                .and_then(|c| c.org_specialist.as_ref())
+                .map(|b| &b.guests);
+            let grants = AgentGrants {
+                service_ids: agent
+                    .grants
+                    .service_ids
+                    .iter()
+                    .filter(|id| {
+                        policy.is_some_and(|p| {
+                            p.service_ids.contains(id)
+                                && p.service_authority.get(*id).is_some_and(|digest| {
+                                    *digest
+                                        == super::org_channel_service::management::service_digest(
+                                            agent, id,
+                                        )
+                                })
+                        })
+                    })
+                    .cloned()
+                    .collect(),
+                ..Default::default()
+            };
+            KeyAuthority::OrgChannelGuest(
+                grants,
+                agent.operation_scopes.clone(),
+                agent.user_id.clone(),
+            )
         } else if row.shared_agent_thread {
             let grants = crate::models::assistant_agent::AgentGrants {
                 service_ids: agent
@@ -1888,6 +1963,9 @@ pub async fn apply_grants_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if change.changes_guest_policy(&agent) {
+        super::org_agent_service::authorize_guest_change(db, owner, &agent, session).await?;
+    }
     let previous_machines = agent.machine_node_ids.clone();
     let previous_logins = agent.saved_login_ids.clone();
     if let GrantChange::Machine {

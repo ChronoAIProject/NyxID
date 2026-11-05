@@ -30,6 +30,7 @@ vi.mock("@/lib/platform-personal", async (importOriginal) => ({
 
 vi.mock("@/hooks/use-orgs", () => ({
   useOrgs: () => ({ data: [], isPending: false, error: null }),
+  useOrg: () => ({ data: undefined, isPending: false, error: null }),
 }));
 
 vi.mock("@/hooks/use-channel-adapters", () => ({

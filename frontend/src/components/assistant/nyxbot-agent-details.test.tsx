@@ -448,6 +448,39 @@ it("lets an organization Member edit shared memory with the privacy note and bac
   ).not.toBeInTheDocument();
 });
 
+it.each(["admin", "member"])(
+  "limits org guest policy controls to flagged admins (%s)",
+  async (role) => {
+    const current = useAuthStore.getState().user!;
+    useAuthStore
+      .getState()
+      .setUser({
+        ...current,
+        capabilities: {
+          ...current.capabilities,
+          billing_available: false,
+          enabled_features: ["nyxbot:org-specialist-channels"],
+        },
+      });
+    agent = agentRow({
+      owner_kind: "org",
+      owner_id: "org-team",
+      org_role: role,
+      can_maintain: true,
+      can_use: true,
+    });
+    renderSheet({ tab: "grants" });
+    await screen.findByRole("form", { name: "Grants" });
+    if (role === "admin")
+      expect(screen.getByRole("list", { name: "Guest access" })).toBeVisible();
+    else
+      expect(
+        screen.queryByRole("list", { name: "Guest access" }),
+      ).not.toBeInTheDocument();
+    expect(readinessReads).toBe(0);
+  },
+);
+
 it("explains the specialist sandbox and who approves in each request policy", async () => {
   agent = agentRow({ owner_kind: "person", can_maintain: true, can_use: true });
   renderSheet({ tab: "grants" });
@@ -628,7 +661,12 @@ it("clears an agent's own access mode back to the workspace setting", async () =
 
 it("hides the agent model selector without the internal model-controls flag", async () => {
   const owner = useAuthStore.getState().user!;
-  useAuthStore.getState().setUser({ ...owner, capabilities: { billing_available: false, enabled_features: [] } });
+  useAuthStore
+    .getState()
+    .setUser({
+      ...owner,
+      capabilities: { billing_available: false, enabled_features: [] },
+    });
   renderSheet();
   const profile = await screen.findByLabelText("Profile", { selector: "form" });
   expect(within(profile).queryByLabelText("Agent model", { selector: '[role="combobox"]' })).not.toBeInTheDocument();

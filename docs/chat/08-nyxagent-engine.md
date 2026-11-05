@@ -2421,3 +2421,16 @@ claim prevents independent retries of the visible and hidden replies. It also
 marks both messages so older replicas observe the same fence. Completed
 action digests remain fenced by `retry_duplicate_action`; missing/uncertain legacy
 activity evidence still requires review rather than replay.
+
+### Org-specialist channel execution
+
+`org_specialist` channel bindings add authenticated per-actor execution without
+changing personal/shared-agent lanes. Member DMs use the member's org-agent
+home; group/topic turns use hidden per-actor conversations over one public
+transcript. A default-off, admin-enabled guest policy intersects agent grants
+and guest operation scopes; the org pays this exact guest lane, including
+platform model credentials, under a daily exact reservation cap. Hidden model
+setup carries the same verified org origin and payer, with no user-supplied
+model/credential choices. The provider admin is only the transport principal.
+Readiness, live sender/agent/binding checks and source fences apply on every
+turn, key use and delivery. See the [channel contract](09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).

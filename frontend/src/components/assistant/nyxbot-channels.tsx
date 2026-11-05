@@ -19,6 +19,9 @@ import {
 import { CopyableField } from "@/components/shared/copyable-field";
 import { ChannelChats } from "@/components/assistant/nyxbot-channel-chats";
 import { useChannelBots } from "@/hooks/use-channel-bots";
+import { OrgSpecialistChannelSettings } from "@/components/assistant/org-specialist-channel-settings";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useAuthStore } from "@/stores/auth-store";
 import {
@@ -120,20 +123,42 @@ export function ChannelBotsManager({
     readonly link: NyxAgentChannelLink;
   }>();
   const [confirming, setConfirming] = useState<string>();
-  const [connectTargets, setConnectTargets] = useState<Record<string, string>>({});
+  const [connectTargets, setConnectTargets] = useState<Record<string, string>>(
+    {},
+  );
   const [error, setError] = useState<string>();
   const nyxbot = nyxBotOf(agents);
-  // Only live personal agents can receive bots or chats; organization specialists are private.
+  const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
+  const adminOf = (id: string | null | undefined) =>
+    orgs.data?.some((org) => org.id === id && org.your_role === "admin") ??
+    false;
+  // Organization targets require a same-org bot and live admin authority.
   const targets = agents.filter(
-    (row) => row.status !== "destroyed" && row.owner_kind !== "org",
+    (row) =>
+      row.status !== "destroyed" &&
+      !row.share_role &&
+      (row.owner_kind !== "org" || (orgChannels && adminOf(row.owner_id))),
   );
   const agentOf = (row: NyxAgentChannelAgent) => row.agent_id ?? nyxbot?.id;
   const connected = (channels.data ?? []).filter(
     (row) => !agent || agentOf(row) === agent.id,
   );
-  const connectedBotIds = new Set((channels.data ?? []).map((row) => row.channel_bot_id));
-  const available = (bots.data ?? []).filter((bot) => !connectedBotIds.has(bot.id));
-  const busy = connect.isPending || disconnect.isPending || link.isPending || retryGateway.isPending;
+  const connectedBotIds = new Set(
+    (channels.data ?? []).map((row) => row.channel_bot_id),
+  );
+  const available = (bots.data ?? []).filter(
+    (bot) =>
+      !connectedBotIds.has(bot.id) &&
+      (agent?.owner_kind !== "org" ||
+        (orgChannels &&
+          bot.user_id === agent.owner_id &&
+          adminOf(agent.owner_id))),
+  );
+  const busy =
+    connect.isPending ||
+    disconnect.isPending ||
+    link.isPending ||
+    retryGateway.isPending;
 
   async function retryNative(row: NyxAgentChannelAgent) {
     setError(undefined);
@@ -148,7 +173,13 @@ export function ChannelBotsManager({
     setError(undefined);
     try {
       const result = await connect.mutateAsync({ botId, agentId });
-      setOwnerLink({ botId, agentId, label: result.channel_agent.bot_label, link: result.link });
+      if (!result.channel_agent.org_specialist)
+        setOwnerLink({
+          botId,
+          agentId,
+          label: result.channel_agent.bot_label,
+          link: result.link,
+        });
     } catch (cause) {
       setError(errorMessage(cause, "Could not connect this bot. Try again."));
     }
@@ -164,7 +195,12 @@ export function ChannelBotsManager({
     try {
       await link.mutateAsync({ channelAgentId: row.id, agentId });
     } catch (cause) {
-      setError(errorMessage(cause, "Could not move this bot to that agent. Try again."));
+      setError(
+        errorMessage(
+          cause,
+          "Could not move this bot to that agent. Try again.",
+        ),
+      );
     }
   }
 
@@ -175,7 +211,9 @@ export function ChannelBotsManager({
       setConfirming(undefined);
       if (ownerLink?.botId === row.channel_bot_id) setOwnerLink(undefined);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not disconnect this bot. Try again."));
+      setError(
+        errorMessage(cause, "Could not disconnect this bot. Try again."),
+      );
     }
   }
 
@@ -209,6 +247,14 @@ export function ChannelBotsManager({
           {connected.map((row) => {
             const target = targets.find((candidate) => candidate.id === agentOf(row));
             const live = row.status === "pending" || row.status === "active";
+            const canManage =
+              !row.org_specialist || adminOf(row.org_specialist.org_id);
+            const rowTargets = targets.filter((a) =>
+              row.org_specialist
+                ? a.owner_kind === "org" &&
+                  a.owner_id === row.org_specialist.org_id
+                : a.owner_kind !== "org",
+            );
             return (
               <li key={row.id}>
                 <GroupedList
@@ -224,7 +270,7 @@ export function ChannelBotsManager({
                         </p>
                       ) : null}
                       {row.platform === "discord" ? <DiscordGatewayStatus row={row} /> : null}
-                      {!row.owner_linked && row.inbound_hint ? (
+                      {!row.org_specialist && !row.owner_linked && row.inbound_hint ? (
                         <p>{row.inbound_hint}</p>
                       ) : null}
                       {["failing", "interrupted", "media_failed"].includes(
@@ -248,7 +294,7 @@ export function ChannelBotsManager({
                   }
                 >
                   <GroupedRow
-                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: "Channels › Connected bot", keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
+                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: "Channels › Connected bot", keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.org_specialist ? "Organization specialist" : row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
                     title={
                       <>
                         {row.bot_label}
@@ -263,7 +309,7 @@ export function ChannelBotsManager({
                       channelPlatformName(row.platform),
                       row.org_id ? orgName(row.org_id) : undefined,
                       channelStatus[row.status] ?? "Unavailable",
-                      row.owner_linked ? "Owner linked" : "Owner not linked",
+                      row.org_specialist ? "Organization specialist" : row.owner_linked ? "Owner linked" : "Owner not linked",
                     ]
                       .filter(Boolean)
                       .join(" · ")}
@@ -272,25 +318,25 @@ export function ChannelBotsManager({
                     title="Answered by"
                     accessory={
                       <AgentSelect
-                        agents={targets}
+                        agents={rowTargets}
                         value={agentOf(row)}
                         label={`Agent for ${row.bot_label}`}
-                        disabled={busy}
+                        disabled={busy || !canManage}
                         onChange={(agentId) => void relink(row, agentId)}
                       />
                     }
                   />
-                  {live ? (
+                  {live && canManage ? (
                     <ChannelChats
                       channel={row}
-                      agents={targets}
+                      agents={rowTargets}
                       botAgentName={(() => {
                         const current = agents.find((candidate) => candidate.id === agentOf(row));
                         return current ? agentLabel(current) : "NyxBot";
                       })()}
                     />
                   ) : null}
-                  {row.platform === "discord" && row.transport === "direct" && row.status === "active" && row.gateway_native_activation ? (
+                  {canManage && row.platform === "discord" && row.transport === "direct" && row.status === "active" && row.gateway_native_activation ? (
                     <GroupedRow
                       asChild
                       interactive
@@ -301,7 +347,7 @@ export function ChannelBotsManager({
                       </button>
                     </GroupedRow>
                   ) : null}
-                  {row.status === "failed" ? (
+                  {!canManage ? null : row.status === "failed" ? (
                     <GroupedRow asChild interactive>
                       <button
                         type="button"
@@ -313,7 +359,7 @@ export function ChannelBotsManager({
                         Reconnect
                       </button>
                     </GroupedRow>
-                  ) : live ? (
+                  ) : live && !row.org_specialist ? (
                     <GroupedRow asChild interactive>
                       <button
                         type="button"
@@ -328,7 +374,7 @@ export function ChannelBotsManager({
                       </button>
                     </GroupedRow>
                   ) : null}
-                  {confirming === row.id ? (
+                  {!canManage ? null : confirming === row.id ? (
                     <>
                       <GroupedRow asChild interactive>
                         <button
@@ -369,6 +415,9 @@ export function ChannelBotsManager({
                     </GroupedRow>
                   )}
                 </GroupedList>
+                {row.org_specialist && live ? (
+                  <OrgSpecialistChannelSettings id={row.id} />
+                ) : null}
               </li>
             );
           })}
@@ -448,6 +497,9 @@ export function ChannelBotsManager({
               .map((bot) => {
                 const target = agent?.id ?? connectTargets[bot.id] ?? nyxbot?.id;
                 const targetName = agent ? agentLabel(agent) : undefined;
+                const botTargets = targets.filter(
+                  (candidate) => candidate.owner_kind !== "org" || candidate.owner_id === bot.user_id,
+                );
                 return (
                   <GroupedRow data-drawer-search-target={`available-bot-${bot.id}`} key={bot.id} asChild>
                     <li>
@@ -463,7 +515,7 @@ export function ChannelBotsManager({
                       <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
                         {agent ? null : (
                           <AgentSelect
-                            agents={targets}
+                            agents={botTargets}
                             value={target}
                             label={`Agent for ${bot.label}`}
                             disabled={busy}

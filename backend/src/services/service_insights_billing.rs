@@ -514,7 +514,11 @@ async fn explain_connections_in_context(
         if !resolved_owners.contains_key(&owner_key) {
             let resolved = billing
                 .owner_resolver()
-                .resolve_for_execution(billing_principal_id, &service.user_id, credential_class)
+                .resolve_for_ordinary_execution(
+                    billing_principal_id,
+                    &service.user_id,
+                    credential_class,
+                )
                 .await?;
             resolved_owners.insert(owner_key.clone(), resolved.owner_id);
         }

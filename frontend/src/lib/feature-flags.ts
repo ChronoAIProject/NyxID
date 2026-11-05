@@ -37,6 +37,7 @@ export const FEATURE_FLAG = {
   NYXAGENT_ENGINE: "assistant:nyxagent-engine",
   ASSISTANT_MODEL_CONTROLS: "assistant:model-controls",
   ASSISTANT_WORKSPACE_PREVIEW: "assistant:workspace-preview",
+  ORG_SPECIALIST_CHANNELS: "nyxbot:org-specialist-channels",
   ORG_AGENTS: "assistant:org-agents",
   SHARED_AGENTS: "assistant:shared-agents",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",

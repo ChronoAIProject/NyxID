@@ -201,6 +201,12 @@ const SHARED_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+const ORG_SPECIALIST_CHANNELS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: "nyxbot:org-specialist-channels",
+    description: "Organization specialist channels with member identity and budgeted org-paid guests; requires all executing replicas upgraded and old workers drained.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
@@ -417,6 +423,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
@@ -466,6 +473,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     HOSTED_CONNECT_INTENT_FLAG,
     AGENT_LEARNING_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
     VOICE_OPENAI_PLATFORM_FLAG,
@@ -3082,6 +3090,7 @@ mod tests {
                 "assistant:hosted-connect-intent-v1",
                 "assistant:agent-learning",
                 "assistant:org-agents",
+                "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",
                 "assistant:voice",
                 "assistant:voice-openai-platform",
