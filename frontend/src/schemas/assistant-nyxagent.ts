@@ -220,7 +220,7 @@ export const nyxAgentMessageSchema = z.object({
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
   crm_artifacts: crmArtifacts,
-      attachments: z.array(nyxAgentAttachmentSchema).default([]),
+  attachments: z.array(nyxAgentAttachmentSchema).default([]),
   activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
   /** A user message written in a chat app: its platform. */
   via: z.string().nullish(),
@@ -901,7 +901,7 @@ export const assistantGroupMessageSchema = z.object({
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
   crm_artifacts: crmArtifacts,
-      attachments: z.array(nyxAgentAttachmentSchema).optional(),
+  attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),
   seq: z.number().int().positive(),
   /** `notice` is a NyxID-authored system line (members joined, renamed, ...). */

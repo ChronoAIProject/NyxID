@@ -30,12 +30,7 @@ vi.mock("@/hooks/use-channel-bots", () => ({
 let availableBots: Record<string, unknown>[];
 const at = "2026-09-28T00:00:00Z";
 let agent: Record<string, unknown>;
-let memory: {
-  id: string;
-  text: string;
-  created_at: string;
-  updated_at: string;
-}[];
+let memory: { id: string; text: string; created_at: string; updated_at: string }[];
 let readinessReads: number;
 let writes: { method: string; endpoint: string; body: unknown }[];
 let grantRequestBodies: string[];
@@ -92,28 +87,20 @@ beforeEach(() => {
     is_admin: false,
     is_active: true,
     created_at: at,
-    capabilities: {
-      billing_available: false,
-      enabled_features: ["assistant:model-controls"],
-    },
+    capabilities: { billing_available: false, enabled_features: ["assistant:model-controls"] },
   });
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
-      const path = new URL(input instanceof Request ? input.url : String(input))
-        .pathname;
-      const fixtures: Record<string, unknown> = {
-        "/api/v1/nodes": { nodes: [] },
-        "/api/v1/saved-logins": [],
-        "/api/v1/triggers": { triggers: [] },
-        "/api/v1/orgs": { orgs: [] },
-      };
-      if (!(path in fixtures))
-        throw new Error(`Unexpected account read: ${path}`);
-      return new Response(JSON.stringify(fixtures[path]));
-    }),
-  );
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+    const fixtures: Record<string, unknown> = {
+      "/api/v1/nodes": { nodes: [] },
+      "/api/v1/saved-logins": [],
+      "/api/v1/triggers": { triggers: [] },
+      "/api/v1/orgs": { orgs: [] },
+    };
+    if (!(path in fixtures)) throw new Error(`Unexpected account read: ${path}`);
+    return new Response(JSON.stringify(fixtures[path]));
+  }));
   writes = [];
   grantRequestBodies = [];
   availableBots = [];
@@ -121,18 +108,8 @@ beforeEach(() => {
   requestMode = "denied";
   agent = agentRow({});
   memory = [
-    {
-      id: "n1",
-      text: "Weekly digests on Mondays",
-      created_at: at,
-      updated_at: at,
-    },
-    {
-      id: "n2",
-      text: "Label urgent issues p0",
-      created_at: at,
-      updated_at: at,
-    },
+    { id: "n1", text: "Weekly digests on Mondays", created_at: at, updated_at: at },
+    { id: "n2", text: "Label urgent issues p0", created_at: at, updated_at: at },
   ];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     const method = init.method ?? "GET";
@@ -141,30 +118,19 @@ beforeEach(() => {
     const id = String(agent.id);
     if (endpoint === `/assistant/nyxagent/agents/${id}/guest-readiness`) {
       readinessReads++;
-      return new Response(
-        JSON.stringify({
-          status: "not_ready",
-          fix: "Send one message to this assistant yourself.",
-        }),
-      );
+      return new Response(JSON.stringify({ status: "not_ready", fix: "Send one message to this assistant yourself." }));
     }
-    if (
-      endpoint === `/assistant/nyxagent/agents/${id}/memory/n1` &&
-      method === "DELETE"
-    ) {
+    if (endpoint === `/assistant/nyxagent/agents/${id}/memory/n1` && method === "DELETE") {
       memory = memory.filter((note) => note.id !== "n1");
       return new Response(null, { status: 204 });
     }
-    if (
-      endpoint === `/assistant/nyxagent/agents/${id}/memory` &&
+    if (endpoint === `/assistant/nyxagent/agents/${id}/memory` &&
       method === "POST"
     ) {
       return new Response(JSON.stringify({ id: "new-note" }));
     }
     if (endpoint === `/assistant/nyxagent/agents/${id}/skills`) {
-      return new Response(
-        JSON.stringify({ revision: 0, skills: [], metadata: {} }),
-      );
+      return new Response(JSON.stringify({ revision: 0, skills: [], metadata: {} }));
     }
     if (endpoint === "/assistant/crm/objects") {
       return new Response(
@@ -198,21 +164,12 @@ beforeEach(() => {
       agent = { ...agent, status: "destroyed", destroyed_at: at };
       return new Response(JSON.stringify({ id, destroyed_at: at }));
     }
-    if (
-      endpoint === `/assistant/nyxagent/agents/${id}` &&
-      method === "DELETE"
-    ) {
+    if (endpoint === `/assistant/nyxagent/agents/${id}` && method === "DELETE") {
       return new Response(null, { status: 204 });
     }
     if (endpoint === `/assistant/nyxagent/agents/${id}` && method === "PATCH") {
       agent = { ...agent, ...(body as object) };
-      return new Response(
-        JSON.stringify({
-          id,
-          name: agent.name,
-          description: agent.description,
-        }),
-      );
+      return new Response(JSON.stringify({ id, name: agent.name, description: agent.description }));
     }
     if (endpoint === `/assistant/nyxagent/agents/${id}`) {
       return new Response(JSON.stringify({ agent, memory, threads: [] }));
@@ -221,30 +178,24 @@ beforeEach(() => {
       return new Response(JSON.stringify({ channel_agents: [] }));
     }
     if (endpoint === "/assistant/nyxagent/settings") {
-      return new Response(
-        JSON.stringify({
-          access_mode: "nyxmode",
-          skip_destructive_confirmation: false,
-          max_live_subagents: 8,
-          max_concurrent_subagent_turns: 3,
-          max_live_subagents_limit: 32,
-          max_concurrent_subagent_turns_limit: 8,
-          specialist_access_requests: requestMode,
-        }),
-      );
+      return new Response(JSON.stringify({
+        access_mode: "nyxmode",
+        skip_destructive_confirmation: false,
+        max_live_subagents: 8,
+        max_concurrent_subagent_turns: 3,
+        max_live_subagents_limit: 32,
+        max_concurrent_subagent_turns_limit: 8,
+        specialist_access_requests: requestMode,
+      }));
     }
     if (endpoint === "/assistant/nyxagent/models") {
-      return new Response(
-        JSON.stringify([
-          { id: "nyxagent/chat", label: "chat", available: true },
-          { id: "nyxagent/research", label: "research", available: true },
-          { id: "nyxagent/retired", label: "retired", available: false },
-        ]),
-      );
+      return new Response(JSON.stringify([
+        { id: "nyxagent/chat", label: "chat", available: true },
+        { id: "nyxagent/research", label: "research", available: true },
+        { id: "nyxagent/retired", label: "retired", available: false },
+      ]));
     }
-    return new Response(JSON.stringify({ message: "not found" }), {
-      status: 404,
-    });
+    return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
   };
 });
 
@@ -257,9 +208,7 @@ afterEach(() => {
   useAuthStore.getState().setUser(null);
 });
 
-function renderSheet(
-  props: Partial<ComponentProps<typeof AgentDetailsSheet>> = {},
-) {
+function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = {}) {
   const onDeleted = vi.fn();
   render(
     <QueryClientProvider client={client}>
@@ -293,18 +242,10 @@ const NYXBOT_TAKEOVER =
 it("forgets a memory note", async () => {
   const { user } = renderSheet({ tab: "memory" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  const notes = await within(sheet).findByRole("list", {
-    name: "researcher memory",
-  });
+  const notes = await within(sheet).findByRole("list", { name: "researcher memory" });
   expect(notes).toHaveTextContent("Weekly digests on Mondays");
-  await user.click(
-    within(notes).getByRole("button", {
-      name: "Forget: Weekly digests on Mondays",
-    }),
-  );
-  await waitFor(() =>
-    expect(notes).not.toHaveTextContent("Weekly digests on Mondays"),
-  );
+  await user.click(within(notes).getByRole("button", { name: "Forget: Weekly digests on Mondays" }));
+  await waitFor(() => expect(notes).not.toHaveTextContent("Weekly digests on Mondays"));
   expect(writes).toContainEqual({
     method: "DELETE",
     endpoint: "/assistant/nyxagent/agents/agent-researcher/memory/n1",
@@ -364,11 +305,7 @@ it("lets the owner choose what others in the agent's chats may do with each serv
     expect(writes).toContainEqual({
       method: "PUT",
       endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
-      body: {
-        services: ["github"],
-        account_read: false,
-        guest_access: { github: "all" },
-      },
+      body: { services: ["github"], account_read: false, guest_access: { github: "all" } },
     }),
   );
 });
@@ -479,12 +416,8 @@ it("edits the role and destroys only after confirmation", async () => {
 
   const danger = within(sheet).getByRole("region", { name: "Danger zone" });
   await user.click(within(danger).getByRole("button", { name: "Destroy" }));
-  const confirm = await screen.findByRole("dialog", {
-    name: "Destroy researcher?",
-  });
-  expect(writes.some((write) => write.endpoint.endsWith("/destroy"))).toBe(
-    false,
-  );
+  const confirm = await screen.findByRole("dialog", { name: "Destroy researcher?" });
+  expect(writes.some((write) => write.endpoint.endsWith("/destroy"))).toBe(false);
   await user.click(within(confirm).getByRole("button", { name: "Destroy" }));
   await waitFor(() =>
     expect(writes).toContainEqual({
@@ -503,15 +436,11 @@ it("deletes a destroyed specialist permanently after confirmation", async () => 
   agent = agentRow({ status: "destroyed", destroyed_at: at });
   const { onDeleted, user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  await user.click(
-    await within(sheet).findByRole("button", { name: "Delete permanently" }),
-  );
+  await user.click(await within(sheet).findByRole("button", { name: "Delete permanently" }));
   const confirm = await screen.findByRole("dialog", {
     name: "Delete researcher permanently?",
   });
-  await user.click(
-    within(confirm).getByRole("button", { name: "Delete permanently" }),
-  );
+  await user.click(within(confirm).getByRole("button", { name: "Delete permanently" }));
   await waitFor(() => expect(onDeleted).toHaveBeenCalledOnce());
   expect(writes).toContainEqual({
     method: "DELETE",
@@ -562,12 +491,7 @@ it("shows the server's refusal of a display name", async () => {
 });
 
 it("lets NyxBot get a display name and persona, with full access and no grants or lifecycle actions", async () => {
-  agent = agentRow({
-    id: "agent-nyxbot",
-    kind: "nyxbot",
-    name: "NyxBot",
-    created_by: "user",
-  });
+  agent = agentRow({ id: "agent-nyxbot", kind: "nyxbot", name: "NyxBot", created_by: "user" });
   const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const profile = await within(sheet).findByLabelText("Profile", { selector: "form" });
@@ -691,17 +615,13 @@ it("explains the specialist sandbox and who approves in each request policy", as
   agent = agentRow({ owner_kind: "person", can_maintain: true, can_use: true });
   renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  const authority = await screen.findByRole("region", {
-    name: "Access authority",
-  });
+  const authority = await screen.findByRole("region", { name: "Access authority" });
   await waitFor(() =>
     expect(authority).toHaveTextContent(
       "When you talk to it directly, it tells you what it is missing and continues; you grant access here.",
     ),
   );
-  expect(authority).toHaveTextContent(
-    "cannot grant access to itself or to other agents",
-  );
+  expect(authority).toHaveTextContent("cannot grant access to itself or to other agents");
   expect(authority).toHaveTextContent("Its requests are never routed");
   // Direct chats never hand the work to NyxBot: no copy in the sheet says so.
   expect(sheet).not.toHaveTextContent(NYXBOT_TAKEOVER);
@@ -720,12 +640,8 @@ it("explains the specialist sandbox and who approves in each request policy", as
       "Only for work NyxBot assigned, or in a group with NyxBot, do its requests go to NyxBot, which approves or denies them",
     ),
   );
-  expect(routed).toHaveTextContent(
-    "When you talk to it directly, it tells you what it is missing",
-  );
-  expect(
-    screen.getByRole("dialog", { name: "Agent details" }),
-  ).not.toHaveTextContent(NYXBOT_TAKEOVER);
+  expect(routed).toHaveTextContent("When you talk to it directly, it tells you what it is missing");
+  expect(screen.getByRole("dialog", { name: "Agent details" })).not.toHaveTextContent(NYXBOT_TAKEOVER);
 });
 
 it.each([
@@ -747,21 +663,13 @@ it("shows an explicit no-access state for an agent the viewer cannot read, witho
   const unknown = "agent-not-mine";
   globalThis.__nyxidAssistantHttpMock = ({ endpoint }) =>
     endpoint === `/assistant/nyxagent/agents/${unknown}`
-      ? new Response(
-          JSON.stringify({ message: "not found", error_code: 1000 }),
-          { status: 404 },
-        )
-      : new Response(
-          JSON.stringify({ message: "not found", error_code: 1000 }),
-          { status: 404 },
-        );
+      ? new Response(JSON.stringify({ message: "not found", error_code: 1000 }), { status: 404 })
+      : new Response(JSON.stringify({ message: "not found", error_code: 1000 }), { status: 404 });
   renderSheet({ agentId: unknown, tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const note = await within(sheet).findByRole("note", { name: "No access" });
   expect(note).toHaveTextContent("You cannot view this agent.");
-  expect(note).toHaveTextContent(
-    "Its grants and skills cannot be shown or changed here.",
-  );
+  expect(note).toHaveTextContent("Its grants and skills cannot be shown or changed here.");
   expect(sheet).toHaveTextContent("This agent is not available to you.");
   expect(within(sheet).queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   expect(within(sheet).queryByLabelText("Grants", { selector: "form" })).not.toBeInTheDocument();
@@ -770,27 +678,18 @@ it("shows an explicit no-access state for an agent the viewer cannot read, witho
 
 it("keeps the retryable banner for a transient agent read failure", async () => {
   globalThis.__nyxidAssistantHttpMock = () =>
-    new Response(
-      JSON.stringify({ message: "upstream timeout", error_code: 5000 }),
-      { status: 503 },
-    );
+    new Response(JSON.stringify({ message: "upstream timeout", error_code: 5000 }), { status: 503 });
   renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  expect(
-    await within(sheet).findByRole("button", { name: "Retry" }),
-  ).toBeVisible();
-  expect(
-    within(sheet).queryByRole("note", { name: "No access" }),
-  ).not.toBeInTheDocument();
+  expect(await within(sheet).findByRole("button", { name: "Retry" })).toBeVisible();
+  expect(within(sheet).queryByRole("note", { name: "No access" })).not.toBeInTheDocument();
 });
 
 it("explains that a destroyed specialist is read-only when a link lands on its grants", async () => {
   agent = agentRow({ status: "destroyed", destroyed_at: at });
   const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
-  const note = await within(sheet).findByRole("note", {
-    name: "Agent destroyed",
-  });
+  const note = await within(sheet).findByRole("note", { name: "Agent destroyed" });
   expect(note).toHaveTextContent("researcher was destroyed on");
   expect(note).toHaveTextContent("Its grants, skills and settings are read-only and it no longer runs. You can delete it permanently below.");
   const grants = within(sheet).getByLabelText("Grants", { selector: "form" });
@@ -816,12 +715,8 @@ it("explains that an organization viewer can see but not change grants and skill
   expect(within(sheet).getByRole("region", { name: "Skills" })).toBeVisible();
   await user.click(within(sheet).getByText("Access", { selector: '[role="tab"]' }));
   expect(within(sheet).getByRole("region", { name: "Grants" })).toBeVisible();
-  expect(
-    within(sheet).queryByRole("button", { name: "Save grants" }),
-  ).not.toBeInTheDocument();
-  expect(
-    within(sheet).queryByRole("note", { name: "Agent destroyed" }),
-  ).not.toBeInTheDocument();
+  expect(within(sheet).queryByRole("button", { name: "Save grants" })).not.toBeInTheDocument();
+  expect(within(sheet).queryByRole("note", { name: "Agent destroyed" })).not.toBeInTheDocument();
   expect(writes).toEqual([]);
 });
 
@@ -855,9 +750,10 @@ it("selects the agent's model from the live list and its own access mode", async
   const model = within(profile).getByLabelText("Agent model", { selector: '[role="combobox"]' });
   await waitFor(() => expect(model).toHaveTextContent("Default model"));
   await user.click(model);
-  expect(
-    await screen.findByRole("option", { name: "Retired (unavailable)" }),
-  ).toHaveAttribute("aria-disabled", "true");
+  expect(await screen.findByRole("option", { name: "Retired (unavailable)" })).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
   await user.click(screen.getByRole("option", { name: "Research" }));
   const mode = within(profile).getByLabelText("Agent access mode", { selector: '[role="combobox"]' });
   expect(mode).toHaveTextContent("Workspace setting (Auto)");
@@ -869,19 +765,13 @@ it("selects the agent's model from the live list and its own access mode", async
     expect(writes).toContainEqual({
       method: "PATCH",
       endpoint: "/assistant/nyxagent/agents/agent-researcher",
-      body: {
-        model: "nyxagent/research",
-        access_mode_override: "ask_every_time",
-      },
+      body: { model: "nyxagent/research", access_mode_override: "ask_every_time" },
     }),
   );
 });
 
 it("clears an agent's own access mode back to the workspace setting", async () => {
-  agent = agentRow({
-    model: "nyxagent/chat",
-    access_mode_override: "autopilot",
-  });
+  agent = agentRow({ model: "nyxagent/chat", access_mode_override: "autopilot" });
   const { user } = renderSheet();
   const profile = await screen.findByLabelText("Profile", { selector: "form" });
   const mode = within(profile).getByLabelText("Agent access mode", { selector: '[role="combobox"]' });
@@ -938,9 +828,7 @@ it("fetches visitor readiness only in the open owner Grants settings", async () 
   expect(readinessReads).toBe(0);
   cleanup();
   renderSheet({ tab: "grants" });
-  expect(
-    await screen.findByText("Send one message to this assistant yourself."),
-  ).toBeVisible();
+  expect(await screen.findByText("Send one message to this assistant yourself.")).toBeVisible();
   expect(readinessReads).toBe(1);
 });
 

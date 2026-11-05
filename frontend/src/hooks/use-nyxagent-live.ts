@@ -1,15 +1,8 @@
 import { useEffect } from "react";
-import {
-  useQueryClient,
-  type QueryClient,
-  type QueryKey,
-} from "@tanstack/react-query";
+import { useQueryClient, type QueryClient, type QueryKey } from "@tanstack/react-query";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { nyxBotGroupKeys } from "@/hooks/use-nyxbot-groups";
-import {
-  listenNyxAgentLive,
-  type NyxAgentLiveEvent,
-} from "@/lib/assistant/nyxagent-live";
+import { listenNyxAgentLive, type NyxAgentLiveEvent } from "@/lib/assistant/nyxagent-live";
 import { useAuthStore } from "@/stores/auth-store";
 
 /** The open thread or group refreshes this quickly after a change. */
@@ -38,16 +31,13 @@ export function nyxAgentLiveRefresh(
   switch (event.type) {
     case "conversation": {
       const signature = `${event.turn_id ?? ""}:${String(event.messages)}`;
-      const listsChanged =
-        event.title_changed || seen.get(event.id) !== signature;
+      const listsChanged = event.title_changed || seen.get(event.id) !== signature;
       seen.set(event.id, signature);
       if (event.group_id) {
         // A hidden group member thread: only its group shows it.
         return {
           now: [nyxBotGroupKeys.messages(userId, event.group_id)],
-          lists: listsChanged
-            ? [groupList, nyxBotQueryKeys.agents(userId)]
-            : [],
+          lists: listsChanged ? [groupList, nyxBotQueryKeys.agents(userId)] : [],
         };
       }
       return {
@@ -60,25 +50,13 @@ export function nyxAgentLiveRefresh(
     case "crm":
       return { now: [["crm", event.owner_id]], lists: [] };
     case "group":
-      return {
-        now: [nyxBotGroupKeys.messages(userId, event.id)],
-        lists: [groupList],
-      };
+      return { now: [nyxBotGroupKeys.messages(userId, event.id)], lists: [groupList] };
     case "channel_thread":
-      return {
-        now: [],
-        lists: [
-          nyxBotQueryKeys.channelChats(userId, event.channel_id),
-          nyxBotQueryKeys.threads(userId),
-        ],
-      };
+      return { now: [], lists: [nyxBotQueryKeys.channelChats(userId, event.channel_id), nyxBotQueryKeys.threads(userId)] };
     case "channels":
       return {
         now: [],
-        lists: [
-          nyxBotQueryKeys.channels(userId),
-          nyxBotQueryKeys.agents(userId),
-        ],
+        lists: [nyxBotQueryKeys.channels(userId), nyxBotQueryKeys.agents(userId)],
       };
     case "ready":
     case "resync":
@@ -95,34 +73,23 @@ let active:
 
 function start(client: QueryClient, userId: string) {
   const seen = new Map<string, string>();
-  const pending = {
-    now: new Map<string, QueryKey>(),
-    lists: new Map<string, QueryKey>(),
-  };
-  const timers: {
-    now?: ReturnType<typeof setTimeout>;
-    lists?: ReturnType<typeof setTimeout>;
-  } = {};
+  const pending = { now: new Map<string, QueryKey>(), lists: new Map<string, QueryKey>() };
+  const timers: { now?: ReturnType<typeof setTimeout>; lists?: ReturnType<typeof setTimeout> } =
+    {};
   const flush = (which: "now" | "lists") => {
     timers[which] = undefined;
     for (const key of pending[which].values()) {
       // Never cancel a refresh already on its way: bursts would starve it.
-      void client.invalidateQueries(
-        { queryKey: key },
-        { cancelRefetch: false },
-      );
+      void client.invalidateQueries({ queryKey: key }, { cancelRefetch: false });
     }
     pending[which].clear();
   };
   const stop = listenNyxAgentLive((event) => {
     const refresh = nyxAgentLiveRefresh(userId, event, seen);
     for (const key of refresh.now) pending.now.set(JSON.stringify(key), key);
-    for (const key of refresh.lists)
-      pending.lists.set(JSON.stringify(key), key);
-    if (pending.now.size)
-      timers.now ??= setTimeout(() => flush("now"), FAST_FLUSH_MS);
-    if (pending.lists.size)
-      timers.lists ??= setTimeout(() => flush("lists"), LIST_FLUSH_MS);
+    for (const key of refresh.lists) pending.lists.set(JSON.stringify(key), key);
+    if (pending.now.size) timers.now ??= setTimeout(() => flush("now"), FAST_FLUSH_MS);
+    if (pending.lists.size) timers.lists ??= setTimeout(() => flush("lists"), LIST_FLUSH_MS);
   });
   return () => {
     stop();
@@ -141,12 +108,7 @@ export function useNyxAgentLive(enabled: boolean) {
       active.stop();
       active = undefined;
     }
-    active ??= {
-      client: queryClient,
-      userId,
-      users: 0,
-      stop: start(queryClient, userId),
-    };
+    active ??= { client: queryClient, userId, users: 0, stop: start(queryClient, userId) };
     const mine = active;
     mine.users += 1;
     return () => {

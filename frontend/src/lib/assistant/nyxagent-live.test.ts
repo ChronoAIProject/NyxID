@@ -15,16 +15,12 @@ function sse(frames: readonly object[], keepOpen = true) {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       for (const frame of frames) {
-        controller.enqueue(
-          encoder.encode(`event: x\ndata: ${JSON.stringify(frame)}\n\n`),
-        );
+        controller.enqueue(encoder.encode(`event: x\ndata: ${JSON.stringify(frame)}\n\n`));
       }
       if (!keepOpen) controller.close();
     },
   });
-  return new Response(stream, {
-    headers: { "content-type": "text/event-stream" },
-  });
+  return new Response(stream, { headers: { "content-type": "text/event-stream" } });
 }
 
 let requests: string[];
@@ -41,11 +37,7 @@ afterEach(() => {
 });
 
 it("parses only known frames and ignores anything else", () => {
-  expect(
-    parseNyxAgentLiveEvent(
-      '{"type":"conversation","id":"nyxa-1","group_id":null}',
-    ),
-  ).toEqual({
+  expect(parseNyxAgentLiveEvent('{"type":"conversation","id":"nyxa-1","group_id":null}')).toEqual({
     type: "conversation",
     id: "nyxa-1",
     group_id: null,
@@ -63,10 +55,7 @@ it("parses only known frames and ignores anything else", () => {
 it("shares one stream, delivers its events, and closes it with the last listener", async () => {
   globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
     requests.push(endpoint);
-    return sse([
-      { type: "ready" },
-      { type: "conversation", id: "nyxa-1", group_id: "nyxg-1" },
-    ]);
+    return sse([{ type: "ready" }, { type: "conversation", id: "nyxa-1", group_id: "nyxg-1" }]);
   };
   const first: NyxAgentLiveEvent[] = [];
   const second: NyxAgentLiveEvent[] = [];
@@ -94,15 +83,10 @@ it("reconnects a silent live stream and cancels its old reader", async () => {
   const cancel = vi.fn();
   globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
     requests.push(endpoint);
-    return new Response(
-      new ReadableStream({
-        start(controller) {
-          controller.enqueue(encoder.encode('data: {"type":"ready"}\n\n'));
-        },
-        cancel,
-      }),
-      { headers: { "content-type": "text/event-stream" } },
-    );
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(encoder.encode('data: {"type":"ready"}\n\n')); },
+      cancel,
+    }), { headers: { "content-type": "text/event-stream" } });
   };
   const events: NyxAgentLiveEvent[] = [];
   const stop = listenNyxAgentLive((event) => events.push(event));
@@ -122,21 +106,16 @@ it("counts keepalive comments as connection activity", async () => {
   let writer!: ReadableStreamDefaultController<Uint8Array>;
   globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
     requests.push(endpoint);
-    return new Response(
-      new ReadableStream({
-        start(controller) {
-          writer = controller;
-          controller.enqueue(encoder.encode('data: {"type":"ready"}\n\n'));
-        },
-      }),
-      { headers: { "content-type": "text/event-stream" } },
-    );
+    return new Response(new ReadableStream({ start(controller) {
+      writer = controller;
+      controller.enqueue(encoder.encode('data: {"type":"ready"}\n\n'));
+    } }), { headers: { "content-type": "text/event-stream" } });
   };
   const stop = listenNyxAgentLive(() => undefined);
   await vi.advanceTimersByTimeAsync(0);
   for (let tick = 0; tick < 5; tick += 1) {
     await vi.advanceTimersByTimeAsync(15_000);
-    writer.enqueue(encoder.encode(": keepalive\n\n"));
+    writer.enqueue(encoder.encode(': keepalive\n\n'));
     await vi.advanceTimersByTimeAsync(0);
   }
   expect(getNyxAgentLiveStatus()).toBe("live");
@@ -147,10 +126,7 @@ it("counts keepalive comments as connection activity", async () => {
 it("falls back to polling when the server has no live stream", async () => {
   globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
     requests.push(endpoint);
-    return new Response(
-      JSON.stringify({ message: "Assistant route not found." }),
-      { status: 404 },
-    );
+    return new Response(JSON.stringify({ message: "Assistant route not found." }), { status: 404 });
   };
   const stop = listenNyxAgentLive(() => undefined);
   await vi.waitFor(() => expect(getNyxAgentLiveStatus()).toBe("unsupported"));
@@ -189,13 +165,7 @@ it("refreshes the open thread on every change but lists only when a turn or coun
   const change = (turn: string | null, messages: number) =>
     nyxAgentLiveRefresh(
       "u",
-      {
-        type: "conversation",
-        id: "nyxa-1",
-        group_id: null,
-        turn_id: turn,
-        messages,
-      },
+      { type: "conversation", id: "nyxa-1", group_id: null, turn_id: turn, messages },
       seen,
     );
   const threadAndAgents = [
@@ -215,13 +185,7 @@ it("refreshes the open thread on every change but lists only when a turn or coun
   expect(
     nyxAgentLiveRefresh(
       "u",
-      {
-        type: "conversation",
-        id: "nyxa-m",
-        group_id: "nyxg-1",
-        turn_id: "t",
-        messages: 1,
-      },
+      { type: "conversation", id: "nyxa-m", group_id: "nyxg-1", turn_id: "t", messages: 1 },
       seen,
     ),
   ).toEqual({
@@ -241,28 +205,10 @@ it("refreshes the open thread on every change but lists only when a turn or coun
 
 it("refreshes titles even when the turn and message count did not change", () => {
   const seen = new Map<string, string>([["nyxa-1", ":2"]]);
-  const event = {
-    type: "conversation" as const,
-    id: "nyxa-1",
-    group_id: null,
-    turn_id: null,
-    messages: 2,
-    title_changed: true,
-  };
+  const event = { type: "conversation" as const, id: "nyxa-1", group_id: null, turn_id: null, messages: 2, title_changed: true };
   const refresh = nyxAgentLiveRefresh("u", event, seen);
-  expect(refresh.lists).toContainEqual([
-    "assistant",
-    "nyxagent",
-    "u",
-    "threads",
-  ]);
-  expect(refresh.now).toContainEqual([
-    "assistant",
-    "nyxagent",
-    "u",
-    "history",
-    "nyxa-1",
-  ]);
+  expect(refresh.lists).toContainEqual(["assistant", "nyxagent", "u", "threads"]);
+  expect(refresh.now).toContainEqual(["assistant", "nyxagent", "u", "history", "nyxa-1"]);
 });
 
 it("invalidates only the event owner and resyncs CRM after reconnect", () => {

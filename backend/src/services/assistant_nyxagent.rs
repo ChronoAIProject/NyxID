@@ -4089,7 +4089,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
-                                artifact_recovery_target: None,
+artifact_recovery_target: None,
                                 artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),

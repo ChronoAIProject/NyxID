@@ -258,8 +258,7 @@ pub async fn persist(
                 .ok_or_else(||AppError::NotFound("Voice conversation unavailable".into()))?;
             messages.insert_one(AssistantMessage{
                 crm_artifacts: Vec::new(),
-                delegated_images:Default::default(),
-                execution_task: None,
+                execution_task: None,delegated_images:Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
         media_pending: None,

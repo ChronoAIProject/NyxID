@@ -306,7 +306,7 @@ pub fn schema(name: &str) -> Value {
                 "machines": {"type":"array","maxItems":64,"items":string(200)},
                 "logins": {"type":"array","maxItems":64,"items":string(200)},
                 "crm": {"type": "array", "maxItems": 16, "items": {"type":"object", "required":["owner_id","object","capabilities"], "properties":{"owner_id":{"type":"string"},"object":{"type":"string"},"capabilities":{"type":"array","items":{"type":"string","enum":["read","write","schema"]}}},"additionalProperties":false}},
-            "account_read": {"type": "boolean"}}),
+                "account_read": {"type": "boolean"}}),
             vec!["subagent"],
         ),
         "search_agent_skills" => (
