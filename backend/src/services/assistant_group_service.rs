@@ -667,10 +667,14 @@ pub async fn delete(db: &Database, owner: &str, id: &str) -> AppResult<()> {
         .delete_many(doc! {"group_id": id})
         .session(&mut session)
         .await?;
-    db.collection::<AssistantGroup>(GROUPS)
-        .delete_one(owner_filter(owner, id)?)
+    if let Some(group) = db
+        .collection::<AssistantGroup>(GROUPS)
+        .find_one_and_delete(owner_filter(owner, id)?)
         .session(&mut session)
-        .await?;
+        .await?
+    {
+        super::trigger_schedule::group::deleted_in_session(db, &group, &mut session).await?;
+    }
     let mut attachment_cursor = db
         .collection::<bson::Document>(crate::models::assistant_attachment::COLLECTION_NAME)
         .find(doc! {"group_id": id, "user_id": owner})
@@ -892,6 +896,7 @@ async fn append_following_bound(
                         conversation_id,
                         message.seq,
                         now,
+                        Some(&group),
                         session,
                     )
                     .await?;
@@ -1148,6 +1153,7 @@ pub async fn follow(
                 &conversation_id,
                 since_seq,
                 Utc::now(),
+                None,
                 session,
             ))
             .await;
@@ -1157,6 +1163,7 @@ pub async fn follow(
         .map_err(transactions::map_transaction_error)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn follow_in_session(
     db: &Database,
     owner: &str,
@@ -1164,8 +1171,35 @@ async fn follow_in_session(
     conversation_id: &str,
     since_seq: i64,
     now: chrono::DateTime<Utc>,
+    snapshot: Option<&AssistantGroup>,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    if let Some(group) = snapshot.filter(|g| g.followers.iter().any(|f| f.automation.is_some())) {
+        let mut followers = group.followers.clone();
+        if followers.iter().any(|f| {
+            f.automation.is_none()
+                && f.conversation_id == conversation_id
+                && f.since_seq >= since_seq
+        }) {
+            return Ok(());
+        }
+        followers.retain(|f| f.automation.is_some() || f.conversation_id != conversation_id);
+        if followers.len() >= MAX_FOLLOWERS {
+            let Some(index) = followers.iter().position(|f| f.automation.is_none()) else {
+                return Err(AppError::Conflict("Group follower capacity reached".into()));
+            };
+            followers.remove(index);
+        }
+        followers.push(GroupFollower {
+            automation: None,
+            conversation_id: conversation_id.into(),
+            since_seq,
+            created_at: now,
+            expires_at: Some(now + chrono::Duration::hours(FOLLOWER_TTL_HOURS)),
+        });
+        db.collection::<AssistantGroup>(GROUPS).update_one(owner_filter(owner, group_id)?, doc! {"$set": {"followers": bson::to_bson(&followers).map_err(|_| AppError::Internal("Follower encoding failed".into()))?}}).session(session).await?;
+        return Ok(());
+    }
     let mut filter = owner_filter(owner, group_id)?;
     filter.insert("created_by_user_id", bson::Bson::Null);
     let groups = db.collection::<AssistantGroup>(GROUPS);
@@ -1180,6 +1214,7 @@ async fn follow_in_session(
         .session(&mut *session)
         .await?;
     let follower = bson::to_bson(&GroupFollower {
+        automation: None,
         conversation_id: conversation_id.into(),
         since_seq,
         created_at: now,
@@ -1226,8 +1261,8 @@ pub async fn take_followers_if_quiet(
     // have no such field.
     let legacy_cutoff = now - chrono::Duration::hours(FOLLOWER_TTL_HOURS);
     for condition in [
-        doc! {"expires_at": {"$lte": bson::DateTime::from_chrono(now)}},
-        doc! {"expires_at": null,
+        doc! {"automation": null, "expires_at": {"$lte": bson::DateTime::from_chrono(now)}},
+        doc! {"automation": null, "expires_at": null,
         "created_at": {"$lte": bson::DateTime::from_chrono(legacy_cutoff)}},
     ] {
         groups
@@ -1238,6 +1273,10 @@ pub async fn take_followers_if_quiet(
             .await?;
     }
     let group = get(db, owner, group_id).await?;
+    if group.followers.iter().any(|f| f.automation.is_some()) {
+        // Atomic v2 delivery owns bound windows; never destructively take them.
+        return Ok((Vec::new(), 0));
+    }
     let live: Vec<GroupFollower> = group
         .followers
         .into_iter()

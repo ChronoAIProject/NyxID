@@ -682,6 +682,8 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
+    pub(crate) automation_parent: Option<super::trigger_schedule::direct::Parent>,
     /// Copied from a verified person's already-loaded enrollment. Not a client field.
     pub(crate) execution_enrollment: bool,
     pub(crate) execution_parent: Option<super::execution_permission_dispatch::tasks::Parent>,
@@ -857,6 +859,8 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            automation_work: None,
+            automation_parent: None,
             execution_enrollment: false,
             execution_parent: None,
             media_event_ids: Vec::new(),
@@ -2178,6 +2182,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            automation_v2: false,
             collaboration: None,
             owner_model_route: None,
             invocation_controlled: false,
@@ -2378,11 +2383,13 @@ pub(crate) async fn begin_owner_turn_in_session(
             return Err(AppError::NotFound("Queued group request not found".into()));
         }
     }
+    let mut automation_work = start.automation_work.clone();
     if let Some(claim) = &start.trigger {
         if start.origin != TurnOrigin::Trigger || start.guest {
             return Err(AppError::Forbidden("Invalid trigger turn".into()));
         }
-        super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
+        automation_work =
+            super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
     }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
@@ -2468,7 +2475,14 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if let Some(binding) = row.collaboration.as_ref() {
+    let events = if automation_work.is_some() && start.trigger.is_some() {
+        let work = automation_work.as_ref().expect("automation binding");
+        let (selected, rest) = std::mem::take(&mut row.pending_events)
+            .into_iter()
+            .partition(|e| e.automation_work.as_ref() == Some(work));
+        row.pending_events = rest;
+        selected
+    } else if let Some(binding) = row.collaboration.as_ref() {
         // Only the canonical permission receipt for this exact requester/root
         // may enter a collaboration continuation. Ordinary queue events remain
         // excluded from hidden threads.
@@ -2769,6 +2783,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            automation_work: lost.automation_work.clone(),
             execution_task: lost.execution_task.clone(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
@@ -2973,10 +2988,23 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
+    if automation_work.is_none() && start.origin == TurnOrigin::Event {
+        automation_work = events.first().and_then(|e| e.automation_work.clone());
+        if let Some(work) = automation_work.as_ref() {
+            super::trigger_schedule::direct::resume_in_session(
+                db, user_id, &id, &turn_id, work, session,
+            )
+            .await?;
+        }
+    }
+    if automation_work.is_some() {
+        row.automation_v2 = true;
+    }
     if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        automation_work: automation_work.clone(),
         execution_task: retry.as_ref().and_then(|r| r.execution_task.clone()),
         business_system_success: false,
         delegated_images: Default::default(),
@@ -3071,10 +3099,25 @@ pub(crate) async fn begin_owner_turn_in_session(
             .flatten(),
         also_deliver: Vec::new(),
     });
+    if let Some(work) = row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.clone())
+        .filter(|w| w.role == "group")
+    {
+        super::trigger_schedule::group::admit(db, &row, &work, turn_id, session).await?;
+    }
     Box::pin(super::assistant_delegated_images::assign_in_session(
         db, session, &mut row,
     ))
     .await?;
+    if let Some(parent) = start.automation_parent.as_ref() {
+        super::trigger_schedule::direct::register_in_session(
+            db, session, user_id, parent, &mut row,
+        )
+        .await?;
+    }
+
     if row
         .active_turn
         .as_ref()
@@ -3187,6 +3230,17 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         if let Some(card) = card.as_ref() {
             row.active_turn.as_mut().expect("turn").execution_task = card.execution_task.clone();
+            if let Some(work) = card.automation_work.as_ref() {
+                row.automation_v2 = true;
+                row.active_turn.as_mut().expect("turn").automation_work = Some(work.clone());
+                super::trigger_schedule::direct::resume_in_session(
+                    db, user_id, &id, turn_id, work, session,
+                )
+                .await?;
+                if work.role == "group" {
+                    super::trigger_schedule::group::admit(db, &row, work, turn_id, session).await?;
+                }
+            }
         }
         if card.is_none() {
             return Err(AppError::BadRequest(
@@ -3194,10 +3248,24 @@ pub(crate) async fn begin_owner_turn_in_session(
             ));
         }
     }
-    Box::pin(super::execution_permission_dispatch::tasks::admit(
-        db, session, &mut row, start, ids,
-    ))
-    .await?;
+    super::trigger_schedule::direct::adopt_lineage(db, &mut row, session).await?;
+    if let Some(work) = row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.as_ref())
+    {
+        super::trigger_schedule::continuation::fence_work(db, user_id, work, session).await?;
+    }
+    if row
+        .active_turn
+        .as_ref()
+        .is_none_or(|t| t.automation_work.is_none())
+    {
+        Box::pin(super::execution_permission_dispatch::tasks::admit(
+            db, session, &mut row, start, ids,
+        ))
+        .await?;
+    }
     // Chats whose queued messages this turn answers get its reply
     // too, unless it already goes there.
     let answered_here = match start.origin {
@@ -3374,6 +3442,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        automation_work: row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.automation_work.clone()),
         execution_task: row
             .active_turn
             .as_ref()
@@ -3669,7 +3741,11 @@ pub async fn append_events_in_session(
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
             if event.invocation_id.is_some()
-                || row.pending_events.iter().any(|e| e.invocation_id.is_some())
+                || event.automation_work.is_some()
+                || row
+                    .pending_events
+                    .iter()
+                    .any(|e| e.invocation_id.is_some() || e.automation_work.is_some())
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
             }
@@ -3780,6 +3856,18 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
     request_stop_row(db, &existing).await
 }
 
+/// Return the already-loaded snapshot so human Stop can scope transports without
+/// an extra legacy read. `None` denotes main's broad legacy transport cleanup.
+pub async fn request_stop_target(
+    db: &Database,
+    owner: &str,
+    id: &str,
+) -> AppResult<Option<AssistantConversation>> {
+    let row = get(db, owner, id).await?;
+    request_stop_row(db, &row).await?;
+    Ok(row.automation_v2.then_some(row))
+}
+
 /// Internal lifecycle callers have already authorized their parent resource.
 /// They must still be able to retire a member whose agent/org access was lost.
 pub(crate) async fn request_stop_row(
@@ -3791,12 +3879,18 @@ pub(crate) async fn request_stop_row(
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let Some(existing_turn) = existing.active_turn.as_ref() else {
+        if existing.automation_v2 {
+            return Ok(());
+        }
         return super::async_service_operation::cancel(db, user_id, id).await;
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
     super::execution_permission_dispatch::tasks::stop(db, existing).await?;
     if existing_turn.heartbeat_at.is_none() && live_turn(existing, now).is_none() {
+        if existing.automation_v2 {
+            return Ok(());
+        }
         return super::async_service_operation::cancel(db, user_id, id).await;
     }
     let expected_turn_id = existing_turn.turn_id.clone();
@@ -3814,7 +3908,9 @@ pub(crate) async fn request_stop_row(
         .await?;
     // Fence new submissions before cancelling existing watches. A reserve
     // racing this update writes the same conversation inside its transaction.
-    super::async_service_operation::cancel(db, user_id, id).await?;
+    if !existing.automation_v2 {
+        super::async_service_operation::cancel(db, user_id, id).await?;
+    }
     let Some(row) = row else {
         // A concurrent settlement, delete, or new turn won the exact fence.
         return Ok(());
@@ -3822,6 +3918,22 @@ pub(crate) async fn request_stop_row(
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(());
     };
+    if existing.automation_v2 {
+        super::async_service_operation::cancel_turn(db, user_id, id, &turn.turn_id).await?;
+        if let Some(work) = turn
+            .automation_work
+            .as_ref()
+            .filter(|w| w.role == "coordinator")
+        {
+            super::trigger_schedule::continuation::stop_root(
+                db,
+                user_id,
+                &work.run_id,
+                &turn.turn_id,
+            )
+            .await?;
+        }
+    }
     // A legacy row has no worker liveness signal. Keep its historical Stop
     // behavior: the worker may observe the durable flag, while an absent worker
     // is reclaimed only by the existing lease/TTL path.
@@ -4207,6 +4319,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+                    automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
@@ -5936,6 +6049,9 @@ pub(crate) async fn delete_in_session(
             .session(&mut *session)
             .await?;
         }
+        super::trigger_schedule::continuation::delete_coordinator_in_session(db, row, session)
+            .await?;
+        super::trigger_schedule::direct::delete_thread_in_session(db, user_id, id, session).await?;
         super::assistant_invocation_service::deleted_in_session(db, session, user_id, id).await?;
         // A member's app turn can clear a former channel reply preference;
         // transport-owned replay must still be purged with that member home.

@@ -13,6 +13,7 @@ use crate::{
 };
 use bson::{Document, doc};
 use chrono::Utc;
+use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 
 pub const MAX_REFERENCES: usize = 16;
@@ -116,6 +117,14 @@ pub async fn publish_in_session(
     message: &AssistantMessage,
     turn: &ActiveTurn,
 ) -> AppResult<Option<&'static str>> {
+    if message
+        .automation_work
+        .as_ref()
+        .is_some_and(|w| w.role == "direct")
+    {
+        // The durable automation receipt publishes the final logical result.
+        return Ok(None);
+    }
     let Some(edge) = &message.delegated_images.assignment else {
         return Ok(None);
     };
@@ -364,22 +373,67 @@ async fn references(
     if message.status != "completed" {
         return Ok(Vec::new());
     }
-    let mut refs = Vec::new();
-    for attachment in message
-        .attachments
-        .into_iter()
-        .filter(engine::chat_tool_image)
-        .take(engine::MAX_TURN_ATTACHMENTS)
+    if message
+        .automation_work
+        .as_ref()
+        .is_none_or(|work| work.role != "direct")
     {
-        let filter = doc! {"_id":&attachment.id,"user_id":&edge.actor,"conversation_id":&edge.source_conversation,"turn_id":&edge.source_turn,"origin":"tool"};
-        match super::assistant_upload_retention::require_available(db, filter).await {
-            Ok(()) => refs.push(DeliveryReference {
-                assignment: edge.clone(),
-                recipient_turn: turn.turn_id.clone(),
-                attachment,
-            }),
-            Err(error) if unavailable(&error) => {}
-            Err(error) => return Err(error),
+        let mut refs = Vec::new();
+        for attachment in message
+            .attachments
+            .into_iter()
+            .filter(engine::chat_tool_image)
+            .take(engine::MAX_TURN_ATTACHMENTS)
+        {
+            let filter = doc! {"_id":&attachment.id,"user_id":&edge.actor,"conversation_id":&edge.source_conversation,"turn_id":&edge.source_turn,"origin":"tool"};
+            match super::assistant_upload_retention::require_available(db, filter).await {
+                Ok(()) => refs.push(DeliveryReference {
+                    assignment: edge.clone(),
+                    recipient_turn: turn.turn_id.clone(),
+                    attachment,
+                }),
+                Err(error) if unavailable(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        return Ok(refs);
+    }
+    let messages = if let Some(work) = message
+        .automation_work
+        .as_ref()
+        .filter(|w| w.role == "direct")
+    {
+        let mut cursor = db.collection::<AssistantMessage>(MESSAGES).find(doc! {"user_id": &edge.actor, "conversation_id": &edge.source_conversation, "role": "assistant", "automation_work.work_id": &work.work_id, "automation_work.run_id": &work.run_id, "delegated_images.assignment.id": &edge.id, "status": "completed"}).sort(doc! {"seq": -1}).limit(32).session(&mut *tx).await?;
+        cursor.stream(&mut *tx).try_collect::<Vec<_>>().await?
+    } else {
+        vec![message]
+    };
+    let mut refs = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for message in messages {
+        let mut source_edge = edge.clone();
+        source_edge.source_turn = message.turn_id.clone();
+        if message.delegated_images.assignment.as_ref() != Some(&source_edge) {
+            continue;
+        }
+        for attachment in message
+            .attachments
+            .into_iter()
+            .filter(engine::chat_tool_image)
+        {
+            if refs.len() >= engine::MAX_TURN_ATTACHMENTS || !seen.insert(attachment.id.clone()) {
+                continue;
+            }
+            let filter = doc! {"_id": &attachment.id, "user_id": &source_edge.actor, "conversation_id": &source_edge.source_conversation, "turn_id": &source_edge.source_turn, "origin": "tool"};
+            match super::assistant_upload_retention::require_available(db, filter).await {
+                Ok(()) => refs.push(DeliveryReference {
+                    assignment: source_edge.clone(),
+                    recipient_turn: turn.turn_id.clone(),
+                    attachment,
+                }),
+                Err(error) if unavailable(&error) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(refs)
@@ -483,7 +537,7 @@ pub async fn consume_wait(
         let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
         let Some(mut row) = rows.find_one(doc! {"_id":conversation,"user_id":owner,"active_turn.turn_id":turn,"active_turn.stop_requested":false}).session(&mut *tx).await? else { return Err(AppError::AssistantTurnRequired) };
         if row.guest_turn || row.is_subagent() || engine::live_turn(&row, Utc::now()).is_none() { return Err(AppError::AssistantTurnRequired) }
-        let events: Vec<_> = row.pending_events.iter().filter(|e| e.kind == "subagent_settled" && e.agent_id.as_ref().is_some_and(|id| agents.contains(id))).cloned().collect();
+        let events: Vec<_> = row.pending_events.iter().filter(|e| e.kind == "subagent_settled" && e.agent_id.as_ref().is_some_and(|id| agents.contains(id)) && e.automation_work.as_ref() == row.active_turn.as_ref().and_then(|t| t.automation_work.as_ref())).cloned().collect();
         adopt_in_session(db, tx, &mut row, &events).await?;
         let mut results = Vec::new();
         for event in &events {
