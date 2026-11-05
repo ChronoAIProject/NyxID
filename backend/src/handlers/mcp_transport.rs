@@ -1638,6 +1638,7 @@ pub async fn mcp_post(
     >,
     request: Request<Body>,
 ) -> Response {
+    let cancellation = crate::downstream_disconnect::request_cancellation(&request);
     let headers = request.headers().clone();
     let body = match super::body_limit::read_request_body(
         request,
@@ -1681,6 +1682,11 @@ pub async fn mcp_post(
         }
         Err(resp) => return resp,
     };
+
+    if let Some(context) = &auth.execution_permission {
+        context.capture_idempotency(&headers);
+        context.bind_cancellation(cancellation);
+    }
 
     // Per-agent rate limit runs after auth, before any work. For OAuth/session
     // callers it is a no-op (no api_key_id / rps). This mirrors the REST proxy.
@@ -3405,7 +3411,7 @@ fn dispatch_service_tool<'a>(
             }
             .await;
             if let Err(error) = result {
-                return tool_result(request.id.clone(), &error.to_string(), true);
+                return permission_admission_failure(state, request.id.clone(), error);
             }
         }
         let mut auto_allowed = match box_tool_future(|| {
@@ -4329,6 +4335,26 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
         )
 }
 
+fn permission_admission_failure(
+    state: &AppState,
+    id: Option<serde_json::Value>,
+    error: crate::errors::AppError,
+) -> Response {
+    if let crate::errors::AppError::ApprovalFailed {
+        request_id, reason, ..
+    } = error
+    {
+        let result = approval_service::wait_failure_result(
+            crate::errors::AppError::Forbidden(reason),
+            &request_id,
+            &state.config.frontend_url,
+        );
+        tool_result(id, &result.to_string(), true)
+    } else {
+        tool_result(id, &error.to_string(), true)
+    }
+}
+
 fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<auth::AuthUser> {
     let user_id = uuid::Uuid::parse_str(&auth.user_id)
         .map_err(|_| crate::errors::AppError::Unauthorized("Invalid caller".into()))?;
@@ -5008,7 +5034,7 @@ async fn handle_meta_call_tool(
         }
         .await;
         if let Err(error) = result {
-            return tool_result(request_id.clone(), &error.to_string(), true);
+            return permission_admission_failure(state, request_id.clone(), error);
         }
     }
     let mut auto_allowed = match box_tool_future(|| {

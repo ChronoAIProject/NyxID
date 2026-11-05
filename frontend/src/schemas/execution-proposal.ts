@@ -13,6 +13,7 @@ export const executionReviewSchema = z.object({
 });
 export const executionProposalSchema = z.object({
   version: z.number(),
+  source: z.string().optional(),
   supported: z.boolean(),
   revision: z.number(),
   state: z.string(),

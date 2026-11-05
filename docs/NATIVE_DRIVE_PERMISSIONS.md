@@ -185,10 +185,29 @@ deletion removes persisted policies; normal revocation retains policy metadata.
 
 ### Optional execution permissions
 
-For per-person `permissions:execution-v1` enrollment, the verified native REST/MCP
-primary plan enters the shared execution coordinator before provider dispatch.
+For personal keys enrolled through the effective person/org/global
+`permissions:execution-v1` flag, the verified native REST/MCP primary plan enters
+the shared execution coordinator before provider dispatch.
 The existing folder/resource policy is still a ceiling. Verification reads keep
 their own checks and never consume the primary one-operation claim. A permission
 gap retains the legacy approval path; refusal before sending is not an uncertain
 write. The pilot remains personal Google/Drive only with the same 90-day credential
 cap. See [execution permissions](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-b).
+
+Enrolled personal native keys also support execution-permission v2 review under
+`permissions:execution-authoring-v2` readiness, using the same live enrollment
+resolver. By default the original request waits for the owner's configured
+approval timeout and returns its actual result on that connection. Timeout or
+disconnect leaves the occurrence permanently not sent. `X-NyxID-Approval-Mode: async` alone opts into background execution
+(`Idempotency-Key` only deduplicates explicitly async requests; `Prefer` keeps
+its downstream meaning): REST returns the
+existing `approval_required` handle, while MCP carries an additive
+`execution.request_id` in the tool error. Pending review precedes the primary
+DispatchMark and is never OutcomeUncertain. Background resume re-enters the native
+engine and verifies the original resource policy again; connected execution keeps
+its verified-plan and live pre-send checks. Verification reads are separate from
+the primary claim.
+The personal-only adapters and 90-day credential cap are unchanged. See
+[execution permissions](EXECUTION_PERMISSIONS.md#permission-updates-2195-part-b1).
+
+Enrolled native keys may poll their exact v2 request using `GET /api/v1/approvals/requests/{id}/status`. This is a read-only exception to their execution namespace: the same active key and actor must match, polling never dispatches, and legacy approvals or another credential's receipts remain unavailable.

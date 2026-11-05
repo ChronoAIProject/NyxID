@@ -233,3 +233,5 @@ pub mod collaboration_group;
 
 pub mod cma_sessions;
 pub mod org_specialist_channels;
+
+pub(crate) mod execution_permission_resume;

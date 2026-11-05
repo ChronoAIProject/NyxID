@@ -266,6 +266,18 @@ impl Transport for BackendTransport {
         let response = result.map_err(|error| {
             if dispatch.was_dispatched() {
                 Error::Upstream
+            } else if let AppError::ApprovalRequired { request_id } = &error {
+                Error::ApprovalPending {
+                    request_id: request_id.clone(),
+                }
+            } else if let AppError::ApprovalFailed { reason, .. } = &error {
+                Error::Denied(match reason.as_str() {
+                    "Approval request was rejected" => {
+                        "Approval request was rejected; nothing was sent"
+                    }
+                    "Approval request expired" => "Approval request expired; nothing was sent",
+                    _ => "This call stopped waiting for approval and sent nothing",
+                })
             } else if error.is_forbidden()
                 || matches!(
                     error,
@@ -363,6 +375,9 @@ async fn prepare(
 }
 
 fn permission_error(error: Error) -> Response {
+    if let Error::ApprovalPending { request_id } = error {
+        return AppError::ApprovalRequired { request_id }.into_response();
+    }
     let status = match error {
         Error::Policy(_) => StatusCode::BAD_REQUEST,
         Error::Denied(_) | Error::HookDenied { .. } => StatusCode::FORBIDDEN,
@@ -390,7 +405,7 @@ pub async fn mcp(
     execute(state, auth, request, true).await
 }
 
-async fn execute(
+pub(crate) async fn execute(
     state: AppState,
     auth: AuthUser,
     request: Request<Body>,
@@ -401,6 +416,9 @@ async fn execute(
         Err(_) => return Ok(permission_error(Error::Busy)),
     };
     let cancellation = crate::downstream_disconnect::request_cancellation(&request);
+    if let Some(context) = &auth.execution_permission {
+        context.bind_cancellation(cancellation.clone());
+    }
     let result = crate::downstream_disconnect::until_client_disconnect(
         &cancellation,
         execute_inner(&state, &auth, request, mcp),
@@ -464,6 +482,36 @@ async fn execute_inner(
         Ok(result) => result?,
         Err(_) => return Ok(permission_error(Error::Timeout)),
     };
+    if let Some(context) = &auth.execution_permission {
+        use crate::models::execution_proposal::PreparedAdapter;
+        let adapter = if body.len() + 2048
+            <= crate::services::execution_permission_dispatch::proposals::MAX_PAYLOAD
+        {
+            std::str::from_utf8(&body)
+                .ok()
+                .map(|body| PreparedAdapter::Native {
+                    uri: parts.uri.to_string(),
+                    method: parts.method.to_string(),
+                    body: body.to_owned(),
+                    content_type: parts
+                        .headers
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned),
+                    mcp,
+                })
+        } else {
+            None
+        };
+        let adapter = adapter.unwrap_or_else(|| {
+            tracing::info!(
+                reason = "native_input_not_retainable",
+                "Execution proposal uses legacy prompts"
+            );
+            PreparedAdapter::Unsupported
+        });
+        context.retain_adapter(adapter, &parts.headers);
+    }
     if mcp {
         return Ok(nyxid_permissions::server::handle_mcp(&engine, body).await);
     }

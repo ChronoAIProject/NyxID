@@ -130,6 +130,13 @@ pub(crate) fn attach(auth: &mut crate::mw::auth::AuthUser, source: Descendant) -
     if let Some(expected) = current.and_then(|c| c.authenticated_key.get()) {
         let _ = context.authenticated_key.set(expected.clone());
     }
+    if let Some(current) = current {
+        context.operation_id.clone_from(&current.operation_id);
+        context.resume = current.resume().cloned();
+        if let Some(v) = current.ingress.get() {
+            let _ = context.ingress.set(v.clone());
+        }
+    }
     context.descendant = Some(Arc::new(source));
     let context = Arc::new(context);
     chat.execution_permission = Some(context.clone());

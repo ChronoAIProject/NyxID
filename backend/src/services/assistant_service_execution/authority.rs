@@ -38,6 +38,9 @@ fn connection_projection<'a>(
         let catalog = if let Some(id) = &service.catalog_service_id {
             db.collection::<Document>("downstream_services")
                 .find_one(doc! {"_id": id, "is_active": true})
+                // The coordinator writes this transaction lock on every
+                // admitted effect. It is not a change to execution authority.
+                .projection(doc! {"execution_dispatch_fence": 0})
                 .await?
                 .ok_or_else(|| AppError::NotFound("Catalog service unavailable".into()))?
         } else {
@@ -48,6 +51,7 @@ fn connection_projection<'a>(
             .find_one(doc! {
                 "api_key_id": api_key_id, "user_service_id": id,
             })
+            .projection(doc! {"execution_dispatch_fence": 0})
             .await?;
         let override_key = if let Some(key) = agent_binding
             .as_ref()
@@ -94,6 +98,7 @@ fn connection_projection<'a>(
         let shared_policy = if access.as_ref().is_some_and(|a| a.shared().is_some()) {
             let approval: Vec<Document> = db.collection("service_approval_configs")
                 .find(doc! {"user_id": {"$in": [&service.user_id, &key.user_id]}, "service_id": {"$in": [Some(service.id.as_str()), service.catalog_service_id.as_deref()]}})
+                .projection(doc! {"execution_dispatch_fence": 0})
                 .sort(doc! {"_id": 1}).await?.try_collect().await?;
             let notifications: Vec<Document> = db
                 .collection("notification_channels")

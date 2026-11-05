@@ -57,6 +57,7 @@ feature flags requires deployment readiness:
 | `permissions:execution-v1` | Explicit execution-contract reader. Per-person activation requires reader/dispatch/authoring; broad activation additionally requires enrollment readiness below. See [contract](EXECUTION_PERMISSIONS.md). |
 | `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
 | `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Upgrade/drain every writer before activation. |
+| `permissions:execution-authoring-v2` | B1 personal external-key, standalone LLM, native-key, watch and human voice-task proposals. Default connected waits never become background work; external background execution requires explicit async opt-in. Required for person/org/global activation alongside the existing capabilities. |
 | `permissions:execution-enrollment-v1` | Broad enrollment snapshot, scoped hints and live admission integration. Advertised by production heartbeats with complete auth/admission and Phase B integration. Required for global/org activation and clear-that-enables. |
 | `assistant:org-instruction-v1` | Exact owner instruction or a single-use owner card before covered org credential effects, in every access mode. |
 | `assistant:hosted-connect-intent-v1` | New assistant MCP and Plugins links persist immutable personal/platform intent; completion always enforces an existing lock. |
@@ -168,7 +169,8 @@ Legacy selection rows have no positive owner provenance and never become instruc
 
 Before global/org activation, upgrade every serving replica and worker, drain old
 writers, and verify `permissions:execution-v1`, `permissions:execution-dispatch-v1`,
-`permissions:execution-authoring-v1` and `permissions:execution-enrollment-v1`. The
+`permissions:execution-authoring-v1`, `permissions:execution-authoring-v2` and
+`permissions:execution-enrollment-v1`. The
 last capability also gates clear-that-enables; explicit disabling is always allowed.
 Pilot orgs can inspect the admin flag response's scoped reconciliation progress.
 Global activation uses bounded snapshot hints and never rewrites the population.
