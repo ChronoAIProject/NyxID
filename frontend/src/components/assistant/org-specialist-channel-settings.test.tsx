@@ -85,9 +85,11 @@ it("lets an admin enable a model-only budget without granting services", async (
 });
 it("members can confirm only their own chat account and cannot edit guest exposure", async () => {
   admin = false;
+  reason = "org_wallet_not_provisioned";
   view();
   expect(await screen.findByText(/Only organization admins/)).toBeVisible();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open organization Billing" })).not.toBeInTheDocument();
   await userEvent.click(
     screen.getByRole("button", { name: "Verify my chat account" }),
   );
@@ -112,6 +114,7 @@ it("explains a missing wallet and disables guest enabling", async () => {
   expect(
     await screen.findByText(/Provision the organization billing wallet/),
   ).toBeVisible();
+  expect(screen.getByRole("link", { name: "Open organization Billing" })).toHaveAttribute("href", "/billing?ownerId=org");
   expect(
     screen.getByRole("checkbox", { name: "Enable guests for this binding" }),
   ).toBeDisabled();

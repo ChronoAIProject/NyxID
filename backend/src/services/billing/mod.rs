@@ -395,6 +395,36 @@ impl BillingService {
         .await
     }
 
+    /// Explicit organization wallet setup may repair a legacy missing
+    /// subscription. Reads and ordinary provisioning keep their existing path.
+    pub async fn ensure_org_wallet_subscription(
+        &self,
+        wallet: &BillingWallet,
+    ) -> AppResult<BillingWallet> {
+        if wallet
+            .lago_subscription_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+        {
+            return Ok(wallet.clone());
+        }
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        let subscription = lago
+            .ensure_subscription(&wallet.lago_customer_id, &self.config.lago_plan_code)
+            .await?;
+        self.db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(bson::doc! {"_id":&wallet.id,"owner_id":&wallet.owner_id,
+                "lago_customer_id":&wallet.lago_customer_id,
+                "$or":[{"lago_subscription_id":null},{"lago_subscription_id":""}]},
+                bson::doc! {"$set":{"lago_subscription_id":subscription,"updated_at":bson::DateTime::now()}})
+            .await?;
+        self.get_wallet(&wallet.owner_id).await?.ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Billing wallet no longer exists".into())
+        })
+    }
+
     pub async fn create_topup_checkout(
         &self,
         owner_id: &str,

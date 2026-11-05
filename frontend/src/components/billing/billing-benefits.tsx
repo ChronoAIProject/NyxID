@@ -11,11 +11,13 @@ import type { BillingCatalog } from "@/lib/billing-display";
 
 export function BillingBenefits({
   catalog = [],
+  ownerId,
 }: {
   catalog?: BillingCatalog;
+  ownerId?: string;
 }) {
-  const grantsQuery = useActiveCreditGrants();
-  const allowancesQuery = useCurrentAllowances();
+  const grantsQuery = useActiveCreditGrants(ownerId);
+  const allowancesQuery = useCurrentAllowances(ownerId);
   const grants = grantsQuery.data?.grants ?? [];
   const allowances = allowancesQuery.data?.allowances ?? [];
   const rolloutHidden = [grantsQuery.error, allowancesQuery.error].every(

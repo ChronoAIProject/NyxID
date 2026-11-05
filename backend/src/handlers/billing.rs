@@ -34,6 +34,7 @@ const LAGO_HMAC_SHA256_ALGORITHM: &str = "hmac";
 
 #[derive(Debug, Deserialize)]
 pub struct UsageQuery {
+    pub owner_id: Option<String>,
     pub machine_id: Option<String>,
     pub job_id: Option<String>,
     pub period: Option<String>,
@@ -228,6 +229,7 @@ pub struct TopUpHistoryResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct TopUpHistoryQuery {
+    pub owner_id: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
     pub period: Option<String>,
@@ -243,6 +245,7 @@ pub struct InvoiceDownloadResponse {
     path = "/api/v1/billing/usage",
     tag = "Billing",
     params(
+        ("owner_id" = Option<String>, Query, description = "Organization owner; requires org admin"),
         ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all"),
         ("bucket" = Option<String>, Query, description = "`day` splits rows by UTC day")
     ),
@@ -256,7 +259,18 @@ pub async fn get_usage(
     auth_user: AuthUser,
     Query(query): Query<UsageQuery>,
 ) -> AppResult<Json<BillingUsageResponse>> {
-    let owner_id = auth_user.user_id.to_string();
+    let actor_id = auth_user.user_id.to_string();
+    let owner_id = if let Some(owner_id) = query.owner_id.as_deref() {
+        let owner = state
+            .billing
+            .owner_resolver()
+            .resolve_for_wallet_management(&actor_id, Some(owner_id))
+            .await?;
+        ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+        owner.owner_id
+    } else {
+        actor_id
+    };
     let period = query.period.unwrap_or_else(|| "30d".to_string());
     let machine_id = query
         .machine_id
@@ -553,30 +567,40 @@ pub(crate) async fn ensure_billing_rollout(
     get,
     path = "/api/v1/billing/wallet",
     tag = "Billing",
+    params(("owner_id" = Option<String>, Query, description = "Organization wallet; requires org admin and never auto-provisions")),
     responses(
-        (status = 200, description = "Billing wallet", body = BillingWalletResponse)
+        (status = 200, description = "Billing wallet, or null for an unprovisioned organization wallet", body = Option<BillingWalletResponse>)
     ),
     security(("bearer_auth" = []))
 )]
 pub async fn get_wallet(
     State(state): State<AppState>,
     auth_user: AuthUser,
-) -> AppResult<Json<BillingWalletResponse>> {
+    Query(query): Query<ProvisionWalletRequest>,
+) -> AppResult<Json<Option<BillingWalletResponse>>> {
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&auth_user.user_id.to_string(), None)
+        .resolve_for_wallet_management(&auth_user.user_id.to_string(), query.owner_id.as_deref())
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &auth_user.user_id.to_string()).await?;
     if let Some(wallet) = state.billing.get_wallet(&owner.owner_id).await? {
-        return Ok(Json(BillingWalletResponse::from_wallet(wallet, false)?));
+        return Ok(Json(Some(BillingWalletResponse::from_wallet(
+            wallet, false,
+        )?)));
+    }
+    // Explicit owner views are read-only, even when an organization-owned
+    // key resolves its own owner as Direct/Personal in the shared ACL.
+    // Only the historical omitted-owner GET retains auto-provisioning.
+    if query.owner_id.is_some() {
+        return Ok(Json(None));
     }
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
 
-    Ok(Json(BillingWalletResponse::from_wallet(
+    Ok(Json(Some(BillingWalletResponse::from_wallet(
         provisioned.wallet,
         provisioned.created,
-    )?))
+    )?)))
 }
 
 /// Native billing views must not provision a wallet as a read side effect.
@@ -637,9 +661,20 @@ pub async fn provision_wallet(
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
     let provisioned = state.billing.ensure_wallet(&owner.owner_id).await?;
+    let wallet = if matches!(
+        owner.pays,
+        crate::services::billing::owner_resolver::PaysFrom::OrgWallet { .. }
+    ) {
+        state
+            .billing
+            .ensure_org_wallet_subscription(&provisioned.wallet)
+            .await?
+    } else {
+        provisioned.wallet
+    };
 
     Ok(Json(BillingWalletResponse::from_wallet(
-        provisioned.wallet,
+        wallet,
         provisioned.created,
     )?))
 }
@@ -693,6 +728,7 @@ pub async fn create_topup(
     get,
     path = "/api/v1/billing/topups",
     tag = "Billing",
+    params(("owner_id" = Option<String>, Query, description = "Organization owner; requires org admin")),
     responses(
         (status = 200, description = "Top-up history", body = TopUpHistoryResponse)
     ),
@@ -707,7 +743,7 @@ pub async fn list_topups(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&actor_id, None)
+        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
 
