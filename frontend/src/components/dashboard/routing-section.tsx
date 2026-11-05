@@ -107,7 +107,7 @@ export function RoutingSection({
 
         {!readOnly && picking && (
           <div className="space-y-2">
-            <Label className="text-xs">Select routing</Label>
+            <Label>Select routing</Label>
             <Select
               onValueChange={handleSelectNode}
               defaultValue={nodeId ?? "direct"}
@@ -129,7 +129,7 @@ export function RoutingSection({
               </SelectContent>
             </Select>
             {allNodes.length === 0 && (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 No nodes registered. Register a node first.
               </p>
             )}

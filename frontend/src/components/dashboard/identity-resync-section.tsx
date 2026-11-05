@@ -76,7 +76,7 @@ export function IdentityResyncSection({
           </Button>
         }
       >
-        <p className="px-4 py-2.5 text-12 text-muted-foreground">
+        <p className="px-4 py-2.5 text-14 text-muted-foreground">
           Each connection to this service keeps its own copy of the
           identity-forwarding settings. Editing the service updates connections
           that still match it and skips customized ones. Resync makes every
@@ -111,7 +111,7 @@ export function IdentityResyncSection({
             </div>
           </DialogHeader>
 
-          <div className="space-y-2 text-12">
+          <div className="space-y-2 text-14">
             <p className="text-muted-foreground">
               Overwritten: identity propagation mode and included user fields,
               JWT audience, access-token forwarding, and delegation-token

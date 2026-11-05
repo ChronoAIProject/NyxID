@@ -204,10 +204,10 @@ export function OrgServiceAccountsTab({
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               {search ? "No Results" : "No Service Accounts"}
             </p>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               {search
                 ? `No service accounts owned by ${orgName} match your search.`
                 : `No service accounts owned by ${orgName}.`}
@@ -251,8 +251,8 @@ export function OrgServiceAccountsTab({
                       }
                     }}
                   >
-                    <TableCell className="font-medium">{sa.name}</TableCell>
-                    <TableCell className="text-xs">
+                    <TableCell className="font-normal">{sa.name}</TableCell>
+                    <TableCell className="text-14">
                       {sa.client_id}
                     </TableCell>
                     <TableCell>
@@ -261,7 +261,7 @@ export function OrgServiceAccountsTab({
                       </Badge>
                     </TableCell>
                     <TableCell
-                      className="max-w-[200px] truncate text-xs"
+                      className="max-w-[200px] truncate text-14"
                       title={sa.allowed_scopes}
                     >
                       {sa.allowed_scopes}
@@ -279,7 +279,7 @@ export function OrgServiceAccountsTab({
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-11 text-text-tertiary">
+            <p className="text-13 text-text-tertiary">
               Showing {String((page - 1) * PER_PAGE + 1)}-
               {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
               service accounts
@@ -293,7 +293,7 @@ export function OrgServiceAccountsTab({
                 <ChevronLeft className="h-4 w-4" />
                 Previous
               </Button>
-              <span className="text-11 text-text-tertiary">
+              <span className="text-13 text-text-tertiary">
                 Page {String(page)} of {String(totalPages)}
               </span>
               <Button
@@ -324,7 +324,7 @@ export function OrgServiceAccountsTab({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-12 text-amber-700 dark:text-amber-400">
+                  <p className="text-14 text-amber-700 dark:text-amber-400">
                     Save these credentials now. The client secret cannot be
                     retrieved later.
                   </p>
@@ -356,7 +356,7 @@ export function OrgServiceAccountsTab({
               >
                 <OrgReadOnlyRow orgName={orgName} />
                 {createForm.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                     {createForm.formState.errors.root.message}
                   </div>
                 )}
@@ -463,9 +463,9 @@ function CredentialRow({
 }) {
   return (
     <div>
-      <p className="mb-1 text-xs font-medium text-muted-foreground">{label}</p>
+      <p className="mb-1 type-secondary-emphasis text-muted-foreground">{label}</p>
       <div className="flex items-center gap-2">
-        <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono text-12">
+        <code className="flex-1 break-all rounded bg-muted px-2 py-1 font-mono text-14">
           {value}
         </code>
         <Button

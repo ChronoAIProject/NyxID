@@ -5,10 +5,10 @@ interface OrgReadOnlyRowProps {
 export function OrgReadOnlyRow({ orgName }: OrgReadOnlyRowProps) {
   return (
     <div className="rounded-lg border border-border bg-muted px-3 py-2">
-      <p className="text-xs uppercase tracking-wide text-text-tertiary">
+      <p className="text-13 uppercase tracking-wide text-text-tertiary">
         Organization
       </p>
-      <p className="text-12 font-medium text-foreground">{orgName}</p>
+      <p className="type-row-title text-foreground">{orgName}</p>
     </div>
   );
 }

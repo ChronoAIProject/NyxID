@@ -1,5 +1,7 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { QueryClient } from "@tanstack/react-query";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { openAssistant, sendMessage, composerInput } from "./helpers";
 import {
   cmaFrame,
@@ -265,6 +267,132 @@ const card = (page: Page) =>
     name: `CMA session: ${cmaSession.title}`,
     exact: true,
   });
+
+async function historyBounds(panel: Locator, label: string) {
+  const button = panel.getByRole("button", { name: label, exact: true });
+  await button.scrollIntoViewIfNeeded();
+  await expect(button).toBeVisible();
+  const bounds = await button.evaluate(button => {
+    const header = button.parentElement!;
+    const body = button.closest('[aria-label^="CMA session:"]')!;
+    const box = button.getBoundingClientRect(), outer = body.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(button);
+    return {
+      button: { client: button.clientWidth, scroll: button.scrollWidth },
+      header: { client: header.clientWidth, scroll: header.scrollWidth },
+      body: { left: outer.left, right: outer.right },
+      box: { left: box.left, right: box.right, top: box.top, bottom: box.bottom },
+      text: [...range.getClientRects()].map(rect => ({ left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom })),
+    };
+  });
+  expect(bounds.button.scroll, label).toBeLessThanOrEqual(bounds.button.client + 1);
+  expect(bounds.header.scroll, label).toBeLessThanOrEqual(bounds.header.client + 1);
+  expect(bounds.box.left).toBeGreaterThanOrEqual(bounds.body.left);
+  expect(bounds.box.right).toBeLessThanOrEqual(bounds.body.right);
+  for (const text of bounds.text) {
+    expect(text.left).toBeGreaterThanOrEqual(bounds.box.left - 1);
+    expect(text.right).toBeLessThanOrEqual(bounds.box.right + 1);
+    expect(text.top).toBeGreaterThanOrEqual(bounds.box.top - 1);
+    expect(text.bottom).toBeLessThanOrEqual(bounds.box.bottom + 1);
+  }
+  return bounds;
+}
+
+for (const theme of ["light", "dark"] as const) for (const width of [1440, 390]) for (const density of [1, 1.4]) for (const actionCount of [5, 30]) {
+  test(`CMA history labels fit source and floating cards (${theme}, ${width}, spacing ${density}×, ${actionCount} actions)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.addInitScript(({ theme, density }) => localStorage.setItem("nyxid.theme", JSON.stringify({
+      state: { mode: theme, textScale: 2, density, motion: "reduce" }, version: 2,
+    })), { theme, density });
+    await mockCma(page, { actionCount });
+    await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+    const panel = card(page);
+    const measurements = [];
+    for (const shell of ["assistant", "studio"]) {
+      const collapsed = await historyBounds(panel, `Show all ${actionCount} actions`);
+      await panel.getByRole("button", { name: `Show all ${actionCount} actions`, exact: true }).click();
+      const expanded = await historyBounds(panel, "Show recent actions");
+      measurements.push({ shell, collapsed, expanded });
+      if (process.env.NYX_REVIEW_SHOTS && density === 1.4 && actionCount === 30) {
+        await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+        await page.screenshot({ animations: "disabled", path: join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-cma-${shell}.png`) });
+      }
+      await panel.getByRole("button", { name: "Show recent actions", exact: true }).click();
+      if (shell === "assistant") {
+        await panel.getByRole("button", { name: "Pin CMA session", exact: true }).click();
+        await page.goto("/keys?mock=1");
+        await expect(panel.getByRole("button", { name: "Unpin CMA session (Pinned)", exact: true })).toBeVisible();
+      }
+    }
+    const metrics = JSON.stringify(measurements, null, 2);
+    await test.info().attach("cma-history-bounds.json", { body: metrics, contentType: "application/json" });
+    if (process.env.NYX_REVIEW_SHOTS) {
+      await mkdir(process.env.NYX_REVIEW_SHOTS, { recursive: true });
+      await writeFile(join(process.env.NYX_REVIEW_SHOTS, `${theme}-${width}-${density}-${actionCount}-cma-history.json`), metrics);
+    }
+  });
+}
+
+for (const theme of ["light", "dark"] as const) {
+  for (const width of [1440, 390]) {
+    for (const scale of [0.5, 2]) {
+      test(`CMA roles and controls retain shared treatment across shells (${theme}, ${width}, ${scale}×)`, async ({ page }) => {
+        await page.setViewportSize({ width, height: 1000 });
+        await page.addInitScript(({ theme, scale }) => {
+          localStorage.setItem("nyxid.theme", JSON.stringify({
+            state: { mode: theme, textScale: scale, density: 1, motion: "reduce" },
+            version: 2,
+          }));
+        }, { theme, scale });
+        await mockCma(page, { actionCount: 5 });
+        await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+        const panel = card(page);
+        const history = panel.getByRole("button", { name: "Show all 5 actions" });
+        await expect(history).toBeVisible();
+        await expect(panel.getByRole("heading", { name: cmaSession.title, exact: true }))
+          .toHaveCSS("font-size", `${15 * 0.85 * scale}px`);
+        await expect(panel.getByRole("heading", { name: cmaSession.title, exact: true }))
+          .toHaveCSS("font-weight", "600");
+        await expect(history).toHaveCSS("font-size", `${14 * 0.85 * scale}px`);
+        await expect(history).toHaveCSS("font-weight", "500");
+        const indicator = page.getByLabel("CMA is working in this session", { exact: true });
+        await expect(indicator).toHaveCSS("font-size", `${12 * 0.85 * scale}px`);
+        expect(await indicator.evaluate(element =>
+          element.getBoundingClientRect().height >= parseFloat(getComputedStyle(element).lineHeight),
+        )).toBe(true);
+
+        const controls = panel.getByRole("group", { name: "CMA session controls" });
+        const before = await controls.locator("[data-icon-button]").evaluateAll(elements => elements.map(element => {
+          const style = getComputedStyle(element);
+          const icon = getComputedStyle(element.querySelector("svg")!);
+          return {
+            label: element.getAttribute("aria-label"),
+            box: { width: style.width, height: style.height, padding: style.padding, gap: style.gap, radius: style.borderRadius, fontSize: style.fontSize, lineHeight: style.lineHeight, icon: { width: icon.width, height: icon.height } },
+          };
+        }));
+        expect(before).toHaveLength(4);
+        for (const control of before) {
+          expect(control.box).toEqual(before[0]!.box);
+          expect(parseFloat(control.box.width)).toBeGreaterThanOrEqual(24);
+          expect(parseFloat(control.box.height)).toBeGreaterThanOrEqual(24);
+        }
+        await panel.getByRole("button", { name: "Pin CMA session" }).click();
+        await page.goto("/keys?mock=1");
+        await expect(panel.getByRole("button", { name: "Unpin CMA session (Pinned)" })).toBeVisible();
+        for (const { label, box } of before.filter(control => control.label !== "Pin CMA session")) {
+          const control = controls.getByLabel(label!, { exact: true });
+          const after = await control.evaluate(element => {
+            const style = getComputedStyle(element);
+            const icon = getComputedStyle(element.querySelector("svg")!);
+            return { width: style.width, height: style.height, padding: style.padding, gap: style.gap, radius: style.borderRadius, fontSize: style.fontSize, lineHeight: style.lineHeight, icon: { width: icon.width, height: icon.height } };
+          });
+          expect(after).toEqual(box);
+        }
+      });
+    }
+  }
+}
 
 test("automatically shows running CMA, streams while minimised, restores, and removes finished sessions", async ({
   page,
@@ -650,6 +778,9 @@ test("keeps unpinned work in its verified source and pins across every route, re
     `/assistant?mock=1&c=${source.conversation}&agent=${source.specialist}`,
   );
   await expect(panel.getByText("Inspecting the browser page")).toBeVisible();
+  // Source content can arrive before the authoritative pin read. Wait for the
+  // actual unpinned control before checking its state, not the preceding card.
+  await panel.getByRole("button", { name: "Pin CMA session" }).waitFor({ state: "visible" });
   await expect(
     panel.getByRole("button", { name: "Pin CMA session" }),
   ).toHaveAttribute("aria-pressed", "false");

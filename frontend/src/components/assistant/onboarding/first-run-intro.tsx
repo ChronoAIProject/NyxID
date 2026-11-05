@@ -9,6 +9,7 @@ import {
 import { Check, ShieldCheck, Sparkles, UsersRound } from "lucide-react";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { Button } from "@/components/ui/button";
+import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { useSaveOnboarding } from "@/hooks/use-assistant-onboarding";
 import { useAuthStore } from "@/stores/auth-store";
@@ -206,16 +207,15 @@ export function FirstRunIntro({
   return (
     <Dialog open={open} onOpenChange={(next) => (next ? onOpenChange(true) : skip())}>
       <DialogContent
-        className="md:max-w-[640px] md:p-0 md:pt-0"
+        className="md:max-w-[40rem] md:p-0 md:pt-0"
         onKeyDown={onKeyDown}
         // Start on the step itself so no chip looks pre-selected.
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           body.current?.focus({ preventScroll: true });
         }}
-        aria-describedby="nyxbot-intro-description"
       >
-        <div className="flex min-h-0 flex-1 flex-col md:min-h-[690px]">
+        <div className="flex min-h-0 flex-1 flex-col md:min-h-[43.125rem]">
           {step === "welcome" ? null : (
             <Progress
               index={(STEPS as readonly string[]).indexOf(step)}
@@ -307,13 +307,13 @@ export function FirstRunIntro({
             )}
           </div>
           {step === "welcome" ? null : (
-          <div className="mt-auto flex items-center gap-2 border-t border-border/50 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:px-6">
+          <div className="mt-auto flex flex-wrap items-center gap-2 border-t border-border/50 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] md:px-6">
             {index < LAST ? (
               <Button variant="ghost" size="sm" onClick={skip}>
                 Skip intro
               </Button>
             ) : null}
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
               {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
                 <Button variant="outline" size="sm" onClick={back}>
                   Back
@@ -372,30 +372,24 @@ function Welcome({
         className="max-w-md space-y-2 animate-in fade-in-0 slide-in-from-bottom-2 duration-500 fill-mode-both motion-reduce:animate-none"
         style={{ animationDelay: "120ms" }}
       >
-        <DialogTitle className="text-22 font-bold text-foreground sm:text-28" style={{ letterSpacing: "-0.03em" }}>
+        <DialogTitle className="type-compact-page-title text-foreground sm:type-page-title" style={{ letterSpacing: "-0.03em" }}>
           {firstName ? `Welcome, ${firstName}` : "Welcome to NyxBot"}
         </DialogTitle>
-        <DialogDescription id="nyxbot-intro-description" className="text-14 leading-relaxed text-muted-foreground">
+        <DialogDescription className="text-14 text-muted-foreground">
           I'm NyxBot, your personal chief of staff. Give me a minute and I'll show you how we'll work together.
         </DialogDescription>
       </div>
-      <ul className="w-full max-w-sm space-y-2 text-left">
+      <GroupedList className="w-full max-w-sm text-left">
         {points.map(({ icon: Icon, text }, position) => (
-          <li
+          <GroupedRow
             key={text}
-            className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2 shadow-sm animate-in fade-in-0 slide-in-from-bottom-1 duration-400 fill-mode-both motion-reduce:animate-none"
+            leading={<Icon />}
+            title={text}
+            className="animate-in fade-in-0 slide-in-from-bottom-1 duration-400 fill-mode-both motion-reduce:animate-none"
             style={{ animationDelay: `${260 + position * 90}ms` }}
-          >
-            <span
-              aria-hidden="true"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay text-foreground"
-            >
-              <Icon className="size-3.5" />
-            </span>
-            <span className="text-12 text-foreground">{text}</span>
-          </li>
+          />
         ))}
-      </ul>
+      </GroupedList>
       <div
         className="flex flex-col items-center gap-2 animate-in fade-in-0 duration-500 fill-mode-both motion-reduce:animate-none"
         style={{ animationDelay: "560ms" }}
@@ -437,9 +431,8 @@ function Progress({
           aria-label={`Step ${position + 1} of ${STEPS.length}: ${STEP_LABELS[step]}`}
           aria-current={position === index ? "step" : undefined}
           onClick={() => onSelect(position)}
-          // Bars sit as close as plain dashes: the assistant's minimum pointer
-          // width does not apply; the tall padding keeps them easy to hit.
-          className="group min-w-0! rounded-full px-0.75 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus"
+          data-icon-button=""
+          className="group flex items-center justify-center rounded-full px-0.75 py-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus"
         >
           <span
             aria-hidden="true"
@@ -470,8 +463,8 @@ function StepHeading({
   return (
     <>
       <div className="space-y-1 pr-8 md:pr-6">
-        <DialogTitle className="text-15 font-semibold text-foreground">{title}</DialogTitle>
-        <DialogDescription id="nyxbot-intro-description" className="text-12 leading-relaxed text-muted-foreground">
+        <DialogTitle className="type-card-title text-foreground">{title}</DialogTitle>
+        <DialogDescription className="text-14 text-muted-foreground">
           {description}
         </DialogDescription>
       </div>
@@ -484,7 +477,7 @@ function Points({ items }: { readonly items: readonly string[] }) {
   return (
     <ul className="space-y-1.5">
       {items.map((item) => (
-        <li key={item} className="flex gap-2 text-12 leading-snug text-muted-foreground">
+        <li key={item} className="flex gap-2 text-14 text-muted-foreground">
           <Check aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-success" />
           {item}
         </li>
@@ -549,7 +542,7 @@ function ChoiceGrid({
               if (node) nodes.current.set(choice.id, node);
               else nodes.current.delete(choice.id);
             }}
-            className="inline-flex animate-in fade-in-0 zoom-in-95 duration-200 ease-out fill-mode-both motion-reduce:animate-none"
+            className="inline-flex max-w-full animate-in fade-in-0 zoom-in-95 duration-200 ease-out fill-mode-both motion-reduce:animate-none"
             style={{ animationDelay: `${shown ? 60 + position * 20 : 0}ms` }}
           >
             <button
@@ -559,7 +552,7 @@ function ChoiceGrid({
               disabled={leaving}
               onClick={() => onToggle(choice.id)}
               className={cn(
-                "inline-flex items-center gap-2 whitespace-nowrap rounded-full border py-1 pr-3 pl-1 text-12 font-medium transition-[background-color,border-color,opacity,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
+                "inline-flex max-w-full items-center gap-2 rounded-full border py-1 pr-3 pl-1 text-left type-row-title transition-[background-color,border-color,opacity,transform] duration-150 active:scale-95 motion-reduce:transition-none motion-reduce:active:scale-100",
                 "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-input-focus",
                 leaving && "scale-95 opacity-0",
                 active
@@ -568,7 +561,7 @@ function ChoiceGrid({
               )}
             >
               <ChoiceIcon name={choice.icon} active={active} />
-              {choice.label}
+              <span className="min-w-0 break-words">{choice.label}</span>
               {active ? <Check aria-hidden="true" className="size-3" /> : null}
             </button>
           </span>
@@ -595,7 +588,7 @@ function ChoiceIcon({ name, active }: { readonly name: string; readonly active: 
 
 function Overline({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="pt-1 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{children}</p>
+    <p className="pt-1 type-group-label uppercase tracking-[0.125em] text-text-tertiary">{children}</p>
   );
 }
 

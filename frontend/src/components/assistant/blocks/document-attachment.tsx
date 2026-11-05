@@ -39,7 +39,7 @@ export function DocumentAttachment({
         type="button"
         onClick={() => void download()}
         disabled={busy}
-        className="flex max-w-full items-center gap-2 rounded-lg border border-hairline bg-card px-3 py-2 text-xs disabled:opacity-50"
+        className="flex max-w-full items-center gap-2 rounded-lg border border-hairline bg-card px-3 py-2 text-13 disabled:opacity-50"
       >
         <FileText className="h-4 w-4 shrink-0" />
         <span className="truncate">{attachment.label}</span>
@@ -49,7 +49,7 @@ export function DocumentAttachment({
         />
       </button>
       {error && (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           {expired ? "Attachment expired per retention policy. Upload it again to continue." : "Attachment unavailable or expired. Upload it again."}
         </p>
       )}

@@ -500,7 +500,7 @@ function ManageScopesPanel({
     return (
       <div className="flex flex-col gap-4">
         <WizardHeading title="Manage permissions" />
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
           {entry.name} doesn't support managing scopes here — its permissions
           are fixed by the provider.
         </p>
@@ -593,7 +593,7 @@ function OwnerPicker({
         onChange={onChange}
         label="Owner"
       />
-      <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+      <p id={`${id}-hint`} className="text-13 text-muted-foreground">
         Org-owned services are shared with every admin of that organization
         and can be proxied by its members.
       </p>
@@ -696,7 +696,7 @@ interface CustomServiceFormProps {
 }
 
 function RequiredMarker() {
-  return <span aria-hidden="true" className="ml-0.5 leading-none text-destructive">*</span>;
+  return <span aria-hidden="true" className="ml-0.5 text-destructive">*</span>;
 }
 
 /**
@@ -840,7 +840,7 @@ function CustomServiceForm({
             autoFocus
             aria-required="true"
           />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             Shown everywhere in the CLI and web UI.
           </p>
         </div>
@@ -856,7 +856,7 @@ function CustomServiceForm({
             placeholder="https://api.example.com"
             aria-required="true"
           />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             The base URL NyxID proxies requests to.
           </p>
         </div>
@@ -896,7 +896,7 @@ function CustomServiceForm({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             How NyxID attaches the credential to outgoing requests.
           </p>
         </div>
@@ -917,7 +917,7 @@ function CustomServiceForm({
               autoFocus={Boolean(prefill.custom)}
               aria-required="true"
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Pasted once, encrypted at rest.
               {authMethod === "basic" ? " Format: user:pass." : ""}
             </p>
@@ -952,11 +952,11 @@ function CustomServiceForm({
           // id is locked at this point — to change it the user
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-11 text-muted-foreground">
+            <p className="type-secondary-emphasis text-foreground">Routed via node</p>
+            <code className="font-mono text-14 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">
+            <p className="text-13 text-muted-foreground mt-1">
               Credential will be encrypted and pushed to this node over
               the existing WebSocket channel. NyxID never logs it.
             </p>
@@ -973,7 +973,7 @@ function CustomServiceForm({
             }}
             placeholder="auto-generated from label"
           />
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             URL segment at <code>/proxy/s/&lt;slug&gt;/…</code>. Leave
             blank to let NyxID derive it from the label.
           </p>
@@ -1192,7 +1192,7 @@ function CatalogConfirmForm({
   if (entry.service_type === "ssh") {
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
           {entry.name} is an SSH service. Use{" "}
           <code>nyxid service add-ssh</code> from your CLI instead
           (certificate-based auth, not a credential binding).
@@ -1222,7 +1222,7 @@ function CatalogConfirmForm({
       `/keys?tab=services&slug=${encodeURIComponent(entry.slug)}`;
     return (
       <div className="flex flex-col gap-3">
-        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
+        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-14">
           {entry.name} uses <code>{entry.auth_method}</code> auth,
           which isn't supported via remote pairing. Complete setup on
           the main Keys page. Your CLI will receive a cancel and
@@ -1403,7 +1403,7 @@ function CatalogConfirmForm({
                 href={entry.api_key_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+                className="mt-1 inline-flex items-center gap-1 type-row-title text-muted-foreground underline-offset-2 hover:underline"
               >
                 Get an API key
                 <ExternalLink className="h-3 w-3" />
@@ -1447,7 +1447,7 @@ function CatalogConfirmForm({
             platformAllowlist={platformScopeAllowlist}
           />
         ) : shape === "device-code" ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This provider does not accept additional scopes — they are
             fixed by the upstream client registration.
           </p>
@@ -1455,11 +1455,11 @@ function CatalogConfirmForm({
 
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-xs font-medium text-foreground">Routed via node</p>
-            <code className="font-mono text-11 text-muted-foreground">
+            <p className="type-secondary-emphasis text-foreground">Routed via node</p>
+            <code className="font-mono text-14 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">
+            <p className="text-13 text-muted-foreground mt-1">
               Credential will be configured on the node agent. NyxID
               never sees or stores it.
             </p>
@@ -1468,7 +1468,7 @@ function CatalogConfirmForm({
 
         {/* With NyxID's key the selected card already says there is nothing to paste. */}
         {shape === "no-auth" && !usePlatformKey ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             This service doesn't need a credential. Click Connect to add it
             to your services.
           </p>
@@ -1528,7 +1528,7 @@ function Field({
 
 function ErrorLine({ message }: { readonly message: string }) {
   return (
-    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
+    <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-14 text-destructive">
       {message}
     </p>
   );

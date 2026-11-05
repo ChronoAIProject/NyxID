@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { useRef, useState } from "react";
 import { z } from "zod";
@@ -59,8 +60,8 @@ export function AssistantAccountDeleteDialog({
       <DialogContent>
         <DialogHeader><DialogTitle>{verifiedUserId ? "Account deletion accepted" : "Delete account"}</DialogTitle><DialogDescription>{verifiedUserId ? "NyxID accepted account deletion and closed sign-in. Local and remote cleanup continues until verified. Continue to clear your session." : "Type your account email to confirm deletion of your account and the Machine data described below."}</DialogDescription></DialogHeader>
         {!verifiedUserId ? <AccountDeletionDisclosure /> : null}
-        {!verifiedUserId ? <div className="space-y-2 border-y border-border py-4"><label htmlFor="assistant-account-delete-email" className="text-12 font-medium">Account email</label><Input id="assistant-account-delete-email" value={confirmEmail} onChange={(event) => setConfirmEmail(event.target.value)} placeholder={accountEmail ?? "you@example.com"} autoComplete="email" /></div> : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
+        {!verifiedUserId ? <div className="space-y-2 border-y border-border py-4"><Label htmlFor="assistant-account-delete-email">Account email</Label><Input id="assistant-account-delete-email" value={confirmEmail} onChange={(event) => setConfirmEmail(event.target.value)} placeholder={accountEmail ?? "you@example.com"} autoComplete="email" /></div> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
         <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>Continue</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmEmail.trim()} onClick={() => void submit()}>Delete account</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>

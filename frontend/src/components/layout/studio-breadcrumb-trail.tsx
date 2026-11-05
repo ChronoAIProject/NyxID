@@ -85,7 +85,7 @@ export function StudioBreadcrumbTrail({
   return (
     <nav
       aria-label="Breadcrumb"
-      className="hidden md:flex items-center gap-1 text-12 min-w-0"
+      className="hidden md:flex items-center gap-1 text-14 min-w-0"
     >
       {crumbs.map((crumb, i) => (
         <div

@@ -73,14 +73,14 @@ export function ToolsPage() {
       ) : error ? (
         <ErrorBanner message="Unable to load tools" onRetry={refetch} />
       ) : filtered.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border p-8 text-12 text-muted-foreground">
+        <div className="rounded-xl border border-dashed border-border p-8 text-14 text-muted-foreground">
           No tools match. Tools use NyxID-provided access; add your own API
           connections in AI Services.
         </div>
       ) : (
         Array.from(groups, ([supplier, rows]) => (
           <section key={supplier} className="space-y-3">
-            <h2 className="text-15 font-semibold">{supplier}</h2>
+            <h2 className="type-card-title">{supplier}</h2>
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {rows.map((tool) => (
                 <ToolCard key={tool.id} tool={tool} />
@@ -102,13 +102,13 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
       <CardContent className="space-y-3 p-4">
         <div>
           {tool.icon_url && <ServiceIcon iconUrl={tool.icon_url} size="md" />}
-          <h3 className="text-15 font-semibold">{tool.name}</h3>
-          <p className="text-11 text-text-tertiary">
+          <h3 className="type-card-title">{tool.name}</h3>
+          <p className="text-13 text-text-tertiary">
             {tool.supplier ?? tool.provider_label}
           </p>
         </div>
         <Badge variant="secondary">Provided by NyxID</Badge>
-        <p className="text-12 text-muted-foreground">{tool.description}</p>
+        <p className="text-14 text-muted-foreground">{tool.description}</p>
         <div className="flex flex-wrap gap-1">
           {tool.topics.map((t) => (
             <Badge key={t} variant="secondary">
@@ -116,14 +116,14 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
             </Badge>
           ))}
         </div>
-        <p className="text-13 font-semibold">{toolPrice(tool)}</p>
-        <p className="text-11 text-text-tertiary">
+        <p className="type-card-title">{toolPrice(tool)}</p>
+        <p className="text-13 text-text-tertiary">
           {tool.limits
             ? `${tool.limits.rate_limit_per_second} requests / second · Burst ${tool.limits.burst}`
             : "No per-user rate limit"}
         </p>
         <details>
-          <summary className="cursor-pointer text-12">
+          <summary className="cursor-pointer text-14">
             {tool.operations.length} operations
           </summary>
           <div className="mt-3 space-y-3">
@@ -132,15 +132,15 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                 key={op.name}
                 className="space-y-1 border-t border-border/50 pt-2"
               >
-                <p className="text-12 font-medium">{op.name}</p>
-                <p className="text-11 text-muted-foreground">
+                <p className="type-row-title">{op.name}</p>
+                <p className="text-13 text-muted-foreground">
                   {op.description}
                 </p>
-                <code className="break-all text-11">
+                <code className="break-all text-14">
                   {op.method} {op.path}
                 </code>
                 {operationPriced && (
-                  <p className="text-11 text-text-tertiary">
+                  <p className="text-13 text-text-tertiary">
                     {operationPrice(tool, op.name)} credits / request
                   </p>
                 )}

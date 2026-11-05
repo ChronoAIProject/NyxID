@@ -256,7 +256,7 @@ it("requires history acknowledgement after invite preview and before acceptance"
   expect(
     screen.getByRole("button", { name: "Accept invitation" }),
   ).toBeDisabled();
-  await userEvent.click(screen.getByRole("checkbox"));
+  await userEvent.click(screen.getByRole("switch"));
   await userEvent.click(
     screen.getByRole("button", { name: "Accept invitation" }),
   );
@@ -334,12 +334,8 @@ it("lets a participant ask the foreign owner without enabling on their behalf", 
     />,
     { wrapper },
   );
-  expect(screen.getByText("Office Agent")).toBeVisible();
-  expect(
-    screen.getByText(
-      "Not shared with you — ask Share Ops to allow participants.",
-    ),
-  ).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Office Agent" })).toBeVisible();
+  expect(screen.getByText("Not shared with you — ask Share Ops to allow participants.")).toBeVisible();
   expect(screen.queryByRole("switch")).not.toBeInTheDocument();
   await userEvent.click(
     screen.getByRole("button", { name: "Ask Share Ops to allow participants" }),

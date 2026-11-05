@@ -28,7 +28,7 @@ export function ServiceRequirementsView({
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-8">
         <EngineerCapIcon className="h-48 w-48 text-muted-foreground/30" />
-        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
           This service has no provider requirements.
         </div>
       </div>
@@ -54,10 +54,10 @@ export function ServiceRequirementsView({
             <div className="flex items-center gap-3">
               <KeyRound className="h-4 w-4 text-muted-foreground" />
               <div>
-                <p className="text-12 font-medium">
+                <p className="type-row-title">
                   {provider?.name ?? req.provider_name}
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {req.injection_method === "bearer"
                     ? "Bearer token"
                     : req.injection_method === "header"

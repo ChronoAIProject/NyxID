@@ -109,16 +109,18 @@ it("describes a specialist as handling direct work itself, never as handing it t
 it("creates a specialist with its role, services and account read, then opens its home thread", async () => {
   const { onCreated, user } = renderDialog();
   const dialog = screen.getByRole("dialog", { name: "New agent" });
-  const create = within(dialog).getByRole("button", { name: "Create agent" });
-  expect(create).toBeDisabled();
+  expect(
+    within(dialog).queryByRole("button", { name: "Create agent" }),
+  ).toBeDisabled();
   // Only connected, active services are offered.
-  const services = within(dialog).getByRole("list", { name: "Services" });
+  const services = within(dialog).getByRole("group", { name: "Services" });
   expect(services).not.toHaveTextContent("Old API");
   await user.type(within(dialog).getByRole("textbox", { name: "Name" }), "Researcher");
   expect(within(dialog).getByRole("textbox", { name: "Name" })).toHaveValue("researcher");
   await user.type(within(dialog).getByRole("textbox", { name: "Role" }), "Finds urgent issues");
   await user.click(within(services).getByRole("checkbox", { name: /GitHub/ }));
   await user.click(within(dialog).getByRole("switch", { name: "Read my account" }));
+  const create = within(dialog).getByRole("button", { name: "Create agent" });
   expect(create).toBeEnabled();
   await user.click(create);
   await waitFor(() =>

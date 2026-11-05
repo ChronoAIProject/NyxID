@@ -228,8 +228,8 @@ export function AssistantProviderSetAppCredentialsDialog({
             </div>
           </form>
         ) : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
-        {verified ? <p className="text-11 text-success">Credential evidence verified.</p> : null}
+        {error ? <p role="alert" className="text-13 text-destructive">{error}</p> : null}
+        {verified ? <p className="text-13 text-success">Credential evidence verified.</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>

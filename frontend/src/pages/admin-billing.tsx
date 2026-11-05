@@ -137,7 +137,7 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
     <Card>
       <CardHeader className="space-y-3">
         <CardTitle>Billed services</CardTitle>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Precedence per credential class: a synced lane price, else legacy
           platform billing while a lane is unsynced or absent, else free.
           BILLING_ENABLED and BILLING_RESALE_ENABLED override everything.
@@ -161,7 +161,7 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
           />
         )}
         {overview.data && rows.length === 0 && (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             {overview.data.length === 0
               ? "No catalog service has billing configuration."
               : "No service matches the search."}
@@ -184,7 +184,7 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
                   <TableRow>
                     <TableCell className="align-top">
                       <div className="font-medium">{service.name}</div>
-                      <div className="text-11 text-muted-foreground">
+                      <div className="text-13 text-muted-foreground">
                         {service.slug}
                       </div>
                       {!service.is_active && (
@@ -318,7 +318,7 @@ function LaneForm({
       <form onSubmit={(event) => void onSubmit(event)} className="space-y-3">
         <BillingLaneFields service={service} />
         {update.error && (
-          <p role="alert" className="text-12 text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {errorText(update.error, "Failed to save prices")}
           </p>
         )}
@@ -354,7 +354,7 @@ function RatesTab() {
           />
         )}
         {rates.data?.length === 0 && (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             No rates are cached yet.
           </p>
         )}
@@ -373,7 +373,7 @@ function RatesTab() {
             <TableBody>
               {rates.data.map((rate) => (
                 <TableRow key={rate.id}>
-                  <TableCell className="font-mono text-12">
+                  <TableCell className="font-mono text-14">
                     {rate.lago_metric_code}
                   </TableCell>
                   <TableCell>{rate.model ?? "Any"}</TableCell>
@@ -421,13 +421,13 @@ function SettingsTab({ canWrite }: { readonly canWrite: boolean }) {
           <CardTitle>Global defaults</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-center gap-2 text-13">
+          <div className="flex flex-wrap items-center gap-2 text-15">
             <span>
               New-wallet overdraft cap: <strong>{cap.effective}</strong> credits
             </span>
             <SourceBadge source={cap.source} />
           </div>
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Applies when a wallet is first provisioned (first charge, top-up
             checkout, or backfill). Existing wallets keep their cap. Empty uses
             BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS ({cap.env}).
@@ -451,7 +451,7 @@ function SettingsTab({ canWrite }: { readonly canWrite: boolean }) {
             <TableBody>
               {data.environment.map((row) => (
                 <TableRow key={row.key}>
-                  <TableCell className="font-mono text-12">{row.key}</TableCell>
+                  <TableCell className="font-mono text-14">{row.key}</TableCell>
                   <TableCell>
                     {row.secret_set === null
                       ? (row.value ?? "Not set")
@@ -520,7 +520,7 @@ function SettingsForm({ config }: { readonly config: BillingConfig }) {
           )}
         />
         {update.error && (
-          <p role="alert" className="text-12 text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             {errorText(update.error, "Failed to save defaults")}
           </p>
         )}

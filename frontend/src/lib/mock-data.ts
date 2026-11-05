@@ -478,6 +478,7 @@ const MOCK_KEYS = [
     openapi_spec_url: null,
     credential_source: {
       type: "org" as const,
+      org_id: "org-0001",
       org_name: "ChronoAI",
       role: "member",
       allowed: true,

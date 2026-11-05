@@ -37,34 +37,34 @@ export function BillingMachines() {
   return (
     <DetailSection title="Machine runtime">
       <div className="space-y-4 px-4 py-3">
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Review an accepted runtime rate, funded intervals and pending
           responsibility separately from gateway service usage. Paused workspace
           storage is free. Adding account funds never resumes a machine
           automatically.
         </p>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           New Machine fixed profile: 2 vCPU, 2 GiB memory and 20 GiB /workspace.
           Each eligible personal account has one free slot with no expiry or
           monthly runtime limit. Paused Machines and unfinished cleanup still
           occupy that slot; additional Machines require paid review. Retained
           Machines keep their historical specifications.
         </p>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Temporary storage is managed by the deployment environment, with no
           fixed capacity commitment, selectable size or extra storage charge.
           Temporary data may be lost after pause or Pod recreation. Full disks
           can cause writes to fail, and disk pressure can evict the Pod. Review
           Machine details for storage observations and recovery guidance.
         </p>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Paid runtime has no per-instance spending cap. Machines and services
           share account allowances, eligible grants and wallet funds; an
           estimate is not a reserved duration. Resume is manual and requires a
           new accepted quote after earlier liability is resolved. Service usage
           is charged separately, including on a free Machine.
         </p>
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Paused workspaces are retained indefinitely without a storage fee.
           Deletion is irreversible, with no snapshots or restore. Deletion
           queues workspace and runtime cleanup with a 24-hour target. Cleanup
@@ -108,7 +108,7 @@ function MachineRuntimeSelection() {
   return (
     <div className="space-y-4">
       {machines.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading your remote machines…
         </p>
       )}
@@ -119,7 +119,7 @@ function MachineRuntimeSelection() {
         />
       )}
       {!machines.isPending && !machines.error && !machines.data?.length ? (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           No active or retained Machines were returned. Use a known Machine ID
           below to look up an owner-authorized retained billing record.
         </p>
@@ -127,7 +127,7 @@ function MachineRuntimeSelection() {
       {!machines.isPending &&
         !machines.error &&
         !machines.discoveryComplete && (
-          <p role="status" className="text-12 text-muted-foreground">
+          <p role="status" className="text-14 text-muted-foreground">
             This server did not confirm complete Machine discovery. Known-ID
             lookup remains available.
           </p>
@@ -180,7 +180,7 @@ function MachineRuntimeSelection() {
               </FormItem>
             )}
           />
-          <p className="text-11 text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             The list includes retained deleted Machines. This lookup also reads
             an owner-authorized retained record; an ID does not grant access or
             restore the workspace.
@@ -189,7 +189,7 @@ function MachineRuntimeSelection() {
         </form>
       </Form>
       {lookupId && lookup.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Looking up the retained Machine record…
         </p>
       )}
@@ -202,7 +202,7 @@ function MachineRuntimeSelection() {
       {selected ? (
         <>
           {selected.resource_state === "deleted" && (
-            <p role="status" className="text-12 text-muted-foreground">
+            <p role="status" className="text-14 text-muted-foreground">
               This Machine is deleted. Retained runtime contracts remain
               available; this view does not restore execution or workspace data.
             </p>

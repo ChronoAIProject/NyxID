@@ -43,7 +43,7 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
       </PopoverTrigger>
       <PopoverContent className="w-80" align="end">
         <div className="space-y-3">
-          <p className="text-xs font-medium">LLM Proxy URLs</p>
+          <p className="type-secondary-emphasis">LLM Proxy URLs</p>
 
           <CopyableField
             label="Direct Proxy URL"
@@ -53,20 +53,20 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
           <CopyableField label="Gateway URL" value={gatewayUrl} size="sm" />
 
           <div>
-            <p className="mb-1 text-10 font-medium text-muted-foreground">
+            <p className="mb-1 type-group-label text-muted-foreground">
               Agent Key
             </p>
             <AgentKeyPicker onSelect={setPickedKey} />
           </div>
 
           <div>
-            <p className="mb-1 text-10 font-medium text-muted-foreground">
+            <p className="mb-1 type-group-label text-muted-foreground">
               Example
             </p>
-            <pre className="rounded bg-muted px-2 py-1.5 text-10 overflow-x-auto whitespace-pre-wrap break-all">
+            <pre className="rounded bg-muted px-2 py-1.5 text-14 overflow-x-auto whitespace-pre-wrap break-all">
               {exampleCurl}
             </pre>
-            <p className="mt-1 text-9 text-muted-foreground">
+            <p className="mt-1 text-12 text-muted-foreground">
               {pickedKey
                 ? "Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this."
                 : "Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example."}

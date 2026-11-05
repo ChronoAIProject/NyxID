@@ -112,7 +112,7 @@ export function ReplyFeedbackFollowUp({ feedback }: { readonly feedback: ReplyFe
         ) : null}
       </Dialog>
       {feedback.error ? (
-        <p role="alert" className="mt-1 text-11 text-destructive">
+        <p role="alert" className="mt-1 text-13 text-destructive">
           Unable to save feedback. Try again.
         </p>
       ) : null}
@@ -176,7 +176,7 @@ function FeedbackDetails({
                 )
               }
               className={cn(
-                "inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 text-12 font-medium transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.97]",
+                "inline-flex h-8 items-center gap-1.5 rounded-full px-3.5 type-row-title transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:scale-[0.97]",
                 on
                   ? "bg-nyx-secondary-400/15 pl-3 text-foreground ring-1 ring-inset ring-nyx-secondary-400/60"
                   : "text-muted-foreground ring-1 ring-inset ring-hairline-strong hover:bg-overlay-strong hover:text-foreground",
@@ -201,7 +201,7 @@ function FeedbackDetails({
               void submit();
             }
           }}
-          className="min-h-24 resize-none text-12"
+          className="min-h-24 resize-none text-14"
           placeholder={
             vote === "up"
               ? "What was satisfying about this reply?"
@@ -210,7 +210,7 @@ function FeedbackDetails({
         />
       </div>
       {failed ? (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           Unable to save feedback. Try again.
         </p>
       ) : null}

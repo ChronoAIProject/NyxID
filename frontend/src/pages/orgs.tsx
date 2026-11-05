@@ -37,8 +37,8 @@ function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-12 font-medium text-muted-foreground">No organizations yet</p>
-        <p className="text-xs text-muted-foreground">
+        <p className="type-row-title text-muted-foreground">No organizations yet</p>
+        <p className="text-13 text-muted-foreground">
           Create an organization to share services and credentials with
           teammates.
         </p>
@@ -77,7 +77,7 @@ export function OrgsPage() {
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Building2 className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-13 font-semibold text-foreground">My Organizations</h3>
+            <h3 className="type-card-title text-foreground">My Organizations</h3>
           </div>
 
           {/* Cards - always on mobile, desktop only in grid mode */}
@@ -99,25 +99,25 @@ export function OrgsPage() {
                           className="h-8 w-8"
                         />
                         <div className="min-w-0">
-                          <p className="truncate text-12 font-medium text-foreground">
+                          <p className="truncate type-row-title text-foreground">
                             {org.display_name ?? "Untitled org"}
                           </p>
-                          <p className="truncate text-xs text-muted-foreground">
+                          <p className="truncate text-13 text-muted-foreground">
                             @{org.slug}
                           </p>
                           {org.contact_email && (
-                            <p className="truncate text-xs text-muted-foreground">
+                            <p className="truncate text-13 text-muted-foreground">
                               {org.contact_email}
                             </p>
                           )}
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             Created {formatRelativeTime(org.created_at) ?? "—"}
                           </p>
                         </div>
                       </div>
                       <RoleBadge role={org.your_role} />
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-2 text-13 text-muted-foreground">
                       <Users className="h-3.5 w-3.5" />
                       <span>View members and invites</span>
                     </div>

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { useFieldArray } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -40,7 +41,7 @@ import type { PlatformProfile } from "@/schemas/platform-onboarding";
 function Preview({ content }: { content: HelpContent }) {
   return (
     <div
-      className="space-y-4 rounded-lg border border-border bg-muted p-4 text-12"
+      className="space-y-4 rounded-lg border border-border bg-muted p-4 text-14"
       aria-label="Help preview"
     >
       {content.articles.map((a, i) => (
@@ -112,7 +113,7 @@ function LibraryEditor({
     setRollback(undefined);
   };
   return (
-    <div className="space-y-4 text-12">
+    <div className="space-y-4 text-14">
       <p>
         Published revision {library.published_revision}. Publishing updates
         every manager assigned to this library. Started replies keep their
@@ -156,13 +157,13 @@ function LibraryEditor({
             ),
           )}
         >
-          <h3 className="text-13 font-semibold">FAQ articles</h3>
+          <h3 className="type-card-title">FAQ articles</h3>
           {articles.fields.map((a, i) => (
             <fieldset
               key={a.fieldKey}
               className="space-y-3 rounded-lg border border-border p-3"
             >
-              <legend className="px-1">Article {i + 1}</legend>
+              <Label asChild><legend className="px-1">Article {i + 1}</legend></Label>
               {(["id", "title", "body"] as const).map((name) => (
                 <FormField
                   key={name}
@@ -230,7 +231,7 @@ function LibraryEditor({
           >
             Add article
           </Button>
-          <h3 className="text-13 font-semibold">Use cases</h3>
+          <h3 className="type-card-title">Use cases</h3>
           <p className="text-muted-foreground">
             These describe ideas and example prompts. They do not create bots or
             grant access.
@@ -240,7 +241,7 @@ function LibraryEditor({
               key={c.fieldKey}
               className="space-y-3 rounded-lg border border-border p-3"
             >
-              <legend className="px-1">Use case {i + 1}</legend>
+              <Label asChild><legend className="px-1">Use case {i + 1}</legend></Label>
               {(["id", "title", "description"] as const).map((name) => (
                 <FormField
                   key={name}
@@ -564,9 +565,9 @@ export function PlatformHelpAssignment({
   const value = selected ?? assignment.data.library_id;
   return (
     <div className="space-y-2">
-      <label className="text-12 font-medium" htmlFor={`help-${profile.id}`}>
+      <Label htmlFor={`help-${profile.id}`}>
         Shared help library
-      </label>
+      </Label>
       <Select value={value} onValueChange={setSelected}>
         <SelectTrigger id={`help-${profile.id}`}>
           <SelectValue />

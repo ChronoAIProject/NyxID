@@ -24,9 +24,11 @@ const mock = vi.hoisted(() => ({
   quote: vi.fn(),
   createRemote: vi.fn(),
   setup: undefined as unknown,
+  pairPending: false,
   search: {} as Record<string, string>,
 }));
 vi.mock("@tanstack/react-router", () => ({
+  useRouter: () => undefined,
   useSearch: () => mock.search,
   useNavigate: () => mock.navigate,
   Link: ({ children }: { children: React.ReactNode }) => <a href="/assistant/machines">{children}</a>,
@@ -85,12 +87,13 @@ vi.mock("@/hooks/use-machines", () => ({
   useCreateMachineSetup: () => ({ mutateAsync: mock.create }),
   issueMachineSetup: mock.issue,
   useMachinePairPreview: () => ({ mutateAsync: mock.preview }),
-  useMachinePairDecision: () => ({ mutateAsync: mock.decide }),
+  useMachinePairDecision: () => ({ mutateAsync: mock.decide, isPending: mock.pairPending }),
 }));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
   mock.setup = undefined;
+  mock.pairPending = false;
   mock.search = {};
   sessionStorage.clear();
 });
@@ -167,7 +170,7 @@ it("pairing shows machine details and requires explicit recognition before appro
     screen.getByRole("button", { name: "Approve pairing" }),
   ).toBeDisabled();
   fireEvent.click(
-    screen.getByRole("checkbox", { name: /I started this setup/ }),
+    screen.getByRole("switch", { name: /I started this setup/ }),
   );
   fireEvent.click(screen.getByRole("button", { name: "Approve pairing" }));
   await waitFor(() =>
@@ -177,6 +180,24 @@ it("pairing shows machine details and requires explicit recognition before appro
       automatic_updates: true,
     }),
   );
+});
+it("locks pairing decisions and review controls while approval is pending", async () => {
+  mock.search = { code: "ABCD-2345" };
+  mock.preview.mockResolvedValue({ hostname: "work-vm", os: "linux", choices });
+  const view = render(<MachinePairPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Review" }));
+  await screen.findByText("work-vm");
+  fireEvent.click(screen.getByRole("switch", { name: /I started this setup/ }));
+  expect(screen.getByRole("button", { name: "Approve pairing" })).toBeEnabled();
+  mock.pairPending = true;
+  view.rerender(<MachinePairPage />);
+  for (const name of ["Review", "Approve pairing", "Decline", "Cancel"]) {
+    expect(screen.getByRole("button", { name })).toBeDisabled();
+  }
+  expect(screen.getByRole("textbox", { name: "Pairing code" })).toBeDisabled();
+  for (const toggle of screen.getAllByRole("switch")) expect(toggle).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "Approve pairing" }));
+  expect(mock.decide).not.toHaveBeenCalled();
 });
 it("quotes setup credentials and URLs, installs the CLI if missing and preserves chosen capabilities", () => {
   const token = `nyx_nreg_${"b".repeat(64)}`;
@@ -244,7 +265,7 @@ it("renders the actual fourth hosted option with its creation form and no instal
     screen.queryByText(/Docker command downloads/),
   ).not.toBeInTheDocument();
   await userEvent.click(
-    screen.getByRole("checkbox", { name: /I accept the shared environment/ }),
+    screen.getByRole("switch", { name: /I accept the shared environment/ }),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "Create free remote machine" }),
@@ -340,6 +361,33 @@ it("shows actionable separation selection when the node reports no owner choice"
   expect(screen.getByRole("link", { name: "Review machine separation" })).toBeInTheDocument();
 });
 
+it("guards switching to hosted setup and retains the self-hosted draft after Keep editing", async () => {
+  useAuthStore.setState({
+    user: {
+      ...useAuthStore.getState().user!,
+      id: "owner",
+      capabilities: { enabled_features: ["experimental:remote-machines"] },
+    },
+    isAuthenticated: true,
+    isLoading: false,
+  });
+  const user = userEvent.setup();
+  render(<QueryClientProvider client={new QueryClient()}><MachineSetupPage /></QueryClientProvider>);
+  const name = screen.getByRole("textbox", { name: "Machine name" });
+  await user.clear(name);
+  await user.type(name, "draft-machine");
+  await user.click(screen.getByRole("tab", { name: "NyxID hosted" }));
+  expect(await screen.findByRole("dialog", { name: "Discard unsaved changes?" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Keep editing" }));
+  expect(name).toHaveValue("draft-machine");
+  expect(screen.getByRole("tab", { name: "Remote VM" })).toHaveAttribute("data-state", "active");
+  await user.click(screen.getByRole("tab", { name: "NyxID hosted" }));
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(screen.getByRole("tab", { name: "NyxID hosted" })).toHaveAttribute("data-state", "active"));
+  expect(mock.issue).not.toHaveBeenCalled();
+  expect(mock.createRemote).not.toHaveBeenCalled();
+});
+
 it.each((["vm", "docker"] as const).flatMap(where => [
   { where, selection: "automatic", label: "Automatic — require confirmed supported separation", flag: "automatic" },
   { where, selection: "require_separated", label: "Require separated workspaces and browsers", flag: "require-separated" },
@@ -354,7 +402,7 @@ it.each((["vm", "docker"] as const).flatMap(where => [
   await user.click(screen.getByRole("option", { name: label }));
   if (selection === "shared_legacy") {
     expect(screen.getByText(SHARED_LEGACY_WARNING)).toBeVisible();
-    await user.click(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }));
+    await user.click(screen.getByRole("switch", { name: /I explicitly accept shared legacy/ }));
   }
   await user.click(screen.getByRole("button", { name: "Create my setup command" }));
   await waitFor(() => expect(mock.issue).toHaveBeenCalledWith("intent", expect.objectContaining({ separation: selection, where })));
@@ -370,7 +418,7 @@ it("requires fresh legacy acknowledgement when reviewing a previously selected s
   render(<MachineSetupPage />);
   await waitFor(() => expect(screen.getByRole("combobox", { name: "Agent separation" })).toHaveTextContent("Explicit shared legacy access"));
   expect(await screen.findByText(SHARED_LEGACY_WARNING)).toBeVisible();
-  const consent = screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ });
+  const consent = screen.getByRole("switch", { name: /I explicitly accept shared legacy/ });
   expect(consent).not.toBeChecked();
   fireEvent.click(screen.getByRole("button", { name: "Create my setup command" }));
   expect(await screen.findByText("Acknowledge the shared legacy warning before continuing")).toBeVisible();
@@ -391,12 +439,12 @@ it("reviews an old omitted choice as automatic and clears legacy consent when th
   expect(mode).toHaveTextContent("Automatic");
   await user.click(mode);
   await user.click(screen.getByRole("option", { name: "Explicit shared legacy access" }));
-  await user.click(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ }));
+  await user.click(screen.getByRole("switch", { name: /I explicitly accept shared legacy/ }));
   await user.click(mode);
   await user.click(screen.getByRole("option", { name: /Automatic —/ }));
   await user.click(mode);
   await user.click(screen.getByRole("option", { name: "Explicit shared legacy access" }));
-  expect(screen.getByRole("checkbox", { name: /I explicitly accept shared legacy/ })).not.toBeChecked();
+  expect(screen.getByRole("switch", { name: /I explicitly accept shared legacy/ })).not.toBeChecked();
   await user.click(mode);
   await user.click(screen.getByRole("option", { name: /Automatic —/ }));
   await user.click(screen.getByRole("button", { name: "Create my setup command" }));

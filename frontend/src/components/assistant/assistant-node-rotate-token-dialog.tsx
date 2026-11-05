@@ -138,7 +138,7 @@ export function AssistantNodeRotateTokenDialog({
                   id="assistant-node-auth-token"
                   readOnly
                   value={result.authToken}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
@@ -151,13 +151,13 @@ export function AssistantNodeRotateTokenDialog({
                   id="assistant-node-signing-secret"
                   readOnly
                   value={result.signingSecret}
-                  className="font-mono text-xs"
+                  className="font-mono text-14"
                 />
               </div>
             ) : null}
           </div>
         ) : (
-          <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-12">
+          <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-14">
             <span className="text-muted-foreground">Node</span>
             <Badge
               variant="secondary"
@@ -169,7 +169,7 @@ export function AssistantNodeRotateTokenDialog({
         )}
 
         {error ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

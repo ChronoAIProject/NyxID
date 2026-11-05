@@ -92,7 +92,7 @@ for (const width of [320, 1280]) {
         expect(control!.y + control!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height);
       }
       const label = strip.getByText("Project notes.md", { exact: true });
-      expect(await label.evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBe(28);
+      expect(await label.evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeCloseTo(14 * 0.85 * 2, 2);
       await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeInViewport();
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(width);
       await page.getByRole("button", { name: "Remove Project notes.md" }).click();
