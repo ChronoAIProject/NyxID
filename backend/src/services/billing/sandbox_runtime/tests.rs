@@ -612,6 +612,7 @@ async fn catalog_identity_drift_and_expired_quote_do_not_admit_usage() {
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
 }
 
+mod admission;
 mod ingestion;
 mod routes;
 

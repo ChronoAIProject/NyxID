@@ -196,7 +196,8 @@ Axum JSON/body rejections may instead return plain text: malformed JSON is 400,
 an unsupported content type is 415, invalid field types or unknown fields are
 422, and an oversized body is 413. Correct those requests before retrying.
 The authoritative numeric registry is `backend/src/errors/mod.rs`; clients must
-branch on both HTTP status and `error`, not human message text:
+branch on both HTTP status and `error`. The exact exclusion contract below is
+the sole exception that also pins `message` for compatibility with the CMA client:
 
 | HTTP | Error | Retry rule |
 | --- | --- | --- |
@@ -209,6 +210,37 @@ branch on both HTTP status and `error`, not human message text:
 | 402 | `billing_provider_unavailable` / `billing_not_configured` | Admission remains closed; recover the receipt first, then retry the same request with bounded exponential backoff. This repository currently maps provider billing errors to 402. |
 | 429 | `rate_limited` | Honor `Retry-After` when present; use bounded backoff. |
 | 5xx or transport timeout | database/internal/unknown outcome | Treat as ambiguous. GET the receipt and retry the identical POST with bounded backoff and jitter. |
+
+### Explicit exclusion on the money-free quote endpoint
+
+After authenticating the producer and validating owner identity, NyxID evaluates
+`CMA_BILLING_ENABLED` first, then `experimental:cma-sandbox-billing` using the
+existing global → matching organization → personal override resolution. These
+checks precede accounting readiness, ordinary billing configuration, catalog,
+rate-card/cache, wallet, subscription and Lago dependencies. A flag-resolution
+failure remains an error; it is never inferred to mean exclusion.
+
+For `POST /quotes`, CMA may proceed unbilled **only** on HTTP **402** with
+`error: "billing_provider_unavailable"`, numeric `error_code: 11302`, and exactly
+one of these `message` strings:
+
+| Exclusion | Exact message |
+| --- | --- |
+| Fleet gate is off | `Billing provider unavailable: CMA paid admission is disabled` |
+| Owner's CMA cohort flag is off | `Billing provider unavailable: Sandbox owner is outside the billing rollout` |
+
+This pins the client contract in CMA PR #1322 at `2d31bf36b`. Excluded quotes
+create no quote, hold or usage row, even when paid-billing dependencies are
+missing or failing. Ordinary `BILLING_ENABLED`/fail-closed state, general billing
+eligibility, missing prices/wallets and provider failures use distinct messages
+and remain fail-closed. Any different status, key, numeric code, message or
+malformed response is **not** permission to run unbilled.
+
+New window admissions check the same gates before paid-billing dependencies,
+after the existing idempotent-receipt recovery path. A window refusal is never
+proof that an earlier ambiguous request created no hold. `GET /receipts`, exact
+committed-request replay, evidence ingestion and settlement of already-funded
+windows remain available when fleet or cohort admission is disabled.
 
 Never extend a provider deadline without an accepted matching receipt. Retry
 receipts/evidence even when admission is disabled. On evidence timeout, GET the

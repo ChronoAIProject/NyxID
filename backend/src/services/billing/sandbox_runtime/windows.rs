@@ -82,6 +82,7 @@ impl BillingService {
         {
             return replay(receipt, &request_digest);
         }
+        self.require_sandbox_rollout(&input.owner_id).await?;
         let service_id = self.require_sandbox_admission()?;
         super::super::exact_migration::require_ready(&self.db).await?;
         let quote = self.db.collection::<SandboxBillingQuote>(QUOTE_COLLECTION)

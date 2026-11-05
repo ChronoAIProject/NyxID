@@ -98,6 +98,16 @@ async fn cma_flag_defaults_off_and_global_user_overrides_control_new_coverage() 
     );
     set_flag(&f, user, Some(true)).await;
     Arc::make_mut(&mut f.billing.config).cma_billing_enabled = false;
+    assert_eq!(
+        f.billing
+            .sandbox_window_receipt(&f.producer, &input.request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        admitted.id,
+        "fleet disable must preserve receipt recovery"
+    );
     assert!(
         f.billing
             .reserve_sandbox_window(&f.producer, another)
@@ -114,6 +124,18 @@ async fn cma_flag_defaults_off_and_global_user_overrides_control_new_coverage() 
             .is_some()
     );
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+    for component in &window.components {
+        let row =
+            f.db.collection::<UsageMeterRow>(USAGE)
+                .find_one(doc! {"_id": &component.usage_row_id})
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            row.funding.unwrap().settled,
+            "fleet disable must preserve exact settlement"
+        );
+    }
 }
 
 #[tokio::test]

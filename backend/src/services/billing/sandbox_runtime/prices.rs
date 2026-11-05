@@ -4,12 +4,28 @@ use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamS
 use crate::models::usage_meter::CredentialClass;
 
 impl BillingService {
-    pub(super) fn require_sandbox_admission(&self) -> AppResult<&str> {
-        if !self.config.cma_billing_enabled
-            || !self.config.billing_enabled
-            || self.config.billing_fail_closed
-        {
+    /// These two messages are part of CMA's exact quote-refusal contract.
+    /// Resolve exclusion before any paid-billing dependency; only these gates
+    /// authorize CMA to proceed unbilled, never a generic provider failure.
+    pub(super) async fn require_sandbox_rollout(&self, owner_id: &str) -> AppResult<()> {
+        if !self.config.cma_billing_enabled {
             return Err(unavailable("CMA paid admission is disabled"));
+        }
+        if !crate::services::feature_flag_service::personal_flag_enabled(
+            &self.db,
+            owner_id,
+            crate::services::feature_flag_service::CMA_SANDBOX_BILLING_FLAG_KEY,
+        )
+        .await?
+        {
+            return Err(unavailable("Sandbox owner is outside the billing rollout"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_sandbox_admission(&self) -> AppResult<&str> {
+        if !self.config.billing_enabled || self.config.billing_fail_closed {
+            return Err(unavailable("CMA billing dependencies are unavailable"));
         }
         let service = self
             .config
@@ -27,8 +43,9 @@ impl BillingService {
         sandbox: &str,
         allocation: SandboxAllocation,
     ) -> AppResult<SandboxBillingQuote> {
-        let service_id = self.require_sandbox_admission()?;
         uuid(owner_id)?;
+        self.require_sandbox_rollout(owner_id).await?;
+        let service_id = self.require_sandbox_admission()?;
         sandbox_id(sandbox)?;
         super::super::sandbox_runtime_math::finite_quantities(units(&allocation), 300)
             .map_err(invalid)?;
@@ -168,14 +185,10 @@ impl BillingService {
                 &self.db, &owner,
             )
             .await?
-            || !crate::services::feature_flag_service::personal_flag_enabled(
-                &self.db,
-                owner_id,
-                crate::services::feature_flag_service::CMA_SANDBOX_BILLING_FLAG_KEY,
-            )
-            .await?
         {
-            return Err(unavailable("Sandbox owner is outside the billing rollout"));
+            return Err(unavailable(
+                "Sandbox owner is not eligible for paid billing",
+            ));
         }
         let wallet = self
             .db

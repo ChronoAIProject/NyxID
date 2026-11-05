@@ -35,6 +35,90 @@ async fn call(
 }
 
 #[tokio::test]
+async fn mounted_quote_exclusion_matches_cma_contract_before_paid_dependencies() {
+    use crate::services::feature_flag_service::{self as flags, FlagTarget};
+    let f = fixture("sandbox_exclusion_contract").await;
+    flags::set_platform_override(
+        &f.db,
+        flags::CMA_SANDBOX_BILLING_FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let state =
+        crate::test_utils::test_app_state_with_config(f.db.clone(), (*f.billing.config).clone());
+    let (token, jti) = crate::crypto::jwt::generate_service_account_token(
+        &state.jwt_keys,
+        &state.config,
+        &f.producer.id,
+        WRITE_SCOPE,
+        3600,
+        0,
+    )
+    .unwrap();
+    f.db.collection::<Document>("service_account_tokens")
+        .update_one(
+            doc! {"jti": &f.producer.token_jti},
+            doc! {"$set": {"jti": jti}},
+        )
+        .await
+        .unwrap();
+    for collection in [
+        WALLETS,
+        "downstream_services",
+        "sandbox_rate_cards",
+        "billing_rate_cache",
+        "billing_migrations",
+    ] {
+        f.db.collection::<Document>(collection)
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+    }
+    let quote = json!({"owner_id": f.owner, "sandbox_id": format!("sbx_{}", Uuid::new_v4().simple()), "allocation": allocation()});
+    for (fleet, message) in [
+        (
+            true,
+            "Billing provider unavailable: Sandbox owner is outside the billing rollout",
+        ),
+        (
+            false,
+            "Billing provider unavailable: CMA paid admission is disabled",
+        ),
+    ] {
+        let mut state = state.clone();
+        let config = &mut state.config;
+        config.cma_billing_enabled = fleet;
+        config.billing_enabled = false;
+        config.billing_fail_closed = true;
+        config.cma_billing_service_id = None;
+        state.billing = Arc::new(BillingService::new(
+            f.db.clone(),
+            Arc::new(state.config.clone()),
+        ));
+        let (_, mounted) = crate::routes::build_router();
+        let router = mounted.with_state(state);
+        let (status, body) = call(&router, Some(&token), "POST", "/quotes", quote.clone()).await;
+        assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            body,
+            json!({"error": "billing_provider_unavailable", "error_code": 11302, "message": message})
+        );
+    }
+    for collection in [QUOTE_COLLECTION, WINDOW_COLLECTION, USAGE] {
+        assert_eq!(
+            f.db.collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[tokio::test]
 async fn mounted_producer_contract_authenticates_and_recovers_receipts_and_cursor() {
     let mut f = fixture("sandbox_routes").await;
     let mut state =
