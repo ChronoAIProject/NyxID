@@ -7,7 +7,7 @@ import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { MachineReviewRequired } from "./machineContracts";
 import { ApiError } from "../../lib/api/ApiError";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 
 export const machineKeys = (epoch: number) =>
   ["workspace", "machines", epoch] as const;
@@ -22,7 +22,7 @@ export function machineError(cause: unknown) {
 }
 export async function openMachineWeb(path: string) {
   await WebBrowser.openBrowserAsync(
-    `${NYXID_FRONTEND_URL.replace(/\/$/, "")}${path}`,
+    `${getFrontendUrl().replace(/\/$/, "")}${path}`,
   );
 }
 

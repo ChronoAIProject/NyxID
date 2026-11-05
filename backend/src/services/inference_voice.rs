@@ -23,7 +23,14 @@ pub fn default_voice(slug: &str) -> Option<VoiceInference> {
                 "nira", "noeul", "nuri", "quartz", "ripple", "sage", "shimmer", "shitan",
                 "sillage", "stone", "tempo", "verse", "vesper", "willow",
             ],
-            vec![VoiceSeconds],
+            vec![
+                VoiceSeconds,
+                Tokens,
+                InputTokens,
+                OutputTokens,
+                CacheReadTokens,
+                CacheWriteTokens,
+            ],
         ),
         "llm-xai" => (
             VoiceProtocol::XaiRealtime,
@@ -47,6 +54,7 @@ pub fn default_voice(slug: &str) -> Option<VoiceInference> {
     };
     Some(VoiceInference {
         protocol,
+        delegation_model: (protocol == VoiceProtocol::OpenaiLive).then(|| "gpt-6-luna".into()),
         models: vec![VoiceModel {
             id: model.into(),
             label: label.into(),
@@ -111,8 +119,17 @@ pub fn validate(voice: &VoiceInference) -> AppResult<()> {
             VoiceUsageSource::ProviderReported
         ) | (VoiceProtocol::XaiRealtime, VoiceUsageSource::ServerMeasured)
     );
-    if !(models_valid && voices_valid && metrics_valid && usage_valid) {
+    let delegation_valid = voice.delegation_model.as_deref().is_none_or(valid_id)
+        && (voice.protocol == VoiceProtocol::OpenaiLive || voice.delegation_model.is_none());
+    if !(models_valid && voices_valid && metrics_valid && usage_valid && delegation_valid) {
         return Err(AppError::ValidationError("Invalid voice metadata: bounded unique models/voices, at most one default, duration/token metrics and the adapter's usage source are required".into()));
     }
     Ok(())
+}
+
+/// The same provider metadata can offer dictation without conversation. Keep
+/// that capability valid while making discovery and call admission agree.
+pub fn conversation_unavailable_reason(voice: &VoiceInference) -> Option<&'static str> {
+    (voice.protocol == VoiceProtocol::OpenaiLive && voice.delegation_model.is_none())
+        .then_some("delegation_model_required")
 }

@@ -433,7 +433,14 @@ test("saved personal Telegram thread stays accessible after owner disconnect", a
   const dialog = page.getByRole("dialog");
   await expect(dialog).toContainText("Work already started may keep running");
   await dialog.getByRole("button", { name: "Disconnect", exact: true }).click();
-  await expect(page.getByText(/9007199254740993 · Disconnected/)).toBeVisible();
+  const personalLink = page.getByRole("region", {
+    name: "@PlatformBot",
+    exact: true,
+  });
+  await expect(personalLink).toContainText(sender.id);
+  await expect(
+    personalLink.getByText("Disconnected", { exact: true }),
+  ).toBeVisible();
   expect(
     state.writes.find((write) => write.path.endsWith("/revoke"))?.body,
   ).toEqual({ generation: 1 });

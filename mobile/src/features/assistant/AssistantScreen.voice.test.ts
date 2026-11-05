@@ -433,7 +433,7 @@ function setup(
       NativeAuthoredSkillReview: "NativeAuthoredSkillReview",
     },
     "../../lib/env": {
-      NYXID_FRONTEND_URL: "https://nyx.example",
+      getFrontendUrl: () => "https://nyx.example",
       NYXID_TRUSTED_FRONTEND_URLS: ["https://nyx.example"],
       firstPartyFrontendUrls: () => ["https://nyx.example"],
     },

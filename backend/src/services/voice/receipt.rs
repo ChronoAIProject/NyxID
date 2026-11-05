@@ -179,6 +179,7 @@ mod tests {
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
             execution_enrolled: false,
+            model_task: None,
             progress: None,
             timing: Default::default(),
             started_at: None,

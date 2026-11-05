@@ -254,6 +254,27 @@ ElevenLabs and Twilio both publish JSON specifications that currently fit under 
 
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
 
+The `nyx-panel` overlay is an instance-mounted device contract, without a
+seeded catalog connection. Panels register its hosted URL on their daily
+`UserEndpoint.openapi_spec_url`; each connection retains its own node route
+and service grants. It exposes on-demand camera JPEGs, display images/captions and
+voice controls, audio output, input mode, screen brightness and persistent fallback
+images. Bot selection, credentials, network and system management remain on the
+separate management service. Daily parameter endpoints reject unknown or combined
+fields; they cannot change the selected Bot. Daily preferences and persistent
+fallback operations require panel firmware v0.6.15 or later. Tool-returned
+images use the ordinary NyxAgent image pipeline; voice tasks use the selected
+Bot's existing service grants. No camera transport or device-specific executor
+is added to Voice.
+With panel firmware v0.6.14 or later, the default camera tool calls
+`POST /camera/capture`: the panel displays the
+same JPEG returned to the model for two minutes, then restores its fallback.
+`GET /camera/snapshot.jpg` remains available for captures that leave the display
+unchanged. Display source metadata is available in `/status` for verification.
+Existing panels can attach the contract through `PUT /keys/{slug}` with
+`openapi_spec_url` pointing to this deployment's
+`/api/v1/catalog-specs/nyx-panel/openapi.json`; no grant or key change is needed.
+
 The Telnyx overlay covers core AI inference, assistants, conversations, speech,
 messaging, and calling. Its full upstream spec exceeds the fetch limit. See
 [Telnyx integration](TELNYX_INTEGRATION.md) for connection setup and platform

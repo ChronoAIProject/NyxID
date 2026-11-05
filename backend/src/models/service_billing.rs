@@ -33,6 +33,9 @@ pub enum BillingMetric {
     Images,
     VoiceSeconds,
     MachineRunningSeconds,
+    SandboxCpuMillisSeconds,
+    SandboxMemoryMibSeconds,
+    SandboxDiskGibSeconds,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -113,7 +116,7 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
 
 impl BillingMetric {
     /// Stable names enter ledger canonical encoding. Never rename existing units.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Tokens,
         Self::Requests,
         Self::Bytes,
@@ -124,6 +127,9 @@ impl BillingMetric {
         Self::Images,
         Self::VoiceSeconds,
         Self::MachineRunningSeconds,
+        Self::SandboxCpuMillisSeconds,
+        Self::SandboxMemoryMibSeconds,
+        Self::SandboxDiskGibSeconds,
     ];
 
     fn metadata(self) -> (&'static str, &'static str, bool) {
@@ -140,6 +146,21 @@ impl BillingMetric {
             Self::MachineRunningSeconds => {
                 ("machine_running_seconds", "Machine running seconds", false)
             }
+            Self::SandboxCpuMillisSeconds => (
+                "sandbox_cpu_millis_seconds",
+                "Sandbox CPU millicore-seconds",
+                false,
+            ),
+            Self::SandboxMemoryMibSeconds => (
+                "sandbox_memory_mib_seconds",
+                "Sandbox RAM MiB-seconds",
+                false,
+            ),
+            Self::SandboxDiskGibSeconds => (
+                "sandbox_disk_gib_seconds",
+                "Sandbox disk GiB-seconds",
+                false,
+            ),
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -153,6 +174,16 @@ impl BillingMetric {
     }
     pub fn is_legacy(self) -> bool {
         matches!(self, Self::Tokens | Self::Requests | Self::Bytes)
+    }
+    /// These units require a durable lifecycle reservation and observation.
+    pub fn is_runtime_allocation(self) -> bool {
+        matches!(
+            self,
+            Self::MachineRunningSeconds
+                | Self::SandboxCpuMillisSeconds
+                | Self::SandboxMemoryMibSeconds
+                | Self::SandboxDiskGibSeconds
+        )
     }
 }
 

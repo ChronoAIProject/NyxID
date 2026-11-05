@@ -132,6 +132,7 @@ pub async fn enqueue(
     }
     let request = VoiceRequest {
         execution_enrolled: false,
+        model_task: None,
         progress: None,
         timing: Default::default(),
         started_at: None,
@@ -1148,6 +1149,7 @@ pub(crate) async fn continuation(
         db,
         VoiceRequest {
             execution_enrolled: parent.execution_enrolled,
+            model_task: None,
             progress: None,
             timing: Default::default(),
             started_at: None,
@@ -1320,6 +1322,7 @@ pub async fn cancel(db: &Database, user: &str, conversation: &str, id: &str) -> 
 
 #[derive(serde::Serialize)]
 pub struct VoiceOption {
+    announcements: bool,
     service_id: String,
     connection_id: Option<String>,
     key_source: &'static str,
@@ -1485,6 +1488,9 @@ async fn audio_options(
             }
             own_connections.push(connection);
         }
+        let conversation_unavailable = (!dictation)
+            .then(|| super::inference_voice::conversation_unavailable_reason(voice))
+            .flatten();
         let billing = service.billing.as_ref();
         let platform_priced =
             super::voice::credentials::duration_billing(&VoiceKeySource::Platform, billing).is_ok();
@@ -1503,6 +1509,10 @@ async fn audio_options(
         {
             if platform_authorized {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: None,
                     key_source: "platform",
@@ -1514,17 +1524,19 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: platform_enabled && platform_priced,
-                    unavailable_reason: if !platform_enabled {
+                    available: platform_enabled
+                        && platform_priced
+                        && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if !platform_enabled {
                         Some("provider_rollout_pending")
                     } else if !platform_priced {
                         Some("duration_tariff_unavailable")
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.platform_key.pricing.clone()
                     } else {
                         None
@@ -1535,6 +1547,10 @@ async fn audio_options(
             }
             for connection in &own_connections {
                 options.push(VoiceOption {
+                    announcements: !dictation
+                        && voice.protocol
+                            == crate::models::downstream_service::VoiceProtocol::OpenaiLive
+                        && thread.is_none_or(|t| !t.shared_agent_thread),
                     service_id: service.id.clone(),
                     connection_id: Some(connection.service.id.clone()),
                     key_source: "own",
@@ -1546,15 +1562,15 @@ async fn audio_options(
                     },
                     default_model: model.default,
                     voice: voice.clone(),
-                    available: own_billing.is_ok(),
-                    unavailable_reason: if own_billing.is_err() {
+                    available: own_billing.is_ok() && conversation_unavailable.is_none(),
+                    unavailable_reason: if conversation_unavailable.is_some() {
+                        conversation_unavailable
+                    } else if own_billing.is_err() {
                         Some("duration_tariff_unavailable")
                     } else {
                         None
                     },
-                    reported_token_pricing: if voice.protocol
-                        == crate::models::downstream_service::VoiceProtocol::XaiRealtime
-                    {
+                    reported_token_pricing: if !dictation {
                         entry.byok_pricing.clone()
                     } else {
                         None

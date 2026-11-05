@@ -12,6 +12,7 @@ use crate::{
 use mongodb::bson::{self, doc};
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn prepare(
     state: &AppState,
     user: &str,
@@ -20,8 +21,9 @@ pub async fn prepare(
     preferences: VoicePreferences,
     identity: String,
     execution_enrolled: bool,
+    client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<runtime::Started> {
-    let row = session::admit(
+    let row = session::admit_for_client_key(
         &state.db,
         user,
         conversation,
@@ -29,12 +31,13 @@ pub async fn prepare(
         preferences,
         identity,
         &state.replica_identity.generation_id,
+        client_key,
     )
     .await?;
     let row = session::write(
         &state.db,
         &row,
-        doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled},
+        doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled && row.client_key.is_none()},
     )
     .await?;
     Ok(runtime::Started {
@@ -60,6 +63,7 @@ pub async fn serve(
             doc! {"$set":{"lease_owner":&state.replica_identity.generation_id}})
             .return_document(mongodb::options::ReturnDocument::After).await?
             .ok_or_else(||AppError::Conflict("Voice relay already started".into()))?;
+        Box::pin(super::client_key::revalidate(&state.db, &call)).await?;
         let resolved = Box::pin(credentials::resolve(
             &state,
             &call.user_id,

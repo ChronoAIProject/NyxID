@@ -82,9 +82,77 @@ async fn owner_flag_blocks_all_downloads_until_that_person_is_enabled() {
             assert!(input.note.is_empty());
         } else {
             assert!(input.uploads.is_empty());
-            assert!(input.note.contains("1 attachments are not shared"));
+            assert!(input.note.contains("1 attachment is not shared"));
+            assert!(input.note.contains("not enabled for this owner"));
+            assert!(input.note.contains("NyxID platform administrator"));
+            assert!(input.note.contains("assistant:channel-media"));
+            assert!(
+                input
+                    .note
+                    .contains("file-format support has not been checked")
+            );
+            assert!(input.note.contains("Keep the original task pending"));
+            assert!(!input.note.contains("lookup failed"));
+            assert!(!input.note.contains("panelTab=privacy"));
             assert_eq!(server.received_requests().await.unwrap().len(), before);
         }
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn flag_lookup_failure_is_unknown_and_blocks_downloads_and_upload_admission() {
+    use mongodb::bson::{Document, doc};
+    let (state, owner, server, bot) = fixture().await;
+    flag(&state, &owner, true).await;
+    // A real resolver failure, without a global fault hook or breaking the
+    // database used to prove that no upload admission/write took place.
+    state
+        .db
+        .collection::<Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .update_one(
+            doc! {"flag_key": flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY, "target_key": &owner},
+            doc! {"$set": {"enabled": "invalid private configuration detail"}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        flags::personal_flag_enabled(&state.db, &owner, flags::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY)
+            .await
+            .is_err()
+    );
+    let before = server.received_requests().await.unwrap().len();
+    let input = prepare_uploads_from(
+        &state,
+        &bot,
+        &owner,
+        &[file("private", None)],
+        &server.uri(),
+    )
+    .await;
+    assert!(input.uploads.is_empty());
+    assert!(input.note.contains("configuration lookup failed"));
+    assert!(input.note.contains("Whether it is enabled is unknown"));
+    assert!(input.note.contains("administrator to investigate"));
+    assert!(input.note.contains("No attachment was downloaded or read"));
+    assert!(
+        input
+            .note
+            .contains("file-format support has not been checked")
+    );
+    assert!(!input.note.contains("not enabled for this owner"));
+    assert!(!input.note.contains("invalid private configuration detail"));
+    assert_eq!(server.received_requests().await.unwrap().len(), before);
+    for collection in ["assistant_upload_limits", "assistant_attachments"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+        );
     }
     state.db.drop().await.unwrap();
 }

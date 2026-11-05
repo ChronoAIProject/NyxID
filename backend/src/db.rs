@@ -326,6 +326,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::billing::machine_runtime::ensure_indexes(db)
         .await
         .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+    crate::services::billing::sandbox_runtime::ensure_indexes(db)
+        .await
+        .map_err(|_| mongodb::error::Error::custom("Sandbox billing index migration failed"))?;
     crate::services::machine_external_grant_service::create_indexes(db)
         .await
         .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;

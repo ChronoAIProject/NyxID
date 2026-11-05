@@ -97,6 +97,8 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 
 - **Speak to NyxBot and specialists** — voice calls start with saved account preferences and show live captions and audio activity in the composer. Change the next call’s defaults through Voice settings in the composer chevron. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
 
+- **Use Bot voice from an independent device** — publish one Voice connection for a personal Bot and grant that connection to the device's Agent Key. Devices retain their own login credentials while conversations use the selected Bot's existing tools, confirmations and billing. Remote speech notifications use the same authorized call. The feature is disabled by default; see [Agent Key voice](docs/chat/12-agent-key-voice.md).
+
 - **Display source images in NyxBot** — supported Notion reads return image references that NyxBot can retain as encrypted chat attachments and deliver through supported channels. The shared retrieval tool rechecks source access; see [source resources and image display](docs/chat/10-source-resources.md).
 
 - **Control NyxBot service use** — NyxBot enforces saved connection order, prefers suitable working personal connections, and asks before organization use in Auto and Ask every time. Choose an exact connection for the next message without changing permission modes. See [NyxBot service execution](docs/NYXBOT_SERVICE_EXECUTION.md).

@@ -104,7 +104,7 @@ function setup(
     ),
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../lib/api/accountApi": { accountApi: api },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
+    "../../lib/env": { getFrontendUrl: () => "https://nyxid.example" },
     "../../hooks/useNetworkStatus": {
       useNetworkStatus: () => ({ isConnected: true }),
     },

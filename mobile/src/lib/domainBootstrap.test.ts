@@ -80,8 +80,8 @@ test("asks both API hosts and applies the first valid answer", async () => {
     ...saved,
   });
   assert.deepEqual(calls.sort(), [`${LEGACY_API}/public/config`, `${NEW_API}/public/config`].sort());
-  assert.equal(domains.NYXID_API_BASE_URL, NEW_API);
-  assert.equal(domains.NYXID_FRONTEND_URL, "https://nyxid.ai");
+  assert.equal(domains.activeDomains().apiBaseUrl, NEW_API);
+  assert.equal(domains.getFrontendUrl(), "https://nyxid.ai");
   assert.deepEqual(saved.writes, ["true"]);
 });
 
@@ -98,7 +98,7 @@ test("uses whichever host answers when the other is down or too old to know the 
       ...store(),
       timeoutMs: 200,
     });
-    assert.equal(domains.NYXID_API_BASE_URL, NEW_API);
+    assert.equal(domains.activeDomains().apiBaseUrl, NEW_API);
   }
 });
 
@@ -109,8 +109,8 @@ test("an explicit off answer returns to the original domains and is saved", asyn
     fetch: fakeFetch({ [LEGACY_API]: { flag: false }, [NEW_API]: { flag: false } }, []),
     ...saved,
   });
-  assert.equal(domains.NYXID_API_BASE_URL, LEGACY_API);
-  assert.equal(domains.NYXID_USING_NEW_DOMAINS, false);
+  assert.equal(domains.activeDomains().apiBaseUrl, LEGACY_API);
+  assert.equal(domains.activeDomains(), domains.DOMAIN_SETS.legacy);
   assert.deepEqual(saved.writes, ["false"]);
 });
 
@@ -125,7 +125,7 @@ test("with no answer in time, the saved choice applies, else the original domain
       timeoutMs: 50,
     });
     assert.ok(Date.now() - started < 1000, "the launch gate is bounded by the timeout");
-    assert.equal(domains.NYXID_API_BASE_URL, expected);
+    assert.equal(domains.activeDomains().apiBaseUrl, expected);
     assert.deepEqual(local.writes, []);
   }
 });
@@ -135,5 +135,5 @@ test("builds without a second domain set skip the network entirely", async () =>
   const calls: string[] = [];
   await bootstrap.initializeDomains({ fetch: fakeFetch({}, calls), ...store("true") });
   assert.deepEqual(calls, []);
-  assert.equal(domains.NYXID_API_BASE_URL, LEGACY_API);
+  assert.equal(domains.activeDomains().apiBaseUrl, LEGACY_API);
 });
