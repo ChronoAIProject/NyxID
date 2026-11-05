@@ -74,11 +74,11 @@ export function ServicePoolCards({
                       <ServicePoolIcon className="size-5" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h3 className="truncate text-15 font-semibold">
+                      <h3 className="truncate type-card-title">
                         {pool.name}
                       </h3>
                       <code
-                        className="block truncate text-xs text-muted-foreground"
+                        className="block truncate text-14 text-muted-foreground"
                         title={`/api/v1/proxy/s/${pool.slug}`}
                       >
                         {pool.slug}
@@ -87,12 +87,12 @@ export function ServicePoolCards({
                     {actions(pool)}
                   </Glide>
                   <Glide>
-                    <p className="line-clamp-1 h-4 text-xs text-muted-foreground">
+                    <p className="line-clamp-1 h-4 text-13 text-muted-foreground">
                       {pool.description ||
                         "One route across compatible connections"}
                     </p>
                   </Glide>
-                  <Glide className="mt-auto space-y-1.5 text-xs">
+                  <Glide className="mt-auto space-y-1.5 text-13">
                     <div className="flex items-center justify-between gap-2">
                       <span className="flex items-center gap-1.5">
                         <PoolStrategyIcon

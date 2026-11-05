@@ -338,7 +338,7 @@ function OptionSelection({
         open && activeIndex >= 0 ? `${id}-choice-${activeIndex}` : undefined
       }
       autoComplete="off"
-      className="h-6 min-w-20 flex-1 bg-transparent p-0 text-12 text-foreground outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed"
+      className="h-6 min-w-20 flex-1 bg-transparent p-0 text-14 text-foreground outline-none placeholder:text-text-tertiary disabled:cursor-not-allowed"
       size={original === undefined ? undefined : Math.max(10, draft.length + 1)}
       placeholder={
         allowCustom
@@ -412,7 +412,7 @@ function OptionSelection({
               role="group"
               aria-label={`Selected ${v}`}
               className={cn(
-                "flex min-h-6 max-w-full items-stretch overflow-hidden rounded-md border border-input bg-muted/25 text-12",
+                "flex min-h-6 max-w-full items-stretch overflow-hidden rounded-md border border-input bg-muted/25 text-14",
                 original === v && "border-ring ring-1 ring-ring",
               )}
             >
@@ -495,19 +495,19 @@ function OptionSelection({
         }}
       >
         {original !== undefined && (
-          <p className="border-b px-2 py-2 text-xs text-muted-foreground">
+          <p className="border-b px-2 py-2 text-13 text-muted-foreground">
             Editing value. Enter saves; Escape cancels.
           </p>
         )}
         {query.isFetching && (
-          <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+          <p role="status" className="px-3 py-2 text-13 text-muted-foreground">
             {pages.length
               ? "Loading remaining suggestions…"
               : "Loading suggestions…"}
           </p>
         )}
         {query.isError && !query.versionChanged && (
-          <div role="alert" className="px-3 py-2 text-xs">
+          <div role="alert" className="px-3 py-2 text-13">
             <p className="text-destructive">
               {pages.length
                 ? "Some suggestions could not load."
@@ -552,7 +552,7 @@ function OptionSelection({
               aria-disabled={disabled || choice.disabled}
               data-option-index={index}
               className={cn(
-                "flex cursor-pointer items-center gap-2 rounded-md px-3 py-1.5 text-12 transition-colors duration-200 hover:bg-overlay-strong",
+                "flex cursor-pointer items-center gap-2 rounded-md px-3 py-1.5 text-14 transition-colors duration-200 hover:bg-overlay-strong",
                 activeIndex === index && "bg-overlay-strong",
                 (disabled || choice.disabled) &&
                   "cursor-not-allowed opacity-50",
@@ -563,7 +563,7 @@ function OptionSelection({
               <span className="min-w-0 flex-1">
                 <span
                   className={cn(
-                    "block break-words text-xs",
+                    "block break-words text-13",
                     optionSet === "service-scope" && "font-mono",
                   )}
                 >
@@ -574,7 +574,7 @@ function OptionSelection({
                 {optionSet === "service-scope" &&
                   choice.label &&
                   choice.label !== choice.value && (
-                    <span className="block break-words text-xs text-muted-foreground">
+                    <span className="block break-words text-13 text-muted-foreground">
                       {choice.label}
                     </span>
                   )}
@@ -586,12 +586,12 @@ function OptionSelection({
           ))}
         </div>
         {!choices.length && !query.isFetching && query.isSuccess && (
-          <p role="status" className="px-3 py-2 text-xs text-muted-foreground">
+          <p role="status" className="px-3 py-2 text-13 text-muted-foreground">
             No matching suggestions.
           </p>
         )}
         {allowCustom && draft.trim() && !editing?.branch && (
-          <p className="border-t px-2 py-2 text-xs text-muted-foreground">
+          <p className="border-t px-2 py-2 text-13 text-muted-foreground">
             Press Enter to finish this scope.
           </p>
         )}

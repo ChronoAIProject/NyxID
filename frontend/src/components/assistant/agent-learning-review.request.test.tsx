@@ -91,7 +91,7 @@ it("explains the two steps first, then finishes an unattached publication throug
     { status: "pinned" },
   ]);
   show();
-  expect(await screen.findByText("Published version: 1.0.1")).toBeVisible();
+  expect(await screen.findByText("1.0.1")).toBeVisible();
   expect(screen.getByText(/Publishing takes two steps: this button first asks for an owner confirmation card/)).toBeVisible();
   // A publication that reached Ornn cannot be rejected or published again.
   expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();

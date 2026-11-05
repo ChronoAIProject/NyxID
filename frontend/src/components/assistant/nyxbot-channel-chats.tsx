@@ -1,18 +1,23 @@
+import { Label } from "@/components/ui/label";
+import { useDrawerSearchEntries, useDrawerSearchEnabled } from "@/lib/drawer-search";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedSelectTrigger,
+  GroupedDisclosure,
+} from "@/components/ui/grouped-list";
 import { GuestReadiness } from "./guest-readiness";
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
-import { ChevronRight, Megaphone, User, Users } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Megaphone, User, Users } from "lucide-react";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { ErrorBanner } from "@/components/shared/error-banner";
+import { GroupedDetail } from "@/components/ui/grouped-detail";
 import {
   useGuestReadiness,
   useNyxBotChannelChats,
@@ -21,7 +26,7 @@ import {
   useUpdateNyxBotChannelChat,
 } from "@/hooks/use-nyxbot-agents";
 import { agentTitle, channelChatTitle } from "@/lib/assistant/nyxbot-labels";
-import { cn, formatRelativeTime } from "@/lib/utils";
+import { formatRelativeTime } from "@/lib/utils";
 import type {
   AssistantAgent,
   NyxAgentChannelAgent,
@@ -64,10 +69,14 @@ function SettingSelect<T extends string>({
   readonly onChange: (value: T) => void;
 }) {
   return (
-    <Select value={value} onValueChange={(next) => onChange(next as T)} disabled={disabled}>
-      <SelectTrigger aria-label={label} className="h-7 w-full max-w-[220px] rounded-md px-2 text-12">
+    <Select
+      value={value}
+      onValueChange={(next) => onChange(next as T)}
+      disabled={disabled}
+    >
+      <GroupedSelectTrigger aria-label={label} className="max-w-full">
         <SelectValue />
-      </SelectTrigger>
+      </GroupedSelectTrigger>
       <SelectContent>
         {options.map((option) => (
           <SelectItem key={option.value} value={option.value}>
@@ -153,127 +162,123 @@ function ChatRow({
         : `A private chat with ${title}, as a guest`;
 
   return (
-    <div className="space-y-2 rounded-md bg-overlay px-2.5 py-2">
-      <div className="flex items-center gap-2">
-        <ChatKindIcon
-          kind={chat.kind}
-          className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
-        />
-        <p className="min-w-0 flex-1 truncate text-12 font-medium text-foreground">
-          {title}
-        </p>
-        {chat.kind ? (
-          <span className="shrink-0 rounded-md border border-hairline px-1 text-10 text-text-tertiary">
-            {kindLabel}
-          </span>
-        ) : null}
-        {chat.last_message_at ? (
-          <span className="shrink-0 text-11 text-text-tertiary">
-            {formatRelativeTime(chat.last_message_at)}
-          </span>
-        ) : null}
-      </div>
-      <p className="text-11 text-muted-foreground">{summary}</p>
-      <div className="grid grid-cols-[auto_1fr] @max-[480px]/channel-bots:grid-cols-1 items-center gap-x-3 gap-y-1.5 text-11 text-muted-foreground">
+    <div className="space-y-3">
+      <GroupedList
+        data-drawer-search-target={`channel-chat-${chat.id}`}
+        info="Control who answers in this chat, who may talk to the bot and whether it may post on its own. Guest service permissions still apply."
+        title={`${title} · ${kindLabel}${chat.last_message_at ? ` · ${formatRelativeTime(chat.last_message_at)}` : ""}`}
+        footer={
+          <>
+            <p>{summary}</p>
+            {!orgSpecialist ? <GuestReadiness
+              readiness={scoped ? chatReadiness.data : agentReadiness.data}
+            /> : null}
+            {group && chat.follow_guidance ? (
+              <p>{chat.follow_guidance}</p>
+            ) : null}
+            {notice ? <p role="status">{notice}</p> : null}
+          </>
+        }
+      >
         {group ? (
           <>
-            <span>Answers</span>
-            <SettingSelect
-              label={`Replies in ${title}`}
-              value={chat.reply_mode}
-              disabled={update.isPending}
-              options={[
-                { value: "mention", label: "When mentioned" },
-                { value: "all", label: "Every message" },
-              ]}
-              onChange={(reply_mode) => void change({ reply_mode })}
-            />
-            {chat.thread_capabilities?.thread_follow ? (
-              <>
-                <span>Threads</span>
+            <GroupedRow
+              title="Answers"
+              accessory={
                 <SettingSelect
-                  label={`Thread follow in ${title}`}
-                  value={chat.threads ?? "off"}
+                  label={`Replies in ${title}`}
+                  value={chat.reply_mode}
                   disabled={update.isPending}
                   options={[
-                    { value: "follow", label: "Follow when addressed" },
-                    { value: "off", label: "Off" },
+                    { value: "mention", label: "When mentioned" },
+                    { value: "all", label: "Every message" },
                   ]}
-                  onChange={(threads) => void change({ threads })}
+                  onChange={(reply_mode) => void change({ reply_mode })}
                 />
-              </>
+              }
+            />
+            {chat.thread_capabilities?.thread_follow ? (
+              <GroupedRow
+                title="Threads"
+                accessory={
+                  <SettingSelect
+                    label={`Thread follow in ${title}`}
+                    value={chat.threads ?? "off"}
+                    disabled={update.isPending}
+                    options={[
+                      { value: "follow", label: "Follow when addressed" },
+                      { value: "off", label: "Off" },
+                    ]}
+                    onChange={(threads) => void change({ threads })}
+                  />
+                }
+              />
             ) : null}
-            <span>Who can talk</span>
+            <GroupedRow
+              title="Who can talk"
+              accessory={
+                <SettingSelect
+                  label={`Who can talk in ${title}`}
+                  value={chat.members_setting ?? "default"}
+                  disabled={update.isPending}
+                  options={[
+                    {
+                      value: "default",
+                      label: orgSpecialist
+                        ? chat.owner_seen
+                          ? "Members and enabled guests (admin present)"
+                          : "Members, until an admin talks here"
+                        : chat.owner_seen
+                          ? "Everyone (you talk here)"
+                          : "You, until you talk here",
+                    },
+                    { value: "everyone", label: orgSpecialist ? "Members and enabled guests" : "Everyone there" },
+                    { value: "owner", label: orgSpecialist ? "Verified organization members" : "Only you" },
+                  ]}
+                  onChange={(members) => void change({ members })}
+                />
+              }
+            />
+          </>
+        ) : null}
+        <GroupedRow
+          title="Answered by"
+          accessory={
             <SettingSelect
-              label={`Who can talk in ${title}`}
-              value={chat.members_setting ?? "default"}
+              label={`Agent for ${title}`}
+              value={chat.agent_id ?? "default"}
               disabled={update.isPending}
               options={[
                 {
                   value: "default",
-                  label: orgSpecialist
-                    ? chat.owner_seen
-                      ? "Members and enabled guests (admin present)"
-                      : "Members, until an admin talks here"
-                    : chat.owner_seen
-                      ? "Everyone (you talk here)"
-                      : "You, until you talk here",
+                  label: `${botAgentName} (the bot's agent)`,
                 },
-                {
-                  value: "everyone",
-                  label: orgSpecialist
-                    ? "Members and enabled guests"
-                    : "Everyone there",
-                },
-                {
-                  value: "owner",
-                  label: channel.org_specialist
-                    ? "Verified organization members"
-                    : "Only you",
-                },
+                ...agents.map((agent) => ({
+                  value: agent.id,
+                  label: agentTitle(agent),
+                })),
               ]}
-              onChange={(members) => void change({ members })}
+              onChange={(agent_id) => void change({ agent_id })}
             />
-          </>
-        ) : null}
-        <span>Answered by</span>
-        <SettingSelect
-          label={`Agent for ${title}`}
-          value={chat.agent_id ?? "default"}
-          disabled={update.isPending}
-          options={[
-            { value: "default", label: `${botAgentName} (the bot's agent)` },
-            ...agents.map((agent) => ({
-              value: agent.id,
-              label: agentTitle(agent),
-            })),
-          ]}
-          onChange={(agent_id) => void change({ agent_id })}
+          }
         />
-        <span>Posts on its own</span>
-        <Switch
-          checked={chat.allow_posts}
-          disabled={update.isPending}
-          aria-label={`Let the agent post in ${title} on its own`}
-          onCheckedChange={(allow_posts) => void change({ allow_posts })}
+        <GroupedRow
+          title="Posts on its own"
+          accessory={
+            <Switch
+              checked={chat.allow_posts}
+              disabled={update.isPending}
+              aria-label={`Let the agent post in ${title} on its own`}
+              onCheckedChange={(allow_posts) => void change({ allow_posts })}
+            />
+          }
         />
-      </div>
-      {!orgSpecialist ? (
-        <GuestReadiness
-          readiness={scoped ? chatReadiness.data : agentReadiness.data}
-        />
-      ) : null}
-      {group && chat.follow_guidance ? (
-        <p className="text-11 text-muted-foreground">{chat.follow_guidance}</p>
-      ) : null}
+      </GroupedList>
       {group &&
       (chat.thread_capabilities?.thread_follow ||
         chat.has_thread_history ||
         (chat.followed_thread_count ?? 0) > 0) ? (
         <ChannelThreads chat={chat} />
-      ) : null}
-      {notice ? (
-        <p className="text-11 text-muted-foreground">{notice}</p>
       ) : null}
     </div>
   );
@@ -281,7 +286,7 @@ function ChatRow({
 
 /**
  * The chats a connected bot is in, with who may talk to its agent. Loaded
- * only once opened, since a busy bot can be in many chats.
+ * on opening, or while indexed by the agent drawer search.
  */
 export function ChannelChats({
   channel,
@@ -295,9 +300,9 @@ export function ChannelChats({
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState(CHATS_SHOWN);
   const [error, setError] = useState<string>();
-  const chats = useNyxBotChannelChats(channel.id, open);
-  const agentId =
-    channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
+  const inDrawer = useDrawerSearchEnabled();
+  const chats = useNyxBotChannelChats(channel.id, open || inDrawer);
+  const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
   const readiness = useGuestReadiness(agentId, open && !channel.org_specialist);
   const access = useSetNyxBotPrivateChats();
   const posts = useSetNyxBotPrivateChatPosts();
@@ -309,6 +314,14 @@ export function ChannelChats({
       !rows.some((parent) => parent.id === chat.parent_chat_id),
   );
 
+  const searchId = `channel-chats-${channel.id}`;
+  useDrawerSearchEntries([
+    { id: searchId, title: "Chats and who can talk", breadcrumb: `Channels › ${channel.bot_label}`, keywords: "Private chats posts members", pages: [searchId], reveal: () => setOpen(true) },
+    ...rows.map((chat) => ({ id: `channel-chat-${chat.id}`, title: channelChatTitle(chat.kind, chat.title, channel.platform),
+      breadcrumb: `Channels › ${channel.bot_label} › Chats`, keywords: `${chat.kind ?? ""} ${chat.members ?? ""} Answered by Posts on its own`,
+      pages: [searchId], reveal: () => { setShown(rows.length); setOpen(true); },
+    })),
+  ]);
   async function setAccess(privateChats: "owner" | "everyone") {
     setError(undefined);
     try {
@@ -335,176 +348,175 @@ export function ChannelChats({
   }
 
   return (
-    <div className="space-y-2">
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setOpen((value) => !value)}
-        className="flex items-center gap-1 text-12 text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ChevronRight
-          aria-hidden="true"
-          className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
-        />
+    <>
+      <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
         Chats and who can talk
-      </button>
-      {open ? (
-        <div className="space-y-2">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-11 text-muted-foreground">
-              Private chats with the bot
-            </span>
-            <SettingSelect
-              label={`Who can talk to ${channel.bot_label} in private chats`}
-              value={channel.private_chats}
-              disabled={access.isPending}
-              options={[
-                {
-                  value: "owner",
-                  label: channel.org_specialist
-                    ? "Verified organization members"
-                    : "Only you",
-                },
-                {
-                  value: "everyone",
-                  label: channel.org_specialist
-                    ? "Members and enabled guests"
-                    : "Anyone",
-                },
-              ]}
-              onChange={(value) => void setAccess(value)}
-            />
-          </div>
-          <p className="text-11 text-text-tertiary">
-            {channel.org_specialist ? (
-              "Verified members use their own membership permissions and billing. Guests can chat only when an admin enables guest access and a daily budget for this binding. An admin talking in a group opens its default audience to enabled guests; other members cannot widen it."
-            ) : (
-              <>
+      </GroupedDisclosure>
+      <GroupedDetail
+        searchPage={searchId}
+        open={open}
+        title={`${channel.bot_label} · Chats`}
+        info="Manage private-chat access and the bot’s behavior in each connected chat. Changes to these controls apply immediately."
+        onReveal={() => setOpen(true)}
+        backLabel="Back to Channels"
+        onBack={() => setOpen(false)}
+      >
+        <GroupedList
+          title="Private chats"
+          data-drawer-search-target={searchId}
+          footer={
+            <>
+              <p>
+                {channel.org_specialist ? (
+                  "Verified members use their own membership permissions and billing. Guests can chat only when an admin enables guest access and a daily budget for this binding. An admin talking in a group opens its default audience to enabled guests; other members cannot widen it."
+                ) : <>
                 People other than you talk to the agent as guests: it never acts
                 on your account for them, NyxBot uses none of your services for
-                them, and a chat&apos;s own specialist only reads with its
-                services. Members of a group can talk to it once you have talked
-                to the bot there. In groups it answers when mentioned or replied
-                to unless set to every message.
-              </>
-            )}
-          </p>
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-11 text-muted-foreground">
-              Allow posts in new private chats
-            </span>
-            <Switch
-              aria-label={`Allow posts in new private chats with ${channel.bot_label}`}
-              checked={channel.private_chat_posts}
-              disabled={posts.isPending}
-              onCheckedChange={(value) => void setPosts(value)}
-            />
-          </div>
-          <p className="text-11 text-text-tertiary">
-            The agent can send updates after a customer first messages this bot.
-            Existing chats keep their settings; you can still turn posting off
-            for individual chats. Groups and topics need their own permission.
-            This does not change who can talk to the bot.
-          </p>
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id={`apply-existing-posts-${channel.id}`}
-              checked={applyToExisting}
-              disabled={posts.isPending}
-              onCheckedChange={(checked) =>
-                setApplyToExisting(checked === true)
-              }
-            />
-            <label
-              htmlFor={`apply-existing-posts-${channel.id}`}
-              className="text-11 text-muted-foreground"
-            >
-              Also apply to existing private chats
-            </label>
-          </div>
-          {applyToExisting ? (
-            <div className="flex items-center gap-2">
-              <p className="text-11 text-text-tertiary">
-                Applies the current setting to up to 1,000 changed private
-                chats, including individual overrides.
+                them, and a chat’s own specialist only reads with its services.
+                Members of a group can talk to it once you have talked to the
+                bot there. In groups it answers when mentioned or replied to
+                unless set to every message.
+                </>}
               </p>
-              <Button
-                size="sm"
-                variant="outline"
+              <p>
+                The agent can send updates after a customer first messages this
+                bot. Existing chats keep their settings; you can still turn
+                posting off for individual chats. Groups and topics need their
+                own permission. This does not change who can talk to the bot.
+              </p>
+              {applyToExisting ? (
+                <p>
+                  Applies the current setting to up to 1,000 changed private
+                  chats, including individual overrides.
+                </p>
+              ) : null}
+              {!channel.org_specialist ? <GuestReadiness readiness={readiness.data} /> : null}
+              {error ? (
+                <p role="alert" className="text-destructive">
+                  {error}
+                </p>
+              ) : null}
+            </>
+          }
+        >
+          <GroupedRow
+            title="Private chats with the bot"
+            accessory={
+              <SettingSelect
+                label={`Who can talk to ${channel.bot_label} in private chats`}
+                value={channel.private_chats}
+                disabled={access.isPending}
+                options={[
+                  { value: "owner", label: channel.org_specialist ? "Verified organization members" : "Only you" },
+                  { value: "everyone", label: channel.org_specialist ? "Members and enabled guests" : "Anyone" },
+                ]}
+                onChange={(value) => void setAccess(value)}
+              />
+            }
+          />
+          <GroupedRow
+            title="Allow posts in new private chats"
+            accessory={
+              <Switch
+                aria-label={`Allow posts in new private chats with ${channel.bot_label}`}
+                checked={channel.private_chat_posts}
+                disabled={posts.isPending}
+                onCheckedChange={(value) => void setPosts(value)}
+              />
+            }
+          />
+          <GroupedRow asChild interactive>
+            <Label>
+              <span className="min-w-0 flex-1">
+                Also apply to existing private chats
+              </span>
+              <Switch
+                checked={applyToExisting}
+                disabled={posts.isPending}
+                onCheckedChange={(checked) =>
+                  setApplyToExisting(checked === true)
+                }
+              />
+            </Label>
+          </GroupedRow>
+          {applyToExisting ? (
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
                 disabled={posts.isPending}
                 onClick={() => void setPosts(channel.private_chat_posts)}
               >
                 Apply current setting
-              </Button>
-            </div>
+              </button>
+            </GroupedRow>
           ) : null}
-          <GuestReadiness readiness={readiness.data} />
-          {error ? (
-            <p role="alert" className="text-11 text-destructive">
-              {error}
-            </p>
-          ) : null}
-          {chats.error ? (
-            <ErrorBanner
-              message={`Could not load chats. ${chats.error.message}`}
-              onRetry={() => void chats.refetch()}
-            />
-          ) : chats.isPending ? (
-            <p className="text-11 text-text-tertiary">Loading chats...</p>
-          ) : rows.length ? (
-            <ul
-              aria-label={`Chats of ${channel.bot_label}`}
-              className="space-y-1.5"
-            >
-              {roots.slice(0, shown).map((chat) => (
-                <li key={chat.id}>
-                  <ChatRow
-                    key={chat.id}
-                    channel={channel}
-                    chat={chat}
-                    agents={agents}
-                    botAgentName={botAgentName}
-                    onError={setError}
-                  />
-                  {rows
-                    .filter((child) => child.parent_chat_id === chat.id)
-                    .map((child) => (
-                      <div
-                        key={child.id}
-                        className="ml-3 mt-1 border-l border-hairline pl-2"
-                      >
-                        <p className="mb-1 text-11 text-text-tertiary">
-                          Earlier thread settings
-                        </p>
-                        <ChatRow
-                          channel={channel}
-                          chat={child}
-                          agents={agents}
-                          botAgentName={botAgentName}
-                          onError={setError}
-                        />
-                      </div>
-                    ))}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-11 text-text-tertiary">
-              No chats yet. Message the bot, or add it to a group and mention
-              it.
-            </p>
-          )}
-          {roots.length > shown ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setShown((value) => value + CHATS_SHOWN * 2)}
-            >
-              Show {Math.min(roots.length - shown, CHATS_SHOWN * 2)} more
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+        </GroupedList>
+        {chats.error ? (
+          <GroupedList
+            footer={
+              <p role="alert" className="text-destructive">
+                Could not load chats. {chats.error.message}
+              </p>
+            }
+          >
+            <GroupedRow asChild interactive>
+              <button type="button" onClick={() => void chats.refetch()}>
+                Retry chats
+              </button>
+            </GroupedRow>
+          </GroupedList>
+        ) : chats.isPending ? (
+          <GroupedList>
+            <GroupedRow title="Loading chats..." />
+          </GroupedList>
+        ) : rows.length ? (
+          <ul
+            aria-label={`Chats of ${channel.bot_label}`}
+            className="space-y-6"
+          >
+            {roots.slice(0, shown).map((chat) => (
+              <li key={chat.id} className="space-y-6">
+                <ChatRow
+                  channel={channel}
+                  chat={chat}
+                  agents={agents}
+                  botAgentName={botAgentName}
+                  onError={setError}
+                />
+                {rows
+                  .filter((child) => child.parent_chat_id === chat.id)
+                  .map((child) => (
+                    <ChatRow
+                      key={child.id}
+                      channel={channel}
+                      chat={child}
+                      agents={agents}
+                      botAgentName={botAgentName}
+                      onError={setError}
+                    />
+                  ))}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <GroupedList>
+            <GroupedRow title="No chats yet." />
+            <GroupedRow title="Message the bot, or add it to a group and mention it." />
+          </GroupedList>
+        )}
+        {roots.length > shown ? (
+          <GroupedList>
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                onClick={() => setShown((value) => value + CHATS_SHOWN * 2)}
+              >
+                Show {Math.min(roots.length - shown, CHATS_SHOWN * 2)} more
+              </button>
+            </GroupedRow>
+          </GroupedList>
+        ) : null}
+      </GroupedDetail>
+    </>
   );
 }

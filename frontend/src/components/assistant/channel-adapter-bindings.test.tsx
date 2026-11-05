@@ -264,7 +264,7 @@ async function select(
   await user.click(screen.getByRole("option", { name: option }));
 }
 async function openForm() {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ChannelAdapterBindings />);
   await user.click(
     screen.getByRole("button", { name: "Add phone or speech connection" }),
@@ -405,7 +405,7 @@ it("shows an actionable unavailable reason and prevents removal while enabled", 
 it("retains cleanup conflicts so the owner can retry removal", async () => {
   mocks.bindings = [binding({ enabled: false })];
   mocks.remove.mockRejectedValueOnce(new Error("Session cleanup is pending."));
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ChannelAdapterBindings />);
   await user.click(screen.getByRole("button", { name: "Remove connection" }));
   expect(
@@ -420,7 +420,7 @@ it("clears delivered Custom LLM secrets on close and account change", async () =
   mocks.bindings = [
     binding({ adapter_id: "elevenlabs.custom_llm", phone_number: "" }),
   ];
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ChannelAdapterBindings />);
   await user.click(
     screen.getByRole("button", { name: "Show Custom LLM setup" }),
@@ -445,7 +445,7 @@ it("ends the issued guest session after its secret dialog closes", async () => {
     phone_number: "",
   });
   mocks.bindings = [row];
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   render(<ChannelAdapterBindings />);
   await user.click(
     screen.getByRole("button", { name: "Create guest session" }),

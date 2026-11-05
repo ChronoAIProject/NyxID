@@ -392,7 +392,7 @@ describe.each(["/settings", "/assistant"] as const)(
             screen.getByRole("link", { name: "privacy policy" }),
           ).toHaveAttribute("href", "/privacy");
       }
-      if (route === "/settings") expect(screen.getByRole("heading", { name: "Account Settings" })).toHaveClass("text-22", "sm:text-28");
+      if (route === "/settings") expect(screen.getByRole("heading", { name: "Account Settings" })).toHaveClass("type-compact-page-title", "sm:type-page-title");
       else expect(screen.queryByRole("heading", { name: "Account Settings" })).not.toBeInTheDocument();
     });
 

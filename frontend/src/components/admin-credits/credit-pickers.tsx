@@ -1,3 +1,4 @@
+import { Label, FieldHelp } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
@@ -74,9 +75,9 @@ export function UserPicker({
         {selected
           .filter((id) => !filtered.some((user) => user.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -91,12 +92,12 @@ export function UserPicker({
                   id}{" "}
                 (outside current results)
               </span>
-            </label>
+            </Label>
           ))}
         {filtered.map((user) => {
           const checked = selected.includes(user.id);
           return (
-            <label
+            <Label
               key={user.id}
               className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
             >
@@ -111,18 +112,18 @@ export function UserPicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium">
+                <span className="block truncate">
                   {user.display_name || user.slug || user.email}
                 </span>
-                <span className="block truncate text-11 text-muted-foreground">
+                <FieldHelp className="block truncate text-muted-foreground">
                   {user.slug ? `Organization / ${user.slug}` : user.email}
-                </span>
+                </FieldHelp>
               </span>
-            </label>
+            </Label>
           );
         })}
         {failed ? (
-          <p role="alert" className="p-3 text-12 text-destructive">
+          <p role="alert" className="p-3 text-14 text-destructive">
             Owners could not be loaded.{" "}
             <Button
               type="button"
@@ -138,17 +139,17 @@ export function UserPicker({
           </p>
         ) : null}
         {filtered.length === 0 && !loading && !failed ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">
             No owners found.
           </p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
+          <p className="px-3 py-3 text-center text-13 text-muted-foreground">
             Searching...
           </p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-13 text-muted-foreground">
         {selected.length} selected
       </div>
     </div>
@@ -192,9 +193,9 @@ export function ServicePicker({
         {selected
           .filter((id) => !filtered.some((service) => service.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -207,13 +208,13 @@ export function ServicePicker({
                 {services.find((service) => service.id === id)?.name ?? id}{" "}
                 (outside current results)
               </span>
-            </label>
+            </Label>
           ))}
         {filtered.map((service) => {
           const checked = selected.includes(service.id);
           const metric = resolveServiceBillingMetric(service);
           return (
-            <label
+            <Label
               key={service.id}
               className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
             >
@@ -230,21 +231,21 @@ export function ServicePicker({
                 }
               />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium">
+                <span className="block truncate">
                   {service.name}
                 </span>
-                <span className="block truncate text-11 text-muted-foreground">
+                <FieldHelp className="block truncate text-muted-foreground">
                   {service.slug}
-                </span>
+                </FieldHelp>
               </span>
               <Badge variant="secondary" className="shrink-0">
                 {metric}
               </Badge>
-            </label>
+            </Label>
           );
         })}
         {filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">
             No services found.
           </p>
         ) : null}
@@ -372,9 +373,9 @@ function MemberPicker({
         {selected
           .filter((id) => !filtered.some((item) => item.id === id))
           .map((id) => (
-            <label
+            <Label
               key={id}
-              className="flex items-center gap-3 px-2 py-2 text-xs"
+              className="flex items-center gap-3 px-2 py-2"
             >
               <Checkbox
                 checked
@@ -387,10 +388,10 @@ function MemberPicker({
                 {items.find((item) => item.id === id)?.name ?? id} (outside
                 current results)
               </span>
-            </label>
+            </Label>
           ))}
         {filtered.map((item) => (
-          <label
+          <Label
             key={item.id}
             className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
           >
@@ -405,17 +406,17 @@ function MemberPicker({
               }
             />
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-12 font-medium">
+              <span className="block truncate">
                 {item.name}
               </span>
-              <span className="block truncate text-11 text-muted-foreground">
+              <FieldHelp className="block truncate text-muted-foreground">
                 {item.detail}
-              </span>
+              </FieldHelp>
             </span>
-          </label>
+          </Label>
         ))}
         {error ? (
-          <p role="alert" className="px-3 py-3 text-12 text-destructive">
+          <p role="alert" className="px-3 py-3 text-14 text-destructive">
             Failed to load {kind}s.{" "}
             <Button type="button" variant="outline" size="sm" onClick={retry}>
               Retry {kind}s
@@ -423,17 +424,17 @@ function MemberPicker({
           </p>
         ) : null}
         {!error && !loading && filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
+          <p className="px-3 py-6 text-center text-14 text-muted-foreground">
             No {kind}s found.
           </p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
+          <p className="px-3 py-3 text-center text-13 text-muted-foreground">
             Searching...
           </p>
         ) : null}
       </div>
-      <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
+      <div className="shrink-0 border-t border-border px-3 py-1.5 text-13 text-muted-foreground">
         {selected.length} selected
       </div>
     </div>

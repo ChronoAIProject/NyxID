@@ -116,11 +116,11 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
         {createdInvite ? (
           <div className="space-y-4">
             <div className="rounded-lg border border-border bg-muted/30 p-4">
-              <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
+              <p className="mb-2 text-13 uppercase tracking-wider text-text-tertiary">
                 Invite link
               </p>
               <div className="flex items-center justify-between gap-2">
-                <span className="break-all text-12 text-foreground">
+                <span className="break-all text-14 text-foreground">
                   {buildOrgInviteJoinUrl(createdInvite.nonce)}
                 </span>
                 <Button
@@ -138,7 +138,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                 </Button>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Expires {new Date(createdInvite.expires_at).toLocaleString()}
             </p>
             <DialogFooter>
@@ -201,7 +201,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
               />
 
               {form.formState.errors.root && (
-                <p className="text-12 text-destructive">
+                <p className="text-14 text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               )}

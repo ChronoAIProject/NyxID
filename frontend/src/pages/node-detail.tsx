@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { MachineSummary } from "@/components/shared/machine-summary";
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
@@ -313,7 +314,7 @@ export function NodeDetailPage() {
           label="Owner"
           value={nodeOwnerLabel(node.owner, currentUserId)}
         />
-        <div className="flex items-center justify-between px-5 py-3 text-13">
+        <div className="flex items-center justify-between px-5 py-3 text-15">
           <span className="text-muted-foreground">Status</span>
           <NodeStatusBadge
             status={node.status}
@@ -389,7 +390,7 @@ export function NodeDetailPage() {
             {admins.map((admin) => (
               <div
                 key={admin.user_id}
-                className="flex items-center justify-between px-5 py-3 text-13"
+                className="flex items-center justify-between px-5 py-3 text-15"
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <Users className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -404,7 +405,7 @@ export function NodeDetailPage() {
             ))}
           </>
         ) : (
-          <p className="px-5 py-3 text-12 text-muted-foreground">
+          <p className="px-5 py-3 text-14 text-muted-foreground">
             No admins are currently listed for this node.
           </p>
         )}
@@ -414,53 +415,53 @@ export function NodeDetailPage() {
       <DetailSection title="Metrics">
         {node.metrics && node.metrics.total_requests > 0 ? (
           <>
-            <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-3 p-4">
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {String(node.metrics.total_requests)}
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
+                <p className="text-13 text-muted-foreground mt-1">
                   Total Requests
                 </p>
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {(node.metrics.success_rate * 100).toFixed(1)}%
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
+                <p className="text-13 text-muted-foreground mt-1">
                   Success Rate
                 </p>
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {node.metrics.avg_latency_ms.toFixed(0)}ms
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
+                <p className="text-13 text-muted-foreground mt-1">
                   Avg Latency
                 </p>
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
-                  className="text-22 font-bold text-foreground"
+                  className="break-words type-metric text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
                   {String(node.metrics.error_count)}
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">Errors</p>
+                <p className="text-13 text-muted-foreground mt-1">Errors</p>
               </div>
             </div>
             {node.metrics.last_error && (
               <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
-                <div className="flex items-center gap-2 text-xs font-medium text-destructive">
+                <div className="flex items-center gap-2 type-secondary-emphasis text-destructive">
                   <Activity className="h-3 w-3" />
                   Last Error
                   {node.metrics.last_error_at && (
@@ -469,7 +470,7 @@ export function NodeDetailPage() {
                     </span>
                   )}
                 </div>
-                <p className="mt-1 text-xs text-destructive/80">
+                <p className="mt-1 text-13 text-destructive/80">
                   {node.metrics.last_error}
                 </p>
               </div>
@@ -486,7 +487,7 @@ export function NodeDetailPage() {
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SolarPanelIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No metrics recorded yet. Metrics will appear after the first proxy
               request.
             </p>
@@ -506,7 +507,7 @@ export function NodeDetailPage() {
                   )
                 }
               >
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 Create pending credential metadata, then enter the secret on the
                 accept page for browser-side encryption.
               </p>
@@ -650,7 +651,7 @@ export function NodeDetailPage() {
             ) : !pendingCredentials || pendingCredentials.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
                 <SwitchIcon className="h-48 w-48 text-muted-foreground" />
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   No pending credentials are waiting for this node.
                 </p>
               </div>
@@ -672,11 +673,11 @@ export function NodeDetailPage() {
                       <TableRow key={credential.id}>
                         <TableCell>
                           <div className="space-y-1">
-                            <code className="text-xs">
+                            <code className="text-14">
                               {credential.service_slug}
                             </code>
                             {credential.label && (
-                              <p className="text-xs text-muted-foreground">
+                              <p className="text-13 text-muted-foreground">
                                 {credential.label}
                               </p>
                             )}
@@ -686,7 +687,7 @@ export function NodeDetailPage() {
                           {injectionMethodLabel(credential.injection_method)}
                         </TableCell>
                         <TableCell>
-                          <code className="text-xs text-muted-foreground">
+                          <code className="text-14 text-muted-foreground">
                             {credential.field_name}
                           </code>
                         </TableCell>
@@ -759,7 +760,7 @@ export function NodeDetailPage() {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <p className="text-12 font-medium text-foreground">
+              <p className="type-row-title text-foreground">
                 Destination owner
               </p>
               <OrgScopeSelect
@@ -771,7 +772,7 @@ export function NodeDetailPage() {
                 label="Destination owner"
               />
             </div>
-            <div className="rounded-lg border border-border bg-muted/40 p-3 text-12">
+            <div className="rounded-lg border border-border bg-muted/40 p-3 text-14">
               <p className="font-medium text-foreground">Transfer preview</p>
               <ul className="mt-2 space-y-1 text-muted-foreground">
                 <li>
@@ -780,12 +781,12 @@ export function NodeDetailPage() {
                 </li>
               </ul>
               {transferIsNoop && (
-                <p className="mt-2 text-xs text-destructive">
+                <p className="mt-2 text-13 text-destructive">
                   Choose a different owner before transferring.
                 </p>
               )}
             </div>
-            <label className="flex items-start gap-2 text-12 text-muted-foreground">
+            <Label className="flex items-start gap-2 text-muted-foreground">
               <Checkbox
                 checked={transferConfirmed}
                 onCheckedChange={(checked) =>
@@ -796,7 +797,7 @@ export function NodeDetailPage() {
                 I understand that cross-owner AI Services will stop routing
                 through this node.
               </span>
-            </label>
+            </Label>
           </div>
           <DialogFooter>
             <Button
@@ -883,16 +884,16 @@ export function NodeDetailPage() {
                   value={rotatedCredentials.signing_secret}
                 />
                 <div className="rounded-lg bg-muted p-3">
-                  <p className="mb-1 text-xs font-medium text-text-tertiary">
+                  <p className="mb-1 type-secondary-emphasis text-text-tertiary">
                     Run on your node
                   </p>
-                  <code className="text-xs text-foreground break-all">
+                  <code className="text-14 text-foreground break-all">
                     nyxid node rekey --auth-token{" "}
                     {rotatedCredentials.auth_token} --signing-secret{" "}
                     {rotatedCredentials.signing_secret}
                   </code>
                 </div>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   <strong>Lost it?</strong> If you don&apos;t copy this now,
                   you&apos;ll need to rotate the credential to get a new one.
                   (Old value stops working immediately on rotate.)

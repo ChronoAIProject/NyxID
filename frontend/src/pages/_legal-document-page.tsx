@@ -80,9 +80,9 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           <Link to={logoHref} className="flex items-center transition-opacity hover:opacity-80">
             <NyxidLogo className="h-8 w-auto" />
           </Link>
-          <h1 className="text-2xl font-bold text-foreground">{title}</h1>
+          <h1 className="type-compact-page-title sm:type-page-title text-foreground">{title}</h1>
           {effectiveDate && (
-            <p className="text-xs text-text-tertiary">Effective date: {effectiveDate}</p>
+            <p className="text-13 text-text-tertiary">Effective date: {effectiveDate}</p>
           )}
         </div>
 
@@ -91,7 +91,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           data-doc-key={docKey}
         >
           {error ? (
-            <p className="text-sm text-destructive">
+            <p className="text-14 text-destructive">
               Failed to load the {title.toLowerCase()}: {error}.{" "}
               <a href={mdPath} className="underline">View source</a>.
             </p>
@@ -100,16 +100,16 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
               remarkPlugins={[remarkGfm]}
               components={{
                 h2: ({ children }) => (
-                  <h2 className="text-base font-semibold text-foreground mt-6 first:mt-0">{children}</h2>
+                  <h2 className="type-section-heading text-foreground mt-6 first:mt-0">{children}</h2>
                 ),
                 h3: ({ children }) => (
-                  <h3 className="text-sm font-semibold text-foreground mt-4">{children}</h3>
+                  <h3 className="type-body-strong text-foreground mt-4">{children}</h3>
                 ),
                 p: ({ children }) => (
-                  <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>
+                  <p className="text-14 text-muted-foreground">{children}</p>
                 ),
                 ul: ({ children }) => (
-                  <ul className="list-inside list-disc space-y-1 pl-2 text-sm text-muted-foreground">
+                  <ul className="list-inside list-disc space-y-1 pl-2 text-14 text-muted-foreground">
                     {children}
                   </ul>
                 ),
@@ -125,21 +125,21 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
                   </a>
                 ),
                 code: ({ children }) => (
-                  <code className="font-mono text-xs text-foreground">{children}</code>
+                  <code className="font-mono text-14 text-foreground">{children}</code>
                 ),
               }}
             >
               {content}
             </ReactMarkdown>
           ) : (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <p className="text-14 text-muted-foreground">Loading…</p>
           )}
         </div>
 
         <div className="flex justify-center">
           <Link
             to="/"
-            className="flex items-center gap-1.5 text-xs text-violet-400 transition-colors hover:text-violet-300"
+            className="flex items-center gap-1.5 type-row-title text-violet-400 transition-colors hover:text-violet-300"
           >
             <ArrowLeft className="h-3 w-3" />
             Back to NyxID

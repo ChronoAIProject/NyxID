@@ -52,7 +52,7 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
     return (
       <div
         role="status"
-        className="flex items-center gap-2 rounded-lg border border-hairline px-3 py-2 text-11 text-muted-foreground"
+        className="flex items-center gap-2 rounded-lg border border-hairline px-3 py-2 text-13 text-muted-foreground"
       >
         <ImageOff className="h-3.5 w-3.5" aria-hidden="true" />
         Image unavailable
@@ -78,7 +78,7 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
         />
       </a>
       {image.imageInput === "unavailable" && (
-        <p role="status" className="max-w-sm text-xs text-muted-foreground">
+        <p role="status" className="max-w-sm text-13 text-muted-foreground">
           {image.imageInputReason === "model_text_only" || image.imageInputReason === "image_input_unsupported"
             ? "This model can’t view images. Choose an image-capable model or describe the image in text."
             : image.origin === "tool" ? "The agent couldn't view this image." : <>
@@ -92,5 +92,5 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
 }
 
 export function ExpiredAttachment() {
-  return <p role="status" className="rounded-lg border border-hairline px-3 py-2 text-xs text-muted-foreground">Attachment expired per retention policy. Upload it again to continue.</p>;
+  return <p role="status" className="rounded-lg border border-hairline px-3 py-2 text-13 text-muted-foreground">Attachment expired per retention policy. Upload it again to continue.</p>;
 }

@@ -69,7 +69,7 @@ export function RecipientTargetFields({
               </SelectContent>
             </Select>
             {description ? (
-              <FormDescription className="text-11">
+              <FormDescription className="text-13">
                 {description}
               </FormDescription>
             ) : null}
@@ -77,7 +77,7 @@ export function RecipientTargetFields({
           </FormItem>
         )}
       />
-      <p className="text-11 text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {targetKind === "org_members"
           ? "Every person in the selected organizations receives the benefit on their personal wallet, including viewers."
           : targetKind === "groups"

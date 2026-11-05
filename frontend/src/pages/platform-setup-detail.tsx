@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { creditUnit } from "@/lib/platform-onboarding";
 import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
@@ -102,7 +103,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
     return null;
   return (
     <DetailSection title="Provisioning and activation">
-      <div className="space-y-3 p-4 text-12">
+      <div className="space-y-3 p-4 text-14">
         {approval.error && <ErrorBanner message={approval.error.message} />}
         {mutation.error && <ErrorBanner message={mutation.error.message} />}
         {needsReview && approval.data && (
@@ -188,7 +189,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                 {approval.data.manager_revision}.
               </p>
             )}
-            <label className="flex gap-2">
+            <Label className="flex gap-2">
               <Checkbox
                 checked={currentReview}
                 onCheckedChange={(checked) =>
@@ -199,7 +200,7 @@ export function ProvisioningControls({ setup }: { setup: PlatformSetup }) {
                 I approve these exact saved facts, limits, model and bot
                 identity.
               </span>
-            </label>
+            </Label>
             <Button
               disabled={!actor || !currentReview || mutation.isPending}
               onClick={() => {
@@ -324,7 +325,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
   return (
     <div className="space-y-6">
       {stale && (
-        <div className="space-y-2 rounded-lg border border-border p-4 text-12">
+        <div className="space-y-2 rounded-lg border border-border p-4 text-14">
           <p>
             A newer revision is available. Reload it before saving or reviewing.
           </p>
@@ -383,7 +384,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
               ))}
               {setup.template === "restaurant-starter" && (
                 <div className="space-y-3">
-                  <h3 className="text-13 font-semibold">
+                  <h3 className="type-card-title">
                     Frequently asked questions
                   </h3>
                   {form.watch("facts.faq").map((_, index) => (
@@ -446,8 +447,8 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                   </Button>
                 </div>
               )}
-              <h3 className="text-13 font-semibold">Runtime limits</h3>
-              <p className="text-12 text-muted-foreground">
+              <h3 className="type-card-title">Runtime limits</h3>
+              <p className="text-14 text-muted-foreground">
                 These caps are reviewed separately from activation. Public
                 restaurant requests require staff confirmation.
               </p>
@@ -522,7 +523,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
         </Form>
       </DetailSection>
       <DetailSection title="Review the saved revision">
-        <div className="space-y-3 p-4 text-12">
+        <div className="space-y-3 p-4 text-14">
           <p>
             Revision {setup.revision} · {setupStatus[setup.state]} ·{" "}
             {setup.approved ? "Approval recorded" : "Approval required"}
@@ -559,7 +560,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
               ? "Customer receipt verified."
               : "Customer receipt has not been verified."}
           </p>
-          <label className="flex items-start gap-2">
+          <Label className="flex items-start gap-2">
             <Checkbox
               checked={reviewed}
               onCheckedChange={(value) => setReviewed(value === true)}
@@ -568,7 +569,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
             <span>
               I reviewed every saved answer and limit in this revision.
             </span>
-          </label>
+          </Label>
           <div className="flex flex-wrap justify-end gap-2">
             <Button
               disabled={
@@ -607,7 +608,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
       />
       {!terminal && (
         <DetailSection title="Link this setup to Telegram">
-          <div className="space-y-3 p-4 text-12">
+          <div className="space-y-3 p-4 text-14">
             <p>
               Only the selected manager chat receives progress for this setup.
               Your other account setups remain private.
@@ -615,10 +616,10 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
             {bindings.error && (
               <ErrorBanner message="Could not load your bindings." />
             )}
-            <label className="block space-y-2">
+            <Label className="block space-y-2">
               Your linked private Telegram account
               <select
-                className="h-8 w-full rounded-lg border border-input bg-background px-3 text-12"
+                className="h-8 w-full rounded-lg border border-input bg-background px-3 text-14"
                 value={bindingId}
                 onChange={(event) => setBindingId(event.target.value)}
               >
@@ -630,7 +631,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
                   </option>
                 ))}
               </select>
-            </label>
+            </Label>
             <Button
               disabled={
                 !bindingId ||
@@ -666,7 +667,7 @@ function SetupEditor({ setup }: { setup: PlatformSetup }) {
       )}
       {!terminal && (
         <DetailSection title="Pause or cancel">
-          <div className="space-y-3 p-4 text-12">
+          <div className="space-y-3 p-4 text-14">
             <p>
               Pause blocks new work. Cancellation retains your created resources
               and invalidates this setup's approval.
@@ -733,12 +734,12 @@ export function PlatformSetupDetailPage() {
         <ErrorBanner message="This setup is unavailable. Choose a saved setup from your list." />
       )}
       {query.data?.runtime_notice && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           {query.data.runtime_notice}
         </p>
       )}
       {validId && query.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading setup…
         </p>
       )}

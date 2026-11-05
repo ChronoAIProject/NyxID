@@ -770,7 +770,8 @@ describe("ChatComposer measured layout", () => {
     });
 
     expect(parts.composer).toHaveClass("flex-col", "items-stretch");
-    expect(parts.controls).toHaveClass("self-end");
+    expect(parts.controls).toHaveClass("items-center");
+    expect(parts.controls).not.toHaveClass("self-end");
   });
 
   it("returns inline when text falls below the threshold", () => {

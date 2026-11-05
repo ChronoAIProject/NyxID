@@ -16,11 +16,17 @@ for (const width of [1280, 390, 320]) {
     });
     await expect(trigger).toBeVisible();
     await input.fill("Review the latest changes\nand explain the next steps.");
+    await expect(page.locator("[data-composer-editor]")).not.toHaveClass(/composer-compact/);
     const attach = page.getByRole("button", { name: "Add context" });
     const send = page.getByRole("button", {
       name: "Send message",
       exact: true,
     });
+    await expect.poll(async () => {
+      const boxes = await Promise.all([attach, trigger, send].map(control => control.boundingBox()));
+      const centers = boxes.map(box => box!.y + box!.height / 2);
+      return Math.max(...centers) - Math.min(...centers);
+    }).toBeLessThanOrEqual(3);
     const textBounds = await input.boundingBox();
     const controls = await Promise.all(
       [attach, trigger, send].map((control) => control.boundingBox()),
@@ -31,7 +37,9 @@ for (const width of [1280, 390, 320]) {
       );
       expect(bounds!.x).toBeGreaterThanOrEqual(0);
       expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
-      expect(Math.abs(bounds!.y - controls[0]!.y)).toBeLessThanOrEqual(3);
+      const center = bounds!.y + bounds!.height / 2;
+      const attachCenter = controls[0]!.y + controls[0]!.height / 2;
+      expect(Math.abs(center - attachCenter)).toBeLessThanOrEqual(3);
     }
     await trigger.click();
     const menu = page.getByRole("menu", { name: "Model and permissions" });

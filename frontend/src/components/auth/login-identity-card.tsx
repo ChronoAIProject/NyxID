@@ -139,7 +139,7 @@ export function LoginIdentityCard({
                       maxLength={32}
                       placeholder={recoveryMode ? "Paste a recovery code" : "000000"}
                       aria-label={recoveryMode ? "Recovery code" : "Authenticator code"}
-                      className="min-w-0 font-mono text-xs tracking-normal sm:text-sm"
+                      className="min-w-0 font-mono text-xs unthemed:text-xs tracking-normal sm:text-sm sm:unthemed:text-sm"
                       disabled={blocked}
                     />
                   </FormControl>
@@ -150,7 +150,7 @@ export function LoginIdentityCard({
             <Button
               type="button"
               variant="link"
-              className="h-auto p-0 text-12"
+              className="h-auto p-0 text-12 unthemed:text-12"
               onClick={() => setRecoveryMode((value) => !value)}
             >
               {recoveryMode ? "Use an authenticator code" : "Use a recovery code"}

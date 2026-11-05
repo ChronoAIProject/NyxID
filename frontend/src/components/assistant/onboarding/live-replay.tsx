@@ -200,16 +200,16 @@ export function LiveReplay({
       <div aria-hidden="true" className="pointer-events-none select-none">
         <div className="flex items-center gap-2 border-b border-border/50 bg-sidebar px-3 py-2">
           <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="sm" />
-          <span className="text-12 font-medium text-foreground">NyxBot</span>
+          <span className="type-row-title text-foreground">NyxBot</span>
         </div>
-        <div className="flex h-[300px] flex-col justify-end gap-3 overflow-hidden px-4 pt-3">
+        <div className="flex h-[18.75rem] flex-col justify-end gap-3 overflow-hidden px-4 pt-3">
           {scene.messages.map((entry) => (
             <div key={entry.id} className="flex flex-col gap-3">
               <div className="flex animate-in fade-in-0 slide-in-from-bottom-1 duration-300 motion-reduce:animate-none">
                 <ChatMessageBubble message={entry} interactiveCards={false} feedbackEnabled={false} />
               </div>
               {scene.specialist?.after === entry.id ? (
-                <div className="flex items-center gap-2 pl-[30px] text-11 text-muted-foreground animate-in fade-in-0 duration-300 motion-reduce:animate-none">
+                <div className="flex items-center gap-2 pl-[1.875rem] text-13 text-muted-foreground animate-in fade-in-0 duration-300 motion-reduce:animate-none">
                   <AgentAvatar agent={RESEARCH} size="xs" />
                   {scene.specialist.state === "working" ? (
                     <span className="flex items-center gap-1.5">
@@ -233,14 +233,14 @@ export function LiveReplay({
             </div>
           ))}
           {scene.working ? (
-            <p className="flex items-center gap-1.5 pl-[30px] text-11 text-text-tertiary">
+            <p className="flex items-center gap-1.5 pl-[1.875rem] text-13 text-text-tertiary">
               <span className="h-1.5 w-1.5 rounded-full bg-nyx-500 motion-safe:animate-pulse" />
               {scene.working}
             </p>
           ) : null}
         </div>
         <div className="p-3">
-          <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-12">
+          <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-16">
             <span className={cn("min-w-0 flex-1 truncate", scene.typed ? "text-foreground" : "text-text-tertiary")}>
               {scene.typed || "Message NyxBot"}
               {scene.typed ? <span className="ml-px inline-block h-[1em] w-px translate-y-[0.15em] bg-foreground motion-safe:animate-pulse" /> : null}

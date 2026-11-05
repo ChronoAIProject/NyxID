@@ -98,7 +98,7 @@ function ConnectionReconnect({
     <Button
       size="sm"
       variant="link"
-      className="mt-1 flex h-auto p-0 text-11"
+      className="mt-1 flex h-auto p-0 text-14"
       onClick={() => onReconnect(connection)}
     >
       <RefreshCw className="size-3" />
@@ -120,7 +120,7 @@ function ServicesEmptyState({ onAdd }: { readonly onAdd: () => void }) {
 
 function LoadingSkeleton() {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+    <div className="grid shell-card-grid sm:grid-cols-2 lg:grid-cols-3">
       {Array.from({ length: 6 }, (_, i) => (
         <Skeleton key={i} className="h-32 rounded-xl" />
       ))}
@@ -246,10 +246,10 @@ function NyxIdApiKeysTab({
               <Shield className="h-4 w-4 text-primary-text" />
             </div>
             <div className="space-y-1">
-              <h3 className="text-13 font-semibold text-foreground">
+              <h3 className="type-card-title text-foreground">
                 Set up an isolated AI agent
               </h3>
-              <p className="max-w-2xl text-xs text-muted-foreground">
+              <p className="max-w-2xl text-14 text-muted-foreground">
                 Create or select an Agent Key, choose allowed services, add
                 credential bindings only when needed, then copy a verification
                 command that proves the key is scoped.
@@ -267,7 +267,7 @@ function NyxIdApiKeysTab({
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <KeySquare className="h-4 w-4 text-muted-foreground" />
-          <h3 className="text-13 font-semibold text-foreground">Agent Keys</h3>
+          <h3 className="type-card-title text-foreground">Agent Keys</h3>
         </div>
         <ApiKeyTable viewMode={viewMode} />
       </div>
@@ -424,7 +424,7 @@ export function KeysPage() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="shell-page-stack">
       <PageHeader
         title="Services & Credentials"
         description="Manage your AI service credentials and agent keys."

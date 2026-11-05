@@ -84,6 +84,10 @@ export async function mockDashboard(page: Page) {
     else if (path === "/orgs") body = { organizations: [], orgs: [] };
     else if (path === "/api-keys") body = { keys: [] };
     else if (path === "/nodes") body = { nodes: [] };
+    else if (path === "/services") body = { services: [] };
+    else if (path === "/admin/users") body = { users: [], total: 0, page: 1, per_page: 50 };
+    else if (path === "/admin/channel-adapter-accounts") body = { accounts: [], next_after_id: null };
+    else if (path === "/admin/channel-adapter-allocations") body = { allocations: [], next_after_id: null };
     else if (path === "/runtime-config")
       body = {
         api_base_url: "https://api.nyxid.example",

@@ -29,7 +29,7 @@ function Row({
   readonly value: string;
 }) {
   return (
-    <div className="flex justify-between gap-3 text-12">
+    <div className="flex justify-between gap-3 text-14">
       <span className="text-muted-foreground">{label}</span>
       <span className="text-right">{value}</span>
     </div>
@@ -42,10 +42,10 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
   const resubscribe = useResubscribeChannelBot();
   const verify = useVerifyChannelBot({ creditsOwnerId: health.data?.user_id });
   if (health.isLoading)
-    return <p className="text-12 text-muted-foreground">Checking health…</p>;
+    return <p className="text-14 text-muted-foreground">Checking health…</p>;
   if (health.error || !health.data)
     return (
-      <p role="alert" className="text-12 text-destructive">
+      <p role="alert" className="text-14 text-destructive">
         Health is unavailable
         {health.error instanceof Error ? `: ${health.error.message}` : "."}
       </p>
@@ -83,7 +83,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
       aria-label="Channel health"
       className="space-y-2 rounded-md border border-border p-3"
     >
-      <div className="flex items-center gap-2 text-13 font-medium">
+      <div className="flex items-center gap-2 type-card-title">
         Health
         <Badge variant={healthy ? "success" : "warning"}>
           {healthy ? "Healthy" : "Needs attention"}
@@ -122,7 +122,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
       )}
       <p
         className={
-          healthy ? "text-12 text-muted-foreground" : "text-12 text-warning"
+          healthy ? "text-14 text-muted-foreground" : "text-14 text-warning"
         }
       >
         {data.recommended_action_text}
@@ -139,7 +139,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
         </Button>
       )}
       {resubscribe.error && (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {resubscribe.error.message}
         </p>
       )}

@@ -360,7 +360,7 @@ export function AssistantChatPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {chat.detailState.status === "loading" &&
         !(chat.session?.messages.length ?? 0) ? (
-          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
             Loading conversation...
           </div>
         ) : (
@@ -1165,7 +1165,7 @@ function NyxAgentThreadPage() {
             onReplayIntro={() => setIntro("account_menu")}
           />
         ) : chat.isLoading && !chat.session.messages.length ? (
-          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
             Loading conversation...
           </div>
         ) : (
@@ -1194,7 +1194,7 @@ function NyxAgentThreadPage() {
                   return (
                     <p
                       role="status"
-                      className="ml-[30px] px-[7px] text-11 text-muted-foreground"
+                      className="ml-[30px] px-[7px] text-13 text-muted-foreground"
                     >
                       Continuing after your decision
                     </p>

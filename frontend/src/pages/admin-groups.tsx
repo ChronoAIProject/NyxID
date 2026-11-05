@@ -144,16 +144,16 @@ export function AdminGroupsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">Failed to load groups</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="type-row-title text-muted-foreground">Failed to load groups</p>
+            <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No groups found</p>
-            <p className="text-xs text-muted-foreground">There are no groups to display.</p>
+            <p className="type-row-title text-muted-foreground">No groups found</p>
+            <p className="text-13 text-muted-foreground">There are no groups to display.</p>
           </div>
         </div>
       ) : (
@@ -184,16 +184,16 @@ export function AdminGroupsPage() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{group.name}</p>
-                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                  <p className="type-row-title truncate">{group.name}</p>
+                  <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                     {group.slug}
                   </p>
                 </div>
-                <Badge variant="secondary" className="text-xs">
+                <Badge variant="secondary" className="text-12">
                   {String(group.member_count)} member{group.member_count !== 1 ? "s" : ""}
                 </Badge>
               </div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+              <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
                 <span>Created {formatDate(group.created_at)}</span>
               </div>
             </div>
@@ -236,14 +236,14 @@ export function AdminGroupsPage() {
                     }
                   }}
                 >
-                  <TableCell className="font-medium">{group.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-normal">{group.name}</TableCell>
+                  <TableCell className="font-mono text-14">
                     {group.slug}
                   </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
                       {group.roles.length === 0 ? (
-                        <span className="text-muted-foreground text-xs">
+                        <span className="text-muted-foreground text-13">
                           None
                         </span>
                       ) : (
@@ -251,7 +251,7 @@ export function AdminGroupsPage() {
                           <Badge
                             key={role.id}
                             variant="secondary"
-                            className="text-xs"
+                            className="text-12"
                           >
                             {role.name}
                           </Badge>
@@ -260,7 +260,7 @@ export function AdminGroupsPage() {
                     </div>
                   </TableCell>
                   <TableCell>
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-muted-foreground text-13">
                       {String(group.member_count)}
                     </span>
                   </TableCell>
@@ -353,7 +353,7 @@ export function AdminGroupsPage() {
                     <FormLabel>Roles</FormLabel>
                     <FormControl>
                       <select
-                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-12 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
+                        className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-14 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
                         multiple
                         value={
                           field.value

@@ -43,7 +43,7 @@ export function ConsentBanner() {
       className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 backdrop-blur"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-12 text-muted-foreground">
+        <div className="text-14 unthemed:text-12 text-muted-foreground">
           Optional usage analytics are linked to your account. Allow enables
           account permission and this browser. Declining withdraws account
           permission across devices. Each other device still needs its own

@@ -1,3 +1,6 @@
+import { Label } from "@/components/ui/label";
+import { describeChanges } from "@/lib/grouped-form-changes";
+import { flushSync } from "react-dom";
 import { useState } from "react";
 import { Switch } from "@/components/ui/switch";
 import { GroupAgentAccessRequest } from "./group-agent-access";
@@ -6,9 +9,28 @@ import { useQueryClient } from "@tanstack/react-query";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Badge } from "@/components/ui/badge";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput as Input,
+  GroupedSelectTrigger as SelectTrigger,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField,
+  GroupedLabel,
+  GroupedMessage,
+} from "@/components/ui/grouped-fields";
+import {
+  GroupedFormActions,
+  GroupedFormScope,
+  GroupedFormBar,
+} from "@/components/ui/grouped-form";
+import {
+  GroupedDialog,
+  GroupedDialogContent,
+  GroupedDialogCancel,
+  GroupedDecisionDraft,
+} from "@/components/ui/grouped-dialog";
 import {
   Dialog,
   DialogContent,
@@ -18,18 +40,9 @@ import {
   DialogBody,
   DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  Form,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormControl,
-  FormMessage,
-  useAppForm,
-} from "@/components/ui/form";
+import { Form, FormField, FormControl, useAppForm } from "@/components/ui/form";
 import {
   Select,
-  SelectTrigger,
   SelectContent,
   SelectItem,
   SelectValue,
@@ -72,23 +85,27 @@ function QuickAdd({
   const [org, setOrg] = useState("");
   const members = useOrgMembers(org);
   return (
-    <div className="space-y-2">
-      <p className="text-12 font-medium">Quick-add from your organization</p>
-      <p className="text-12 text-muted-foreground">
-        New participants can read the full retained group history.
-      </p>
-      <Select value={org} onValueChange={setOrg}>
-        <SelectTrigger aria-label="Shared organization">
-          <SelectValue placeholder="Choose organization" />
-        </SelectTrigger>
-        <SelectContent>
-          {orgs.data?.map((row) => (
-            <SelectItem key={row.id} value={row.id}>
-              {row.display_name ?? row.slug}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+    <GroupedList
+      title="Quick-add from your organization"
+      footer="New participants can read the full retained group history."
+    >
+      <GroupedRow
+        title="Organization"
+        accessory={
+          <Select value={org} onValueChange={setOrg}>
+            <SelectTrigger aria-label="Shared organization">
+              <SelectValue placeholder="Choose organization" />
+            </SelectTrigger>
+            <SelectContent>
+              {orgs.data?.map((row) => (
+                <SelectItem key={row.id} value={row.id}>
+                  {row.display_name ?? row.slug}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        }
+      />
       {(members.data ?? [])
         .filter(
           (p) =>
@@ -96,21 +113,22 @@ function QuickAdd({
             !group.participants?.some((member) => member.id === p.user_id),
         )
         .map((person) => (
-          <div
+          <GroupedRow
             key={person.user_id}
-            className="flex items-center justify-between gap-2 text-12"
-          >
-            <span>{person.display_name ?? "Member"}</span>
-            <Button
-              size="sm"
-              disabled={busy || (group.participants?.length ?? 0) >= 16}
-              onClick={() => onAdd(person.user_id)}
-            >
-              Add participant
-            </Button>
-          </div>
+            title={person.display_name ?? "Member"}
+            accessory={
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={busy || (group.participants?.length ?? 0) >= 16}
+                onClick={() => onAdd(person.user_id)}
+              >
+                Add participant
+              </Button>
+            }
+          />
         ))}
-    </div>
+    </GroupedList>
   );
 }
 
@@ -124,38 +142,41 @@ function Rename({
   readonly busy: boolean;
 }) {
   const form = useAppForm<z.infer<typeof renameSchema>>({
+    mode: "onChange",
     resolver: zodResolver(renameSchema),
     defaultValues: { name },
   });
+  const submit = form.handleSubmit(async (values) => {
+    if (await save(values.name)) form.reset(values);
+  });
   return (
     <Form {...form}>
-      <form
-        className="flex items-end gap-2"
-        onSubmit={form.handleSubmit(async (values) => {
-          if (await save(values.name)) form.reset(values);
-        })}
-      >
-        <FormField
-          control={form.control}
-          name="name"
-          render={({ field }) => (
-            <FormItem className="flex-1">
-              <FormLabel>Group name</FormLabel>
-              <FormControl>
-                <Input {...field} maxLength={60} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
+      <form onSubmit={submit} className="space-y-6">
+        <GroupedList title="Profile">
+          <FormField
+            control={form.control}
+            name="name"
+            render={({ field }) => (
+              <GroupedField>
+                <GroupedLabel>Group name</GroupedLabel>
+                <FormControl>
+                  <Input {...field} maxLength={60} />
+                </FormControl>
+                <GroupedMessage />
+              </GroupedField>
+            )}
+          />
+        </GroupedList>
+        <GroupedFormActions
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }])}
+          disabled={!form.formState.isValid}
+          label="group name"
+          dirty={form.formState.isDirty}
+          pending={busy}
+          save={submit}
+          discard={() => form.reset()}
+          saveLabel="Save"
         />
-        <Button
-          type="submit"
-          variant="primary"
-          isLoading={busy}
-          disabled={!form.formState.isDirty}
-        >
-          Save
-        </Button>
       </form>
     </Form>
   );
@@ -202,42 +223,49 @@ export function CollaborationSettings({
       !group.members.some((m) => m.id === a.id),
   );
   return (
-    <Dialog
+    <GroupedDialog
       open
       onOpenChange={(open) => {
         if (!open && !mutation.isPending) onClose();
       }}
     >
-      <DialogContent scrollMode="body" className="md:max-w-lg">
+      <GroupedDialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader>
           <DialogTitle>Group participants and agents</DialogTitle>
           <DialogDescription>{policy.history_disclosure}</DialogDescription>
         </DialogHeader>
-        <DialogBody className="space-y-5">
-          {policy.can_manage ? (
-            <Rename
-              name={group.name}
-              busy={mutation.isPending}
-              save={(name) => apply({ action: "rename", name })}
-            />
-          ) : null}
-          <section className="space-y-2" aria-label="Group participants">
-            <p className="text-12 font-medium">
-              Participants ({group.participants?.length ?? 0} of 16)
-            </p>
-            {group.participants?.map((person) => (
-              <div key={person.id} className="flex items-center gap-2 text-12">
-                <span className="flex-1">
-                  {person.display_name}
-                  {person.id === actor ? " (you)" : ""}
-                </span>
-                {person.id === policy.creator_user_id ? (
-                  <Badge variant="accent">Creator</Badge>
-                ) : (
-                  <>
-                    {policy.can_manage ? (
+        <GroupedFormScope>
+          <DialogBody className="space-y-6 pb-4">
+            {policy.can_manage && (
+              <Rename
+                name={group.name}
+                busy={mutation.isPending}
+                save={(name) => apply({ action: "rename", name })}
+              />
+            )}
+            <GroupedList
+              title={`Participants (${group.participants?.length ?? 0} of 16)`}
+              aria-label="Group participants"
+              footer={
+                policy.transfer_to_user_id &&
+                policy.transfer_to_user_id !== actor
+                  ? "Waiting for the proposed creator to accept management."
+                  : undefined
+              }
+            >
+              {group.participants?.map((person) => (
+                <GroupedRow
+                  key={person.id}
+                  title={`${person.display_name}${person.id === actor ? " (you)" : ""}`}
+                  accessory={
+                    person.id === policy.creator_user_id ? (
+                      <span className="text-13 text-text-tertiary">
+                        Creator
+                      </span>
+                    ) : policy.can_manage ? (
                       <>
                         <Button
+                          variant="ghost"
                           size="sm"
                           disabled={mutation.isPending}
                           onClick={() =>
@@ -253,7 +281,9 @@ export function CollaborationSettings({
                           Transfer
                         </Button>
                         <Button
+                          variant="ghost"
                           size="sm"
+                          className="text-destructive"
                           disabled={mutation.isPending}
                           onClick={() =>
                             setConfirm({
@@ -268,123 +298,195 @@ export function CollaborationSettings({
                           Remove
                         </Button>
                       </>
-                    ) : null}
-                  </>
-                )}
-              </div>
-            ))}
-            {policy.transfer_to_user_id === actor ? (
-              <Button
-                variant="primary"
-                isLoading={mutation.isPending}
-                onClick={() =>
-                  setConfirm({
-                    text: "Accept management of this group? You will manage its participants and invitations.",
-                    change: { action: "accept_transfer" },
-                  })
-                }
-              >
-                Accept management
-              </Button>
-            ) : policy.transfer_to_user_id ? (
-              <p className="text-12 text-muted-foreground">
-                Waiting for the proposed creator to accept management.
-              </p>
-            ) : null}
-          </section>
-          {policy.can_manage ? (
-            <section className="space-y-3" aria-label="Group invitations">
-              <Button
-                disabled={
-                  mutation.isPending || (group.participants?.length ?? 0) >= 16
-                }
-                onClick={() => void apply({ action: "invite" })}
-              >
-                Create invitation link
-              </Button>
-              <p className="text-12 text-muted-foreground">
-                Single use, expires after seven days. A NyxID account is
-                required. Send the link yourself.
-              </p>
-              {invite ? (
-                <div className="space-y-2">
-                  <Input
-                    aria-label="Invitation link"
-                    readOnly
-                    value={`${window.location.origin}/assistant#group-invite=${invite.token}`}
-                  />
-                  <Button
-                    onClick={() =>
-                      void navigator.clipboard.writeText(
-                        `${window.location.origin}/assistant#group-invite=${invite.token}`,
-                      )
-                    }
-                  >
-                    Copy link
-                  </Button>
-                  <p className="text-11 text-text-tertiary">
-                    Expires {new Date(invite.expires_at).toLocaleString()}
-                  </p>
-                </div>
-              ) : null}
-              {policy.invites.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-center justify-between gap-2 text-12"
-                >
-                  <span>
-                    Invitation · expires{" "}
-                    {new Date(item.expires_at).toLocaleDateString()}
-                  </span>
-                  <Button
-                    size="sm"
+                    ) : undefined
+                  }
+                />
+              ))}
+              {policy.transfer_to_user_id === actor && (
+                <GroupedRow asChild interactive>
+                  <button
+                    type="button"
                     disabled={mutation.isPending}
                     onClick={() =>
-                      void apply({
-                        action: "cancel_invite",
-                        invite_id: item.id,
+                      setConfirm({
+                        text: "Accept management of this group? You will manage its participants and invitations.",
+                        change: { action: "accept_transfer" },
                       })
                     }
                   >
-                    Cancel invitation
-                  </Button>
-                </div>
-              ))}
-              <QuickAdd
-                group={group}
-                busy={mutation.isPending}
-                onAdd={(person_id) =>
-                  setConfirm({
-                    text: "This person will immediately see the full retained group history. Add them now?",
-                    change: {
-                      action: "quick_add",
-                      person_id,
-                      history_disclosed: true,
-                    },
-                  })
-                }
-              />
-            </section>
-          ) : null}
-          <section className="space-y-3" aria-label="Group agents">
-            <p className="text-12 font-medium">Agents</p>
+                    Accept management
+                  </button>
+                </GroupedRow>
+              )}
+            </GroupedList>
+            {policy.can_manage && (
+              <>
+                <GroupedList
+                  title="Invitations"
+                  aria-label="Group invitations"
+                  footer={
+                    <>
+                      Single use, expires after seven days. A NyxID account is
+                      required. Send the link yourself.
+                      {invite && (
+                        <p>
+                          Expires {new Date(invite.expires_at).toLocaleString()}
+                        </p>
+                      )}
+                    </>
+                  }
+                >
+                  <GroupedRow asChild interactive>
+                    <button
+                      type="button"
+                      disabled={
+                        mutation.isPending ||
+                        (group.participants?.length ?? 0) >= 16
+                      }
+                      onClick={() => void apply({ action: "invite" })}
+                    >
+                      Create invitation link
+                    </button>
+                  </GroupedRow>
+                  {invite && (
+                    <>
+                      <GroupedRow>
+                        <Input
+                          aria-label="Invitation link"
+                          readOnly
+                          value={`${window.location.origin}/assistant#group-invite=${invite.token}`}
+                        />
+                      </GroupedRow>
+                      <GroupedRow asChild interactive>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void navigator.clipboard.writeText(
+                              `${window.location.origin}/assistant#group-invite=${invite.token}`,
+                            )
+                          }
+                        >
+                          Copy link
+                        </button>
+                      </GroupedRow>
+                    </>
+                  )}
+                  {policy.invites.map((item) => (
+                    <GroupedRow
+                      key={item.id}
+                      title="Invitation"
+                      description={`Expires ${new Date(item.expires_at).toLocaleDateString()}`}
+                      accessory={
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={mutation.isPending}
+                          onClick={() =>
+                            void apply({
+                              action: "cancel_invite",
+                              invite_id: item.id,
+                            })
+                          }
+                        >
+                          Cancel invitation
+                        </Button>
+                      }
+                    />
+                  ))}
+                </GroupedList>
+                <QuickAdd
+                  group={group}
+                  busy={mutation.isPending}
+                  onAdd={(person_id) =>
+                    setConfirm({
+                      text: "This person will immediately see the full retained group history. Add them now?",
+                      change: {
+                        action: "quick_add",
+                        person_id,
+                        history_disclosed: true,
+                      },
+                    })
+                  }
+                />
+              </>
+            )}
             {group.members.map((agent) => {
               const guest = policy.guest_access.find(
                 (g) => g.agent_id === agent.id,
               );
               return (
-                <div
+                <GroupedList
                   key={agent.id}
-                  className="space-y-2 rounded-lg border border-border p-3 text-12"
+                  title={agentTitle(agent)}
+                  footer={
+                    guest?.lane === "guest"
+                      ? "Your requests use guest access and bill the agent owner."
+                      : agent.unavailable
+                        ? groupAgentUnavailableReason(agent)
+                        : "Your requests use your access and billing rules."
+                  }
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="flex-1 font-medium">
-                      {agentTitle(agent)}
-                      {agent.shared ? " · Shared agent" : ""}
-                    </span>
-                    {policy.can_manage ? (
-                      <Button
-                        size="sm"
+                  <GroupedRow
+                    title={agentTitle(agent)}
+                    description={[
+                      agent.shared ? "Shared agent" : null,
+                      agent.owner_name ? `Owner: ${agent.owner_name}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  />
+                  {guest?.can_enable ? (
+                    <GroupedRow
+                      title="Participants can use this agent"
+                      accessory={
+                        <Switch
+                          aria-label={`Participants can use ${agentTitle(agent)}`}
+                          checked={guest.enabled}
+                          disabled={mutation.isPending}
+                          onCheckedChange={(enabled) => enabled
+                            ? setConfirm({
+                                text: "Allow current and future participants without use rights to talk to this agent as guests? They use your guest service policy and you pay. They cannot approve actions or use your private account tools.",
+                                change: { action: "guest_access", agent_id: agent.id, enabled: true, guest_revision: guest.revision },
+                              })
+                            : void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })}
+                        />
+                      }
+                    />
+                  ) : guest?.enabled && guest.can_disable ? (
+                    <GroupedRow asChild interactive>
+                      <button
+                        type="button"
+                        disabled={mutation.isPending}
+                        onClick={() => void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })
+                        }
+                      >
+                        Disable participant access
+                      </button>
+                    </GroupedRow>
+                  ) : null}
+                  <GroupAgentAccessRequest
+                    grouped
+                    group={group}
+                    member={agent}
+                  />
+                  {policy.can_manage && group.lead_agent_id !== agent.id && (
+                    <GroupedRow asChild interactive>
+                      <button
+                        type="button"
+                        disabled={mutation.isPending}
+                        onClick={() =>
+                          void apply({ action: "lead", agent_id: agent.id })
+                        }
+                      >
+                        Set as default recipient
+                      </button>
+                    </GroupedRow>
+                  )}
+                  {policy.can_manage && (
+                    <GroupedRow asChild interactive>
+                      <button
+                        type="button"
+                        className="text-destructive"
                         disabled={
                           mutation.isPending || group.members.length <= 1
                         }
@@ -396,151 +498,130 @@ export function CollaborationSettings({
                         }
                       >
                         Remove agent
-                      </Button>
-                    ) : null}
-                  </div>
-                  <p className="text-muted-foreground">
-                    {guest?.lane === "guest"
-                      ? "Your requests use guest access and bill the agent owner."
-                      : agent.unavailable
-                        ? groupAgentUnavailableReason(agent)
-                        : "Your requests use your access and billing rules."}
-                  </p>
-                  {agent.owner_name ? <p className="text-muted-foreground">Owner: {agent.owner_name}</p> : null}
-                  {guest?.can_enable ? (
-                    <label className="flex items-center gap-2">
-                      <Switch
-                        aria-label={`Participants can use ${agentTitle(agent)}`}
-                        checked={guest.enabled}
-                        disabled={mutation.isPending}
-                        onCheckedChange={(enabled) => enabled
-                          ? setConfirm({
-                              text: "Allow current and future participants without use rights to talk to this agent as guests? They use your guest service policy and you pay. They cannot approve actions or use your private account tools.",
-                              change: { action: "guest_access", agent_id: agent.id, enabled: true, guest_revision: guest.revision },
-                            })
-                          : void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })}
-                      />
-                      Participants can use this agent
-                    </label>
-                  ) : guest?.enabled && guest.can_disable ? (
-                    <Button size="sm" disabled={mutation.isPending} onClick={() => void apply({ action: "guest_access", agent_id: agent.id, enabled: false, guest_revision: guest.revision })}>
-                      Disable participant access
-                    </Button>
-                  ) : null}
-                  <GroupAgentAccessRequest group={group} member={agent} />
-                  {policy.can_manage && group.lead_agent_id !== agent.id ? (
-                    <Button
-                      size="sm"
-                      disabled={mutation.isPending}
-                      onClick={() =>
-                        void apply({ action: "lead", agent_id: agent.id })
-                      }
-                    >
-                      Set as default recipient
-                    </Button>
-                  ) : null}
-                </div>
+                      </button>
+                    </GroupedRow>
+                  )}
+                </GroupedList>
               );
             })}
-            {eligible.length ? (
-              <Select
-                onValueChange={(agent_id) =>
-                  void apply({
-                    action: policy.can_manage ? "add_agent" : "propose_agent",
-                    agent_id,
-                  })
-                }
-              >
-                <SelectTrigger
-                  aria-label="Add specialist"
-                  disabled={mutation.isPending || group.members.length >= 8}
-                >
-                  <SelectValue
-                    placeholder={
+            {(eligible.length > 0 || policy.proposals.length > 0) && (
+              <GroupedList title="More agents" aria-label="Group agents">
+                {eligible.length > 0 && (
+                  <GroupedRow
+                    title={
                       policy.can_manage
                         ? "Add a specialist"
                         : "Propose a specialist"
                     }
+                    accessory={
+                      <Select
+                        onValueChange={(agent_id) =>
+                          void apply({
+                            action: policy.can_manage ? "add_agent" : "propose_agent",
+                            agent_id,
+                          })
+                        }
+                      >
+                        <SelectTrigger
+                          aria-label="Add specialist"
+                          disabled={
+                            mutation.isPending || group.members.length >= 8
+                          }
+                        >
+                          <SelectValue placeholder="Choose specialist" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {eligible.map((agent) => (
+                            <SelectItem key={agent.id} value={agent.id}>
+                              {agentTitle(agent)}
+                              {agent.owner_name ? ` · ${agent.owner_name}` : ""}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    }
                   />
-                </SelectTrigger>
-                <SelectContent>
-                  {eligible.map((agent) => (
-                    <SelectItem key={agent.id} value={agent.id}>
-                      {agentTitle(agent)}
-                      {agent.owner_name ? ` · ${agent.owner_name}` : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : null}
-            {policy.proposals.map((proposal) => (
-              <div
-                key={proposal.id}
-                className="flex items-center gap-2 text-12"
-              >
-                <span className="flex-1">
-                  Proposed agent {proposal.agent_id}
-                </span>
-                {policy.can_manage ? (
-                  <Button
-                    size="sm"
+                )}
+                {policy.proposals.map((proposal) => (
+                  <GroupedRow
+                    key={proposal.id}
+                    title={`Proposed agent ${proposal.agent_id}`}
+                    accessory={
+                      policy.can_manage ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={mutation.isPending}
+                          onClick={() =>
+                            void apply({
+                              action: "accept_agent",
+                              proposal_id: proposal.id,
+                            })
+                          }
+                        >
+                          Accept agent
+                        </Button>
+                      ) : (
+                        <span>Awaiting creator</span>
+                      )
+                    }
+                  />
+                ))}
+              </GroupedList>
+            )}
+            <GroupedList
+              title="Group actions"
+              footer={
+                <>
+                  <p>
+                    Only the person who requested work can decide its cards or
+                    stop it. The creator must transfer management to an
+                    accepting participant before leaving, or delete the group.
+                  </p>
+                  {error && (
+                    <p role="alert" className="text-destructive">
+                      {error}
+                    </p>
+                  )}
+                </>
+              }
+            >
+              <GroupedRow asChild interactive>
+                <button
+                  type="button"
+                  className="text-destructive"
+                  disabled={mutation.isPending}
+                  onClick={() =>
+                    setConfirm({
+                      text: "Leave this group? You will lose access to its history and your queued work will be cancelled.",
+                      change: { action: "leave" },
+                    })
+                  }
+                >
+                  Leave group
+                </button>
+              </GroupedRow>
+              {policy.can_manage && (
+                <GroupedRow asChild interactive>
+                  <button
+                    type="button"
+                    className="text-destructive"
                     disabled={mutation.isPending}
                     onClick={() =>
-                      void apply({
-                        action: "accept_agent",
-                        proposal_id: proposal.id,
+                      setConfirm({
+                        text: "Delete this group and its transcript for everyone? This cannot be undone.",
+                        change: { action: "delete" },
                       })
                     }
                   >
-                    Accept agent
-                  </Button>
-                ) : (
-                  <span>Awaiting creator</span>
-                )}
-              </div>
-            ))}
-          </section>
-          <p className="text-12 text-muted-foreground">
-            Only the person who requested work can decide its cards or stop it.
-            The creator must transfer management to an accepting participant
-            before leaving, or delete the group.
-          </p>
-          <div className="flex gap-2">
-            <Button
-              disabled={mutation.isPending}
-              onClick={() =>
-                setConfirm({
-                  text: "Leave this group? You will lose access to its history and your queued work will be cancelled.",
-                  change: { action: "leave" },
-                })
-              }
-            >
-              Leave group
-            </Button>
-            {policy.can_manage ? (
-              <Button
-                variant="destructive"
-                disabled={mutation.isPending}
-                onClick={() =>
-                  setConfirm({
-                    text: "Delete this group and its transcript for everyone? This cannot be undone.",
-                    change: { action: "delete" },
-                  })
-                }
-              >
-                Delete group
-              </Button>
-            ) : null}
-          </div>
-          {error ? (
-            <p role="alert" className="text-12 text-destructive">
-              {error}
-            </p>
-          ) : null}
-        </DialogBody>
-        <DialogFooter>
-          <Button onClick={onClose}>Close</Button>
-        </DialogFooter>
+                    Delete group
+                  </button>
+                </GroupedRow>
+              )}
+            </GroupedList>
+          </DialogBody>
+          <GroupedFormBar dialog />
+        </GroupedFormScope>
         {confirm ? (
           <Dialog
             open
@@ -554,7 +635,7 @@ export function CollaborationSettings({
                 <DialogDescription>{confirm.text}</DialogDescription>
               </DialogHeader>
               {error ? (
-                <p role="alert" className="text-12 text-destructive">
+                <p role="alert" className="text-14 text-destructive">
                   {error}
                 </p>
               ) : null}
@@ -573,8 +654,8 @@ export function CollaborationSettings({
             </DialogContent>
           </Dialog>
         ) : null}
-      </DialogContent>
-    </Dialog>
+      </GroupedDialogContent>
+    </GroupedDialog>
   );
 }
 
@@ -591,7 +672,7 @@ export function CollaborationCards({
       {decisions.map((card, i) => (
         <div
           key={card.id ?? `${card.requester_id}-${String(i)}`}
-          className="space-y-2 rounded-lg border border-border bg-card p-3 text-12"
+          className="space-y-2 rounded-lg border border-border bg-card p-3 text-14"
         >
           <p>
             {card.can_decide
@@ -639,7 +720,7 @@ export function CollaborationCards({
         </div>
       ))}
       {mutation.error ? (
-        <p role="alert" className="text-12 text-destructive">
+        <p role="alert" className="text-14 text-destructive">
           {errorText(mutation.error)}
         </p>
       ) : null}
@@ -673,6 +754,7 @@ export function GroupInviteDialog({
         await client.invalidateQueries({
           queryKey: nyxBotGroupKeys.all(actor),
         });
+        flushSync(() => setDisclosed(false));
         onJoined(group);
       }
     } catch (cause) {
@@ -682,13 +764,18 @@ export function GroupInviteDialog({
     }
   }
   return (
-    <Dialog
+    <GroupedDialog
       open
       onOpenChange={(open) => {
         if (!open && !busy) onClose();
       }}
     >
-      <DialogContent className="md:max-w-md">
+      <GroupedDialogContent className="md:max-w-md">
+        <GroupedDecisionDraft
+          dirty={disclosed}
+          pending={busy}
+          discard={() => setDisclosed(false)}
+        />
         <DialogHeader>
           <DialogTitle>
             {preview ? `Join ${preview.group_name}` : "Group invitation"}
@@ -700,34 +787,45 @@ export function GroupInviteDialog({
         </DialogHeader>
         <DialogBody className="space-y-3">
           {preview ? (
-            <>
-              <p className="text-12">
-                Created by {preview.creator_name ?? "a NyxID user"}
-              </p>
-              <p className="text-12">
-                Participants:{" "}
-                {preview.participants?.map((p) => p.display_name).join(", ")}
-              </p>
-              <p className="text-12">
-                Expires {new Date(preview.expires_at).toLocaleString()}
-              </p>
-              <label className="flex items-center gap-2 text-12">
-                <Checkbox
-                  checked={disclosed}
-                  onCheckedChange={(checked) => setDisclosed(checked === true)}
-                />
-                I understand everyone can read the full retained group history.
-              </label>
-            </>
+            <GroupedList
+              title="Invitation"
+              footer={`Expires ${new Date(preview.expires_at).toLocaleString()}`}
+            >
+              <GroupedRow
+                title="Created by"
+                accessory={preview.creator_name ?? "a NyxID user"}
+              />
+              <GroupedRow
+                title="Participants"
+                description={preview.participants
+                  ?.map((p) => p.display_name)
+                  .join(", ")}
+              />
+              <GroupedRow asChild interactive>
+                <Label>
+                  <Switch
+                    className="order-last shrink-0"
+                    checked={disclosed}
+                    onCheckedChange={(checked) => setDisclosed(checked === true)}
+                  />
+                  <span className="min-w-0 flex-1">I understand everyone can read the full retained group
+                  history.</span>
+                </Label>
+              </GroupedRow>
+            </GroupedList>
           ) : null}
           {error ? (
-            <p role="alert" className="text-12 text-destructive">
-              {error}
-            </p>
+            <GroupedList
+              footer={
+                <p role="alert" className="text-destructive">
+                  {error}
+                </p>
+              }
+            />
           ) : null}
         </DialogBody>
         <DialogFooter>
-          <Button onClick={onClose}>Cancel</Button>
+          <GroupedDialogCancel disabled={busy}>Cancel</GroupedDialogCancel>
           <Button
             variant="primary"
             isLoading={busy}
@@ -737,7 +835,7 @@ export function GroupInviteDialog({
             {preview ? "Accept invitation" : "Preview invitation"}
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      </GroupedDialogContent>
+    </GroupedDialog>
   );
 }

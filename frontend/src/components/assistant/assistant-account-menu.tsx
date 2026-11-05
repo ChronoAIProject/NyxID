@@ -57,11 +57,11 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
 
   return (
     <>
-      <div className="px-3 py-1.5">
-        <p className="truncate text-12 font-medium text-foreground">
+      <div className="shell-account-heading">
+        <p className="truncate shell-user-name">
           {user?.display_name ?? "User"}
         </p>
-        <p className="truncate text-11 text-text-tertiary">
+        <p className="truncate shell-user-email">
           {user?.email ?? ""}
         </p>
       </div>
@@ -81,7 +81,7 @@ export function AssistantAccountMenuItems({ onPanel }: { readonly onPanel: (pane
           <Bell aria-hidden="true" />
           <span className="min-w-0 flex-1">
             Notification settings
-            <span aria-hidden="true" className="block text-10 text-text-tertiary">Studio</span>
+            <span aria-hidden="true" className="block text-12 text-text-tertiary">Studio</span>
           </span>
           <span className="sr-only"> (opens in Studio)</span>
         </Link>

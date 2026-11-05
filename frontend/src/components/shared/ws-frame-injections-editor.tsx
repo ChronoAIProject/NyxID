@@ -152,7 +152,7 @@ export function WsFrameInjectionsEditor({
         hasErrors ? "border-destructive" : "border-border/50",
       )}
     >
-      <summary className="cursor-pointer text-13 font-semibold text-foreground">
+      <summary className="cursor-pointer type-card-title text-foreground">
         WebSocket auth frames
       </summary>
       <div className="mt-4 space-y-3">
@@ -178,7 +178,7 @@ export function WsFrameInjectionsEditor({
         </div>
 
         {errorMessage && (
-          <p className="text-xs text-destructive">{errorMessage}</p>
+          <p className="text-13 text-destructive">{errorMessage}</p>
         )}
 
         {value.map((rule, index) => {
@@ -206,7 +206,7 @@ export function WsFrameInjectionsEditor({
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium">Rule {index + 1}</p>
+                <p className="type-secondary-emphasis">Rule {index + 1}</p>
                 <Button
                   type="button"
                   variant="ghost"
@@ -221,7 +221,7 @@ export function WsFrameInjectionsEditor({
               </div>
 
               {errors?.[index] && (
-                <p className="text-xs text-destructive">{errors[index]}</p>
+                <p className="text-13 text-destructive">{errors[index]}</p>
               )}
 
               <div className="grid gap-3 sm:grid-cols-3">
@@ -367,7 +367,6 @@ export function WsFrameInjectionsEditor({
                 />
                 <Label
                   htmlFor={`ws-consume-trigger-${index}`}
-                  className="text-12 font-normal"
                 >
                   Consume trigger frame
                 </Label>
@@ -376,7 +375,7 @@ export function WsFrameInjectionsEditor({
               <div className="space-y-1.5">
                 <Label>Injected frame template</Label>
                 <textarea
-                  className="flex min-h-[96px] w-full rounded-lg border border-input bg-transparent px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-[96px] w-full rounded-lg border border-input bg-transparent px-3 py-2 font-mono text-13 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                   value={rule.template}
                   maxLength={4096}
                   placeholder='{"type":"auth","access_token":"${credential}"}'

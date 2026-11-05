@@ -225,7 +225,7 @@ export function ApiKeyCreateDialog({
               </DialogDescription>
             </DialogHeader>
             <div className="flex items-center gap-2">
-              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-12 break-all">
+              <code className="flex-1 rounded-lg bg-muted p-3 font-mono text-14 break-all">
                 {createdKey}
               </code>
               <Button
@@ -276,7 +276,7 @@ export function ApiKeyCreateDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -307,7 +307,7 @@ export function ApiKeyCreateDialog({
                             </Badge>
                           ))}
                         </div>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Stored on the key for audit attribution. You can
                           change it later on the Agent Key detail page.
                         </p>
@@ -346,7 +346,7 @@ export function ApiKeyCreateDialog({
                             label="Owner"
                           />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-13 text-muted-foreground">
                           Org-owned keys are shared with every admin of that
                           organization and can only scope to services owned by
                           the same org.
@@ -383,7 +383,7 @@ export function ApiKeyCreateDialog({
                           }
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         Where NyxID sends channel relay messages. Required for
                         Channel Bot routing.
                       </p>

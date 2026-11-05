@@ -116,14 +116,14 @@ export function ApprovalGrantsPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartLockIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-2">
-            <p className="text-12 font-medium text-muted-foreground">
+            <p className="type-row-title text-muted-foreground">
               {grantModeStatusUnavailable
                 ? "Policy Status Unavailable"
                 : grantModeKnownOff
                   ? "Grant Mode Is Off"
                   : "No Active Grants"}
             </p>
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               {grantModeStatusUnavailable
                 ? "No grants are active, but approval policy status could not be loaded."
                 : hasGrantModeService
@@ -160,7 +160,7 @@ export function ApprovalGrantsPage() {
                   </Button>
                 </div>
                 <div className="flex min-w-0 items-center gap-2 pr-10">
-                  <p className="truncate text-13 font-semibold text-foreground">
+                  <p className="truncate type-card-title text-foreground">
                     {grant.service_name}
                   </p>
                   {grant.org_scoped && (
@@ -173,7 +173,7 @@ export function ApprovalGrantsPage() {
                     </Badge>
                   )}
                 </div>
-                <p className="text-11 text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   {grant.requester_label ?? grant.requester_type}
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
@@ -181,7 +181,7 @@ export function ApprovalGrantsPage() {
                     <Badge variant="warning">Expiring soon</Badge>
                   )}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                   <span>Granted {formatDate(grant.granted_at)}</span>
                   <span>Expires {formatDate(grant.expires_at)}</span>
                 </div>
@@ -204,7 +204,7 @@ export function ApprovalGrantsPage() {
               <TableBody>
                 {grants.map((grant) => (
                   <TableRow key={grant.id}>
-                    <TableCell className="font-medium">
+                    <TableCell className="font-normal">
                       <div className="flex items-center gap-2">
                         <span>{grant.service_name}</span>
                         {grant.org_scoped && (
@@ -223,7 +223,7 @@ export function ApprovalGrantsPage() {
                         <span>
                           {grant.requester_label ?? grant.requester_type}
                         </span>
-                        <span className="text-11 text-muted-foreground">
+                        <span className="text-13 text-muted-foreground">
                           {grant.requester_type}
                         </span>
                       </div>
@@ -237,7 +237,7 @@ export function ApprovalGrantsPage() {
                           {formatDate(grant.expires_at)}
                         </span>
                         {isExpiringSoon(grant.expires_at) && (
-                          <Badge variant="warning" className="text-xs">
+                          <Badge variant="warning" className="text-12">
                             Expiring soon
                           </Badge>
                         )}
@@ -263,7 +263,7 @@ export function ApprovalGrantsPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-11 text-text-tertiary">
+              <p className="text-13 text-text-tertiary">
                 Showing {String((page - 1) * perPage + 1)}-
                 {String(Math.min(page * perPage, total))} of {String(total)}
               </p>
@@ -277,7 +277,7 @@ export function ApprovalGrantsPage() {
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-11 text-text-tertiary">
+                <span className="text-13 text-text-tertiary">
                   Page {String(page)} of {String(totalPages)}
                 </span>
                 <Button

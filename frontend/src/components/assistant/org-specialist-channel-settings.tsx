@@ -4,6 +4,7 @@ import { useAppForm } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { CopyableField } from "@/components/shared/copyable-field";
 import { useOrgSpecialistChannel } from "@/hooks/use-org-specialist-channel";
 import {
@@ -154,7 +155,7 @@ function GuestSettings({
             : "The organization wallet is suspended."}
         </p>
       ) : null}
-      <label className="flex items-center gap-2">
+      <Label className="flex items-center gap-2">
         <Checkbox
           checked={form.watch("enabled")}
           disabled={
@@ -164,24 +165,24 @@ function GuestSettings({
           onCheckedChange={(value) => form.setValue("enabled", value === true)}
         />
         Enable guests for this binding
-      </label>
-      <label className="block space-y-1">
+      </Label>
+      <Label className="block space-y-1">
         <span>Daily guest budget (credits, UTC)</span>
         <Input
           {...form.register("daily_credits")}
           inputMode="decimal"
           disabled={saving}
         />
-      </label>
+      </Label>
       {form.formState.errors.daily_credits ? (
         <p role="alert" className="text-destructive">
           {form.formState.errors.daily_credits.message}
         </p>
       ) : null}
       <fieldset className="space-y-1">
-        <legend>Delegated services</legend>
+        <Label asChild><legend>Delegated services</legend></Label>
         {settings.available_services.map((service) => (
-          <label key={service.id} className="flex items-center gap-2">
+          <Label key={service.id} className="flex items-center gap-2">
             <Checkbox
               disabled={saving}
               checked={selected.includes(service.id)}
@@ -195,7 +196,7 @@ function GuestSettings({
               }
             />
             {service.label}
-          </label>
+          </Label>
         ))}
       </fieldset>
       <Button

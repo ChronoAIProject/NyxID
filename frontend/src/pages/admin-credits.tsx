@@ -500,20 +500,20 @@ export function AdminCreditsPage() {
         aria-label="Issued credit balance"
         className="min-w-0 rounded-lg border border-border p-4"
       >
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Remaining issued credits
         </p>
         {overview.data ? (
           <>
-            <p className="min-w-0 break-all text-24 font-semibold tabular-nums">
+            <p className="min-w-0 break-all type-metric tabular-nums">
               {formatExactCredits(overview.data.summary.remaining, 12)} credits
             </p>
             {overview.isError ? (
-              <p role="alert" className="text-12 text-warning">
+              <p role="alert" className="text-14 text-warning">
                 This total is stale. The refresh failed.
               </p>
             ) : null}
-            <details className="mt-2 text-12">
+            <details className="mt-2 text-14">
               <summary className="cursor-pointer">Balance details</summary>
               <dl className="mt-3 grid gap-3 sm:grid-cols-2">
                 {[
@@ -555,7 +555,7 @@ export function AdminCreditsPage() {
             </details>
           </>
         ) : (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             {overview.isLoading
               ? "Loading credit balance…"
               : "Balance summary unavailable. Individual allocations and existing actions remain available below."}
@@ -591,7 +591,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="grants" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Promotional credits are consumed before purchased wallet credits.
             </p>
             {canManageGrants ? (
@@ -628,7 +628,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="allowances" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Free metric units reset on UTC recurrence windows and settle
               against actual usage.
             </p>
@@ -669,7 +669,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="schedules" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Recurring allocations issue a fresh credit total and fresh service
               ceilings each UTC period. Pausing stops future issuance.
             </p>

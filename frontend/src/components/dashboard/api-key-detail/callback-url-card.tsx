@@ -90,7 +90,7 @@ export function CallbackUrlCard({
               value={value}
               onChange={(e) => setValue(e.target.value)}
             />
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Must be HTTPS in production. Used by Channel Bot Relay to forward
               platform messages to this agent.
             </p>
@@ -116,7 +116,7 @@ export function CallbackUrlCard({
         ) : (
           <div className="flex items-center justify-between gap-2">
             {callbackUrl ? (
-              <code className="truncate rounded bg-muted px-2 py-1 text-xs">
+              <code className="truncate rounded bg-muted px-2 py-1 text-14">
                 {callbackUrl}
               </code>
             ) : (

@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
 import { Shield, RotateCcw, Trash2 } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -325,12 +326,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
               <ErrorBanner message="Failed to load org approval policies. Try refreshing the page." onRetry={refetchConfigs} />
             </div>
           ) : orgServices.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
               No org-owned services yet. Add a key to this org before
               configuring approval policies.
             </div>
           ) : serviceConfigs?.configs.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
               No org approval policies configured. Members use their personal
               approval settings.
             </div>
@@ -356,10 +357,10 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 >
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
-                      <p className="text-12 font-medium">
+                      <p className="type-row-title">
                         {config.service_name}
                       </p>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-13 text-muted-foreground">
                         {approvalPolicyLabel(config)} (org policy dominant)
                       </p>
                     </div>
@@ -389,9 +390,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       <TabsContent value="simple" className="mt-3">
                         <div className="flex flex-col gap-3">
                           <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs text-muted-foreground">
-                              Mode:
-                            </span>
+                            <Label htmlFor={`approval-mode-${mutationKey}`}>Mode</Label>
                             <Select
                               value={config.approval_mode}
                               onValueChange={(value) =>
@@ -402,7 +401,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                 )
                               }
                             >
-                              <SelectTrigger className="h-7 w-[180px] text-xs">
+                              <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
@@ -414,7 +413,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                 </SelectItem>
                               </SelectContent>
                             </Select>
-                            <span className="text-xs text-muted-foreground">
+                            <span className="text-13 text-muted-foreground">
                               {config.approval_mode === "grant"
                                 ? "Approval creates a reusable grant"
                                 : "Every request needs fresh approval"}
@@ -422,9 +421,9 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                           </div>
                           <div className="flex flex-wrap gap-3">
                             {approvalVerbs.map((verb) => (
-                              <label
+                              <Label
                                 key={verb}
-                                className="flex items-center gap-2 text-xs text-muted-foreground"
+                                className="flex items-center gap-2 text-muted-foreground"
                               >
                                 <Switch
                                   checked={enabledVerbs.includes(verb)}
@@ -438,7 +437,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                                   }
                                 />
                                 {approvalVerbLabels[verb]}
-                              </label>
+                              </Label>
                             ))}
                           </div>
                         </div>
@@ -483,12 +482,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
+              <Label
+
                 htmlFor="org-service-select"
               >
                 Service
-              </label>
+              </Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
@@ -516,8 +515,8 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border p-4">
               <div className="space-y-0.5">
-                <p className="text-12 font-medium">Require Approval</p>
-                <p className="text-xs text-muted-foreground">
+                <p className="type-row-title">Require Approval</p>
+                <p className="text-13 text-muted-foreground">
                   Whether members must get an admin&rsquo;s approval to use
                   this service.
                 </p>
@@ -533,12 +532,12 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
             {selectedApprovalRequired && (
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label
-                    className="text-12 font-medium"
+                  <Label
+
                     htmlFor="org-approval-mode-select"
                   >
                     Approval Mode
-                  </label>
+                  </Label>
                   <Select
                     value={selectedApprovalMode}
                     onValueChange={(v) =>
@@ -553,21 +552,21 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       <SelectItem value="grant">Time-based grant</SelectItem>
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {selectedApprovalMode === "grant"
                       ? "Approval creates a reusable grant lasting the configured number of days. Subsequent requests skip approval until the grant expires."
                       : "Every API request requires a fresh approval. No grant is created."}
                   </p>
                 </div>
                 <div className="space-y-2">
-                  <p className="text-12 font-medium">
+                  <p className="type-row-title">
                     Require Approval For
                   </p>
                   <div className="grid gap-2 sm:grid-cols-3">
                     {approvalVerbs.map((verb) => (
-                      <label
+                      <Label
                         key={verb}
-                        className="flex items-center justify-between rounded-lg border border-border p-3 text-xs text-muted-foreground"
+                        className="flex items-center justify-between rounded-lg border border-border p-3 text-muted-foreground"
                       >
                         <span>{approvalVerbLabels[verb]}</span>
                         <Switch
@@ -588,7 +587,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                             });
                           }}
                         />
-                      </label>
+                      </Label>
                     ))}
                   </div>
                 </div>
@@ -667,7 +666,7 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
             <ErrorBanner message="Failed to load org approval grants. Try refreshing the page." onRetry={refetch} />
           </div>
         ) : grants.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
             No active org approval grants.
           </div>
         ) : (
@@ -678,8 +677,8 @@ function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
                 className="flex items-center justify-between rounded-lg border border-border p-4"
               >
                 <div className="space-y-0.5">
-                  <p className="text-12 font-medium">{grant.service_name}</p>
-                  <p className="text-xs text-muted-foreground">
+                  <p className="type-row-title">{grant.service_name}</p>
+                  <p className="text-13 text-muted-foreground">
                     {grant.requester_label ?? grant.requester_type} ·
                     granted {formatDate(grant.granted_at)} · expires{" "}
                     {formatDate(grant.expires_at)}
