@@ -2346,10 +2346,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         start.org_access.as_ref(),
     )
     .await?;
-    row.shared_agent_thread = matches!(
-        authority,
-        super::assistant_agent_credential_service::KeyAuthority::Shared(..)
-    );
+    row.shared_agent_thread = authority.is_shared();
 
     if live_turn(&row, now).is_some() {
         return Err(AppError::AssistantTurnActive);
@@ -2471,8 +2468,25 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if row.collaboration.is_some()
-        || start.invocation_id.is_some()
+    let events = if let Some(binding) = row.collaboration.as_ref() {
+        // Only the canonical permission receipt for this exact requester/root
+        // may enter a collaboration continuation. Ordinary queue events remain
+        // excluded from hidden threads.
+        let (selected, remaining): (Vec<_>, Vec<_>) = std::mem::take(&mut row.pending_events)
+            .into_iter()
+            .partition(|event| {
+                event.id.starts_with("execution-decision:")
+                    && event.execution_task.as_ref().is_some_and(|task| {
+                        task.version == 1
+                            && task.actor_user_id == binding.original_requester_id
+                            && task.task.root_kind
+                                == crate::models::execution_permission::TaskRootKind::GroupRequest
+                            && task.task.root_id == binding.request_id
+                    })
+            });
+        row.pending_events = remaining;
+        selected
+    } else if start.invocation_id.is_some()
         || start.guest
         || start.origin == TurnOrigin::Trigger
         || (start.origin == TurnOrigin::User && row.channel.is_some())
@@ -2691,7 +2705,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     if row.group_request_id.is_some() {
         super::api_key_mutation_service::update_one(
             db,
-            doc! {"_id": credential_id, "user_id": user_id},
+            doc! {"_id": credential_id, "user_id": user_id, "assistant_group_id":{"$ne": &row.group_id}},
             doc! {"$set": {"assistant_group_id": &row.group_id}},
             Some(&mut *session),
         )
@@ -4389,6 +4403,7 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
 /// A pending proxy approval request raised by this chat's key. The chat renders
 /// it as a card; the decision itself goes through the ordinary approvals API.
 pub struct ChatApproval {
+    pub execution_proposal: Option<super::execution_permission_dispatch::proposals::ProposalView>,
     pub status: String,
     pub review_path: String,
     pub id: String,
@@ -4438,8 +4453,10 @@ async fn chat_approvals(
         return Ok(Vec::new());
     };
     let scope = doc! {
-        "requester_type":"user", "requester_id":user_id,"requester_label":&key.name,
-        "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+        "$or":[
+            {"execution_proposal":null,"requester_type":"user", "requester_id":user_id,"requester_label":&key.name,"$or":[{"user_id":user_id},{"notify_user_ids":user_id}]},
+            {"user_id":user_id,"execution_proposal.v1.key_id":credential_api_key_id}
+        ],
     };
     let now = Utc::now();
     let mut pending = scope.clone();
@@ -4468,23 +4485,49 @@ async fn chat_approvals(
     }
     Ok(rows
         .into_iter()
-        .map(|row| ChatApproval {
-            status: if row.status == "pending" && row.expires_at <= now {
-                "expired".into()
-            } else {
-                row.status
-            },
-            review_path: super::assistant_links::AssistantPage::Approvals.path(),
-            id: row.id,
-            service_slug: row.service_slug,
-            service_name: row.service_name,
-            summary: row.action_description.unwrap_or(row.operation_summary),
-            approval_mode: row.approval_mode,
-            created_at: row.created_at,
-            expires_at: row.expires_at,
-            agent_key_prefix: key.key_prefix.clone(),
-        })
+        .map(|row| chat_approval(row, &key.key_prefix))
         .collect())
+}
+fn chat_approval(
+    row: crate::models::approval_request::ApprovalRequest,
+    key_prefix: &str,
+) -> ChatApproval {
+    let proposal = super::execution_permission_dispatch::proposals::view(&row);
+    ChatApproval {
+        review_path: proposal.as_ref().map_or_else(
+            || super::assistant_links::AssistantPage::Approvals.path(),
+            |p| p.review_path.clone(),
+        ),
+        execution_proposal: proposal,
+        status: if row.status == "pending" && row.expires_at <= Utc::now() {
+            "expired".into()
+        } else {
+            row.status
+        },
+        id: row.id,
+        service_slug: row.service_slug,
+        service_name: row.service_name,
+        summary: row.action_description.unwrap_or(row.operation_summary),
+        approval_mode: row.approval_mode,
+        created_at: row.created_at,
+        expires_at: row.expires_at,
+        agent_key_prefix: key_prefix.into(),
+    }
+}
+pub(crate) async fn include_execution_card(
+    db: &Database,
+    actor: &str,
+    conversation: &AssistantConversation,
+    id: &str,
+    rows: &mut Vec<ChatApproval>,
+) -> AppResult<()> {
+    if rows.iter().any(|row| row.id == id) {
+        return Ok(());
+    }
+    if let Some(row)=db.collection::<crate::models::approval_request::ApprovalRequest>("approval_requests").find_one(doc!{"_id":id,"user_id":actor,"execution_proposal.v1.conversation_id":&conversation.id,"execution_proposal.v1.key_id":&conversation.credential_api_key_id}).await? {
+        rows.push(chat_approval(row,""));
+    }
+    Ok(())
 }
 
 pub const MAX_TURN_ATTACHMENTS: usize = 8;
@@ -5904,6 +5947,13 @@ pub(crate) async fn delete_in_session(
             super::channel_thread_follow_service::delete_conversation(db, user_id, id, session)
                 .await?;
         }
+        super::execution_permission_dispatch::proposals::cancel_in_session(
+            db,
+            session,
+            doc! {"user_id":user_id,"execution_proposal.v1.conversation_id":id},
+            "source_deleted",
+        )
+        .await?;
         // Revoke the conversation's key and ciphertext in this transaction.
         let credential = db
             .collection::<bson::Document>(

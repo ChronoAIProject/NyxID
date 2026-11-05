@@ -190,6 +190,7 @@ pub async fn mutate(
                 return Err(AppError::ValidationError("permissions:execution-v1 supports per-user enables only: global and organization enrollment require a separately reviewed rollout".into()));
             }
             security_readiness_service::require(db, "permissions:execution-dispatch-v1").await?;
+            security_readiness_service::require(db, "permissions:execution-authoring-v1").await?;
         }
         if *kind != FlagTargetKind::Global {
             let id = target_id

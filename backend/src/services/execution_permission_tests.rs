@@ -12,6 +12,8 @@ fn now() -> DateTime<Utc> {
 pub(crate) fn fixture() -> ApprovalGrant {
     let validity = Validity::Persistent;
     ApprovalGrant {
+        execution_review: None,
+        execution_last_used_at: None,
         execution_use: None,
         id: uuid::Uuid::new_v4().to_string(), user_id: "actor".into(), service_id: "catalog".into(),
         service_name: "Service".into(), requester_type: "api_key".into(), requester_id: "actor".into(), requester_label: None,

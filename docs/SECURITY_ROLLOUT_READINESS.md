@@ -54,7 +54,9 @@ feature flags requires deployment readiness:
 | `assistant:machine-capabilities` | Capability editing and deliberate legacy-assignment materialization behavior; stored assignments and live machine ACLs retain their execution checks. |
 | `assistant:machine-contexts` | Separated-context configuration; backend observations do not certify the node's OS implementation. |
 | `assistant:live-turn-gate` | Conditional execution/route gate; channel and platform turn fences and conversation-key management denial retain their stronger unconditional checks. |
-| `permissions:execution-v1` | Reader-only explicit execution contract; no authoring or enforcement enabled. Future dispatch/writers require a distinct readiness version; see [contract](EXECUTION_PERMISSIONS.md). |
+| `permissions:execution-v1` | Explicit execution-contract reader. Activation is per-person only and requires all three permission capabilities; see [contract](EXECUTION_PERMISSIONS.md). |
+| `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
+| `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Upgrade/drain every writer before activation. |
 | `assistant:org-instruction-v1` | Exact owner instruction or a single-use owner card before covered org credential effects, in every access mode. |
 | `assistant:hosted-connect-intent-v1` | New assistant MCP and Plugins links persist immutable personal/platform intent; completion always enforces an existing lock. |
 

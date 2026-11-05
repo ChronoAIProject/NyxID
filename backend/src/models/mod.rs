@@ -51,6 +51,7 @@ pub mod downstream_service;
 pub mod durable_operation_execution;
 pub mod durable_operation_grant;
 pub mod execution_permission;
+pub mod execution_proposal;
 pub mod feature_flag_definition;
 pub mod feature_flag_metadata;
 pub mod feature_flag_override;

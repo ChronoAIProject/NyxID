@@ -1622,6 +1622,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/requests/{request_id}/decide",
             post(handlers::approvals::decide_request),
         )
+        .route(
+            "/requests/{request_id}/execution-decision",
+            post(handlers::approvals::decide_execution_request),
+        )
         .route("/grants", get(handlers::approvals::list_grants))
         .route(
             "/grants/{grant_id}/authorization",

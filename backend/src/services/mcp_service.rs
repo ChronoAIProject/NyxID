@@ -3810,6 +3810,40 @@ impl PreparedProxyCall {
         {
             return Ok(());
         }
+        // Only retain calls whose exact prepared bytes can use the ordinary
+        // HTTP replay seam. Managed materialization keeps its legacy decisions.
+        let mut retained_headers = axum::http::HeaderMap::new();
+        for (name, value) in &self.parameter_headers {
+            if let (Ok(name), Ok(value)) = (
+                axum::http::HeaderName::from_bytes(name.as_bytes()),
+                axum::http::HeaderValue::from_str(value),
+            ) {
+                retained_headers.insert(name, value);
+            }
+        }
+        if self.acknowledgement_id.is_none()
+            && self.lark_message.is_none()
+            && self.attachment_binding.is_none()
+            && self.resource_source.is_none()
+            && self.server_owned_headers.is_empty()
+            && proxy_service::collect_forward_headers_with_defaults(&retained_headers, &[])
+                == self.parameter_headers
+        {
+            auth.execution_permission
+                .as_ref()
+                .expect("participating")
+                .enable_authoring();
+        } else if self.acknowledgement_id.is_none()
+            && auth
+                .assistant_chat
+                .as_deref()
+                .is_some_and(super::execution_permission_dispatch::proposals::supported_chat)
+        {
+            tracing::info!(
+                reason = "mcp_effect_not_retainable",
+                "Execution proposal uses legacy prompts"
+            );
+        }
         let McpToolSource::UserManaged {
             user_service_id,
             effective_owner_id,

@@ -950,6 +950,8 @@ pub struct CmaOperationResponse {
 }
 #[derive(Clone, Serialize)]
 pub struct ChatApprovalResponse {
+    execution_proposal:
+        Option<crate::services::execution_permission_dispatch::proposals::ProposalView>,
     status: String,
     review_path: String,
     id: String,
@@ -964,6 +966,7 @@ pub struct ChatApprovalResponse {
 impl From<engine::ChatApproval> for ChatApprovalResponse {
     fn from(row: engine::ChatApproval) -> Self {
         Self {
+            execution_proposal: row.execution_proposal,
             status: row.status,
             review_path: row.review_path,
             id: row.id,
@@ -1017,8 +1020,18 @@ pub async fn history(
         )
         .await?;
     }
-    let approvals =
+    let mut approvals =
         engine::approval_history(&state.db, &user_id, &conversation.credential_api_key_id).await?;
+    if let Some(card) = query.card {
+        engine::include_execution_card(
+            &state.db,
+            &user_id,
+            &conversation,
+            &card.to_string(),
+            &mut approvals,
+        )
+        .await?;
+    }
     // Best effort: the transcript never fails because of the waiting list.
     let waiting = super::nyxbot::waiting(&state, &user_id, &conversation.id)
         .await
@@ -1947,6 +1960,112 @@ pub(crate) fn http_egress(
 
 #[async_trait::async_trait]
 impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgentEgress {
+    async fn resume_execution(
+        &self,
+        row: &AssistantConversation,
+        resume: crate::services::execution_permission_dispatch::proposals::Resume,
+    ) -> AppResult<Response> {
+        if row.user_id != self.auth.user_id.to_string() {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let key = self
+            .state
+            .db
+            .collection::<crate::models::api_key::ApiKey>("api_keys")
+            .find_one(
+                doc! {"_id":&row.credential_api_key_id,"user_id":&row.user_id,"is_active":true,
+                "$or":[{"expires_at":null},{"expires_at":{"$gt":mongodb::bson::DateTime::now()}}]},
+            )
+            .await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let mut auth = crate::mw::auth::api_key_auth_user(
+            &self.state.db,
+            &key,
+            resume.source_credential_id.clone(),
+            None,
+            None,
+        )
+        .await?;
+        if auth.assistant_chat.as_ref().is_none_or(|c| {
+            c.conversation_id != row.id
+                || c.turn_id.as_deref() != row.active_turn.as_ref().map(|t| t.turn_id.as_str())
+        }) {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let effect = resume.effect.clone();
+        let independent_card = resume.independent_card_id.clone();
+        crate::services::execution_permission_dispatch::RequestContext::for_resume(
+            &mut auth, resume,
+        )?;
+        let query = if let Some(query) = &effect.query {
+            format!("{query}&_nyxid_via={}", effect.connection)
+        } else {
+            format!("_nyxid_via={}", effect.connection)
+        };
+        let path = effect.path.as_str();
+        // Generic MCP connections have no catalog row. Resolve their live
+        // slug only to select the ordinary route; _nyxid_via still pins the
+        // retained connection and the coordinator checks its full snapshot.
+        let slug = if effect.endpoint.as_deref()
+            == Some(crate::services::mcp_service::GENERIC_PROXY_ENDPOINT_ID)
+        {
+            Some(
+                crate::services::user_service_service::find_user_service_by_id(
+                    &self.state.db,
+                    &effect.connection,
+                )
+                .await?
+                .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?
+                .slug,
+            )
+        } else {
+            None
+        };
+        let route = slug
+            .as_ref()
+            .map_or_else(|| effect.catalog.clone(), |slug| format!("s/{slug}"));
+        let uri = format!(
+            "/api/v1/proxy/{route}/{}?{query}",
+            path.trim_start_matches('/')
+        );
+        let mut request = axum::http::Request::builder()
+            .method(effect.method.as_str())
+            .uri(uri);
+        for (name, value) in &effect.headers {
+            request = request.header(name, value);
+        }
+        if let Some(card) = independent_card {
+            request = request.header(
+                crate::services::assistant_service_execution::ACK_HEADER,
+                card,
+            );
+        }
+        let mut request = request
+            .body(Body::from(effect.body))
+            .map_err(|_| AppError::BadRequest("Invalid retained operation".into()))?;
+        request.extensions_mut().insert(SERVER_TURN_POLICY);
+        if let Some(slug) = slug {
+            return Box::pin(super::proxy::proxy_request_by_slug_inner(
+                &self.state,
+                &auth,
+                &slug,
+                path,
+                request,
+                &mut String::new(),
+            ))
+            .await;
+        }
+        Box::pin(super::proxy::proxy_request_inner(
+            &self.state,
+            &auth,
+            &effect.catalog,
+            path,
+            request,
+            &mut String::new(),
+        ))
+        .await
+    }
+
     async fn model_image_input(
         &self,
         authority: &crate::services::platform_manager_contract::NyxAgentExecutionContext,

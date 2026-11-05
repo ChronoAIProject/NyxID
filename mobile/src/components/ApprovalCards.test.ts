@@ -9,7 +9,7 @@ import type { ChallengeDetail } from "../lib/api/types";
 type Element = { type: string; props: Record<string, any> };
 
 // Exercise the real card source; replace only native rendering and theme.
-function loadCard(name: "HistoryCard" | "ChallengeCard") {
+function loadCard(name: "HistoryCard" | "ChallengeCard", openedUrls: string[] = []) {
   const filename = fileURLToPath(new URL(`./${name}.tsx`, import.meta.url));
   const output = ts.transpileModule(readFileSync(filename, "utf8"), {
     compilerOptions: {
@@ -27,8 +27,11 @@ function loadCard(name: "HistoryCard" | "ChallengeCard") {
     },
     "./ServiceIcon": { ServiceIcon: "ServiceIcon" },
     "./GroupedCell": { GroupedCell: "GroupedCell" },
+    "./settings/SettingsList": { SettingsRow: "SettingsRow" },
+    "../lib/env": { NYXID_FRONTEND_URL: "https://app.example.test" },
     "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
+      Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
       Pressable: "Pressable",
       Text: "Text",
       View: "View",
@@ -132,6 +135,33 @@ const request: ChallengeDetail = {
 };
 const HistoryCard = loadCard("HistoryCard");
 const ChallengeCard = loadCard("ChallengeCard");
+
+test("execution proposals keep the grouped card and only offer web review", () => {
+  const openedUrls: string[] = [];
+  const Card = loadCard("ChallengeCard", openedUrls);
+  const tree = Card({
+    challenge: {
+      ...request,
+      execution_proposal: {
+        version: 1, supported: true, can_decide: true,
+        state: "pending", review_path: "/assistant/approvals",
+      },
+    },
+    onApprove: () => assert.fail("Execution proposal approved from mobile"),
+    onDeny: () => assert.fail("Execution proposal denied from mobile"),
+  });
+  assert.equal(tree.type, "GroupedCell");
+  assert.match(textContent(tree), /Review the exact scope and duration in the web app/);
+  assert.doesNotMatch(textContent(tree), /Approval applies only|Approving allows/);
+  assert.ok(elements(tree).every((e) =>
+    (e.type as unknown as { name?: string }).name !== "ApprovalDecisionPair"));
+  const link = elements(tree).find((e) => e.type === "SettingsRow" && e.props.label === "Review in the web app");
+  assert.ok(link);
+  assert.equal(link.props.tone, "action");
+  assert.equal(link.props.accessibilityRole, "link");
+  link.props.onPress();
+  assert.deepEqual(openedUrls, ["https://app.example.test/assistant/approvals"]);
+});
 
 test("pending card shows the complete operation, requester and service, and opens its detail", () => {
   let opened = 0;

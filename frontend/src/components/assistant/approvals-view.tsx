@@ -1,3 +1,4 @@
+import { ExecutionPermissionCard } from "@/components/assistant/blocks/execution-permission-card";
 import { useEffect, useState } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
@@ -85,13 +86,26 @@ function HistorySection({
   readonly entries: readonly AssistantApprovalEntry[];
 }) {
   if (!entries.length) return <EmptyState history />;
+  const proposals = entries.filter((entry) => entry.block.execution_proposal);
+  const legacy = entries.filter((entry) => !entry.block.execution_proposal);
   const days = new Map<string, AssistantApprovalEntry[]>();
-  for (const entry of entries) {
+  for (const entry of legacy) {
     const day = dayLabel(entry.decidedAt ?? entry.requestedAt);
     days.set(day, [...(days.get(day) ?? []), entry]);
   }
   return (
     <div className="space-y-6">
+      {proposals.length ? (
+        <div className="space-y-3">
+          {proposals.map((entry) => (
+            <ExecutionPermissionCard
+              key={entry.requestId}
+              requestId={entry.requestId}
+              proposal={entry.block.execution_proposal!}
+            />
+          ))}
+        </div>
+      ) : null}
       {[...days].map(([day, rows]) => (
         <GroupedList key={day} title={day}>
           {rows.map((entry) => {

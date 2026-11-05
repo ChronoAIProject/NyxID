@@ -1,3 +1,4 @@
+import { executionProposalSchema } from "./execution-proposal";
 import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
@@ -267,6 +268,7 @@ export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSche
 /// A pending proxy approval raised by the chat's key; decided through the
 /// ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  execution_proposal: executionProposalSchema.nullish(),
   status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
   review_path: z.string().optional(),
   id: z.string(),

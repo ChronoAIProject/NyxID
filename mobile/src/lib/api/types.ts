@@ -22,6 +22,7 @@ export type ChallengeItem = {
 };
 
 export type ChallengeDetail = ChallengeItem & {
+  execution_proposal?: { version: number; state: string; review_path: string } | null;
   summary: string;
   /** Actual decision metadata, absent on older servers and pending requests. */
   decided_at?: string | null;

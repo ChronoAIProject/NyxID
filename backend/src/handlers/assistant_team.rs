@@ -3817,6 +3817,12 @@ pub fn spawn_sweeps(state: AppState) {
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
             }
+            if crate::services::execution_permission_dispatch::proposals::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Execution permission recovery deferred");
+            }
             // Things the owner finished outside the chat queue events first.
             if let Err(error) = super::nyxbot::process_watches(&state).await {
                 tracing::debug!(%error, "NyxBot watch sweep deferred");

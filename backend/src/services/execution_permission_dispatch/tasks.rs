@@ -278,6 +278,16 @@ pub(crate) fn settle<'a>(
         let Some(task) = turn.execution_task.as_ref() else {
             return Ok(());
         };
+        let receipts: Vec<_> = turn
+            .events
+            .iter()
+            .filter_map(|e| e.id.strip_prefix("execution-decision:"))
+            .collect();
+        if !receipts.is_empty() && message.status == "completed" {
+            db.collection::<Document>("approval_requests").update_many(doc!{"_id":{"$in":receipts},"user_id":&row.user_id,
+                "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}},
+                doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}}).session(&mut *session).await?;
+        }
         if task.task.root_kind != TaskRootKind::Message
             || message.status != "completed"
             || turn.report_to.is_some()
@@ -299,7 +309,12 @@ pub(crate) fn settle<'a>(
             .session(&mut *session)
             .await?
             .is_some();
-        if !pending_card && !descendant {
+        let pending_effect = db.collection::<Document>("approval_requests").find_one(doc! {
+            "user_id":&row.user_id,"execution_proposal.v1.task.task":&reference,
+            "execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
+            "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}
+        }).session(&mut *session).await?.is_some();
+        if !pending_card && !descendant && !pending_effect {
             db.collection::<Document>(collection(&task.task))
                 .update_one(
                     doc! {"_id":&task.task.root_id,"execution_task.epoch":task.epoch},
@@ -340,6 +355,8 @@ pub(crate) fn stop<'a>(
                 db.collection::<Document>("assistant_conversations").update_many(
                     doc! {"user_id":&row.user_id,"active_turn.execution_task.task":&reference,"active_turn.execution_task.epoch":task.epoch},
                     doc! {"$set":{"active_turn.stop_requested":true},"$inc":{"authority_fence":1_i64}}).session(&mut *session).await?;
+                super::proposals::cancel_in_session(db,session,
+                    doc!{"user_id":&row.user_id,"execution_proposal.v1.task.task":&reference},"task_stopped").await?;
                 db.collection::<Document>("assistant_acknowledgements").update_many(
                     doc! {"user_id":&row.user_id,"execution_task.task":&reference,"execution_task.epoch":task.epoch,"status":{"$in":["pending","allowed"]}},
                     doc! {"$set":{"status":"expired","expires_at":bson::DateTime::now(),"expiry_reason":"task_stopped"}}).session(&mut *session).await?;

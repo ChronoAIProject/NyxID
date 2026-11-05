@@ -366,6 +366,7 @@ remain the acting person's.
 Execution-permission dispatch (default-off #2194 Phase A) can satisfy only the
 three eligible discretionary floors for a fully covered, exact actor/account
 operation. Operation and input scopes remain ceilings and always run first.
-Gaps use the existing cards until #2195. Activation is per-user only and requires
-both execution reader and dispatch readiness; see
+Eligible assistant MCP/proxy gaps use one requester-private permission card
+and exact retained-effect resume (#2195 Part A); other gaps keep existing cards.
+Activation is per-person only and requires reader, dispatch and authoring readiness; see
 [the execution contract](EXECUTION_PERMISSIONS.md#dispatch-integration-2194-phase-a).

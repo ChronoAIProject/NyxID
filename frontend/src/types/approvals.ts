@@ -1,3 +1,4 @@
+import type { ExecutionProposal } from "@/schemas/execution-proposal";
 export type GlobalApprovalMode = "writes_only" | "all" | "off";
 
 export interface NotificationSettings {
@@ -56,6 +57,7 @@ export interface TelegramDisconnectResponse {
 }
 
 export interface ApprovalRequestItem {
+  readonly execution_proposal?: ExecutionProposal | null;
   readonly id: string;
   readonly service_name: string;
   readonly service_slug: string;
@@ -87,6 +89,15 @@ export interface ApprovalRequestListResponse {
 }
 
 export interface ApprovalGrantItem {
+  readonly execution?: {
+    readonly supported: boolean;
+    readonly validity: string | null;
+    readonly valid_until: string | null;
+    readonly review?: ExecutionProposal["review"];
+    readonly source_request_id?: string | null;
+    readonly source_review_path?: string | null;
+    readonly last_dispatched_at?: string | null;
+  } | null;
   readonly id: string;
   readonly service_id: string;
   readonly service_name: string;

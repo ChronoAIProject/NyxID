@@ -1,11 +1,13 @@
 import { ServiceIcon } from "./ServiceIcon";
+import { NYXID_FRONTEND_URL } from "../lib/env";
 import { useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Linking, Pressable, StyleSheet, Text, View } from "react-native";
 import { ChevronRight } from "lucide-react-native";
 import { TOUCH_TARGET, spacing, typeScale } from "../theme/designTokens";
 import { useTheme } from "../theme/ThemeContext";
 import type { ThemeColors } from "../theme/mobileTheme";
 import { GroupedCell } from "./GroupedCell";
+import { SettingsRow } from "./settings/SettingsList";
 import type { ChallengeDetail } from "../lib/api/types";
 
 type ChallengeCardProps = {
@@ -202,18 +204,33 @@ export function ChallengeCard({
             {context.join(" · ")}
           </Text>
           <Text style={styles.meta}>
-            {challenge.approval_mode === "grant"
-              ? `Approving allows matching requests for ${grantDurationLabel}.`
-              : "Approval applies only to this request."}
+            {challenge.execution_proposal
+              ? "Review the exact scope and duration in the web app."
+              : challenge.approval_mode === "grant"
+                ? `Approving allows matching requests for ${grantDurationLabel}.`
+                : "Approval applies only to this request."}
           </Text>
         </View>
         {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
       </Pressable>
-      <ApprovalDecisionPair
-        disabled={blocked}
-        onApprove={onApprove}
-        onDeny={onDeny}
-      />
+      {challenge.execution_proposal ? (
+        <View style={styles.pairDivider}>
+          <SettingsRow
+            tone="action"
+            label="Review in the web app"
+            accessibilityRole="link"
+            onPress={() =>
+              void Linking.openURL(`${NYXID_FRONTEND_URL}/assistant/approvals`)
+            }
+          />
+        </View>
+      ) : (
+        <ApprovalDecisionPair
+          disabled={blocked}
+          onApprove={onApprove}
+          onDeny={onDeny}
+        />
+      )}
     </GroupedCell>
   );
 }

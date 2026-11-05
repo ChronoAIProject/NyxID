@@ -1,8 +1,9 @@
 import { ServiceIcon } from "../../components/ServiceIcon";
+import { NYXID_FRONTEND_URL } from "../../lib/env";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { capture } from "../../lib/telemetry";
-import { AppState, StyleSheet, Text, View } from "react-native";
+import { AppState, Linking, StyleSheet, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useFocusEffect } from "@react-navigation/native";
 import {
@@ -195,7 +196,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const viewedEmittedRef = useRef<string | null>(null);
   const decided = useRef(false);
   const decidable = useRef(false);
-  decidable.current = data?.status === "PENDING";
+  decidable.current = data?.status === "PENDING" && !data.execution_proposal;
   useEffect(
     () => () => {
       if (viewedAtRef.current != null && decidable.current && !decided.current)
@@ -410,6 +411,18 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
           <SettingsRow label="Expires" value={approvalExpiryLabel(data)} />
         </SettingsGroup>
         <ApprovalEvidence challenge={data} />
+        {data.execution_proposal && (
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              tone="action"
+              label="Review in the web app"
+              accessibilityRole="link"
+              onPress={() =>
+                void Linking.openURL(`${NYXID_FRONTEND_URL}/assistant/approvals`)
+              }
+            />
+          </SettingsGroup>
+        )}
         {actionState.canDecide && (
           <SettingsGroup inset={false}>
             <ApprovalDecisionPair

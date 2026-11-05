@@ -1,11 +1,10 @@
-# Explicit execution permissions (#2193 / #2194 Phase A)
+# Explicit execution permissions (#2193 / #2194 Phase A / #2195 Part A)
 
-**Status: #2193 contract plus default-off #2194 Phase A dispatch integration.**
-No API/tool writes execution permissions; #2195 owns human permission
-updates/resume and #2196 owns legacy mapping. The contract sections below describe
-the shared contract; the Phase A section defines its supported runtime integration. Existing unmarked rows,
-turns and native adapters retain their behavior. Unrelated requests gain no
-database reads.
+**Status: default-off contract, dispatch, and assistant permission authoring.**
+The #2195 Part A flow below adds human permission updates and exact-effect resume
+for enrolled private owner, shared-recipient and collaboration chat turns using
+MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
+mapping is not included. Unmarked traffic gains no preparation or database reads.
 
 ## Representation and scope
 
@@ -134,7 +133,7 @@ authority. `org_scoped` does not relax the execution payload's exact actor.
 | Reader/writer | Handling |
 | --- | --- |
 | `approval_service::check_approval` / `grant_scope_covers` | Unchanged legacy dispatch logic rejects the marker. |
-| `approval_service::list_grants`, `handlers/approvals` | Execution rows independent of legacy Grant-mode configuration; same owner/admin service visibility. Additive `execution` DTO reports effective validity, not sentinel lifetime. No prepared inputs, resource policy or authority/credential digests exposed. Unknown versions marked unsupported. `supported` means the schema is understood, not that a live effect is authorized; task/admission/resource checks remain separate. Legacy fields retained for compatibility. |
+| `approval_service::list_grants`, `handlers/approvals` | Execution rows independent of legacy Grant-mode configuration; same owner/admin service visibility. Additive `execution` DTO reports effective validity, not sentinel lifetime. A bounded, redacted review is returned only to the first-party human; retained HTTP bytes, resource policy and authority/credential digests are never returned. Unknown versions marked unsupported. `supported` means the schema is understood, not that a live effect is authorized; task/admission/resource checks remain separate. Legacy fields retained for compatibility. |
 | `revoke_grant`, `revoke_all_grants`, service-policy reconciliation | Existing ownership/filter semantics; execution rows get bounded terminal retention in the same update, legacy dates preserved. `unscoped_only` still matches only `scope:null`, excluding the marker. |
 | `assistant_action_effects_org::grant_for_actor` | Existing owner/admin/resource checks govern revocation; calls the shared revoke helper. Does not execute grants. |
 | `org_service` blocker/cleanup queries | Active persistent grants block deletion; revoked/expired grants remain eligible for cleanup. |
@@ -149,12 +148,12 @@ old record; no widening by inference.
 ## Rollout and unsupported behavior
 
 1. Deploy all readers and dispatchers first, with `permissions:execution-v1`
-   default off. Activation requires both reader and dispatch capabilities in the
+   default off. Activation requires reader, dispatch and authoring capabilities in the
    all-replica roster and drained-writer gate, and supports per-person overrides
    only. Reads and disabling remain available.
-2. #2195 authoring must require a separate readiness capability before writing
-   permissions, native references or mandatory org markers. Reader or dispatch
-   readiness alone never enables these writes.
+2. Authoring requires `permissions:execution-authoring-v1` in addition to reader
+   and dispatch readiness. Native references and mandatory org markers remain
+   unwritable. Reader or dispatch readiness alone never enables new proposals.
 3. Old readers ignore the optional payload and reject its scope marker for
    legacy approval. Old listing is acceptable during the reader rollout; old
    replicas must not serve activated cohorts. No TTL migration is needed.
@@ -163,8 +162,8 @@ old record; no widening by inference.
    mandatory policies before old binaries return. Persistent records survive
    rollback's unchanged TTL.
 
-Phase A does not include permission authoring/UI, consolidated gap cards,
-native-policy-key execution, Machine service HTTP, async/background watches,
+#2194 Phase A does not include authoring; #2195 Part A below adds assistant
+permission cards and web UI. This release still excludes native-policy-key execution, Machine service HTTP, async/background watches,
 voice-task service calls, mandatory-org authoring or legacy migration. Tests cover
 the pure contract, serialization/legacy management, real proxy/MCP/LLM admission,
 provider attempt counts, task fences, concurrent claims and the unmarked database
@@ -181,9 +180,9 @@ execution permission, and creates no proposal fields or inert cards.
 
 `permissions:execution-v1` can be enabled **only for an active person via a user
 override**. Global and organization enables are rejected with a validation error;
-reads, disabling and clearing remain available. Activation requires both
-`permissions:execution-v1` (reader) and `permissions:execution-dispatch-v1`
-(enforcement) in the existing all-replica readiness/drained-writer gate.
+reads, disabling and clearing remain available. Activation requires
+`permissions:execution-v1` (reader), `permissions:execution-dispatch-v1`
+(enforcement) and `permissions:execution-authoring-v1` (human authoring) in the existing all-replica readiness/drained-writer gate.
 
 The override and `User.execution_permission_enrollment = 1` are written in the
 same transaction; disabling/clearing removes the marker. Authentication copies
@@ -216,8 +215,8 @@ the legacy gates. Disabling cannot downgrade already admitted coverage to Full.
 Decision order is ceilings/deny → full coverage evaluation → remaining floors →
 claims → final live revalidation → dispatch. **Covered** suppresses only the
 three closed eligible floors above, without making fake legacy consents or
-receipts. **RequestableGap** goes through today's prompt chain unchanged; multiple
-legacy layers can still ask until #2195. **Prohibited** returns before a new card
+receipts. **RequestableGap** keeps the legacy chain except for the eligible assistant
+authoring path defined below. **Prohibited** returns before a new card
 or effect. Database, provider, billing, capacity and unsupported-adapter failures
 remain operational errors. The separately authored mandatory-org marker, when
 encountered in participating admission, refuses coverage; its authoring remains
@@ -274,5 +273,116 @@ Upgrade readers and dispatchers, drain older writers, then enable per-person
 cohorts. Old replicas ignore additive fields and keep their legacy behavior;
 they must not serve an activated cohort. Before binary rollback, disable and
 drain marked roots and claims on upgraded replicas. The `expires_at` TTL remains
-unchanged, including persistent permission sentinel retention. No new permission
-writer, legacy migration, native-policy-key cutover or version bump is included.
+unchanged, including persistent permission sentinel retention. No legacy migration, native-policy-key cutover or version bump is included.
+
+
+## Permission updates and resume: #2195 Part A
+
+### Eligible sources and one private review
+
+Only a live, enrolled assistant chat key with a recoverable server `TaskRef` can
+create a proposal: private owner, shared-recipient and collaboration-group turns,
+through ordinary HTTP proxy or MCP endpoint/generic/prepared HTTP. Guest,
+platform/channel/automation, old in-flight turns without recorded lineage,
+ordinary API-key/external and standalone LLM-gateway callers retain their existing
+gap behavior. Unsupported managed/composite transformations also retain legacy
+prompts. This does not extend Phase B adapters.
+
+The existing `ApprovalRequest` carries one versioned `execution_proposal`.
+Ceilings and prohibitions run before its creation. It consolidates only missing
+access-mode, personal-service and exact-actor shared-connection consent floors.
+There is no second acknowledgement card, inferred legacy grant or Always consent.
+Independent floors remain required; saving permission never approves them.
+The active acting person is the only decider. Full access cannot self-approve,
+and another group participant, owner or manager cannot see the private review.
+
+The proposal binds exact actor/principal/lane, chat key/source credential,
+conversation and result audience, task/epoch/deadline, selected connection/epoch,
+agent behavior, authority and endpoint snapshots, prepared inputs and eligible
+floors. A keyed digest deduplicates matching pending gaps. Denial and uncertain
+outcomes stay task-bound. Duplicate calls from the original or resume turn return
+the same receipt; after its delivery, a different server-admitted turn can create
+a new occurrence under reusable permission. Identical calls within one server
+turn are conservatively one occurrence; a model request ID cannot override this.
+A task has at most 32 proposal rows. NyxID-generated proxy correlation IDs are excluded from gap/scope identity,
+while retention and send-time checks preserve their exact outbound bytes. Only
+the trusted server-generated marker allows this; caller-supplied IDs remain
+exact, reviewed and Operation-only.
+
+The encrypted retained prepared HTTP effect, including encryption overhead, is
+capped at **256 KiB**. Raw/multipart, oversized, credential-bearing headers,
+paths requiring URI encoding/decoding, or unreconstructable destinations use the legacy chain with a metadata-only reason
+code, before any proposal is written. Connection authentication credentials are re-resolved at dispatch, never retained in the effect.
+Private payloads/results are purged after 24 hours or source cancellation/deletion;
+request metadata retains the existing approval-request TTL.
+
+### Web decision and validity
+
+`GET /api/v1/approvals/requests/{id}` returns the additive proposal DTO only to its
+first-party human decider. `POST /api/v1/approvals/requests/{id}/execution-decision`
+requires that human and accepts only:
+
+```json
+{"approved":true,"expected_revision":1,"choice_id":"operation","choice_digest":"server-issued","idempotency_key":"client-generated-uuid"}
+```
+
+The client cannot author a connection, audience, scope, validity payload or task.
+Operation is the default. The immutable choices are this operation, this task,
+one displayed hour, and persistent until revoked/binding changes. Reusable
+choices require an enforceable closed shape: exact path/query and JSON inputs,
+no semantic headers beyond JSON Content-Type, and empty bodies for bodyless
+methods. Sensitive/large inputs permit Operation only. The same shape restriction
+runs on every reusable use and again at egress. Omitted input constraints never
+mean an approved wildcard. No Full-access suggestion is shown.
+
+The transaction rechecks actor enrollment, source/key, live task/audience,
+shared behavior and endpoint/connection authority, then commits the card decision,
+`ApprovalGrant.execution` and a server-authored resume event together. A queue
+failure rolls everything back. Exact decision replay returns the committed result;
+a changed revision, digest, choice or idempotency key conflicts. Legacy decision
+handlers, Telegram callbacks and legacy decision waiters reject any proposal
+before mutation. Unknown envelopes cannot be decided or resumed.
+
+Web source transcript, requester-private group cards and Approvals inbox render
+the same request. Reload/polling distinguishes permission saved from operation
+queued/running/completed/not-sent/unknown. Grants inspection shows the approved
+scope, audience, source and recent dispatch, and uses existing revocation. It
+never displays the persistent TTL sentinel as a permission expiry. Mobile and
+Telegram remain link-only, with generic notifications through existing configured
+channels and no input preview or legacy Allow/Deny action.
+
+### Exact resume and recovery
+
+Resume consumes a typed server event and the encrypted original effect, not a
+model-authored retry. It re-enters normal proxy admission/coordinator/remaining
+floors and live egress checks with the exact connection, inputs and authority.
+A proposal's independent queued → preparing → dispatched CAS admits at most one
+provider attempt **for every validity choice**. Reusable permission is never
+consumed; Operation additionally uses the existing `execution_use` claim.
+
+A stale pre-send preparation can be recovered after two minutes. A dispatched
+attempt with a lost response is unknown and cannot be sent again. Durable result
+receipt replay performs no provider call. Bounded sweeps recover lost queue
+wakeups, expire pending reviews and deliver outcomes; fair scheduling prevents
+old pending reviews from starving queued work. Remaining independent reviews can
+pause the retained effect; their decisions retain their existing semantics.
+Cancellation, departure, source deletion and sharing narrowing fence queued work
+and purge private payloads. Operation permissions receive terminal retention in
+the same terminal update; reusable grants remain subject to their live binding.
+
+Group receipt publication includes only HTTP outcome, never raw provider account
+data. The original requester can read the bounded encrypted result on their
+private permission card; other participants cannot. A private source also receives
+the bounded response, with conventional secret fields redacted. Errors before the dispatch barrier report nothing sent; after it,
+an unavailable response reports unknown. Neither a receipt nor a TaskRef is
+bearer authority. The original caller's normal billing lane remains unchanged.
+
+### Authoring rollout
+
+Deploy readers, dispatchers and authoring support to every replica and drain old
+writers before per-person activation. There is no org/global enable, new env var,
+TTL migration or backfill. Old replicas ignore proposal payloads and retain legacy
+behavior; they must not serve activated cohorts. Disable enrollment and drain
+pending resumes/claims on upgraded replicas before binary rollback. The unchanged
+`expires_at` TTL preserves persistent rows. #2195 Part B adds non-assistant callers;
+#2196 handles explicitly reviewed legacy mapping.
