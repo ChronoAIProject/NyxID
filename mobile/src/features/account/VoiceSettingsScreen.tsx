@@ -161,7 +161,7 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
       ) : null}
       <SettingsGroup
         title="Dictation"
-        footer="The microphone in the message field uses your iPhone's speech recognition, on the device when available. The words appear in your message, where you can edit them before sending."
+        footer="The microphone in the message field uses your device's speech recognition, with local processing when available. The words appear in your message, where you can edit them before sending."
       >
         <SettingsMenuRow
           icon={Languages}
