@@ -44,6 +44,7 @@ interface BillingWalletCardProps {
   readonly onProvision: () => void;
   readonly provisioning: boolean;
   readonly billingReady: boolean;
+  readonly needsSubscription?: boolean;
   readonly onTopUp: (amountCredits: number) => Promise<void>;
   readonly topUpPending: boolean;
   /** Controls the Add credits dialog when set (e.g. a top-up deep link). */
@@ -61,6 +62,7 @@ export function BillingWalletCard({
   onProvision,
   provisioning,
   billingReady,
+  needsSubscription = false,
   onTopUp,
   topUpPending,
   topUpOpen,
@@ -162,13 +164,16 @@ export function BillingWalletCard({
               />
             </button>
           </div>
-          <AddCreditsDialog
+          {needsSubscription ? <div className="space-y-2">
+            <p role="status" className="type-secondary text-muted-foreground">Finish setting up the organization subscription before adding credits or enabling guests.</p>
+            <Button variant="primary" onClick={onProvision} disabled={!billingReady || provisioning} isLoading={provisioning}>Finish wallet setup</Button>
+          </div> : <AddCreditsDialog
             billingReady={billingReady}
             pending={topUpPending}
             onTopUp={onTopUp}
             open={topUpOpen}
             onOpenChange={onTopUpOpenChange}
-          />
+          />}
         </div>
 
         {showBreakdown && (
