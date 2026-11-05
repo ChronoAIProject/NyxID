@@ -6002,6 +6002,7 @@ pub(crate) async fn delete_in_session(
             crate::models::cma_session_origin::COLLECTION_NAME,
             crate::models::assistant_voice::REQUESTS,
             crate::models::assistant_voice_session::COLLECTION_NAME,
+            crate::models::assistant_voice_announcement::COLLECTION_NAME,
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
             super::assistant_service_execution::COLLECTION,
             crate::models::assistant_attachment::COLLECTION_NAME,

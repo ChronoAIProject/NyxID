@@ -162,7 +162,7 @@ function setup(
       },
     },
     "../../lib/api/collaborationTransport": { inviteToken, invitationLink },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.ai" },
+    "../../lib/env": { getFrontendUrl: () => "https://nyxid.ai" },
     "./useCollaborationSession": { useCollaborationSession: () => session },
   };
   const harness = hookHarness<Element>(mocks);

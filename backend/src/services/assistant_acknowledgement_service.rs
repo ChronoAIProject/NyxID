@@ -1012,6 +1012,7 @@ mod access_mode_tests {
         let mut chat = ChatAuthority {
             execution_group_id: None,
             execution_unsupported: false,
+            execution_voice_task: false,
             execution_task: None,
             execution_permission: None,
             business_system_success: false,
@@ -1050,6 +1051,7 @@ mod access_mode_tests {
 pub struct ChatAuthority {
     pub(crate) execution_group_id: Option<String>,
     pub(crate) execution_unsupported: bool,
+    pub(crate) execution_voice_task: bool,
     pub(crate) execution_task: Option<crate::models::execution_permission::TaskAdmission>,
     pub(crate) execution_permission:
         Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
@@ -1598,13 +1600,18 @@ pub async fn for_key_with_access(
             .as_ref()
             .map(|b| b.group_id.clone())
             .or_else(|| conversation.group_id.clone()),
-        execution_unsupported: conversation.automation_thread
+        execution_voice_task: conversation.voice_parent_conversation_id.is_some()
+            || conversation
+                .active_turn
+                .as_ref()
+                .is_some_and(|t| t.voice_request_id.is_some()),
+        execution_unsupported: (conversation.automation_thread
+            && conversation.voice_parent_conversation_id.is_none())
             || conversation.platform_thread.is_some()
-            || conversation.active_turn.as_ref().is_some_and(|t| {
-                t.voice_request_id.is_some()
-                    || t.trigger_run_id.is_some()
-                    || t.channel_adapter_origin.is_some()
-            }),
+            || conversation
+                .active_turn
+                .as_ref()
+                .is_some_and(|t| t.trigger_run_id.is_some() || t.channel_adapter_origin.is_some()),
         execution_task: conversation
             .active_turn
             .as_ref()
@@ -3160,6 +3167,7 @@ pub(crate) async fn decide_in_session(
             .map(|b| b.group_id.clone())
             .or_else(|| target.group_id.clone()),
         execution_unsupported: false,
+        execution_voice_task: false,
         execution_task: row.execution_task.clone(),
         execution_permission: None,
         business_system_success: false,

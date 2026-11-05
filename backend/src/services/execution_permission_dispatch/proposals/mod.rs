@@ -59,6 +59,7 @@ pub(crate) fn supported_chat(chat: &acks::ChatAuthority) -> bool {
         && !chat.turn_stopped
         && !chat.guest
         && !chat.execution_unsupported
+        && !chat.execution_voice_task
         && !chat.platform_thread
         && chat.platform_origin.is_none()
         && chat.channel_adapter_origin.is_none()

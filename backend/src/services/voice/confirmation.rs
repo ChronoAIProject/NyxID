@@ -439,6 +439,13 @@ pub async fn fence_decision(
         models::{assistant_voice::REQUESTS, assistant_voice_session::COLLECTION_NAME},
     };
     use mongodb::bson::doc;
+    // A Bot Voice service grant authorizes invoking the Bot, never acting as
+    // its human owner. Device audio cannot satisfy owner action cards.
+    if fence.session.client_key.is_some() {
+        return Err(AppError::Forbidden(
+            "Review and confirm this action on its NyxID owner card".into(),
+        ));
+    }
     if chrono::Utc::now().timestamp_millis() >= fence.until_ms
         || card_digest(card) != fence.authority_digest
         || card.user_id != fence.session.user_id

@@ -39,7 +39,7 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
       jsxs: (type: unknown, props: unknown) => ({ type, props }),
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://app.example.test" },
+    "../../lib/env": { getFrontendUrl: () => "https://app.example.test" },
     "react-native": {
       Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
       ...Object.fromEntries(["Text", "View"].map((n) => [n, n])),

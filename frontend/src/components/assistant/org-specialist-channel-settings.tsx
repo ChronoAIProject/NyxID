@@ -152,7 +152,8 @@ function GuestSettings({
         <p role="status" className="text-destructive">
           {settings.readiness_reason === "org_wallet_not_provisioned"
             ? "Provision the organization billing wallet and subscription before enabling guests."
-            : "The organization wallet is suspended."}
+            : "The organization wallet is suspended."}{" "}
+          <a href={`/billing?ownerId=${encodeURIComponent(settings.org_id)}`} className="type-button underline">Open organization Billing</a>
         </p>
       ) : null}
       <Label className="flex items-center gap-2">

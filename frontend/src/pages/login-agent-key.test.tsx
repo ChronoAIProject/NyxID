@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
   remove: vi.fn(),
   preview: vi.fn(),
   logout: vi.fn(),
-  auth: { signedIn: true },
+  auth: { signedIn: true, actor: "user" },
   search: {} as { user_code?: string },
   navigate: vi.fn(),
 }));
@@ -29,7 +29,9 @@ vi.mock("@/lib/api-client", async (importOriginal) => ({
 }));
 vi.mock("@/stores/auth-store", () => {
   const state = () => ({
-    user: { id: "user", display_name: "Human" },
+    user: mocks.auth.signedIn
+      ? { id: mocks.auth.actor, display_name: "Human" }
+      : null,
     isAuthenticated: mocks.auth.signedIn,
     logout: mocks.logout,
   });
@@ -104,6 +106,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
   vi.clearAllMocks();
   mocks.auth.signedIn = true;
+  mocks.auth.actor = "user";
   mocks.search = {};
   mocks.preview.mockResolvedValue(preview);
   mocks.post.mockImplementation(async (path: string) =>
@@ -154,6 +157,39 @@ describe("Login code minting and credential management", () => {
       can_revoke: false,
     });
   }
+  it.each(["replacement", "logout"])(
+    "clears the issued code and review on account %s",
+    async (transition) => {
+      mintResponses();
+      const view = mount(<LoginAgentKeyPage mint />);
+      await click("Full account session");
+      await click("Generate account login code");
+      expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+      mocks.auth.actor = "another-user";
+      mocks.auth.signedIn = transition !== "logout";
+      view.rerender(
+        <QueryClientProvider client={client}>
+          <LoginAgentKeyPage mint />
+        </QueryClientProvider>,
+      );
+      expect(screen.queryByText("ABCD-EFGH")).not.toBeInTheDocument();
+      if (transition === "replacement") {
+        expect(
+          screen.getByRole("button", { name: "Full account session" }),
+        ).toBeVisible();
+        expect(
+          screen.queryByRole("button", { name: "Generate account login code" }),
+        ).not.toBeInTheDocument();
+      } else {
+        expect(
+          screen.getByRole("link", { name: "Approve on this computer" }),
+        ).toBeVisible();
+      }
+      expect(
+        mocks.post.mock.calls.filter(([path]) => path === "/auth/login-code"),
+      ).toHaveLength(1);
+    },
+  );
   it("steps up inline before retrying one-time code minting", async () => {
     mintResponses();
     const original = mocks.post.getMockImplementation()!;

@@ -87,7 +87,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
         </div>
 
         <div
-          className="legal-prose space-y-6 rounded-xl border border-border bg-card p-6 sm:p-8"
+          className="legal-prose text-foreground space-y-6 rounded-xl border border-border bg-card p-6 sm:p-8"
           data-doc-key={docKey}
         >
           {error ? (
@@ -119,7 +119,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
                 a: ({ href, children }) => (
                   <a
                     href={href}
-                    className="text-violet-400 underline hover:text-violet-300"
+                    className="text-foreground underline hover:text-muted-foreground"
                   >
                     {children}
                   </a>
@@ -139,7 +139,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
         <div className="flex justify-center">
           <Link
             to="/"
-            className="flex items-center gap-1.5 type-row-title text-violet-400 transition-colors hover:text-violet-300"
+            className="flex items-center gap-1.5 type-row-title text-foreground underline transition-colors hover:text-muted-foreground"
           >
             <ArrowLeft className="h-3 w-3" />
             Back to NyxID

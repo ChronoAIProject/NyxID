@@ -5,7 +5,7 @@ use crate::models::usage_meter::{BillingLayer, UsageFunding};
 use crate::test_utils::test_auth_user;
 use axum::extract::{Query, State};
 
-fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
+pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     UsageMeterRow {
@@ -60,6 +60,7 @@ async fn read_usage(state: &crate::AppState, actor: &str) -> BillingUsageRespons
         State(state.clone()),
         test_auth_user(actor),
         Query(UsageQuery {
+            owner_id: None,
             machine_id: None,
             job_id: None,
             period: None,
@@ -1016,6 +1017,7 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
         State(state.clone()),
         test_auth_user(&owner),
         Query(UsageQuery {
+            owner_id: None,
             machine_id: None,
             job_id: None,
             period: Some("7d".into()),
@@ -1045,6 +1047,7 @@ async fn day_buckets_split_usage_by_utc_day_without_changing_totals() {
         State(state),
         test_auth_user(&owner),
         Query(UsageQuery {
+            owner_id: None,
             machine_id: None,
             job_id: None,
             period: None,
@@ -1153,6 +1156,7 @@ async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scop
             State(state.clone()),
             test_auth_user(&owner),
             Query(UsageQuery {
+                owner_id: None,
                 period: None,
                 bucket: None,
                 machine_id: Some(machine.clone()),
@@ -1177,6 +1181,7 @@ async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scop
             State(state),
             test_auth_user(&owner),
             Query(UsageQuery {
+                owner_id: None,
                 period: None,
                 bucket: None,
                 machine_id: Some("not-a-uuid".into()),

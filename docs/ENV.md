@@ -848,3 +848,28 @@ After authenticated migration readiness across every field adapter, separately
 turn legacy reads off. Old backups and historical KMS key versions retain their
 own decryption requirements; the currently configured KMS resource can still
 serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.
+
+
+### CMA Sandbox prepaid admission
+
+`experimental:cma-sandbox-billing` is the sole CMA admission rollout control.
+The admin feature flag defaults to false and resolves global, matching organization,
+then personal overrides. Enabling new quotes/windows also
+requires `BILLING_ENABLED=true`, `BILLING_FAIL_CLOSED=false`, a configured Lago
+client, exact-accounting readiness, the owner's existing billing rollout and
+subscription entitlement, and a synchronized effective CMA rate card.
+CMA billing has no dedicated environment configuration. The unique active `cma`
+catalog service owns its Sandbox billing settings. A platform admin selects its
+authorized General-purpose producer service account on the service edit page;
+the issued token and live account must both allow `billing:sandbox:write`.
+Missing or ambiguous service/producer settings fail closed. Producer changes are
+transactionally audited and the selected account becomes platform-protected.
+
+Receipt recovery and evidence finalization remain available to the configured
+producer when new admission is disabled. Keep its authority and the existing
+billing reconciler available to drain admitted liability. Deployment seeds the
+approved #2151 rates once without enabling billing. Admin Billing Settings can
+publish immutable future rate versions without redeployment. No new wallet is
+introduced. Upgrade all API readers and billing workers before enabling the
+three Sandbox metrics; old enum readers are unsafe
+once those units have been persisted. See [CMA billing](CMA_BILLING.md).

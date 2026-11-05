@@ -448,6 +448,7 @@ mod tests {
                     "catalog:skills:read",
                     "catalog:skills:write",
                     "user-services:read",
+                    "billing:sandbox:write",
                 ]
             };
             let mut req = Request::builder().uri(path);

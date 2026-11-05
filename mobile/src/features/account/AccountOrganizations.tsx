@@ -12,7 +12,7 @@ import {
 } from "../../components/settings/SettingsList";
 import { accountApi } from "../../lib/api/accountApi";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
-import { NYXID_FRONTEND_URL } from "../../lib/env";
+import { getFrontendUrl } from "../../lib/env";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import {
   useAccountSecurityRefresh,
@@ -118,7 +118,7 @@ export function AccountOrganizations({
     try {
       await WebBrowser.openBrowserAsync(
         accountWebUrl(
-          NYXID_FRONTEND_URL,
+          getFrontendUrl(),
           `/orgs/${encodeURIComponent(selected.id)}?tab=${tab}`,
         ),
       );

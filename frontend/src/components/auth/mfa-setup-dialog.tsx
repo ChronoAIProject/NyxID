@@ -43,6 +43,8 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const setupMutation = useMfaSetup();
+  const [setupPending, setSetupPending] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   const form = useAppForm<MfaVerifyFormData>({
@@ -59,6 +61,8 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
   }, [copiedIndex]);
 
   async function handleSetup() {
+    setSetupPending(true);
+    setSetupError(null);
     try {
       const data = await setupMutation.mutateAsync();
       setSetupData(data);
@@ -73,15 +77,17 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       setQrDataUrl(dataUrl);
       setStep("verify");
     } catch (error) {
-      if (error instanceof ApiError) {
-        toast.error(error.message);
-      } else {
-        toast.error("Failed to set up MFA");
-      }
+      const message =
+        error instanceof ApiError ? error.message : "Failed to set up MFA";
+      setSetupError(message);
+      toast.error(message);
+    } finally {
+      setSetupPending(false);
     }
   }
 
   async function onVerify(data: MfaVerifyFormData) {
+    form.clearErrors("root");
     try {
       const result = await api.post<MfaConfirmResponse>("/auth/mfa/confirm", {
         code: data.code,
@@ -110,7 +116,11 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
     }
   }, []);
 
+  const pending = setupPending || form.formState.isSubmitting;
+
   function handleClose() {
+    if (pending) return;
+    setSetupError(null);
     setStep("setup");
     setSetupData(null);
     setRecoveryCodes([]);
@@ -124,7 +134,10 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       <DialogContent className="md:max-w-[520px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-primary-text" aria-hidden="true" />
+            <ShieldCheck
+              className="h-5 w-5 text-primary-text"
+              aria-hidden="true"
+            />
             {step === "setup" && "Enable Two-Factor Authentication"}
             {step === "verify" && "Scan QR Code"}
             {step === "recovery" && "Recovery Codes"}
@@ -140,16 +153,21 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
         </DialogHeader>
 
         {step === "setup" && (
-          <div className="space-y-4">
+          <div className="space-y-4" aria-busy={setupPending}>
             <p className="text-14 text-muted-foreground">
               You will need an authenticator app like Google Authenticator,
               Authy, or 1Password to complete setup.
             </p>
+            {setupError && (
+              <p role="alert" className="text-14 text-destructive">
+                {setupError}
+              </p>
+            )}
             <Button
               variant="primary"
               onClick={handleSetup}
               className="w-full"
-              isLoading={setupMutation.isPending}
+              isLoading={setupPending}
             >
               Begin Setup
             </Button>
@@ -184,6 +202,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
             <Form {...form}>
               <form
                 onSubmit={form.handleSubmit(onVerify)}
+                aria-busy={form.formState.isSubmitting}
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
@@ -217,12 +236,34 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   )}
                 />
 
-                <Button variant="primary" type="submit" className="w-full" disabled={!form.formState.isValid || form.formState.isSubmitting}>
+                <Button
+                  variant="primary"
+                  type="submit"
+                  className="w-full"
+                  isLoading={form.formState.isSubmitting}
+                  disabled={
+                    !mfaVerifySchema.safeParse({ code: form.watch("code") })
+                      .success || form.formState.isSubmitting
+                  }
+                >
                   Verify and Enable
                 </Button>
               </form>
             </Form>
           </div>
+        )}
+
+        {pending && (
+          <p role="status" className="text-13 text-text-tertiary">
+            {setupPending
+              ? "Preparing two-factor authentication…"
+              : "Verifying authentication code…"}
+          </p>
+        )}
+        {step !== "recovery" && (
+          <Button variant="outline" onClick={handleClose} disabled={pending}>
+            Cancel
+          </Button>
         )}
 
         {step === "recovery" && recoveryCodes.length > 0 && (

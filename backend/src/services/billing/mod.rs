@@ -19,6 +19,10 @@ pub mod reconcile;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
+pub mod sandbox_rates;
+pub mod sandbox_runtime;
+mod sandbox_runtime_math;
+pub mod sandbox_settings;
 pub mod schedules;
 mod targets;
 pub mod taxes;
@@ -392,6 +396,36 @@ impl BillingService {
         .await
     }
 
+    /// Explicit organization wallet setup may repair a legacy missing
+    /// subscription. Reads and ordinary provisioning keep their existing path.
+    pub async fn ensure_org_wallet_subscription(
+        &self,
+        wallet: &BillingWallet,
+    ) -> AppResult<BillingWallet> {
+        if wallet
+            .lago_subscription_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty())
+        {
+            return Ok(wallet.clone());
+        }
+        let lago = self.lago.as_deref().ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Lago client is not configured".into())
+        })?;
+        let subscription = lago
+            .ensure_subscription(&wallet.lago_customer_id, &self.config.lago_plan_code)
+            .await?;
+        self.db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .update_one(bson::doc! {"_id":&wallet.id,"owner_id":&wallet.owner_id,
+                "lago_customer_id":&wallet.lago_customer_id,
+                "$or":[{"lago_subscription_id":null},{"lago_subscription_id":""}]},
+                bson::doc! {"$set":{"lago_subscription_id":subscription,"updated_at":bson::DateTime::now()}})
+            .await?;
+        self.get_wallet(&wallet.owner_id).await?.ok_or_else(|| {
+            crate::errors::AppError::BillingNotConfigured("Billing wallet no longer exists".into())
+        })
+    }
+
     pub async fn create_topup_checkout(
         &self,
         owner_id: &str,
@@ -495,6 +529,14 @@ impl BillingService {
         ctx: &BillingRouteContext,
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
+        if ctx
+            .platform_specs()
+            .any(|(metric, _)| metric.is_runtime_allocation())
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Runtime allocation pricing requires dedicated prepaid window admission".into(),
+            ));
+        }
         let org_guest = ctx.org_channel_guest.is_some();
         if let Some(guest) = &ctx.org_channel_guest {
             if !self.config.billing_enabled || self.lago.is_none() {

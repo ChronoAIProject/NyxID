@@ -94,6 +94,33 @@ macro_rules! proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
+                "/proxy/nyxbot-voice/{service_id}/{*path}",
+                "/api/v1/proxy/nyxbot-voice/{service_id}/{*path}",
+                "handlers::assistant_voice::internal::service_request",
+                axum::routing::any(handlers::assistant_voice::internal::service_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice runtime owns call usage and settlement"
+                )
+            ),
+            (
+                "/proxy/nyxbot-voice/{service_id}",
+                "/api/v1/proxy/nyxbot-voice/{service_id}",
+                "handlers::assistant_voice::internal::service_root",
+                axum::routing::any(handlers::assistant_voice::internal::service_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice service root has no operation"
+                )
+            ),
+            (
+                "/proxy/nyxbot-voice/{service_id}/",
+                "/api/v1/proxy/nyxbot-voice/{service_id}/",
+                "handlers::assistant_voice::internal::service_root",
+                axum::routing::any(handlers::assistant_voice::internal::service_root),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "Voice service root has no operation"
+                )
+            ),
+            (
                 "/permission-execution/rest/{*path}",
                 "/api/v1/permission-execution/rest/{*path}",
                 "handlers::permission_keys::rest",
@@ -1378,6 +1405,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/billing/rates", get(handlers::admin_billing::get_rates))
         .route(
+            "/billing/cma-rate-cards",
+            get(handlers::admin_sandbox_rates::list).post(handlers::admin_sandbox_rates::publish),
+        )
+        .route(
             "/remote-machines/platform",
             get(handlers::admin_remote_machine_platform::get),
         )
@@ -1404,6 +1435,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/billing/services/{id}/resync",
             post(handlers::admin_billing::resync_service),
+        )
+        .route(
+            "/billing/services/{id}/sandbox",
+            get(handlers::admin_sandbox_settings::get).put(handlers::admin_sandbox_settings::put),
         )
         .route(
             "/billing/services/{id}",
@@ -3192,6 +3227,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::machine_activity::list),
         )
         .route(
+            "/assistant/nyxagent/agents/{id}/voice-service",
+            get(handlers::assistant_voice::voice_service)
+                .put(handlers::assistant_voice::publish_voice_service),
+        )
+        .route(
             "/assistant/nyxagent/dictation/options",
             get(handlers::assistant_voice::dictation_options),
         )
@@ -3518,6 +3558,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .layer(middleware::from_fn(reject_relay_tokens));
 
     let api_v1 = api_v1_public
+        .nest("/billing/sandboxes", handlers::sandbox_billing::router())
         .nest("/catalog-curation", handlers::catalog_curation::router())
         .merge(api_v1_delegated)
         .merge(api_v1_shared)

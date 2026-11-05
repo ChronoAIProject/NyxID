@@ -12,6 +12,7 @@ import type { InlineMention } from "@/lib/assistant/group-mentions";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
 import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
 import { assistantModalLinkTarget } from "@/lib/assistant/assistant-link-target";
 import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
@@ -255,8 +256,9 @@ const COMPONENTS: Components = {
       {children}
     </ul>
   ),
-  ol: ({ children }) => (
+  ol: ({ children, start }) => (
     <ol
+      start={start}
       className={`${BLOCK} ml-4 list-decimal space-y-1 text-foreground/90 marker:text-text-tertiary`}
     >
       {children}
@@ -385,6 +387,8 @@ const COMPONENTS: Components = {
 type MarkdownProps = ComponentProps<typeof ReactMarkdown>;
 const REMARK_PLUGINS: MarkdownProps["remarkPlugins"] = [
   remarkGfm,
+  // Parse CJK punctuation boundaries without rewriting code or escaped markers.
+  remarkCjkFriendly,
   remarkSafeModelContent,
 ];
 const REHYPE_PLUGINS: MarkdownProps["rehypePlugins"] = [
@@ -406,7 +410,7 @@ const urlTransform: MarkdownProps["urlTransform"] = (url) =>
  * blocks into a fragment, so a split block's prefix and tail remain siblings
  * under one parent and the `first:mt-0` rhythm still resolves across the seam.
  */
-const MarkdownSegment = memo(function MarkdownSegment({
+export const MarkdownContent = memo(function MarkdownContent({
   text, mentions,
 }: {
   readonly text: string;
@@ -455,7 +459,7 @@ export const TextBlock = memo(function TextBlock({
     >
       {prefix ? (
         <>
-          <MarkdownSegment text={prefix} mentions={mentions} />
+          <MarkdownContent text={prefix} mentions={mentions} />
           {/* mdast-util-to-hast separates top-level blocks with a newline text
               node. Two parses each produce their own but none at the seam, so
               this restores it and keeps split output byte-identical to a whole
@@ -463,7 +467,7 @@ export const TextBlock = memo(function TextBlock({
           {"\n"}
         </>
       ) : null}
-      <MarkdownSegment text={tail} mentions={mentions} />
+      <MarkdownContent text={tail} mentions={mentions} />
       {streaming ? (
         <span
           aria-hidden

@@ -278,8 +278,6 @@ pub async fn delegate(
     source_id: &str,
     segment: &Segment,
 ) -> AppResult<crate::models::assistant_voice::VoiceRequest> {
-    use crate::models::assistant_voice::{RequestState, VoiceRequest};
-    use mongodb::bson::doc;
     if !segment.sealed
         || !segment.complete
         || segment.speaker != Speaker::User
@@ -290,9 +288,60 @@ pub async fn delegate(
             "Voice delegation needs a complete user segment".into(),
         ));
     }
+    admit_task(db, call, source_id, &segment.id, &segment.text, None).await
+}
+
+/// Admit model-authored intent directly. Captions and provider offsets never
+/// select or construct this task; the session supplies every authority field.
+pub(super) async fn delegate_task(
+    db: &mongodb::Database,
+    call: &crate::models::assistant_voice_session::VoiceSession,
+    source_id: &str,
+    text: &str,
+    source: crate::models::assistant_voice::VoiceTaskSource,
+) -> AppResult<crate::models::assistant_voice::VoiceRequest> {
+    if text.trim().is_empty()
+        || text.len() > 16_384
+        || source_id.is_empty()
+        || source_id.len() > 256
+    {
+        return Err(AppError::ValidationError(
+            "Invalid model-authored voice task".into(),
+        ));
+    }
+    admit_task(
+        db,
+        call,
+        source_id,
+        &uuid::Uuid::new_v4().to_string(),
+        text,
+        Some(source),
+    )
+    .await
+}
+
+async fn admit_task(
+    db: &mongodb::Database,
+    call: &crate::models::assistant_voice_session::VoiceSession,
+    source_id: &str,
+    message_id: &str,
+    text: &str,
+    model_task: Option<crate::models::assistant_voice::VoiceTaskSource>,
+) -> AppResult<crate::models::assistant_voice::VoiceRequest> {
+    use crate::models::assistant_voice::{RequestState, VoiceRequest};
+    use mongodb::bson::doc;
+    Box::pin(super::client_key::revalidate(db, call)).await?;
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
+    // A session hint is not a marked task. Resolve before first queue admission;
+    // continuation requests retain their durable enrollment and drain normally.
+    let execution_enrolled = call.execution_enrolled
+        && call.client_key.is_none()
+        && crate::services::execution_permission_enrollment::live_enabled(db, &call.user_id, None)
+            .await?;
     let request = VoiceRequest {
+        execution_enrolled,
+        model_task,
         progress: None,
         timing: Default::default(),
         started_at: None,
@@ -304,7 +353,7 @@ pub async fn delegate(
         task_conversation_id: None,
         session_id: call.id.clone(),
         source_id: source_id.into(),
-        message_id: segment.id.clone(),
+        message_id: message_id.into(),
         message_seq: 0,
         turn_id: uuid::Uuid::new_v4().to_string(),
         state: RequestState::Queued,
@@ -320,17 +369,21 @@ pub async fn delegate(
     };
     let db = db.clone();
     let call = call.clone();
-    let text = segment.text.clone();
+    let text = text.to_owned();
     let mut tx = db.client().start_session().await?;
     tx.start_transaction()
         .and_run2(async move |tx| {
             let result = Box::pin(async {
+                Box::pin(super::client_key::fence_call(&db, &call, tx)).await?;
+                let mut admission_fence = super::session::fence(&call);
+                admission_fence.extend(doc! {"live_slot":true,"end_requested":false,
+                "deadline":{"$gt":mongodb::bson::DateTime::now()}});
                 if db
                     .collection::<mongodb::bson::Document>(
                         crate::models::assistant_voice_session::COLLECTION_NAME,
                     )
                     .update_one(
-                        super::session::fence(&call),
+                        admission_fence,
                         doc! {"$set":{"admission_fence":uuid::Uuid::new_v4().to_string()}},
                     )
                     .session(&mut *tx)

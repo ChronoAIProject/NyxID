@@ -9,6 +9,7 @@ import type { PublicAuthConfig } from "./publicAuthConfig";
 import * as emailLogin from "./emailLogin";
 import * as publicAuthConfig from "./publicAuthConfig";
 import * as socialCallback from "./socialCallback";
+import { loadTestModule } from "../../lib/api/apiUrlTestHarness";
 
 type Element = { type: unknown; props: Record<string, any> };
 type LoginInput = ReturnType<typeof emailLogin.passwordLoginInput>;
@@ -49,10 +50,14 @@ function setup({
   state = "ready",
   providers = [],
   emailEnabled = true,
+  getFrontendUrl = () => "https://nyxid.example",
+  beforeMount = () => {},
 }: {
   state?: "ready" | "loading" | "error";
   providers?: PublicAuthConfig["socialProviders"];
   emailEnabled?: boolean;
+  getFrontendUrl?: () => string;
+  beforeMount?: () => void;
 } = {}) {
   const config: PublicAuthConfig = {
     emailAuthEnabled: emailEnabled,
@@ -63,6 +68,7 @@ function setup({
   const socialUrls: string[] = [];
   const registrationUrls: string[] = [];
   const navigations: string[] = [];
+  const waitlistUrls: string[] = [];
   const urlListeners: Array<(event: { url: string }) => void> = [];
   let login = async (_input: LoginInput) => signedIn;
   let refetch = async () => ({ data: config, error: null as Error | null });
@@ -126,6 +132,7 @@ function setup({
         },
       },
       Linking: {
+        openURL: async (url: string) => { waitlistUrls.push(url); },
         getInitialURL: async () => null,
         addEventListener: (_event: string, listener: (event: { url: string }) => void) => {
           urlListeners.push(listener);
@@ -170,7 +177,7 @@ function setup({
     "./publicAuthConfig": publicAuthConfig,
     "./socialCallback": socialCallback,
     "../../lib/telemetry": { capture: () => {} },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
+    "../../lib/env": { getFrontendUrl },
     "../../theme/ThemeContext": { useTheme: () => ({ colors }) },
     "../../theme/flowStyles": { createFlowStyles: () => ({}) },
     "../../components/brand/BrandNebula": {
@@ -189,6 +196,7 @@ function setup({
   const { AuthHomeScreen } = harness.load(
     fileURLToPath(new URL("./AuthHomeScreen.tsx", import.meta.url)),
   ) as { AuthHomeScreen: (props: unknown) => Element };
+  beforeMount();
   harness.mount(() => AuthHomeScreen({ navigation: { navigate: (route: string) => navigations.push(route) } }));
 
   function input(label: string) {
@@ -229,6 +237,7 @@ function setup({
     sessions,
     socialUrls,
     registrationUrls,
+    waitlistUrls,
     navigations,
     configRefetches: () => configRefetches,
     setLogin: (handler: typeof login) => {
@@ -564,4 +573,38 @@ test("backgrounding clears password and authenticator data", (t) => {
   assert.equal(screen.input("Password").props.value, "");
   assert.equal(screen.input("Email").props.value, "reviewer@example.test");
   assert.equal(screen.submit().props.disabled, true);
+});
+
+test("registration and waitlist callbacks resolve the domain after import and at each press", async (t) => {
+  const domains = loadTestModule<typeof import("../../lib/domains")>("../domains.ts", {
+    process: { env: {
+      EXPO_PUBLIC_API_BASE_URL: "https://old-api.example/api/v1",
+      EXPO_PUBLIC_FRONTEND_URL: "https://old.example",
+      EXPO_PUBLIC_LEGAL_BASE_URL: "https://old.example",
+      EXPO_PUBLIC_NEW_API_BASE_URL: "https://api.nyxid.ai/api/v1",
+      EXPO_PUBLIC_NEW_FRONTEND_URL: "https://nyxid.ai",
+      EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "https://nyxid.ai",
+    } },
+  });
+  const screen = setup({
+    getFrontendUrl: domains.getFrontendUrl,
+    beforeMount: () => domains.selectNewDomains(true),
+  });
+  t.after(screen.harness.unmount);
+  const registration = elements(screen.harness.value()).find((element) => element.props.accessibilityLabel === "Create account")!;
+  registration.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register"]);
+  screen.openUrl("nyxid://auth/social/callback?status=error&error=social_auth_registration_closed");
+  const waitlist = elements(screen.harness.value()).find((element) => element.type === "Text" && textContent(element) === "Join the waitlist");
+  assert.ok(waitlist);
+  waitlist.props.onPress();
+  assert.deepEqual(screen.waitlistUrls, ["https://nyxid.ai"]);
+  // Existing event handlers must not retain a URL from their earlier render.
+  domains.selectNewDomains(false);
+  registration.props.onPress();
+  waitlist.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register", "https://old.example/register"]);
+  assert.deepEqual(screen.waitlistUrls, ["https://nyxid.ai", "https://old.example"]);
 });
