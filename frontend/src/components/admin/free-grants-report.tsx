@@ -45,12 +45,12 @@ function Report({ params }: { params: URLSearchParams }) {
     >
       <CardHeader>
         {query.isFetching && data && (
-          <p role="status" className="text-11 text-text-tertiary">
+          <p role="status" className="type-secondary text-text-tertiary">
             Updating issued grants…
           </p>
         )}
         <CardTitle>Free grants issued</CardTitle>
-        <p className="text-12 text-muted-foreground">
+        <p className="type-secondary text-muted-foreground">
           Credits actually issued to billing accounts in the selected UTC
           window. Uses the time and Users / organizations filters. Request-user
           and service filters do not apply. Issuance is separate from consumed
@@ -72,12 +72,12 @@ function Report({ params }: { params: URLSearchParams }) {
           data && (
             <div>
               <p
-                className="font-display text-28 tabular-nums"
+                className="font-display type-metric tabular-nums"
                 title={data.issued}
               >
                 {formatCreditAmount(data.issued)}
               </p>
-              <p className="mt-1 text-11 text-text-tertiary">
+              <p className="mt-1 type-secondary text-text-tertiary">
                 {data.grants.toLocaleString()}{" "}
                 {data.grants === 1 ? "grant" : "grants"} across{" "}
                 {data.total_accounts.toLocaleString()} billing{" "}
@@ -90,7 +90,7 @@ function Report({ params }: { params: URLSearchParams }) {
       </CardHeader>
       {data && (
         <CardContent>
-          <p className="mb-3 text-11 text-text-tertiary">
+          <p className="mb-3 type-secondary text-text-tertiary">
             Issued from {utc(data.window.from)} to {utc(data.window.to)} (end
             exclusive).
             {window
@@ -102,18 +102,18 @@ function Report({ params }: { params: URLSearchParams }) {
             open={expanded}
             onToggle={(e) => setExpanded(e.currentTarget.open)}
           >
-            <summary className="w-fit cursor-pointer text-12 font-medium">
+            <summary className="w-fit cursor-pointer type-button">
               Issued by account
             </summary>
             <ul className="mt-3 divide-y divide-border/50">
               {data.accounts.map((a) => (
                 <li
                   key={a.owner_id}
-                  className="flex flex-wrap items-start justify-between gap-3 py-3 text-12"
+                  className="flex flex-wrap items-start justify-between gap-3 py-3 type-secondary"
                 >
                   <div className="min-w-0 flex-1">
-                    <p className="break-all font-medium">{a.label}</p>
-                    <p className="text-11 text-text-tertiary">
+                    <p className="break-all type-row-title">{a.label}</p>
+                    <p className="type-secondary text-text-tertiary">
                       {a.account_kind === "org"
                         ? "Organization"
                         : a.account_kind === "person"
@@ -122,7 +122,7 @@ function Report({ params }: { params: URLSearchParams }) {
                       · {a.grants.toLocaleString()}{" "}
                       {a.grants === 1 ? "grant" : "grants"}
                     </p>
-                    <p className="break-all font-mono text-11 text-text-tertiary">
+                    <p className="break-all font-mono type-secondary text-text-tertiary">
                       {a.owner_id}
                     </p>
                   </div>
@@ -133,7 +133,7 @@ function Report({ params }: { params: URLSearchParams }) {
               ))}
             </ul>
             {!data.accounts.length && (
-              <p className="py-3 text-12 text-muted-foreground">
+              <p className="py-3 type-secondary text-muted-foreground">
                 No grants issued in this window.
               </p>
             )}
@@ -146,7 +146,7 @@ function Report({ params }: { params: URLSearchParams }) {
                 >
                   Previous accounts
                 </Button>
-                <span className="text-11 text-text-tertiary">
+                <span className="type-secondary text-text-tertiary">
                   Page {data.page} of{" "}
                   {Math.ceil(data.total_accounts / data.per_page)}
                 </span>

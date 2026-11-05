@@ -409,7 +409,7 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
       aria-label="Feedback message thread"
       aria-busy={query.isFetching}
     >
-      <p className="text-11 text-text-tertiary">
+      <p className="type-secondary text-text-tertiary">
         Conversation through the rated reply. Text excerpts only. Known secret
         formats are redacted.
       </p>
@@ -453,7 +453,7 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
             key={message.id}
             className={`rounded-lg p-3 ${message.rated ? "border border-hairline-strong bg-overlay" : "border border-border/50"}`}
           >
-            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-11 text-text-tertiary">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 type-secondary text-text-tertiary">
               <strong className="text-foreground">
                 {message.role === "user" ? "User" : "Assistant"}
                 {message.rated ? " · Rated reply" : ""}
@@ -462,11 +462,11 @@ function ThreadMessages({ id, revision }: { id: string; revision: string }) {
                 {new Date(message.created_at).toLocaleString()}
               </time>
             </div>
-            <p className="whitespace-pre-wrap break-words text-12">
+            <p className="whitespace-pre-wrap break-words type-body">
               {message.text || "No text available."}
             </p>
             {message.truncated && (
-              <p className="mt-1 text-11 text-text-tertiary">
+              <p className="mt-1 type-secondary text-text-tertiary">
                 Message excerpt truncated.
               </p>
             )}

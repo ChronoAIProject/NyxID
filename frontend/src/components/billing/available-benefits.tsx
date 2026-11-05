@@ -77,19 +77,19 @@ export function AvailableBenefits({
     >
       <CardHeader>
         {noWallet && (
-          <p role="status" className="text-12 text-warning">
+          <p role="status" className="type-secondary text-warning">
             Provision a wallet to use your grants and allowances.
           </p>
         )}
         {suspended && (
-          <p role="alert" className="text-12 font-medium text-warning">
+          <p role="alert" className="type-secondary-emphasis text-warning">
             Usage is suspended. Wallet credits, grants, and allowances cannot
             fund requests until billing is restored.
           </p>
         )}
         <CardTitle>Available credits</CardTitle>
         <p
-          className="font-display text-28 font-medium tabular-nums"
+          className="font-display type-metric tabular-nums"
           title={
             complete
               ? blocked
@@ -112,13 +112,13 @@ export function AvailableBenefits({
               )
             : "Unavailable"}
         </p>
-        <p className="text-12 text-muted-foreground">
+        <p className="type-secondary text-muted-foreground">
           Wallet plus spendable grants. Grants apply to their eligible services;
           free allowances are additional usage in their own units. Current
           balances are independent of usage filters.
         </p>
         {complete && blocked && (
-          <p className="text-12 text-muted-foreground">
+          <p className="type-secondary text-muted-foreground">
             Balance before billing restrictions:{" "}
             {money(
               availableCreditTotal(walletAvailable!, data!.summary.unreserved),
@@ -137,14 +137,14 @@ export function AvailableBenefits({
           />
         )}
         {!stale && (benefits.isFetching || wallet.isFetching) && (
-          <p role="status" className="text-11 text-text-tertiary">
+          <p role="status" className="type-secondary text-text-tertiary">
             Updating balances…
           </p>
         )}
       </CardHeader>
       {data && (
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap gap-x-6 gap-y-2 text-12">
+          <div className="flex flex-wrap gap-x-6 gap-y-2 type-secondary">
             <span>
               Wallet:{" "}
               <strong>
@@ -168,7 +168,7 @@ export function AvailableBenefits({
           {data.allowances.length > 0 && (
             <ul
               aria-label="Available free usage"
-              className="flex flex-wrap gap-x-5 gap-y-1 text-12 text-muted-foreground"
+              className="flex flex-wrap gap-x-5 gap-y-1 type-secondary text-muted-foreground"
             >
               {data.allowances.slice(0, 3).map((a) => (
                 <li key={a.allowance.id}>
@@ -186,10 +186,10 @@ export function AvailableBenefits({
             open={expanded}
             onToggle={(e) => setExpanded(e.currentTarget.open)}
           >
-            <summary className="w-fit cursor-pointer text-12 font-medium">
+            <summary className="w-fit cursor-pointer type-button">
               Balance breakdown
             </summary>
-            <dl className="my-3 grid gap-2 text-12 sm:grid-cols-2">
+            <dl className="my-3 grid gap-2 type-secondary sm:grid-cols-2">
               {(
                 [
                   ["Held grants", data.summary.held],
@@ -211,8 +211,8 @@ export function AvailableBenefits({
                 </div>
               ))}
             </dl>
-            <h3 className="text-13 font-semibold">Individual grants</h3>
-            <p className="my-1 text-11 text-text-tertiary">
+            <h3 className="type-secondary-strong">Individual grants</h3>
+            <p className="my-1 type-secondary text-text-tertiary">
               {data.total_grants.toLocaleString()}{" "}
               {data.total_grants === 1 ? "grant" : "grants"} · page {data.page}.
               The available total includes every eligible grant, across all
@@ -222,7 +222,7 @@ export function AvailableBenefits({
               {data.grants.map((g) => (
                 <li
                   key={g.id}
-                  className="min-w-0 space-y-1 break-words py-3 text-12"
+                  className="min-w-0 space-y-1 break-words py-3 type-secondary"
                 >
                   <div className="flex flex-wrap justify-between gap-2">
                     <strong className="min-w-0 break-all">
@@ -248,7 +248,7 @@ export function AvailableBenefits({
                       exactCredits(g.remaining, g.remaining_micros) ?? "0",
                     )}
                   </p>
-                  <p className="text-11 text-muted-foreground">
+                  <p className="type-secondary text-muted-foreground">
                     Granted{" "}
                     {money(exactCredits(g.amount, g.amount_micros) ?? "0")} ·
                     Issued {timestamp(g.created_at)}
@@ -265,7 +265,7 @@ export function AvailableBenefits({
                       : "No expiry"}
                   </p>
                   {g.service_limits?.map((r) => (
-                    <p key={r.key} className="text-11 text-muted-foreground">
+                    <p key={r.key} className="type-secondary text-muted-foreground">
                       {r.label ||
                         r.service_slugs
                           .map((s) => serviceName(catalog, s))
@@ -278,7 +278,7 @@ export function AvailableBenefits({
               ))}
             </ul>
             {!data.grants.length && (
-              <p className="py-3 text-12 text-muted-foreground">
+              <p className="py-3 type-secondary text-muted-foreground">
                 No grants on this page.
               </p>
             )}
@@ -303,12 +303,12 @@ export function AvailableBenefits({
                 </Button>
               </div>
             )}
-            <h3 className="mt-4 text-13 font-semibold">Free allowances</h3>
+            <h3 className="mt-4 type-secondary-strong">Free allowances</h3>
             <BillingAllowanceBenefits
               allowances={data.allowances}
               catalog={catalog}
             />
-            <p className="mt-3 text-11 text-text-tertiary">
+            <p className="mt-3 type-secondary text-text-tertiary">
               Benefits refreshed {timestamp(data.summary.generated_at)}.
               Allowances apply first, then eligible grants, then wallet credits.
             </p>

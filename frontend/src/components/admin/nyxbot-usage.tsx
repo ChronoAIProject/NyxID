@@ -267,7 +267,7 @@ export function NyxbotUsage() {
               }
             />
           </div>
-          <p className="text-11 leading-relaxed text-text-tertiary">
+          <p className="type-secondary text-text-tertiary">
             Helpful rate reflects people who chose to leave feedback, not task
             success. Review a rating and preview its conversation to understand
             what worked or needs attention.
@@ -640,7 +640,7 @@ export function NyxbotUsage() {
             </Card>
           )}
           <NyxbotModelUsage from={from} to={to} />
-          <p className="text-13 leading-relaxed text-text-tertiary">
+          <p className="type-secondary text-text-tertiary">
             Sessions are conversation threads with user input, including channel
             input. Turn outcomes include specialist and automated work; mirrored
             voice replies count once per turn. Feedback includes group replies.
