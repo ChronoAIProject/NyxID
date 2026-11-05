@@ -28,6 +28,7 @@ import {
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
+import { ArtifactDelivery } from "@/components/assistant/blocks/artifact-delivery";
 import { ToolImage } from "@/components/assistant/blocks/tool-image";
 import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
@@ -717,6 +718,7 @@ export function ChatMessageBubble({
               images={message.images}
             />
           ))}
+        {message.artifactDelivery && <ArtifactDelivery delivery={message.artifactDelivery} />}
         {replyImages.length ? (
           <div className={cn("flex flex-wrap gap-2", content ? "mb-2" : "mt-2")}>
             {replyImages.map((image) => (
