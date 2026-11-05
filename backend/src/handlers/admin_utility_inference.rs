@@ -87,7 +87,7 @@ pub async fn put_crm(
             service_slug: c.service_slug,
             model: c.model,
         }),
-        true,
+        utility::InferenceRoute::Crm,
     )
     .await?;
     audit_service::log_for_user(state.db.clone(), &auth, "admin_crm_inference_updated", None);

@@ -275,7 +275,7 @@ async fn crm_generation_never_substitutes_for_the_admin_pinned_model() {
             service_slug: "chrono-llm-public".into(),
             model: "admin-pinned-crm-model".into(),
         }),
-        true,
+        crate::services::utility_inference_service::InferenceRoute::Crm,
     )
     .await
     .unwrap();
