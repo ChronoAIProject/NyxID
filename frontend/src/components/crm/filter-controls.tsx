@@ -164,7 +164,7 @@ function FilterValue({
         }
       />
       {error ? (
-        <p role="alert" className="text-11 text-destructive">
+        <p role="alert" className="type-meta text-destructive">
           {error}
         </p>
       ) : null}

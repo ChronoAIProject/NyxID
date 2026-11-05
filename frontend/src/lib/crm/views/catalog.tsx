@@ -155,10 +155,10 @@ function GridComponent({
 }
 
 const textClasses = {
-  title: "text-22 font-bold leading-tight sm:text-28",
-  heading: "text-15 font-semibold leading-tight",
-  body: "text-13 leading-relaxed text-foreground",
-  muted: "text-12 leading-relaxed text-muted-foreground",
+  title: "type-compact-page-title sm:type-page-title",
+  heading: "type-card-title",
+  body: "type-secondary text-foreground",
+  muted: "type-meta text-muted-foreground",
 } as const;
 
 function TextComponent({
@@ -189,7 +189,7 @@ function MetricComponent({
   if (result.isPending) {
     return (
       <div role="status" className="rounded-xl border border-border/50 p-4">
-        <p className="text-11 text-text-tertiary">Loading {props.title}...</p>
+        <p className="type-meta text-text-tertiary">Loading {props.title}...</p>
       </div>
     );
   }
@@ -199,10 +199,10 @@ function MetricComponent({
 
   return (
     <section className="rounded-xl border border-border/50 bg-card p-4 shadow-sm">
-      <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+      <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
         {props.title}
       </p>
-      <p className="mt-2 text-28 font-semibold tabular-nums text-foreground">
+      <p className="mt-2 type-metric tabular-nums text-foreground">
         {formatAggregateValue(result.data.total, result.data.unit)}
       </p>
     </section>
@@ -277,7 +277,7 @@ function AggregateChartFrame({
   const points = aggregateResultToChartPoints(result);
   return (
     <section className="min-w-0 rounded-xl border border-border/50 bg-card p-4 shadow-sm">
-      <h3 className="mb-3 text-15 font-semibold">{title}</h3>
+      <h3 className="mb-3 type-card-title">{title}</h3>
       {points.length === 0 ? (
         <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-border text-12 text-text-tertiary">
           No data matches this view.
@@ -299,7 +299,7 @@ function AggregateChartFrame({
             ))}
           </dl>
           {result.truncated ? (
-            <p className="mt-2 text-11 text-text-tertiary">
+            <p className="mt-2 type-meta text-text-tertiary">
               Additional groups are combined into Other.
             </p>
           ) : null}

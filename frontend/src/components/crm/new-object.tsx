@@ -152,10 +152,10 @@ export function NewCrmObject({ ownerId }: { readonly ownerId?: string }) {
                   required
                 />
               </Label>
-              <label className="flex gap-2 text-12">
+              <Label className="flex gap-2">
                 <input type="checkbox" {...form.register("pipeline")} />
                 Include an Open / Done status pipeline
-              </label>
+              </Label>
               <Button type="submit" isLoading={create.isPending}>
                 Create object
               </Button>

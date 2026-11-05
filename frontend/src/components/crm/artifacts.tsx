@@ -24,7 +24,7 @@ function Frame({
       aria-label="CRM artifact"
     >
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <h3 className="truncate text-13 font-semibold">{title}</h3>
+        <h3 className="truncate type-secondary-strong">{title}</h3>
         <Link
           to="/assistant/crm"
           search={artifactSearch(artifact)}
@@ -110,7 +110,7 @@ function RecordArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
         object_key: record.data.object_key,
       }}
     >
-      <p className="mb-2 text-11 text-text-tertiary">
+      <p className="mb-2 type-meta text-text-tertiary">
         {object.data.label}
         {record.data.archived ? " · Archived" : ""}
       </p>

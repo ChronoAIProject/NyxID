@@ -18,14 +18,14 @@ export function CrmViewErrors({
           <AlertCircle className="size-4 text-destructive" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-13 font-semibold text-destructive">{title}</h3>
+          <h3 className="type-secondary-strong text-destructive">{title}</h3>
           <ul className="mt-2 space-y-1.5">
             {errors.map((error, index) => (
               <li
                 key={`${error.path}-${String(index)}`}
                 className="text-12 text-destructive"
               >
-                <code className="font-mono text-11">{error.path}</code>
+                <code className="font-mono type-meta">{error.path}</code>
                 <span aria-hidden="true">: </span>
                 {error.message}
               </li>

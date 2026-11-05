@@ -112,7 +112,7 @@ export function CrmImportExport({
           </Button>
         ) : null}
       </div>
-      <p className="text-11 text-text-secondary">
+      <p className="type-meta text-text-secondary">
         Exports use the displayed filters and typed raw values. Each download
         includes its schema, total and next cursor and can be imported directly
         (up to 100 records). JSON arrays of row objects are also accepted.
@@ -247,7 +247,7 @@ export function CrmImportExport({
                   </option>
                 </select>
               </Label>
-              <p className="text-11 text-text-secondary">
+              <p className="type-meta text-text-secondary">
                 Matching trims whitespace and ignores case; ambiguous matches
                 and repeated identities are rejected. Relationship values must
                 be exact authorized record IDs; select values use stable option
@@ -290,7 +290,7 @@ export function CrmImportExport({
           ) : null}
           {preview ? (
             <div className="space-y-2">
-              <p className="text-12 font-medium">
+              <p className="type-group-label">
                 {preview.rows.length} rows ·{" "}
                 {preview.rows.filter((r) => r.action === "create").length}{" "}
                 create ·{" "}
@@ -298,7 +298,7 @@ export function CrmImportExport({
                 update ·{" "}
                 {preview.rows.filter((r) => r.action === "skip").length} skip
               </p>
-              <ol className="max-h-64 overflow-auto text-11">
+              <ol className="max-h-64 overflow-auto type-meta">
                 {preview.rows.map((row) => (
                   <li key={row.index}>
                     Row {row.index + 1}: {row.action}

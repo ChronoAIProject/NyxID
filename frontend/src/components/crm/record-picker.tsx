@@ -178,12 +178,12 @@ export function CrmRecordPicker({
           aria-multiselectable={field.cardinality === "many"}
         >
           {records.isFetching ? (
-            <p role="status" className="p-3 text-11 text-text-tertiary">
+            <p role="status" className="p-3 type-meta text-text-tertiary">
               Searching...
             </p>
           ) : null}
           {records.isError ? (
-            <p role="alert" className="p-3 text-11 text-destructive">
+            <p role="alert" className="p-3 type-meta text-destructive">
               Could not load records.
             </p>
           ) : null}
@@ -217,7 +217,7 @@ export function CrmRecordPicker({
             );
           })}
           {records.data?.rows.length === 0 ? (
-            <p className="p-3 text-11 text-text-tertiary">
+            <p className="p-3 type-meta text-text-tertiary">
               No matching records.
             </p>
           ) : null}

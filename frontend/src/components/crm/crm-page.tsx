@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { CrmArtifactsPanel } from "./artifacts-panel";
 import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
 import { CrmOwnerContext } from "@/lib/crm/owner-context";
@@ -197,14 +198,14 @@ function CrmWorkspace({ ownerId }: { readonly ownerId?: string }) {
 
           <div className="flex flex-wrap items-center gap-2">
             {effectiveMode === "table" ? (
-              <label className="flex gap-2 text-12">
+              <Label className="flex gap-2">
                 <input
                   type="checkbox"
                   checked={includeArchived}
                   onChange={(event) => setIncludeArchived(event.target.checked)}
                 />
                 Include archived records
-              </label>
+              </Label>
             ) : null}
             {object.access === "schema" ? (
               <Button
@@ -318,7 +319,7 @@ function EnabledCrmPage() {
   return (
     <CrmOwnerContext value={owner}>
       <div className="space-y-4">
-        <label className="flex items-center gap-3 text-12">
+        <Label className="flex items-center gap-3">
           CRM owner
           <select
             aria-label="CRM owner"
@@ -341,7 +342,7 @@ function EnabledCrmPage() {
               </option>
             ))}
           </select>
-        </label>
+        </Label>
         <CrmWorkspace key={`${actor}:${owner}`} ownerId={owner} />
       </div>
     </CrmOwnerContext>

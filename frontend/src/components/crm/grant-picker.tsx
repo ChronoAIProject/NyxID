@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -30,7 +31,9 @@ export function CrmGrantPicker({
       disabled={disabled || !enabled}
       className="space-y-3 rounded-lg border border-border p-4"
     >
-      <legend className="text-13 font-semibold">CRM access</legend>
+      <Label asChild>
+        <legend>CRM access</legend>
+      </Label>
       <p className="text-12 text-text-secondary">
         Grant each object explicitly. Write and schema access also require read.
         Relationship matching and labels require read access to the target
@@ -96,7 +99,7 @@ export function CrmGrantPicker({
           >
             <span className="min-w-28">{object.plural_label}</span>
             {(["read", "write", "schema"] as const).map((capability) => (
-              <label key={capability} className="flex items-center gap-1">
+              <Label key={capability} className="flex items-center gap-1">
                 <input
                   type="checkbox"
                   checked={grant?.capabilities.includes(capability) ?? false}
@@ -132,7 +135,7 @@ export function CrmGrantPicker({
                   : capability === "write"
                     ? "Write"
                     : "Read"}
-              </label>
+              </Label>
             ))}
           </div>
         );

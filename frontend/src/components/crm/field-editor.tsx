@@ -80,7 +80,7 @@ export function CrmFieldEditor({
     control = (
       <div className="flex items-center gap-2">
         {field.type === "currency" ? (
-          <span className="text-11 font-medium text-text-tertiary">
+          <span className="type-group-label text-text-tertiary">
             {field.currency}
           </span>
         ) : null}
@@ -203,13 +203,13 @@ export function CrmFieldEditor({
 
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id} className="text-12">
+      <Label htmlFor={id}>
         {field.label}
         {field.required ? " *" : ""}
       </Label>
       {control}
       {error ? (
-        <p id={`${id}-error`} role="alert" className="text-11 text-destructive">
+        <p id={`${id}-error`} role="alert" className="type-meta text-destructive">
           {error}
         </p>
       ) : null}

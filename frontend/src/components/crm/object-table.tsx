@@ -90,7 +90,7 @@ function TableControls({
           Filters{filters.length ? ` (${filters.length})` : ""}
         </Button>
         {totalCount !== undefined ? (
-          <span className="text-11 tabular-nums text-text-tertiary">
+          <span className="type-meta tabular-nums text-text-tertiary">
             {totalCount.toLocaleString()} total
           </span>
         ) : null}
@@ -264,7 +264,7 @@ function CrmObjectTableState({
                     {fields.map((field) => (
                       <TableHead
                         key={field.key}
-                        className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
+                        className="type-table-header uppercase tracking-[1.5px] text-text-tertiary"
                       >
                         {isCrmSortableField(field) ? (
                           <button
@@ -351,7 +351,7 @@ function CrmObjectTableState({
         )}
 
         <div className="flex items-center justify-between gap-3">
-          <span className="text-11 tabular-nums text-text-tertiary">
+          <span className="type-meta tabular-nums text-text-tertiary">
             {first.toLocaleString()}-{last.toLocaleString()} of{" "}
             {result.data.total_count.toLocaleString()}
           </span>

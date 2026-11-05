@@ -74,7 +74,7 @@ export function CrmViewsPanel({ ownerId }: CrmViewsPanelProps) {
     <section aria-labelledby="crm-views-heading" className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 id="crm-views-heading" className="text-15 font-semibold">
+          <h2 id="crm-views-heading" className="type-card-title">
             Views
           </h2>
           <p className="mt-1 text-12 text-muted-foreground">
@@ -207,16 +207,16 @@ export function CrmViewsPanel({ ownerId }: CrmViewsPanelProps) {
               <div className="space-y-4">
                 <div className="flex items-start justify-between gap-3 border-b border-border/50 pb-3">
                   <div>
-                    <h3 className="text-15 font-semibold">
+                    <h3 className="type-card-title">
                       {selected.data.title}
                     </h3>
                     <a
-                      className="text-11 underline"
+                      className="type-meta underline"
                       href={crmLink({ ownerId, viewId: selected.data.id })}
                     >
                       Link to this view
                     </a>
-                    <p className="mt-1 text-11 text-text-tertiary">
+                    <p className="mt-1 type-meta text-text-tertiary">
                       Revision {selected.data.revision.toLocaleString()}
                     </p>
                   </div>

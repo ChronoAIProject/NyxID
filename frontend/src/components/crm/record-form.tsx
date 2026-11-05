@@ -146,7 +146,7 @@ export function CrmRecordForm({
   return (
     <CrmOwnerContext value={ownerId ?? object.owner_id}>
       <section className="space-y-4" aria-labelledby={headingId}>
-        <h3 id={headingId} className="text-15 font-semibold">
+        <h3 id={headingId} className="type-card-title">
           {title}
         </h3>
         {readOnly ? (
@@ -181,7 +181,7 @@ export function CrmRecordForm({
                 );
               })}
               {form.formState.errors.root?.message ? (
-                <p role="alert" className="text-11 text-destructive">
+                <p role="alert" className="type-meta text-destructive">
                   {form.formState.errors.root.message}
                 </p>
               ) : null}

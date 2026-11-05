@@ -96,7 +96,7 @@ function FieldSettings({
         })}
       >
         <fieldset disabled={patch.isPending} className="space-y-2">
-          <p className="text-11 text-text-tertiary">
+          <p className="type-meta text-text-tertiary">
             {field.key} · {field.type}
           </p>
           <Label>
@@ -111,22 +111,22 @@ function FieldSettings({
               })}
             />
           </Label>
-          <label className="flex gap-2 text-12">
+          <Label className="flex gap-2">
             <input
               type="checkbox"
               disabled={stage}
               {...form.register("required")}
             />
             Required{stage ? " (pipeline stage)" : ""}
-          </label>
-          <label className="flex gap-2 text-12">
+          </Label>
+          <Label className="flex gap-2">
             <input
               type="checkbox"
               disabled={stage}
               {...form.register("archived")}
             />
             Archived (stored values stay readable)
-          </label>
+          </Label>
           {field.type === "select" ? (
             <div className="space-y-2">
               {options.map((option, index) => (
@@ -134,7 +134,7 @@ function FieldSettings({
                   key={option.value}
                   className="flex flex-wrap items-center gap-2"
                 >
-                  <span className="text-11">{option.value}</span>
+                  <span className="type-meta">{option.value}</span>
                   <Input
                     className="w-40"
                     aria-label={`${option.value} option label`}
@@ -144,13 +144,13 @@ function FieldSettings({
                       maxLength: 200,
                     })}
                   />
-                  <label className="flex gap-2 text-11">
+                  <Label className="flex gap-2">
                     <input
                       type="checkbox"
                       {...form.register(`options.${index}.archived`)}
                     />
                     Archived
-                  </label>
+                  </Label>
                 </div>
               ))}
               <Button
@@ -319,7 +319,7 @@ export function CrmSchemaEditor({
           })}
         >
           <fieldset disabled={add.isPending} className="space-y-3">
-            <h3 className="text-13 font-semibold">Add custom field</h3>
+            <h3 className="type-secondary-strong">Add custom field</h3>
             <Label>
               Stable field key
               <Input

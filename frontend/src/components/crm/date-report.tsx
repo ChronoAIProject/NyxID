@@ -44,7 +44,7 @@ export function CrmDateReport({
       aria-label="Dated report"
       className="space-y-3 rounded-lg border border-border p-4"
     >
-      <h3 className="text-13 font-semibold">Records by date</h3>
+      <h3 className="type-secondary-strong">Records by date</h3>
       <p className="text-12 text-text-secondary">
         Counts use current record values and exclude archived records. Calendar
         dates retain their written date in UTC; datetime values use the selected
@@ -120,7 +120,7 @@ export function CrmDateReport({
                   ))}
                 </tbody>
               </table>
-              <p className="text-11">
+              <p className="type-meta">
                 Total: {String(result.data?.total ?? "Unavailable")}
                 {result.data?.truncated
                   ? " · Additional buckets are combined as Other"

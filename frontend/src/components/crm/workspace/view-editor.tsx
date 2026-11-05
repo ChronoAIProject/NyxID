@@ -235,11 +235,11 @@ export function CrmViewEditor({
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h3 className="text-15 font-semibold">
+          <h3 className="type-card-title">
             {view ? "Edit view" : "Create view"}
           </h3>
           {view ? (
-            <p className="mt-1 text-11 text-text-tertiary">
+            <p className="mt-1 type-meta text-text-tertiary">
               Revision {view.revision.toLocaleString()}
             </p>
           ) : null}
@@ -315,7 +315,7 @@ export function CrmViewEditor({
           {generationFailed ? "Retry same generation" : "Generate draft"}
         </Button>
         {generationFailed ? (
-          <div className="space-y-2 text-11">
+          <div className="space-y-2 type-meta">
             <p>
               Retrying keeps the same request identity. If inference was
               dispatched but its result is unavailable, this request will not
@@ -335,7 +335,7 @@ export function CrmViewEditor({
             </Button>
           </div>
         ) : null}
-        <p className="text-11 text-text-tertiary">
+        <p className="type-meta text-text-tertiary">
           Generation uses object metadata. Review the draft and save it when
           ready.
         </p>
@@ -357,7 +357,7 @@ export function CrmViewEditor({
             setJson(event.target.value);
             setValidated(false);
           }}
-          className="min-h-80 resize-y font-mono text-12 leading-relaxed"
+          className="min-h-80 resize-y font-mono type-code"
         />
       </div>
 

@@ -17,7 +17,7 @@ export function CrmArtifactsPanel({
   return (
     <div className="space-y-6">
       <section aria-label="Custom datasets" className="space-y-3">
-        <h2 className="text-14 font-semibold">Custom datasets</h2>
+        <h2 className="type-body-strong">Custom datasets</h2>
         {objects.isPending ? (
           <p role="status">Loading datasets…</p>
         ) : objects.isError ? (
@@ -47,7 +47,7 @@ export function CrmArtifactsPanel({
         )}
       </section>
       <section aria-label="Saved views" className="space-y-3">
-        <h2 className="text-14 font-semibold">Saved views</h2>
+        <h2 className="type-body-strong">Saved views</h2>
         <CrmViewsPanel ownerId={ownerId} />
       </section>
     </div>

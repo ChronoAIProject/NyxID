@@ -1047,7 +1047,7 @@ export function AssistantSidebar({
           >
             <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />
             <span className="flex-1 truncate">Artifacts</span>
-            <span className="font-mono text-9 text-text-tertiary">
+            <span className="font-mono type-badge text-text-tertiary">
               {counts.data?.artifacts ?? 0}
             </span>
           </Link>

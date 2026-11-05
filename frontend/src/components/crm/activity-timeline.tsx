@@ -60,7 +60,7 @@ export function CrmActivityTimeline({
       ids={history.map((activity) => activity.actor.user_id)}
     >
       <section className="space-y-3" aria-labelledby="crm-activity-title">
-        <h3 id="crm-activity-title" className="text-13 font-semibold">
+        <h3 id="crm-activity-title" className="type-secondary-strong">
           Activity
         </h3>
         {canWrite ? (
@@ -108,7 +108,7 @@ export function CrmActivityTimeline({
                 </Button>
               </div>
               {addNote.isError ? (
-                <p role="alert" className="text-11 text-destructive">
+                <p role="alert" className="type-meta text-destructive">
                   Could not add the note.
                 </p>
               ) : null}
@@ -116,12 +116,12 @@ export function CrmActivityTimeline({
           </Form>
         ) : null}
         {activities.isPending ? (
-          <p role="status" className="text-11 text-text-tertiary">
+          <p role="status" className="type-meta text-text-tertiary">
             Loading activity...
           </p>
         ) : null}
         {activities.isError ? (
-          <div role="alert" className="space-y-2 text-11 text-destructive">
+          <div role="alert" className="space-y-2 type-meta text-destructive">
             <p>Could not load activity.</p>
             <Button
               type="button"
@@ -151,12 +151,12 @@ export function CrmActivityTimeline({
                 </p>
                 {activity.kind === "stage_changed" &&
                 (activity.summary.changed_fields?.length ?? 0) > 1 ? (
-                  <p className="text-11 text-text-tertiary">
+                  <p className="type-meta text-text-tertiary">
                     Changed fields:{" "}
                     {activity.summary.changed_fields?.join(", ")}
                   </p>
                 ) : null}
-                <p className="text-11 text-text-tertiary">
+                <p className="type-meta text-text-tertiary">
                   <CrmPersonName id={activity.actor.user_id} /> ·{" "}
                   {activity.actor.kind === "agent"
                     ? (activity.actor.agent_name ??

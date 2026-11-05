@@ -96,7 +96,7 @@ function PipelineCard({
       >
         <span className="block break-words">{title}</span>
         {pending ? (
-          <span className="mt-1 block text-10 font-normal text-text-tertiary">
+          <span className="mt-1 block type-meta text-text-tertiary">
             Moving...
           </span>
         ) : null}
@@ -196,19 +196,19 @@ function PipelineLane({
       aria-label={stage.label}
     >
       <header className="flex items-center justify-between border-b border-border/50 px-3 py-2.5">
-        <h3 className="text-12 font-medium">{stage.label}</h3>
-        <span className="text-11 tabular-nums text-text-tertiary">
+        <h3 className="type-group-label">{stage.label}</h3>
+        <span className="type-meta tabular-nums text-text-tertiary">
           {count === undefined ? "Unavailable" : count.toLocaleString()}
         </span>
       </header>
       <div className="min-h-24 space-y-2 p-2">
         {isPending ? (
-          <p role="status" className="p-2 text-11 text-text-tertiary">
+          <p role="status" className="p-2 type-meta text-text-tertiary">
             Loading...
           </p>
         ) : null}
         {isError ? (
-          <div role="alert" className="p-2 text-11 text-destructive">
+          <div role="alert" className="p-2 type-meta text-destructive">
             Could not load this lane.
             <Button
               size="sm"
@@ -244,7 +244,7 @@ function PipelineLane({
           );
         })}
         {!isPending && !isError && rows.length === 0 ? (
-          <p className="p-2 text-center text-11 text-text-tertiary">
+          <p className="p-2 text-center type-meta text-text-tertiary">
             No records
           </p>
         ) : null}

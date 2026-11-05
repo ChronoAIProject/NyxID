@@ -15,7 +15,7 @@ export function CrmViewList({
     return (
       <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center">
         <LayoutDashboard className="mx-auto size-5 text-text-tertiary" />
-        <p className="mt-2 text-12 font-medium text-muted-foreground">
+        <p className="mt-2 type-group-label text-muted-foreground">
           No saved views
         </p>
       </div>
@@ -41,10 +41,10 @@ export function CrmViewList({
             >
               <LayoutDashboard className="mt-0.5 size-3.5 shrink-0 text-text-tertiary" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-12 font-medium text-foreground">
+                <span className="block truncate type-group-label text-foreground">
                   {view.title}
                 </span>
-                <span className="mt-0.5 block text-10 text-text-tertiary">
+                <span className="mt-0.5 block type-meta text-text-tertiary">
                   Revision {view.revision.toLocaleString()}
                 </span>
               </span>

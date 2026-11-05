@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { CrmPeopleLabels, CrmPersonName } from "@/components/crm/people-picker";
 import { crmLink } from "@/lib/crm/record-navigation";
 import { crmAuthorityRefused } from "@/lib/crm/query-visibility";
@@ -148,7 +149,7 @@ function RecordFields({
                 form.clearErrors(`values.${field.key}`);
               }}
             />
-            <label className="flex items-center gap-2 text-11 text-muted-foreground">
+            <Label className="flex items-center gap-2 text-muted-foreground">
               <Checkbox
                 checked={protectedFields[field.key] ?? false}
                 onCheckedChange={(checked) => {
@@ -158,7 +159,7 @@ function RecordFields({
               />
               <ShieldCheck aria-hidden="true" className="size-3" />
               Protect this field from agent changes
-            </label>
+            </Label>
           </div>
         ))}
     </div>
@@ -182,10 +183,10 @@ function ConflictNotice({
       aria-live="polite"
     >
       <div>
-        <h3 className="text-12 font-semibold text-warning">
+        <h3 className="type-table-header text-warning">
           This record changed elsewhere
         </h3>
-        <p className="text-11 text-muted-foreground">
+        <p className="type-meta text-muted-foreground">
           The saved record is now revision {current.revision}. Review its
           current values, then retry your edits.
         </p>
@@ -196,7 +197,7 @@ function ConflictNotice({
           .map((field) => (
             <div
               key={field.key}
-              className="grid grid-cols-[minmax(5rem,0.7fr)_minmax(0,1.3fr)] gap-2 text-11"
+              className="grid grid-cols-[minmax(5rem,0.7fr)_minmax(0,1.3fr)] gap-2 type-meta"
             >
               <dt className="text-text-tertiary">{field.label}</dt>
               <dd className="min-w-0 break-words">
@@ -357,7 +358,7 @@ function CrmRecordEditor({
           />
         </fieldset>
         {form.formState.errors.root?.message ? (
-          <p role="alert" className="text-11 text-destructive">
+          <p role="alert" className="type-meta text-destructive">
             {form.formState.errors.root.message}
           </p>
         ) : null}
@@ -391,7 +392,7 @@ function RelatedRecordsGroup({
   );
   return (
     <div className="space-y-1.5">
-      <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+      <p className="type-table-header uppercase tracking-[1.5px] text-text-tertiary">
         {object.data?.plural_label ?? group.object_key} · {group.field_key} (
         {group.count})
       </p>
@@ -486,7 +487,7 @@ export function CrmRecordSheet({
               ]}
             >
               <a
-                className="text-11 underline"
+                className="type-meta underline"
                 href={crmLink({
                   ownerId: data.record.owner_id,
                   recordId: data.record.id,
@@ -496,7 +497,7 @@ export function CrmRecordSheet({
                 Link to this record
               </a>
               {data.record.updated_by ? (
-                <p className="text-11 text-text-tertiary">
+                <p className="type-meta text-text-tertiary">
                   Last updated by{" "}
                   <CrmPersonName id={data.record.updated_by.user_id} /> ·{" "}
                   {data.record.updated_by.kind === "agent"
@@ -510,7 +511,7 @@ export function CrmRecordSheet({
                 </p>
               ) : null}
               {Object.keys(data.record.field_sources ?? {}).length ? (
-                <details className="text-11">
+                <details className="type-meta">
                   <summary>Field source times</summary>
                   <dl>
                     {Object.entries(data.record.field_sources ?? {}).map(
@@ -541,7 +542,7 @@ export function CrmRecordSheet({
                   className="space-y-3"
                   aria-labelledby="crm-fields-title"
                 >
-                  <h3 id="crm-fields-title" className="text-13 font-semibold">
+                  <h3 id="crm-fields-title" className="type-secondary-strong">
                     Fields
                   </h3>
                   <dl className="space-y-2">
@@ -567,7 +568,7 @@ export function CrmRecordSheet({
               )}
               {data.object.fields.some((field) => field.archived) ? (
                 <section className="space-y-3" aria-label="Archived fields">
-                  <h3 className="text-13 font-semibold">Archived fields</h3>
+                  <h3 className="type-secondary-strong">Archived fields</h3>
                   <dl className="space-y-2">
                     {data.object.fields
                       .filter((field) => field.archived)
@@ -595,16 +596,16 @@ export function CrmRecordSheet({
                 className="space-y-3"
                 aria-labelledby="crm-related-title"
               >
-                <h3 id="crm-related-title" className="text-13 font-semibold">
+                <h3 id="crm-related-title" className="type-secondary-strong">
                   Related records
                 </h3>
                 {related.isPending ? (
-                  <p role="status" className="text-11 text-text-tertiary">
+                  <p role="status" className="type-meta text-text-tertiary">
                     Loading related records...
                   </p>
                 ) : null}
                 {!related.isError && related.data?.groups.length === 0 ? (
-                  <div className="rounded-lg border border-dashed border-border p-3 text-11 text-text-tertiary">
+                  <div className="rounded-lg border border-dashed border-border p-3 type-meta text-text-tertiary">
                     No related records.
                   </div>
                 ) : null}
