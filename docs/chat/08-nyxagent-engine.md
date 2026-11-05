@@ -2093,8 +2093,32 @@ Admins, operators and `nyxid:admin:usage:read` holders (Usage Viewer) read
 `from`/`to`, `vote`, `model`, `agent_kind`, `has_error=true` and a
 `(created_at,_id)` cursor (`feedback_cursor_invalid` when malformed). Responses
 hold per-day counts and up to 100 recent rows with their comment and context;
-rows written before the snapshot existed have `context: null`. Message text is
-never included.
+rows written before the snapshot existed have `context: null`. Each row exposes
+its stable feedback `id` (multiple people may rate the same group reply).
+`can_preview_threads` indicates Admin/Operator transcript access. This metadata
+endpoint never includes message text.
+
+Admins and Operators can separately request
+`GET /api/v1/admin/assistant/feedback/{id}/thread?cursor=...`. Usage Viewer
+permission alone returns 403. The server resolves the conversation or group from
+the feedback row and reads feedback, parent, anchor and messages in one snapshot,
+pinned by a short read-only transaction even when snapshot history retention is low.
+It returns up to six human-visible text excerpts, chronological and ending at the
+rated message on the first page. `rated` identifies that reply. A bounded cursor
+binds feedback ID, anchor ID and boundary message ID; every boundary is resolved
+inside the same parent and cannot advance beyond the anchor. Unique parent/sequence
+indexes support bounded backward seeks, independent of timestamp ties.
+
+Only user/assistant (personal) or user/agent (group) message text is projected.
+System/tool/notice rows, synthetic personal wake-ups, continuations, tool arguments
+and results, attachment metadata and credential fields are excluded. Existing
+secret and telemetry redactors run before the 2,000-character/80-line excerpt
+limit; `truncated` marks clipped text. Missing/deleted parents or anchors return
+`unavailable: true`; withdrawn feedback returns 404, malformed/foreign cursors 400.
+Reads have a ten-second database limit and a twelve-second overall deadline.
+The browser loads excerpts only on demand, then prepends **Load previous messages**
+pages; closing a preview discards its cache. Errors offer retry and mark retained
+excerpts stale; 403/404 or unavailable context removes retained excerpts.
 
 
 ### Admin NyxBot activity
@@ -2140,8 +2164,11 @@ execution limit and project only metadata, never transcript text.
 Chart days are zero-filled in UTC. The UI's end date includes the whole selected
 day and is translated to the respective endpoints' exclusive/inclusive bounds.
 Feedback is grouped by original submission day; vote edits, withdrawals, and
-transcript deletion can change historical reports. List entries lead with votes
-and comments; message IDs and tool identifiers are available in reply details.
+transcript deletion can change historical reports. The feedback summary and review list appear before activity charts and model-cost
+detail. List entries lead with votes and comments; privileged reviewers can preview
+the thread beside each rating. List filters show complete matching rating totals;
+message IDs and tool identifiers remain in collapsed reply details. Helpful rate
+and daily charts retain the full-period denominator when list filters change.
 Native channel guest authority also covers positively addressed foreign
 Telegram/Lark/Feishu bot actors in owner-enabled groups. The receiving bot's
 existing channel/chat agent answers; native mention names do not select arbitrary

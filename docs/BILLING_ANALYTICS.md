@@ -13,9 +13,69 @@ its members: platform-key requests bill the acting person. Choose the last
 
 NyxBot shows assistant activity, turn outcomes, and reply feedback using the same
 chart styling. Its date range and feedback filters are independent of the billing
-workspace, and read access includes admins, operators and Usage Viewers. See the
+workspace. Admins, operators and Usage Viewers can read metadata; thread
+previews require Admin or Operator. See the
 [NyxBot activity contract](chat/08-nyxagent-engine.md#admin-nyxbot-activity) for
 metric definitions, endpoint bounds, and feedback semantics.
+
+## Grant credits: granted and used
+
+Dashboard and List show **Grant credits** above their usage views. Granted is
+credits actually issued; Used is grant-funded consumption during the same
+selected UTC window. These are period flows, not a cohort utilization rate or a
+remaining balance: consumption can come from older grants and exceed issuance.
+The daily chart compares both flows and has an accessible exact-value table.
+Collapsed copy identifies its scope: time and billing-account filters, all
+services. The Account / Service breakdown starts collapsed.
+
+`GET /api/v1/admin/usage/free-grants` retains `require_admin_usage_read`
+authorization. It accepts only `period` (24h/7d/30d), `from`/`to`, `owners`
+(billing-account UUIDs), and independent one-based `page` and `service_page`
+(1–100000, default 1). Unknown parameters are rejected. The positive UTC window
+is at most 31 days, with inclusive start and exclusive end. Acting-user and
+service filters do not apply. Service selection in the disclosure changes the
+breakdown, not the report's filter or overall granted amount.
+
+One bounded snapshot aggregation reads the immutable billing ledger. Legacy
+`grant_issued` and `grant_consumed` events use integer micros when present,
+otherwise whole-credit amounts. Exact v2 movements count only the credit source
+leg: `platform:promotions` for `grant_issued`, and
+`grant:{reference_id}` for `grant_consumed`. The corresponding debit leg must
+never be added again. Wallet usage, allowance units, expiry, revocation, top-ups,
+pending/unledgered grants and future schedules are excluded. Scheduled issuance
+counts once through its existing journal deduplication identity. Financial
+ownership comes from ledger `owner_id`; no membership expansion participates.
+Personal, organization and historical deleted accounts remain separate.
+
+The response retains exact decimal `issued`, `grants`, `total_accounts`,
+`accounts`, `page`, `per_page`, `window` and `generated_at`, and adds:
+
+- Exact decimal `used` globally and on each account row. Accounts include
+  issuance-only and usage-only owners. They sort by issued descending, used
+  descending, then owner ID ascending.
+- `services: [{ service_slug, used }]`, `total_services` and `service_page`.
+  Services report actual grant-funded usage only, sorted by used descending
+  then slug ascending (null first on ties). Null identifies historical usage
+  without a recorded service. Universal and multi-service grants are shared
+  credits; no per-service issuance allocation is inferred or duplicated.
+- `interval: "day"` and `trend: [{ start, end, issued, used }]`. UTC daily
+  buckets are clipped to the effective window, include empty days as zero,
+  and are bounded to at most 32 buckets for a 31-day window.
+
+Both breakdowns return at most 50 rows. Totals, account/service counts and trend
+cover the full filtered population on every page. All money uses exact
+Credits/Decimal128; the chart converts values only to draw coordinates, while
+tooltips and chart data retain exact strings. Identity labels are resolved only
+for the loaded accounts. Existing ledger event/date/owner indexes bound the
+match; database execution has a 20-second maxTime and an outer 22-second deadline
+(timeout code 12200). The facets share one snapshot, so paging never changes
+which population contributes to a response's totals.
+
+Paging either breakdown pins the effective window and preserves independent
+positions. Polling can refresh that fixed window; explicit Usage Refresh resets
+both pages and resolves a new current relative window. The UI labels stale
+refreshes and shows readable UTC boundaries. Authorization loss clears totals,
+chart data and breakdown details. The report is absent from the NyxBot tab.
 
 ## Design and library decision
 

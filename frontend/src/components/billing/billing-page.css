@@ -276,7 +276,7 @@
      one track width and one caption column, so tracks and captions end on
      the same right edge in every benefit row. */
   --benefit-meter-track: 180px;
-  --benefit-meter-caption: 68px;
+  --benefit-meter-caption: 6.5rem;
   .benefit-meter {
     display: grid;
     grid-template-columns: var(--benefit-meter-track) var(
@@ -993,6 +993,7 @@
   }
   .allowance-balance > header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 16px;
     margin-bottom: 12px;
@@ -1003,11 +1004,13 @@
     white-space: nowrap;
   }
   .allowance-balance .benefit-meter {
+    flex-basis: 12rem;
+    min-width: min(100%, 12rem);
     max-width: 260px;
   }
   .allowance-balance > dl {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
     gap: 12px;
     @apply type-secondary;
   }
@@ -1229,9 +1232,6 @@
     overflow-wrap: anywhere;
   }
   @container benefits (max-width: 559px) {
-    .allowance-balance > dl {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
     .allowance-period,
     .allowance-balance {
       padding: 12px;
