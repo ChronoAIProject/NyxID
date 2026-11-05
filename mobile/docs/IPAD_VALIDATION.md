@@ -109,6 +109,10 @@ At committed head `107f5d1d7`, Mobile passed1,702 tests, typecheck and native-sy
 
 During delivery, team main advanced to `10444489b`, including the same two production URL-accessor fixes. This temporarily made the PR conflict and prevented new pull-request Checks from starting. The merge retains the stronger dynamic-domain test mocks and assertions from this PR. All mobile source/test bytes are identical before and after this merge; only upstream non-mobile changes were newly integrated. The 14 approval-card/detail tests were rerun and passed after resolving the two test-only conflicts. The earlier focused iPad results remain associated with unchanged mobile source.
 
+## Follow-up CI test typing repair
+
+At merge head `baea79688`, GitHub Mobile CI passed all **1,709 tests** and native-sync, then reported type errors in the three new regression test files. The Node helper `fileURLToPath` was receiving the ambient React Native `URL` type; these tests now explicitly import Node's `URL`. The machine router fixture now supplies route keys and normalizes router results through `getRehydratedState`, preserving complete navigation-state types without casts or disabled assertions. These changes affect tests only and do not alter the App source used for the Pro observations. The final commit needs a fresh CI typecheck result; the 1,709-test result alone is not a complete Mobile CI pass.
+
 ## Remaining acceptance work
 
 - Long-page scrolling and bottom reachability are unproven for legal documents, automation run lists/pagination, the lower key-creation form and memory fields. The final wide-table column is only partly visible; successful horizontal reachability is unproven. CUA scroll attempts did not establish viewport movement, so they are not counted as passes or attributed to a product defect without further evidence.

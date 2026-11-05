@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import {
   CommonActions,
@@ -25,8 +25,12 @@ function linkedMachine() {
       stale: true,
       index: 1,
       routes: [
-        initial.routes[0]!,
-        { name: "Machines", params: { machine: "qa-mac", tab: "logins" } },
+        { key: initial.routes[0]!.key, name: initial.routes[0]!.name },
+        {
+          key: "qa-machines",
+          name: "Machines",
+          params: { machine: "qa-mac", tab: "logins" },
+        },
       ],
     },
     options,
@@ -37,7 +41,7 @@ function linkedMachine() {
   const passive: Effect[] = [];
   const dispatch = (action: Parameters<typeof router.getStateForAction>[1]) => {
     const next = router.getStateForAction(state, action, options);
-    if (next) state = next;
+    if (next) state = router.getRehydratedState(next, options);
     else unhandled.push(action.type);
   };
   const jsx = (type: unknown, props: unknown) => ({ type, props });
