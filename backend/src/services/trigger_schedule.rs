@@ -124,12 +124,6 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             "automation_direct_ttl",
             true,
         ),
-        (
-            RUNS,
-            doc! {"coordinator.protocol": 1, "outcome": 1},
-            "automation_coordinator_drain",
-            false,
-        ),
     ] {
         let mut options = IndexOptions::builder().name(name.to_owned()).build();
         if ttl {

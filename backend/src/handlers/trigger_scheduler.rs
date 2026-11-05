@@ -541,7 +541,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     if bounded {
         schedules::continuation::reserve_admission(&state.db, job).await?;
     }
-    let admission = Box::pin(super::assistant_team::start_server_turn(
+    match Box::pin(super::assistant_team::start_server_turn(
         state,
         &run.user_id,
         start,
@@ -549,18 +549,9 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             owner: &run.user_id,
             limit,
         },
-    ));
-    let admitted = if bounded {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(schedules::continuation::ADMISSION_ATTEMPT_SECONDS),
-            admission,
-        )
-        .await
-        .map_err(|_| AppError::Conflict("automation_admission_timeout".into()))?
-    } else {
-        admission.await
-    };
-    match admitted {
+    ))
+    .await
+    {
         Ok(super::assistant_team::Started::Turn { .. }) => {
             schedules::audit(
                 &state.db,

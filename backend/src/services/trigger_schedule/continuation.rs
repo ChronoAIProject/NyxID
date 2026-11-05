@@ -12,7 +12,6 @@ pub const CONTINUATION_LIMIT: u32 = 32;
 pub const DISPATCH_LIMIT: u32 = 32;
 pub const COORDINATOR_DEADLINE_SECONDS: i64 = 60 * 60;
 pub const ADMISSION_LEASE_SECONDS: i64 = 120;
-pub const ADMISSION_ATTEMPT_SECONDS: u64 = 30;
 
 pub async fn enrollment_ready(db: &Database, configured: bool) -> bool {
     if !configured {
@@ -216,6 +215,17 @@ pub fn backstop(deferrals: i32) -> Duration {
     Duration::seconds((60_i64 << deferrals.clamp(0, 3)).min(300))
 }
 
+/// Match fields individually: BSON document key ordering carries no identity.
+pub fn identity(prefix: &str, work: &AutomationWork) -> Document {
+    doc! {
+        format!("{prefix}.run_id"): &work.run_id,
+        format!("{prefix}.work_id"): &work.work_id,
+        format!("{prefix}.role"): &work.role,
+        format!("{prefix}.coordinator_thread_id"): &work.coordinator_thread_id,
+        format!("{prefix}.confirmation_policy"): bson::to_bson(&work.confirmation_policy).expect("scalar confirmation policy"),
+    }
+}
+
 /// Only a verified live source turn can add work. The run-wide counter counts
 /// accepted dispatches, including nested direct and group handoffs, exactly once.
 pub async fn register_in_session(
@@ -227,11 +237,17 @@ pub async fn register_in_session(
     count: u32,
     session: &mut ClientSession,
 ) -> AppResult<TriggerRun> {
-    let matched = db.collection::<Document>(THREADS).update_one(doc! {
-        "_id": thread, "user_id": owner, "active_turn.turn_id": turn,
-        "active_turn.stop_requested": {"$ne": true},
-        "active_turn.automation_work": bson::to_bson(work).map_err(|_| AppError::Internal("Encode automation work".into()))?,
-    }, doc! {"$inc": {"automation_handoff_version": 1_i64}}).session(&mut *session).await?.matched_count;
+    let mut source = identity("active_turn.automation_work", work);
+    source.extend(
+        doc! {"_id": thread, "user_id": owner, "active_turn.turn_id": turn,
+        "active_turn.stop_requested": {"$ne": true}},
+    );
+    let matched = db
+        .collection::<Document>(THREADS)
+        .update_one(source, doc! {"$inc": {"automation_handoff_version": 1_i64}})
+        .session(&mut *session)
+        .await?
+        .matched_count;
     if matched != 1 {
         return Err(AppError::AssistantTurnRequired);
     }
@@ -429,31 +445,31 @@ fn drain_queries() -> Vec<(&'static str, Document, &'static str, &'static str)> 
         ),
         (
             THREADS,
-            doc! {"active_turn.automation_work.run_id": {"$gt": ""}},
+            doc! {"active_turn.automation_work.run_id": {"$type": "string", "$gt": ""}},
             "automation_active_drain",
             "active_children",
         ),
         (
             THREADS,
-            doc! {"pending_events.automation_work.run_id": {"$gt": ""}},
+            doc! {"pending_events.automation_work.run_id": {"$type": "string", "$gt": ""}},
             "automation_event_drain",
             "queued_results",
         ),
         (
             GROUPS,
-            doc! {"followers.automation.work.run_id": {"$gt": ""}},
+            doc! {"followers.automation.work.run_id": {"$type": "string", "$gt": ""}},
             "automation_group_drain",
             "group_work",
         ),
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
-            doc! {"automation_work.run_id": {"$gt": ""}, "status": {"$in": ["pending", "allowed"]}},
+            doc! {"automation_work.run_id": {"$type": "string", "$gt": ""}, "status": {"$in": ["pending", "allowed"]}},
             "automation_card_drain",
             "confirmation_cards",
         ),
         (
             crate::models::async_service_operation::COLLECTION_NAME,
-            doc! {"delivery.automation_work.run_id": {"$gt": ""}, "state": {"$in": ["submitting", "waiting", "ready", "queued", "cancelling"]}},
+            doc! {"delivery.automation_work.run_id": {"$type": "string", "$gt": ""}, "state": {"$in": ["submitting", "waiting", "ready", "queued", "cancelling"]}},
             "automation_async_drain",
             "async_work",
         ),
@@ -464,8 +480,8 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
     for (collection, keys, name) in [
         (
             RUNS,
-            doc! {"user_id": 1, "thread_id": 1, "coordinator.protocol": 1, "outcome": 1},
-            "automation_coordinator_thread",
+            doc! {"coordinator.protocol": 1, "outcome": 1, "user_id": 1, "thread_id": 1},
+            "automation_coordinator_drain",
         ),
         (
             HANDOFFS,
@@ -512,19 +528,24 @@ pub async fn indexes(db: &Database) -> mongodb::error::Result<()> {
             doc! {"user_id": 1, "followers.automation.work.work_id": 1},
             "automation_group_parent_work",
         ),
-        (
-            crate::models::assistant_group::MESSAGES_COLLECTION_NAME,
-            doc! {"group_id": 1, "user_id": 1, "request_id": 1, "seq": -1},
-            "automation_group_transcript",
-        ),
     ] {
+        let mut options = IndexOptions::builder().name(name.to_owned()).build();
+        options.partial_filter_expression = match name {
+            "automation_coordinator_drain" => Some(doc! {"coordinator.protocol": 2}),
+            "automation_direct_drain" => None, // New collection contains only enrolled work.
+            _ => {
+                let bound = keys
+                    .keys()
+                    .find(|key| {
+                        key.contains("automation")
+                            && (key.ends_with("run_id") || key.ends_with("work_id"))
+                    })
+                    .expect("bound index field");
+                Some(doc! {bound: {"$type": "string"}})
+            }
+        };
         db.collection::<Document>(collection)
-            .create_index(
-                IndexModel::builder()
-                    .keys(keys)
-                    .options(IndexOptions::builder().name(name.to_owned()).build())
-                    .build(),
-            )
+            .create_index(IndexModel::builder().keys(keys).options(options).build())
             .await?;
     }
     Ok(())
@@ -540,6 +561,37 @@ pub async fn stop_root(db: &Database, owner: &str, id: &str, turn: &str) -> AppR
         finish_record(db, &run).await?;
     }
     Ok(())
+}
+
+/// Marked threads retain main's cleanup for ordinary/terminal work. Only other
+/// live runs are protected, including when an idle/stale Stop has no target.
+pub async fn stop_protected_runs_in_session(
+    db: &Database,
+    owner: &str,
+    target: Option<&str>,
+    session: &mut ClientSession,
+) -> AppResult<Vec<String>> {
+    let mut cursor = db
+        .collection::<Document>(RUNS)
+        .find(doc! {
+            "user_id": owner, "coordinator.protocol": 2,
+            "outcome": {"$in": ["started", "waiting"]},
+        })
+        .projection(doc! {"_id": 1})
+        .limit(129)
+        .session(&mut *session)
+        .await?;
+    let rows: Vec<Document> = cursor.stream(session).try_collect().await?;
+    if rows.len() > 128 {
+        return Err(AppError::Conflict(
+            "Too many live automation runs for Stop cleanup".into(),
+        ));
+    }
+    Ok(rows
+        .into_iter()
+        .filter_map(|r| r.get_str("_id").ok().map(str::to_owned))
+        .filter(|id| Some(id.as_str()) != target)
+        .collect())
 }
 
 /// Transport cancellation follows a successful exact-root Stop. A stale Stop
@@ -621,17 +673,40 @@ pub async fn work_pending(
 pub async fn fence_work(
     db: &Database,
     owner: &str,
+    thread: &str,
     work: &AutomationWork,
     session: &mut ClientSession,
 ) -> AppResult<()> {
-    if db.collection::<Document>(RUNS).update_one(doc! {"_id": &work.run_id, "user_id": owner, "coordinator.protocol": 2, "coordinator.deadline": {"$gt": date(Utc::now())}, "outcome": {"$in": ["started", "waiting"]}}, doc! {"$inc": {"coordinator.version": 1_i64}}).session(&mut *session).await?.matched_count != 1 { return Err(AppError::AssistantTurnRequired); }
+    let run = db.collection::<TriggerRun>(RUNS).find_one(doc! {
+        "_id": &work.run_id, "user_id": owner, "coordinator.protocol": 2,
+        "coordinator.deadline": {"$gt": date(Utc::now())}, "outcome": {"$in": ["started", "waiting"]},
+    }).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
     let pending = match work.role.as_str() {
-        "coordinator" => true,
-        "direct" => db.collection::<Document>(HANDOFFS).find_one(doc! {"_id": &work.work_id, "run_id": &work.run_id, "user_id": owner, "state": "pending", "work": bson::to_bson(work).map_err(|_| AppError::Internal("Encode automation work".into()))?}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
-        "group" => db.collection::<Document>(GROUPS).find_one(doc! {"user_id": owner, "followers": {"$elemMatch": {"automation.work.run_id": &work.run_id, "automation.work.coordinator_thread_id": &work.coordinator_thread_id, "automation.work.confirmation_policy": bson::to_bson(&work.confirmation_policy).map_err(|_| AppError::Internal("Encode automation policy".into()))?, "automation.dispatches": {"$elemMatch": {"id": &work.work_id, "state": "running"}}}}}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
+        "coordinator" => run.thread_id.as_deref() == Some(thread) && *work == context(&run, thread),
+        "direct" => {
+            let mut filter = identity("work", work);
+            filter.extend(doc! {"_id": &work.work_id, "user_id": owner, "child_thread_id": thread, "state": "pending"});
+            db.collection::<Document>(HANDOFFS).find_one(filter).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some()
+        }
+        "group" => db.collection::<Document>(GROUPS).find_one(doc! {"user_id": owner, "followers": {"$elemMatch": {
+            "automation.work.run_id": &work.run_id, "automation.work.coordinator_thread_id": &work.coordinator_thread_id,
+            "automation.work.confirmation_policy": bson::to_bson(&work.confirmation_policy).expect("scalar confirmation policy"),
+            "automation.dispatches": {"$elemMatch": {"id": &work.work_id, "thread_id": thread, "state": "running"}}
+        }}}).projection(doc! {"_id": 1}).session(&mut *session).await?.is_some(),
         _ => false,
     };
-    if !pending {
+    if !pending
+        || db
+            .collection::<Document>(THREADS)
+            .update_one(
+                doc! {"_id": thread, "user_id": owner},
+                doc! {"$inc": {"automation_handoff_version": 1_i64}},
+            )
+            .session(session)
+            .await?
+            .matched_count
+            != 1
+    {
         return Err(AppError::AssistantTurnRequired);
     }
     Ok(())
@@ -669,11 +744,12 @@ pub async fn event_can_resume(
         "coordinator" => run.thread_id.as_deref() == Some(row.id.as_str())
             && *work == context(&run, &row.id)
             && run.coordinator.as_ref().is_some_and(|c| c.continuations < CONTINUATION_LIMIT),
-        "direct" => db.collection::<Document>(HANDOFFS).find_one(doc! {
-            "_id": &work.work_id, "run_id": &run.id, "user_id": &row.user_id,
-            "child_thread_id": &row.id, "state": "pending",
-            "work": bson::to_bson(work).map_err(|_| AppError::Internal("Encode automation work".into()))?,
-        }).projection(doc! {"_id": 1}).await?.is_some(),
+        "direct" => {
+            let mut filter = identity("work", work);
+            filter.extend(doc! {"_id": &work.work_id, "run_id": &run.id, "user_id": &row.user_id,
+                "child_thread_id": &row.id, "state": "pending"});
+            db.collection::<Document>(HANDOFFS).find_one(filter).projection(doc! {"_id": 1}).await?.is_some()
+        },
         "group" => db.collection::<Document>(GROUPS).find_one(doc! {
             "_id": &row.group_id, "user_id": &row.user_id,
             "followers": {"$elemMatch": {"automation.work.run_id": &run.id,
@@ -768,6 +844,44 @@ pub async fn retire_work_in_session(
 ) -> AppResult<()> {
     let owner = &run.user_id;
     let id = &run.id;
+    let mut threads = run.thread_id.iter().cloned().collect::<Vec<_>>();
+    let mut cursor = db
+        .collection::<Document>(HANDOFFS)
+        .find(doc! {"user_id": owner, "run_id": id, "state": "pending"})
+        .projection(doc! {"child_thread_id": 1})
+        .limit(i64::from(DISPATCH_LIMIT))
+        .session(&mut *session)
+        .await?;
+    let receipts: Vec<Document> = cursor.stream(&mut *session).try_collect().await?;
+    threads.extend(
+        receipts
+            .iter()
+            .filter_map(|r| r.get_str("child_thread_id").ok().map(str::to_owned)),
+    );
+    let mut cursor = db
+        .collection::<crate::models::assistant_group::AssistantGroup>(GROUPS)
+        .find(doc! {"user_id": owner, "followers.automation.work.run_id": id})
+        .limit(i64::from(DISPATCH_LIMIT))
+        .session(&mut *session)
+        .await?;
+    let groups: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
+    for group in &groups {
+        threads.extend(
+            group
+                .followers
+                .iter()
+                .filter_map(|f| f.automation.as_ref())
+                .filter(|r| &r.work.run_id == id)
+                .flat_map(|r| r.dispatches.iter().filter_map(|d| d.thread_id.clone())),
+        );
+    }
+    db.collection::<Document>(THREADS)
+        .update_many(
+            doc! {"_id": {"$in": threads}, "user_id": owner},
+            doc! {"$inc": {"automation_handoff_version": 1_i64}},
+        )
+        .session(&mut *session)
+        .await?;
     db.collection::<Document>(THREADS)
         .update_many(
             doc! {"user_id": owner, "active_turn.automation_work.run_id": id},

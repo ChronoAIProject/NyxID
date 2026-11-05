@@ -1749,7 +1749,14 @@ pub(crate) async fn fence(
         }) {
             return Err(AppError::AssistantTurnRequired);
         }
-        super::trigger_schedule::continuation::fence_work(db, &chat.user_id, work, session).await?;
+        super::trigger_schedule::continuation::fence_work(
+            db,
+            &chat.user_id,
+            &chat.conversation_id,
+            work,
+            session,
+        )
+        .await?;
     }
     let key = db
         .collection::<ApiKey>(KEYS)
