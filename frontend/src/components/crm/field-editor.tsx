@@ -40,8 +40,7 @@ export function CrmFieldEditor({
 
   if (
     field.type === "text" &&
-    field.max_length > 200 &&
-    !["name", "title", "domain", "email"].includes(field.key)
+    field.max_length > 254
   ) {
     control = (
       <Textarea

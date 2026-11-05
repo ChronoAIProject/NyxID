@@ -41,10 +41,12 @@ it("keeps optional boolean unset, false and true distinct and allows clearing", 
 });
 
 it.each([
-  ["name", 1000, "INPUT"],
-  ["title", 1000, "INPUT"],
-  ["email", 1000, "INPUT"],
+  ["name", 1000, "TEXTAREA"],
+  ["title", 200, "INPUT"],
+  ["email", 254, "INPUT"],
   ["short_note", 200, "INPUT"],
+  ["description", 254, "INPUT"],
+  ["name", 255, "TEXTAREA"],
   ["description", 1000, "TEXTAREA"],
 ])("renders %s with length %i using %s", (key, maxLength, tag) => {
   render(
