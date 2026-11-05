@@ -1,3 +1,4 @@
+import { CrmPeoplePicker } from "@/components/crm/people-picker";
 import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,6 +43,7 @@ function FilterValue({
   readonly ownerId?: string;
   readonly onChange: (value: unknown) => void;
 }) {
+  const [error, setError] = useState<string>();
   const [draft, setDraft] = useState(() => {
     if (Array.isArray(filter.value)) return filter.value.join(", ");
     const formatted = formatCrmFieldInput(field, filter.value);
@@ -87,6 +89,14 @@ function FilterValue({
       </Select>
     );
   }
+  if (field.type === "user" && filter.op !== "in" && filter.op !== "nin")
+    return (
+      <CrmPeoplePicker
+        value={filter.value}
+        ownerId={ownerId}
+        onChange={onChange}
+      />
+    );
   if (field.type === "record") {
     const many = filter.op === "in";
     return (
@@ -109,45 +119,56 @@ function FilterValue({
     );
   }
   return (
-    <Input
-      aria-label={`${field.label} value`}
-      type={
-        field.type === "date"
-          ? "date"
-          : field.type === "datetime"
-            ? "datetime-local"
-            : "text"
-      }
-      inputMode={
-        field.type === "number" || field.type === "currency"
-          ? "decimal"
-          : undefined
-      }
-      maxLength={filter.op === "contains" ? 100 : undefined}
-      value={draft}
-      onChange={(event) => {
-        const next = event.target.value;
-        setDraft(next);
-        try {
-          onChange(
-            filter.op === "in" || filter.op === "nin"
-              ? next
-                  .split(",")
-                  .map((value) => value.trim())
-                  .filter(Boolean)
-                  .slice(0, 100)
-              : parseCrmFieldInput(field, next),
-          );
-        } catch {
-          // Keep the partial editor text; the previous valid server value remains active.
+    <div className="space-y-1">
+      <Input
+        aria-invalid={Boolean(error)}
+        aria-label={`${field.label} value`}
+        type={
+          field.type === "date"
+            ? "date"
+            : field.type === "datetime"
+              ? "datetime-local"
+              : "text"
         }
-      }}
-      placeholder={
-        filter.op === "in" || filter.op === "nin"
-          ? "Comma-separated values"
-          : undefined
-      }
-    />
+        inputMode={
+          field.type === "number" || field.type === "currency"
+            ? "decimal"
+            : undefined
+        }
+        maxLength={filter.op === "contains" ? 100 : undefined}
+        value={draft}
+        onChange={(event) => {
+          const next = event.target.value;
+          setDraft(next);
+          try {
+            setError(undefined);
+            onChange(
+              filter.op === "in" || filter.op === "nin"
+                ? next
+                    .split(",")
+                    .map((value) => value.trim())
+                    .filter(Boolean)
+                    .slice(0, 100)
+                : parseCrmFieldInput(field, next),
+            );
+          } catch (cause) {
+            setError(
+              `${cause instanceof Error ? cause.message : "Invalid value"} The previous valid filter is still active.`,
+            );
+          }
+        }}
+        placeholder={
+          filter.op === "in" || filter.op === "nin"
+            ? "Comma-separated values"
+            : undefined
+        }
+      />
+      {error ? (
+        <p role="alert" className="text-11 text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </div>
   );
 }
 

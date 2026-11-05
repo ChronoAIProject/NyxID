@@ -1,4 +1,5 @@
-import { useRef } from "react";
+import { CrmOwnerContext } from "@/lib/crm/owner-context";
+import { useId, useRef } from "react";
 import { CrmFieldEditor } from "@/components/crm/field-editor";
 import { Button } from "@/components/ui/button";
 import { Form, useAppForm } from "@/components/ui/form";
@@ -71,6 +72,7 @@ export function CrmRecordForm({
   onCreated,
 }: CrmRecordFormProps) {
   const fields = includedFields(object, requestedFields);
+  const headingId = useId();
   const create = useCreateCrmRecord(ownerId);
   const actionKey = useRef<string | null>(null);
   const form = useAppForm<CrmRecordFormValues>({
@@ -100,7 +102,10 @@ export function CrmRecordForm({
           value === null ||
           value === "" ||
           (Array.isArray(value) && value.length === 0);
-        if (field.required && missing)
+        if (
+          field.required &&
+          (missing || (typeof value === "string" && !value.trim()))
+        )
           errors[field.key] = `${field.label} is required.`;
         else parsed[field.key] = value;
       } catch (error) {
@@ -139,62 +144,59 @@ export function CrmRecordForm({
   }
 
   return (
-    <section
-      className="space-y-4"
-      aria-labelledby={`crm-record-form-${object.key}`}
-    >
-      <h3
-        id={`crm-record-form-${object.key}`}
-        className="text-15 font-semibold"
-      >
-        {title}
-      </h3>
-      {readOnly ? (
-        <p className="rounded-lg border border-dashed border-border p-3 text-12 text-text-tertiary">
-          You have read-only access to this CRM.
-        </p>
-      ) : (
-        <Form {...form}>
-          <form className="space-y-4" onSubmit={form.handleSubmit(submit)}>
-            {fields.map((field) => {
-              const fieldError = form.formState.errors.values?.[field.key];
-              const message =
-                fieldError &&
-                "message" in fieldError &&
-                typeof fieldError.message === "string"
-                  ? fieldError.message
-                  : undefined;
-              return (
-                <CrmFieldEditor
-                  key={field.key}
-                  field={field}
-                  value={values[field.key]}
-                  ownerId={ownerId}
-                  error={message}
-                  onChange={(value) => {
-                    actionKey.current = null;
-                    form.setValue(`values.${field.key}`, value);
-                    form.clearErrors(`values.${field.key}`);
-                  }}
-                />
-              );
-            })}
-            {form.formState.errors.root?.message ? (
-              <p role="alert" className="text-11 text-destructive">
-                {form.formState.errors.root.message}
-              </p>
-            ) : null}
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={!form.formState.isDirty}
-              isLoading={create.isPending}
-            >
-              {submitLabel}
-            </Button>
-          </form>
-        </Form>
-      )}
-    </section>
+    <CrmOwnerContext value={ownerId ?? object.owner_id}>
+      <section className="space-y-4" aria-labelledby={headingId}>
+        <h3 id={headingId} className="text-15 font-semibold">
+          {title}
+        </h3>
+        {readOnly ? (
+          <p className="rounded-lg border border-dashed border-border p-3 text-12 text-text-tertiary">
+            You have read-only access to this CRM.
+          </p>
+        ) : (
+          <Form {...form}>
+            <form className="space-y-4" onSubmit={form.handleSubmit(submit)}>
+              {fields.map((field) => {
+                const fieldError = form.formState.errors.values?.[field.key];
+                const message =
+                  fieldError &&
+                  "message" in fieldError &&
+                  typeof fieldError.message === "string"
+                    ? fieldError.message
+                    : undefined;
+                return (
+                  <CrmFieldEditor
+                    key={field.key}
+                    disabled={create.isPending}
+                    field={field}
+                    value={values[field.key]}
+                    ownerId={ownerId}
+                    error={message}
+                    onChange={(value) => {
+                      actionKey.current = null;
+                      form.setValue(`values.${field.key}`, value);
+                      form.clearErrors(`values.${field.key}`);
+                    }}
+                  />
+                );
+              })}
+              {form.formState.errors.root?.message ? (
+                <p role="alert" className="text-11 text-destructive">
+                  {form.formState.errors.root.message}
+                </p>
+              ) : null}
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!form.formState.isDirty}
+                isLoading={create.isPending}
+              >
+                {submitLabel}
+              </Button>
+            </form>
+          </Form>
+        )}
+      </section>
+    </CrmOwnerContext>
   );
 }

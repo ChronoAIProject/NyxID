@@ -20,6 +20,8 @@ export function CrmRecordPicker({
   ownerId,
   disabled,
   onChange,
+  id,
+  describedBy,
 }: {
   readonly field: RecordField;
   readonly value: string | readonly string[] | null;
@@ -27,17 +29,23 @@ export function CrmRecordPicker({
   readonly ownerId?: string;
   readonly disabled?: boolean;
   readonly onChange: (value: string | string[] | null) => void;
+  readonly id?: string;
+  readonly describedBy?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [queryText, setQueryText] = useState("");
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
   const object = useCrmObject(field.target, ownerId, open);
   const titleField = object.data?.fields.find(
     (candidate) => candidate.type === "text" && candidate.required,
   );
   useEffect(() => {
     if (search.trim() === queryText) return;
-    const timer = window.setTimeout(() => setQueryText(search.trim()), 200);
+    const timer = window.setTimeout(() => {
+      setQueryText(search.trim());
+      setCursors([undefined]);
+    }, 200);
     return () => window.clearTimeout(timer);
   }, [queryText, search]);
   const records = useCrmTableQuery(
@@ -53,6 +61,7 @@ export function CrmRecordPicker({
             ? { field: titleField.key, direction: "asc" }
             : undefined,
           page_size: 50,
+          cursor: cursors.at(-1),
           include_archived: false,
         }
       : undefined,
@@ -109,6 +118,8 @@ export function CrmRecordPicker({
     >
       <PopoverTrigger asChild>
         <Button
+          id={id}
+          aria-describedby={describedBy}
           type="button"
           variant="outline"
           role="combobox"
@@ -189,6 +200,45 @@ export function CrmRecordPicker({
             <p className="p-3 text-11 text-text-tertiary">
               No matching records.
             </p>
+          ) : null}
+        </div>
+        <div className="flex justify-between gap-2">
+          {cursors.length > 1 ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={records.isFetching}
+              onClick={() => setCursors((current) => current.slice(0, -1))}
+            >
+              Previous results
+            </Button>
+          ) : null}
+          {records.data?.next_cursor ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={records.isFetching}
+              onClick={() =>
+                setCursors((current) => [
+                  ...current,
+                  records.data?.next_cursor ?? undefined,
+                ])
+              }
+            >
+              Next results
+            </Button>
+          ) : null}
+          {records.isError ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void records.refetch()}
+            >
+              Retry results
+            </Button>
           ) : null}
         </div>
         <div className="flex items-center justify-between border-t border-border/50 pt-2">

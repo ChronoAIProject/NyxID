@@ -1,3 +1,10 @@
+import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
+import { CrmOwnerContext } from "@/lib/crm/owner-context";
+import { CrmSchemaEditor } from "@/components/crm/schema-editor";
+import { CrmImportExport } from "@/components/crm/import-export";
+import { CrmDateReport } from "@/components/crm/date-report";
+import { useCrmLocation } from "@/lib/crm/location";
+import { useOrgs } from "@/hooks/use-orgs";
 import { useState } from "react";
 import { Columns3, List, Plus } from "lucide-react";
 import { CrmObjectTable } from "@/components/crm/object-table";
@@ -23,12 +30,31 @@ import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { CrmTableQuery } from "@/schemas/crm";
 import { useAuthStore } from "@/stores/auth-store";
 
-function CrmWorkspace() {
-  const objects = useCrmObjects();
-  const [selectedKey, setSelectedKey] = useState<string>();
+function CrmWorkspace({ ownerId }: { readonly ownerId?: string }) {
+  const location = useCrmLocation();
+  const setCrmLocation = location.set;
+  useNyxAgentLive(true);
+  const objects = useCrmObjects(ownerId);
+  const selectedKey = location.get("object") ?? undefined;
+  const setSelectedKey = (object: string) =>
+    setCrmLocation({ object, record: undefined });
   const [mode, setMode] = useState<"table" | "pipeline">("table");
-  const [surface, setSurface] = useState<"records" | "views">("records");
-  const [recordId, setRecordId] = useState<string>();
+  const surface =
+    location.has("view") || location.get("surface") === "views"
+      ? "views"
+      : "records";
+  const setSurface = (next: "records" | "views") =>
+    setCrmLocation({
+      surface: next === "views" ? "views" : undefined,
+      view: undefined,
+      record: undefined,
+    });
+  const [panel, setPanel] = useState<"schema" | "transfer" | "report">();
+  const [includeArchived, setIncludeArchived] = useState(false);
+  const [exportQuery, setExportQuery] = useState<CrmTableQuery>();
+  const recordId = location.get("record") ?? undefined;
+  const setRecordId = (record: string | undefined) =>
+    setCrmLocation({ record });
   const [createOpen, setCreateOpen] = useState(false);
   const object =
     objects.data?.find((candidate) => candidate.key === selectedKey) ??
@@ -43,7 +69,7 @@ function CrmWorkspace() {
         ),
         filters: [],
         page_size: 50,
-        include_archived: false,
+        include_archived: includeArchived && effectiveMode === "table",
       }
     : undefined;
 
@@ -88,7 +114,7 @@ function CrmWorkspace() {
         </Button>
       </div>
 
-      {surface === "views" ? <CrmViewsPanel /> : null}
+      {surface === "views" ? <CrmViewsPanel ownerId={ownerId} /> : null}
 
       {surface === "records" && objects.isPending ? (
         <p role="status" className="text-12 text-text-tertiary">
@@ -163,19 +189,108 @@ function CrmWorkspace() {
             </div>
           </div>
 
+          <div className="flex flex-wrap items-center gap-2">
+            {effectiveMode === "table" ? (
+              <label className="flex gap-2 text-12">
+                <input
+                  type="checkbox"
+                  checked={includeArchived}
+                  onChange={(event) => setIncludeArchived(event.target.checked)}
+                />
+                Include archived records
+              </label>
+            ) : null}
+            {object.access === "schema" ? (
+              <Button
+                variant="outline"
+                size="sm"
+                aria-pressed={panel === "schema"}
+                onClick={() =>
+                  setPanel(panel === "schema" ? undefined : "schema")
+                }
+              >
+                Schema settings
+              </Button>
+            ) : null}
+            <Button
+              variant="outline"
+              size="sm"
+              aria-pressed={panel === "transfer"}
+              onClick={() =>
+                setPanel(panel === "transfer" ? undefined : "transfer")
+              }
+            >
+              Import / export
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              aria-pressed={panel === "report"}
+              onClick={() =>
+                setPanel(panel === "report" ? undefined : "report")
+              }
+            >
+              Dated report
+            </Button>
+          </div>
+          {panel === "schema" && object.access === "schema" ? (
+            <CrmSchemaEditor
+              key={object.key}
+              object={object}
+              objects={objects.data}
+              ownerId={ownerId}
+            />
+          ) : null}
+          {panel === "transfer" ? (
+            <CrmImportExport
+              key={JSON.stringify(query)}
+              object={object}
+              query={
+                effectiveMode === "table" &&
+                exportQuery?.object === query.object
+                  ? exportQuery
+                  : query
+              }
+              ownerId={ownerId}
+            />
+          ) : null}
+          {panel === "report" ? (
+            <CrmDateReport
+              key={object.key}
+              object={object}
+              query={
+                effectiveMode === "table" &&
+                exportQuery?.object === query.object
+                  ? exportQuery
+                  : query
+              }
+              ownerId={ownerId}
+            />
+          ) : null}
           {effectiveMode === "pipeline" ? (
-            <CrmPipelineBoard query={query} onSelectRecord={setRecordId} />
+            <CrmPipelineBoard
+              ownerId={ownerId}
+              query={query}
+              onSelectRecord={setRecordId}
+            />
           ) : (
-            <CrmObjectTable query={query} onSelectRecord={setRecordId} />
+            <CrmObjectTable
+              ownerId={ownerId}
+              onQueryChange={setExportQuery}
+              query={query}
+              onSelectRecord={setRecordId}
+            />
           )}
 
           <CrmCreateRecordSheet
+            ownerId={ownerId}
             object={object}
             open={createOpen}
             onOpenChange={setCreateOpen}
             onCreated={setRecordId}
           />
           <CrmRecordSheet
+            ownerId={ownerId}
             recordId={recordId}
             open={Boolean(recordId)}
             onOpenChange={(open) => {
@@ -189,17 +304,52 @@ function CrmWorkspace() {
   );
 }
 
+function EnabledCrmPage() {
+  const actor = useAuthStore((state) => state.user?.id);
+  const location = useCrmLocation();
+  const orgs = useOrgs();
+  const owner = location.get("owner") ?? actor;
+  return (
+    <CrmOwnerContext value={owner}>
+      <div className="space-y-4">
+        <label className="flex items-center gap-3 text-12">
+          CRM owner
+          <select
+            aria-label="CRM owner"
+            className="rounded-lg border border-border bg-background p-2"
+            value={owner ?? ""}
+            onChange={(event) =>
+              location.set({
+                owner: event.target.value,
+                record: undefined,
+                view: undefined,
+                object: undefined,
+                surface: undefined,
+              })
+            }
+          >
+            <option value={actor}>Personal workspace</option>
+            {orgs.data?.map((org) => (
+              <option key={org.id} value={org.id}>
+                {org.display_name ?? org.slug}
+              </option>
+            ))}
+          </select>
+        </label>
+        <CrmWorkspace key={`${actor}:${owner}`} ownerId={owner} />
+      </div>
+    </CrmOwnerContext>
+  );
+}
 export function CrmPage() {
   const loading = useAuthStore((state) => state.isLoading);
   const enabled = useFeature(FEATURE_FLAG.CRM);
-
   if (loading) return null;
-  if (!enabled) {
+  if (!enabled)
     return (
       <p className="text-13 text-text-secondary">
         CRM isn't available for your account.
       </p>
     );
-  }
-  return <CrmWorkspace />;
+  return <EnabledCrmPage />;
 }

@@ -86,3 +86,39 @@ describe("CrmRecordForm", () => {
     );
   });
 });
+
+it("keeps label, error and heading associations unique across two forms for one object", () => {
+  const linked: CrmObject = {
+    ...object,
+    fields: [
+      ...object.fields,
+      {
+        key: "company",
+        label: "Company",
+        type: "record",
+        target: "company",
+        cardinality: "one",
+        required: false,
+        archived: false,
+      },
+    ],
+  };
+  const { container } = render(
+    <>
+      <CrmRecordForm object={linked} title="First company" />
+      <CrmRecordForm object={linked} title="Second company" />
+    </>,
+  );
+  const ids = [...container.querySelectorAll("[id]")].map(
+    (element) => element.id,
+  );
+  expect(new Set(ids).size).toBe(ids.length);
+  for (const label of container.querySelectorAll("label[for]"))
+    expect(
+      container.querySelector(`[id="${label.getAttribute("for")}"]`),
+    ).toBeTruthy();
+  expect(screen.getAllByRole("combobox", { name: "Company" })).toHaveLength(2);
+  expect(screen.getByRole("region", { name: "First company" })).not.toBe(
+    screen.getByRole("region", { name: "Second company" }),
+  );
+});

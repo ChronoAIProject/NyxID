@@ -1,3 +1,5 @@
+import { useId } from "react";
+import { CrmPeoplePicker } from "@/components/crm/people-picker";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -31,7 +33,8 @@ export function CrmFieldEditor({
   readonly disabled?: boolean;
   readonly onChange: (value: unknown) => void;
 }) {
-  const id = `crm-field-${field.key}`;
+  const instanceId = useId();
+  const id = `crm-field-${instanceId}-${field.key}`;
   const describedBy = error ? `${id}-error` : undefined;
   let control;
 
@@ -47,7 +50,18 @@ export function CrmFieldEditor({
         onChange={(event) => onChange(event.target.value)}
       />
     );
-  } else if (field.type === "text" || field.type === "user") {
+  } else if (field.type === "user") {
+    control = (
+      <CrmPeoplePicker
+        id={id}
+        describedBy={describedBy}
+        value={value}
+        ownerId={ownerId}
+        disabled={disabled}
+        onChange={onChange}
+      />
+    );
+  } else if (field.type === "text") {
     control = (
       <Input
         id={id}
@@ -85,7 +99,7 @@ export function CrmFieldEditor({
       </div>
     );
   } else if (field.type === "boolean") {
-    control = (
+    control = field.required ? (
       <div className="flex min-h-8 items-center">
         <Switch
           id={id}
@@ -95,6 +109,29 @@ export function CrmFieldEditor({
           onCheckedChange={onChange}
         />
       </div>
+    ) : (
+      <Select
+        value={
+          value === null || value === undefined ? UNSET : String(value === true)
+        }
+        disabled={disabled}
+        onValueChange={(next) =>
+          onChange(next === UNSET ? null : next === "true")
+        }
+      >
+        <SelectTrigger
+          id={id}
+          aria-invalid={Boolean(error)}
+          aria-describedby={describedBy}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={UNSET}>Not set</SelectItem>
+          <SelectItem value="true">Yes</SelectItem>
+          <SelectItem value="false">No</SelectItem>
+        </SelectContent>
+      </Select>
     );
   } else if (field.type === "date" || field.type === "datetime") {
     control = (
@@ -141,6 +178,8 @@ export function CrmFieldEditor({
   } else {
     control = (
       <CrmRecordPicker
+        id={id}
+        describedBy={describedBy}
         field={field}
         value={
           field.cardinality === "many"

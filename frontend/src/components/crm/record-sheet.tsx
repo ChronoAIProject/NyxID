@@ -1,4 +1,7 @@
-import { useRef, useState } from "react";
+import { CrmPeopleLabels, CrmPersonName } from "@/components/crm/people-picker";
+import { crmLink } from "@/lib/crm/record-navigation";
+import { crmAuthorityRefused } from "@/lib/crm/query-visibility";
+import { useEffect, useRef, useState } from "react";
 import { Archive, ArchiveRestore, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { CrmActivityTimeline } from "@/components/crm/activity-timeline";
@@ -237,6 +240,17 @@ function CrmRecordEditor({
   const form = useAppForm<RecordFormValues>({
     defaultValues: editorValues(object, record),
   });
+  const baseline = useRef(record);
+  const dirty = form.formState.isDirty;
+  useEffect(() => {
+    if (!dirty && baseline.current.revision !== record.revision) {
+      baseline.current = record;
+      form.reset(editorValues(object, record));
+    }
+  }, [dirty, form, object, record]);
+  const currentConflict =
+    conflict ??
+    (dirty && record.revision !== baseline.current.revision ? record : null);
   const editableFields = object.fields.filter((field) => !field.archived);
 
   async function save(
@@ -246,33 +260,32 @@ function CrmRecordEditor({
     form.clearErrors();
     let patch = retainedPatch;
     if (!patch) {
-      const changedValueFields = editableFields.filter((field) =>
-        form.getFieldState(`values.${field.key}`).isDirty,
+      const changedValueFields = editableFields.filter(
+        (field) => form.getFieldState(`values.${field.key}`).isDirty,
       );
-      const parsed = parseValues(
-        changedValueFields,
-        form.getValues("values"),
-      );
+      const parsed = parseValues(changedValueFields, form.getValues("values"));
       if (Object.keys(parsed.errors).length) {
         setFieldErrors(form, parsed.errors);
         return;
       }
       const protection = form.getValues("protected");
-      const changedProtectionFields = editableFields.filter((field) =>
-        form.getFieldState(`protected.${field.key}`).isDirty,
+      const changedProtectionFields = editableFields.filter(
+        (field) => form.getFieldState(`protected.${field.key}`).isDirty,
       );
       patch = {
         values: parsed.data,
         protect: changedProtectionFields
           .filter(
             (field) =>
-              protection[field.key] && !record.overrides.includes(field.key),
+              protection[field.key] &&
+              !baseline.current.overrides.includes(field.key),
           )
           .map((field) => field.key),
         unprotect: changedProtectionFields
           .filter(
             (field) =>
-              !protection[field.key] && record.overrides.includes(field.key),
+              !protection[field.key] &&
+              baseline.current.overrides.includes(field.key),
           )
           .map((field) => field.key),
       };
@@ -280,7 +293,7 @@ function CrmRecordEditor({
     pendingPatch.current = patch;
     try {
       actionKey.current ??= crypto.randomUUID();
-      await update.mutateAsync({
+      const saved = await update.mutateAsync({
         id: record.id,
         expectedRevision,
         ...patch,
@@ -289,6 +302,8 @@ function CrmRecordEditor({
       actionKey.current = null;
       pendingPatch.current = null;
       setConflict(null);
+      baseline.current = saved;
+      form.reset(editorValues(object, saved));
       toast.success(`${object.label} saved`);
       onSaved();
     } catch (error) {
@@ -312,30 +327,35 @@ function CrmRecordEditor({
     <Form {...form}>
       <form
         className="space-y-5"
-        onSubmit={form.handleSubmit(() => save(record.revision))}
+        onSubmit={form.handleSubmit(() => save(baseline.current.revision))}
       >
-        {conflict ? (
+        {currentConflict ? (
           <ConflictNotice
             object={object}
-            current={conflict}
+            current={currentConflict}
             pending={update.isPending}
             onRetry={() => {
-              if (pendingPatch.current)
-                void save(conflict.revision, pendingPatch.current);
+              actionKey.current = null;
+              void save(
+                currentConflict.revision,
+                pendingPatch.current ?? undefined,
+              );
             }}
           />
         ) : null}
-        <RecordFields
-          object={object}
-          form={form}
-          record={record}
-          ownerId={ownerId}
-          onAnyChange={() => {
-            actionKey.current = null;
-            pendingPatch.current = null;
-            setConflict(null);
-          }}
-        />
+        <fieldset disabled={update.isPending} className="space-y-5">
+          <RecordFields
+            object={object}
+            form={form}
+            record={record}
+            ownerId={ownerId}
+            onAnyChange={() => {
+              actionKey.current = null;
+              pendingPatch.current = null;
+              setConflict(null);
+            }}
+          />
+        </fieldset>
         {form.formState.errors.root?.message ? (
           <p role="alert" className="text-11 text-destructive">
             {form.formState.errors.root.message}
@@ -411,9 +431,12 @@ export function CrmRecordSheet({
   const object = useCrmObject(detail.data?.object_key, ownerId, open);
   const related = useCrmRelated(open ? recordId : undefined, ownerId);
   const archive = useSetCrmRecordArchived(ownerId);
-  const archiveActionKey = useRef<string | null>(null);
+  const archiveActionKeys = useRef(new Map<string, string>());
   const data =
-    detail.data && object.data
+    !crmAuthorityRefused(detail.error) &&
+    !crmAuthorityRefused(object.error) &&
+    detail.data &&
+    object.data
       ? { record: detail.data, object: object.data }
       : undefined;
   const titleField = data?.object.fields.find(
@@ -442,14 +465,72 @@ export function CrmRecordSheet({
           ) : null}
           {detail.isError || object.isError ? (
             <p role="alert" className="text-12 text-destructive">
-              Could not load this record.
+              Could not refresh this record. Temporary errors retain your draft;
+              retry when connected.
             </p>
           ) : null}
           {data ? (
-            <>
+            <CrmPeopleLabels
+              ownerId={data.record.owner_id}
+              ids={[
+                ...(data.record.updated_by
+                  ? [data.record.updated_by.user_id]
+                  : []),
+                ...data.object.fields
+                  .filter((field) => field.type === "user")
+                  .flatMap((field) =>
+                    typeof data.record.values[field.key] === "string"
+                      ? [data.record.values[field.key] as string]
+                      : [],
+                  ),
+              ]}
+            >
+              <a
+                className="text-11 underline"
+                href={crmLink({
+                  ownerId: data.record.owner_id,
+                  recordId: data.record.id,
+                  object: data.object.key,
+                })}
+              >
+                Link to this record
+              </a>
+              {data.record.updated_by ? (
+                <p className="text-11 text-text-tertiary">
+                  Last updated by{" "}
+                  <CrmPersonName id={data.record.updated_by.user_id} /> ·{" "}
+                  {data.record.updated_by.kind === "agent"
+                    ? (data.record.updated_by.agent_name ??
+                      "Unavailable specialist")
+                    : "Human"}{" "}
+                  · {new Date(data.record.updated_at).toLocaleString()}
+                  {data.record.updated_by.source
+                    ? ` · source time ${new Date(data.record.updated_by.source.ordered_at).toLocaleString()}`
+                    : ""}
+                </p>
+              ) : null}
+              {Object.keys(data.record.field_sources ?? {}).length ? (
+                <details className="text-11">
+                  <summary>Field source times</summary>
+                  <dl>
+                    {Object.entries(data.record.field_sources ?? {}).map(
+                      ([key, time]) => (
+                        <div key={key}>
+                          <dt>
+                            {data.object.fields.find(
+                              (field) => field.key === key,
+                            )?.label ?? key}
+                          </dt>
+                          <dd>{new Date(time).toLocaleString()}</dd>
+                        </div>
+                      ),
+                    )}
+                  </dl>
+                </details>
+              ) : null}
               {data.object.access !== "read" ? (
                 <CrmRecordEditor
-                  key={data.record.revision}
+                  key={`editor:${data.record.owner_id}:${data.record.id}`}
                   object={data.object}
                   record={data.record}
                   ownerId={ownerId}
@@ -484,6 +565,32 @@ export function CrmRecordSheet({
                   </dl>
                 </section>
               )}
+              {data.object.fields.some((field) => field.archived) ? (
+                <section className="space-y-3" aria-label="Archived fields">
+                  <h3 className="text-13 font-semibold">Archived fields</h3>
+                  <dl className="space-y-2">
+                    {data.object.fields
+                      .filter((field) => field.archived)
+                      .map((field) => (
+                        <div
+                          key={field.key}
+                          className="grid grid-cols-2 gap-3 text-12"
+                        >
+                          <dt className="text-text-tertiary">
+                            {field.label} (archived)
+                          </dt>
+                          <dd className="min-w-0 break-words">
+                            {renderCrmCell(
+                              field,
+                              data.record.values[field.key],
+                              data.record.links[field.key],
+                            )}
+                          </dd>
+                        </div>
+                      ))}
+                  </dl>
+                </section>
+              ) : null}
               <section
                 className="space-y-3"
                 aria-labelledby="crm-related-title"
@@ -496,21 +603,23 @@ export function CrmRecordSheet({
                     Loading related records...
                   </p>
                 ) : null}
-                {related.data?.groups.length === 0 ? (
+                {!related.isError && related.data?.groups.length === 0 ? (
                   <div className="rounded-lg border border-dashed border-border p-3 text-11 text-text-tertiary">
                     No related records.
                   </div>
                 ) : null}
-                {related.data?.groups.map((group) => (
-                  <RelatedRecordsGroup
-                    key={`${group.object_key}:${group.field_key}`}
-                    group={group}
-                    ownerId={ownerId}
-                    onSelectRecord={onSelectRecord}
-                  />
-                ))}
+                {!related.isError &&
+                  related.data?.groups.map((group) => (
+                    <RelatedRecordsGroup
+                      key={`${group.object_key}:${group.field_key}`}
+                      group={group}
+                      ownerId={ownerId}
+                      onSelectRecord={onSelectRecord}
+                    />
+                  ))}
               </section>
               <CrmActivityTimeline
+                key={`activity:${data.record.owner_id}:${data.record.id}`}
                 recordId={data.record.id}
                 ownerId={ownerId}
                 canWrite={data.object.access !== "read"}
@@ -523,14 +632,18 @@ export function CrmRecordSheet({
                     isLoading={archive.isPending}
                     onClick={async () => {
                       try {
-                        archiveActionKey.current ??= crypto.randomUUID();
+                        const identity = `${data.record.owner_id}:${data.record.id}:${data.record.archived}`;
+                        const key =
+                          archiveActionKeys.current.get(identity) ??
+                          crypto.randomUUID();
+                        archiveActionKeys.current.set(identity, key);
                         await archive.mutateAsync({
                           id: data.record.id,
                           expectedRevision: data.record.revision,
                           archived: !data.record.archived,
-                          idempotencyKey: archiveActionKey.current,
+                          idempotencyKey: key,
                         });
-                        archiveActionKey.current = null;
+                        archiveActionKeys.current.delete(identity);
                         toast.success(
                           data.record.archived
                             ? "Record restored"
@@ -557,7 +670,7 @@ export function CrmRecordSheet({
                   </Button>
                 </div>
               ) : null}
-            </>
+            </CrmPeopleLabels>
           ) : null}
         </div>
       </SheetContent>

@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { CrmPeopleLabels, CrmPersonName } from "@/components/crm/people-picker";
+import { useRef } from "react";
 import {
   FilePlus2,
   MessageSquareText,
@@ -8,7 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Form, useAppForm } from "@/components/ui/form";
 import { Textarea } from "@/components/ui/textarea";
-import { useAddCrmNote, useCrmActivities } from "@/hooks/use-crm";
+import { useAddCrmNote, useCrmActivityHistory } from "@/hooks/use-crm";
 import type { CrmActivity } from "@/schemas/crm";
 
 function ActivityIcon({ kind }: { readonly kind: CrmActivity["kind"] }) {
@@ -41,96 +42,157 @@ export function CrmActivityTimeline({
   readonly ownerId?: string;
   readonly canWrite?: boolean;
 }) {
-  const activities = useCrmActivities(recordId, undefined, ownerId);
+  const activities = useCrmActivityHistory(recordId, ownerId);
   const addNote = useAddCrmNote(ownerId);
   const actionKey = useRef<string | null>(null);
   const form = useAppForm<{ body: string }>({ defaultValues: { body: "" } });
   const bodyField = form.register("body", { required: true });
-  useEffect(() => {
-    if (addNote.isSuccess) form.reset({ body: "" });
-  }, [addNote.isSuccess, form]);
+  const history = [
+    ...new Map(
+      activities.data?.pages.flatMap((page) =>
+        page.activities.map((activity) => [activity.id, activity] as const),
+      ),
+    ).values(),
+  ];
   return (
-    <section className="space-y-3" aria-labelledby="crm-activity-title">
-      <h3 id="crm-activity-title" className="text-13 font-semibold">
-        Activity
-      </h3>
-      {canWrite ? (
-        <Form {...form}>
-          <form
-            className="space-y-2"
-            onSubmit={form.handleSubmit(async ({ body }) => {
-              actionKey.current ??= crypto.randomUUID();
-              await addNote.mutateAsync({
-                id: recordId,
-                body,
-                idempotencyKey: actionKey.current,
-              });
-              actionKey.current = null;
-              await activities.refetch();
-            })}
-          >
-            <Textarea
-              aria-label="Add a note"
-              placeholder="Add a note..."
-              maxLength={10_000}
-              {...bodyField}
-              onChange={(event) => {
-                actionKey.current = null;
-                void bodyField.onChange(event);
-              }}
-            />
-            <div className="flex justify-end">
-              <Button
-                type="submit"
-                size="sm"
-                variant="primary"
-                disabled={!form.formState.isDirty || !form.watch("body").trim()}
-                isLoading={addNote.isPending}
-              >
-                Add note
-              </Button>
-            </div>
-            {addNote.isError ? (
-              <p role="alert" className="text-11 text-destructive">
-                Could not add the note.
-              </p>
-            ) : null}
-          </form>
-        </Form>
-      ) : null}
-      {activities.isPending ? (
-        <p role="status" className="text-11 text-text-tertiary">
-          Loading activity...
-        </p>
-      ) : null}
-      {activities.isError ? (
-        <p role="alert" className="text-11 text-destructive">
-          Could not load activity.
-        </p>
-      ) : null}
-      <ol className="space-y-3">
-        {activities.data?.activities.map((activity) => (
-          <li
-            key={activity.id}
-            className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2"
-          >
-            <span
-              className="mt-0.5 flex size-6 items-center justify-center rounded-md border border-border/50 bg-overlay text-text-tertiary [&_svg]:size-3"
-              aria-hidden="true"
+    <CrmPeopleLabels
+      ownerId={ownerId}
+      ids={history.map((activity) => activity.actor.user_id)}
+    >
+      <section className="space-y-3" aria-labelledby="crm-activity-title">
+        <h3 id="crm-activity-title" className="text-13 font-semibold">
+          Activity
+        </h3>
+        {canWrite ? (
+          <Form {...form}>
+            <form
+              className="space-y-2"
+              onSubmit={form.handleSubmit(async ({ body }) => {
+                try {
+                  actionKey.current ??= crypto.randomUUID();
+                  await addNote.mutateAsync({
+                    id: recordId,
+                    body,
+                    idempotencyKey: actionKey.current,
+                  });
+                  actionKey.current = null;
+                  form.reset({ body: "" });
+                  await activities.refetch();
+                } catch {
+                  // The mutation exposes the failure below; retain the draft and retry key.
+                }
+              })}
             >
-              <ActivityIcon kind={activity.kind} />
-            </span>
-            <div className="min-w-0">
-              <p className="whitespace-pre-wrap text-12 text-foreground">
-                {activityText(activity)}
-              </p>
-              <p className="text-11 text-text-tertiary">
-                {new Date(activity.created_at).toLocaleString()}
-              </p>
-            </div>
-          </li>
-        ))}
-      </ol>
-    </section>
+              <Textarea
+                disabled={addNote.isPending}
+                aria-label="Add a note"
+                placeholder="Add a note..."
+                maxLength={10_000}
+                {...bodyField}
+                onChange={(event) => {
+                  actionKey.current = null;
+                  void bodyField.onChange(event);
+                }}
+              />
+              <div className="flex justify-end">
+                <Button
+                  type="submit"
+                  size="sm"
+                  variant="primary"
+                  disabled={
+                    !form.formState.isDirty || !form.watch("body").trim()
+                  }
+                  isLoading={addNote.isPending}
+                >
+                  Add note
+                </Button>
+              </div>
+              {addNote.isError ? (
+                <p role="alert" className="text-11 text-destructive">
+                  Could not add the note.
+                </p>
+              ) : null}
+            </form>
+          </Form>
+        ) : null}
+        {activities.isPending ? (
+          <p role="status" className="text-11 text-text-tertiary">
+            Loading activity...
+          </p>
+        ) : null}
+        {activities.isError ? (
+          <div role="alert" className="space-y-2 text-11 text-destructive">
+            <p>Could not load activity.</p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void activities.refetch()}
+            >
+              Retry history
+            </Button>
+          </div>
+        ) : null}
+        <ol className="space-y-3">
+          {history.map((activity) => (
+            <li
+              key={activity.id}
+              className="grid grid-cols-[1.5rem_minmax(0,1fr)] gap-2"
+            >
+              <span
+                className="mt-0.5 flex size-6 items-center justify-center rounded-md border border-border/50 bg-overlay text-text-tertiary [&_svg]:size-3"
+                aria-hidden="true"
+              >
+                <ActivityIcon kind={activity.kind} />
+              </span>
+              <div className="min-w-0">
+                <p className="whitespace-pre-wrap text-12 text-foreground">
+                  {activityText(activity)}
+                </p>
+                {activity.kind === "stage_changed" &&
+                (activity.summary.changed_fields?.length ?? 0) > 1 ? (
+                  <p className="text-11 text-text-tertiary">
+                    Changed fields:{" "}
+                    {activity.summary.changed_fields?.join(", ")}
+                  </p>
+                ) : null}
+                <p className="text-11 text-text-tertiary">
+                  <CrmPersonName id={activity.actor.user_id} /> ·{" "}
+                  {activity.actor.kind === "agent"
+                    ? (activity.actor.agent_name ??
+                      `Specialist ${activity.actor.agent_id ?? "unavailable"}`)
+                    : "Human"}{" "}
+                  · {new Date(activity.created_at).toLocaleString()}
+                  {activity.actor.source ? (
+                    <span className="block">
+                      {activity.actor.source.run_id
+                        ? `Scheduled run ${activity.actor.source.run_id}`
+                        : "Assistant turn"}{" "}
+                      · source time{" "}
+                      {new Date(
+                        activity.actor.source.ordered_at,
+                      ).toLocaleString()}
+                    </span>
+                  ) : null}
+                </p>
+              </div>
+            </li>
+          ))}
+        </ol>
+        {activities.hasNextPage ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            isLoading={activities.isFetchingNextPage}
+            onClick={() => void activities.fetchNextPage()}
+          >
+            {activities.isFetchNextPageError
+              ? "Retry older activity"
+              : "Load older activity"}
+          </Button>
+        ) : null}
+      </section>
+    </CrmPeopleLabels>
   );
 }

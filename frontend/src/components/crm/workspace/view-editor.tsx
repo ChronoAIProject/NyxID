@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { CheckCircle2, Save, ShieldCheck, X } from "lucide-react";
 import { z } from "zod";
 import { CrmViewErrors } from "@/components/crm/workspace/view-errors";
@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  useGenerateCrmView,
   useCreateCrmView,
   useUpdateCrmView,
   useValidateCrmView,
@@ -50,7 +51,9 @@ const DEFAULT_CRM_VIEW_ENVELOPE: CrmViewEnvelope = {
 function readValidationErrors(cause: unknown): readonly CrmValidationError[] {
   if (!(cause instanceof ApiError)) return [];
   const parsed = validationDetailsSchema.safeParse(
-    cause.errorResponse.details,
+    cause.errorResponse.errors !== undefined
+      ? { errors: cause.errorResponse.errors }
+      : cause.errorResponse.details,
   );
   return parsed.success ? parsed.data.errors : [];
 }
@@ -74,11 +77,13 @@ export function CrmViewEditor({
   readonly onReload?: () => void;
   readonly objects?: readonly CrmViewObjectMetadata[];
 }) {
-  const initialTitle = view?.title ?? "";
+  const editorId = useId();
+  const [baseline, setBaseline] = useState(view);
+  const initialTitle = baseline?.title ?? "";
   const initialJson = useMemo(
     () =>
-      JSON.stringify(view?.envelope ?? DEFAULT_CRM_VIEW_ENVELOPE, null, 2),
-    [view?.envelope],
+      JSON.stringify(baseline?.envelope ?? DEFAULT_CRM_VIEW_ENVELOPE, null, 2),
+    [baseline?.envelope],
   );
   const [title, setTitle] = useState(initialTitle);
   const [json, setJson] = useState(initialJson);
@@ -87,12 +92,61 @@ export function CrmViewEditor({
   const [conflict, setConflict] = useState(false);
   const [requestError, setRequestError] = useState<string>();
   const actionKey = useRef<string | null>(null);
+  const draftVersion = useRef(0);
+  const [generationPrompt, setGenerationPrompt] = useState("");
+  const [generationObject, setGenerationObject] = useState(
+    objects?.[0]?.key ?? "company",
+  );
+  const generate = useGenerateCrmView(ownerId);
+  const generationKey = useRef<string | null>(null);
+  const [generationFailed, setGenerationFailed] = useState(false);
+  async function generateDraft() {
+    setRequestError(undefined);
+    setGenerationFailed(false);
+    generationKey.current ??= crypto.randomUUID();
+    const version = draftVersion.current;
+    try {
+      const result = await generate.mutateAsync({
+        object: generationObject,
+        prompt: generationPrompt,
+        draft: JSON.parse(json) as unknown,
+        idempotencyKey: generationKey.current,
+      });
+      if (version !== draftVersion.current) return;
+      generationKey.current = null;
+      actionKey.current = null;
+      draftVersion.current += 1;
+      setJson(JSON.stringify(result.envelope, null, 2));
+      setErrors(result.errors);
+      setValidated(result.valid);
+    } catch (error) {
+      setGenerationFailed(true);
+      setRequestError(readableError(error));
+    }
+  }
   const validateView = useValidateCrmView(ownerId);
   const createView = useCreateCrmView(ownerId);
   const updateView = useUpdateCrmView(ownerId);
   const isPending =
-    validateView.isPending || createView.isPending || updateView.isPending;
+    validateView.isPending ||
+    createView.isPending ||
+    updateView.isPending ||
+    generate.isPending;
   const isDirty = title !== initialTitle || json !== initialJson;
+  useEffect(() => {
+    if (
+      !isDirty &&
+      !isPending &&
+      view &&
+      view.revision !== baseline?.revision
+    ) {
+      setBaseline(view);
+      setTitle(view.title);
+      setJson(JSON.stringify(view.envelope, null, 2));
+      setValidated(false);
+      actionKey.current = null;
+    }
+  }, [view, baseline?.revision, isDirty, isPending]);
 
   function parseDraft(): CrmViewEnvelope | undefined {
     setValidated(false);
@@ -122,10 +176,12 @@ export function CrmViewEditor({
   }
 
   async function validateDraft() {
+    const version = draftVersion.current;
     const envelope = parseDraft();
     if (!envelope) return undefined;
     try {
       const result = await validateView.mutateAsync(envelope);
+      if (version !== draftVersion.current) return undefined;
       setErrors(result.errors);
       setValidated(result.valid);
       return result.valid ? envelope : undefined;
@@ -138,21 +194,23 @@ export function CrmViewEditor({
   }
 
   async function handleSave() {
+    const version = draftVersion.current;
+    const savingTitle = title.trim();
     actionKey.current ??= crypto.randomUUID();
     const idempotencyKey = actionKey.current;
     const envelope = await validateDraft();
-    if (!envelope) return;
+    if (!envelope || version !== draftVersion.current) return;
     try {
       const saved = view
         ? await updateView.mutateAsync({
             id: view.id,
-            title: title.trim(),
+            title: savingTitle,
             envelope,
-            expectedRevision: view.revision,
+            expectedRevision: baseline?.revision ?? view.revision,
             idempotencyKey,
           })
         : await createView.mutateAsync({
-            title: title.trim(),
+            title: savingTitle,
             envelope,
             idempotencyKey,
           });
@@ -199,27 +257,103 @@ export function CrmViewEditor({
       </div>
 
       <div className="space-y-2">
-        <Label htmlFor="crm-view-title">View name</Label>
+        <Label htmlFor={`${editorId}-title`}>View name</Label>
         <Input
-          id="crm-view-title"
+          id={`${editorId}-title`}
           value={title}
           maxLength={200}
+          disabled={isPending}
           onChange={(event) => {
             actionKey.current = null;
+            draftVersion.current += 1;
             setTitle(event.target.value);
             setValidated(false);
           }}
         />
       </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="crm-view-json">JSON envelope</Label>
+      <div className="space-y-2 rounded-lg border border-border p-3">
+        <Label htmlFor={`${editorId}-prompt`}>Describe a workspace</Label>
+        <select
+          aria-label="Workspace object"
+          value={generationObject}
+          disabled={isPending}
+          className="rounded-lg border border-input bg-background px-3 py-2 text-12"
+          onChange={(event) => {
+            generationKey.current = null;
+            setGenerationFailed(false);
+            setRequestError(undefined);
+            setGenerationObject(event.target.value);
+          }}
+        >
+          {objects?.map((object) => (
+            <option key={object.key} value={object.key}>
+              {object.key}
+            </option>
+          ))}
+        </select>
         <Textarea
-          id="crm-view-json"
+          id={`${editorId}-prompt`}
+          value={generationPrompt}
+          maxLength={4000}
+          disabled={isPending}
+          onChange={(event) => {
+            generationKey.current = null;
+            setGenerationFailed(false);
+            setRequestError(undefined);
+            setGenerationPrompt(event.target.value);
+          }}
+          placeholder="Show open opportunities by stage with a pipeline value chart"
+        />
+        <Button
+          type="button"
+          variant="outline"
+          disabled={isPending || !generationPrompt.trim()}
+          isLoading={generate.isPending}
+          onClick={() => void generateDraft()}
+        >
+          {generationFailed ? "Retry same generation" : "Generate draft"}
+        </Button>
+        {generationFailed ? (
+          <div className="space-y-2 text-11">
+            <p>
+              Retrying keeps the same request identity. If inference was
+              dispatched but its result is unavailable, this request will not
+              run again. You can explicitly start a new attempt, which may incur
+              another inference charge.
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isPending}
+              onClick={() => {
+                generationKey.current = null;
+                void generateDraft();
+              }}
+            >
+              Start a new generation attempt
+            </Button>
+          </div>
+        ) : null}
+        <p className="text-11 text-text-tertiary">
+          Generation uses object metadata. Review the draft and save it when
+          ready.
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor={`${editorId}-json`}>JSON envelope</Label>
+        <Textarea
+          id={`${editorId}-json`}
           value={json}
           spellCheck={false}
+          disabled={isPending}
           onChange={(event) => {
             actionKey.current = null;
+            generationKey.current = null;
+            setGenerationFailed(false);
+            setRequestError(undefined);
+            draftVersion.current += 1;
             setJson(event.target.value);
             setValidated(false);
           }}
@@ -237,7 +371,7 @@ export function CrmViewEditor({
           View is valid.
         </div>
       ) : null}
-      {conflict ? (
+      {conflict || (view && baseline && view.revision !== baseline.revision) ? (
         <div
           role="alert"
           className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/25 bg-warning/[0.04] px-3 py-2"
@@ -246,7 +380,12 @@ export function CrmViewEditor({
             This view changed after the editor opened.
           </p>
           {onReload ? (
-            <Button type="button" size="sm" variant="outline" onClick={onReload}>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={onReload}
+            >
               Reload current view
             </Button>
           ) : null}

@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { renderCrmRoute } from "@/test/crm-router";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CrmViewsPanel } from "@/components/crm/workspace";
 
@@ -13,6 +14,7 @@ vi.mock("@/hooks/use-crm", () => ({
 }));
 
 vi.mock("@/hooks/use-crm-views", () => ({
+  useDeleteCrmView: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useCrmViews: mockViews,
   useCrmView: mockView,
 }));
@@ -52,7 +54,7 @@ beforeEach(() => {
     isPending: false,
     isError: false,
     isFetching: false,
-    data: [view],
+    data: { views: [view], next_cursor: null },
     refetch: vi.fn(),
   });
   mockView.mockImplementation((id: string | undefined) => ({
@@ -64,9 +66,9 @@ beforeEach(() => {
 });
 
 describe("CrmViewsPanel access", () => {
-  it("hides create and edit affordances for read access", () => {
+  it("hides create and edit affordances for read access", async () => {
     mockObjects.mockReturnValue({ data: [{ access: "read" }] });
-    render(<CrmViewsPanel ownerId="owner-1" />);
+    await renderCrmRoute(<CrmViewsPanel ownerId="owner-1" />);
 
     expect(
       screen.queryByRole("button", { name: "New view" }),
@@ -77,12 +79,62 @@ describe("CrmViewsPanel access", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows create and edit affordances for work access", () => {
+  it("shows create and edit affordances for work access", async () => {
     mockObjects.mockReturnValue({ data: [{ access: "work" }] });
-    render(<CrmViewsPanel ownerId="owner-1" />);
+    await renderCrmRoute(<CrmViewsPanel ownerId="owner-1" />);
 
     expect(screen.getByRole("button", { name: "New view" })).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: /Accounts/ }));
-    expect(screen.getByRole("button", { name: "Edit" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "Edit" })).toBeVisible();
   });
+});
+
+vi.mock("@/components/crm/workspace/renderer", () => ({
+  CrmViewRenderer: ({
+    recordId,
+    onRecordChange,
+  }: {
+    recordId?: string;
+    onRecordChange: (id?: string) => void;
+  }) => (
+    <div>
+      <button onClick={() => onRecordChange("record-1")}>
+        Open artifact record
+      </button>
+      {recordId ? (
+        <div role="dialog">
+          {recordId}
+          <button onClick={() => onRecordChange(undefined)}>
+            Close artifact record
+          </button>
+        </div>
+      ) : null}
+    </div>
+  ),
+}));
+it("keeps saved-view record selection in router search through close, Back and Forward", async () => {
+  mockObjects.mockReturnValue({ data: [{ access: "read" }] });
+  const { router, history } = await renderCrmRoute(
+    <CrmViewsPanel ownerId="owner-1" />,
+    "/assistant/crm?owner=owner-1&view=view-1&panel=settings",
+  );
+  fireEvent.click(screen.getByText("Open artifact record"));
+  await waitFor(() =>
+    expect(router.state.location.search).toMatchObject({
+      owner: "owner-1",
+      view: "view-1",
+      record: "record-1",
+      panel: "settings",
+    }),
+  );
+  fireEvent.click(screen.getByText("Close artifact record"));
+  await waitFor(() =>
+    expect(router.state.location.search.record).toBeUndefined(),
+  );
+  history.back();
+  expect(await screen.findByRole("dialog")).toHaveTextContent("record-1");
+  history.forward();
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
 });

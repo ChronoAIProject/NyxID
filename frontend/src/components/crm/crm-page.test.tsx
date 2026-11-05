@@ -1,4 +1,12 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { renderCrmRoute } from "@/test/crm-router";
+import {
+  cleanup,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+  act,
+} from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { CrmObject } from "@/schemas/crm";
 import { useAuthStore } from "@/stores/auth-store";
@@ -10,6 +18,10 @@ const mocks = vi.hoisted(() => ({
   useCrmObjects: vi.fn(),
 }));
 
+vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-nyxagent-live", () => ({
+  useNyxAgentLive: () => undefined,
+}));
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: () => mocks.enabled,
 }));
@@ -98,14 +110,54 @@ it("shows the unavailable state without issuing CRM requests", () => {
   expect(mocks.useCrmObjects).not.toHaveBeenCalled();
 });
 
-it("removes archived fields from the default query projection", () => {
+it("removes archived fields from the default query projection", async () => {
   mocks.enabled = true;
-  render(<CrmPage />);
+  await renderCrmRoute(<CrmPage />);
 
   expect(screen.getByText("CRM table")).toBeInTheDocument();
   expect(mocks.objectTable).toHaveBeenCalledWith(
     expect.objectContaining({
       query: expect.objectContaining({ select: ["name"] }),
     }),
+  );
+});
+
+it("clears stale saved-view selection and preserves unrelated account search through history", async () => {
+  mocks.enabled = true;
+  const { router, history } = await renderCrmRoute(
+    <CrmPage />,
+    "/assistant/crm?owner=org&object=company&view=directory&record=record-1&panel=account",
+  );
+  expect(screen.getByRole("button", { name: "Saved views" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Records" }));
+  await waitFor(() =>
+    expect(router.state.location.search).not.toHaveProperty("view"),
+  );
+  expect(router.state.location.search).toMatchObject({
+    owner: "org",
+    object: "company",
+    panel: "account",
+  });
+  expect(router.state.location.search).not.toHaveProperty("record");
+  await act(async () => {
+    history.back();
+  });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Saved views" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    ),
+  );
+  await act(async () => {
+    history.forward();
+  });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Records" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    ),
   );
 });

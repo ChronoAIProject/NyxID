@@ -1,4 +1,5 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { CrmPeopleLabels } from "@/components/crm/people-picker";
+import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import {
   ChevronDown,
   ChevronLeft,
@@ -32,6 +33,7 @@ export interface CrmObjectTableProps {
   readonly columns?: readonly string[];
   readonly ownerId?: string;
   readonly onSelectRecord?: (recordId: string) => void;
+  readonly onQueryChange?: (query: CrmTableQuery) => void;
 }
 
 function interactiveKey(
@@ -110,6 +112,7 @@ function CrmObjectTableState({
   columns,
   ownerId,
   onSelectRecord,
+  onQueryChange,
 }: CrmObjectTableProps) {
   const [filters, setFilters] = useState<CrmFilter[]>(() => [...query.filters]);
   const [sort, setSort] = useState(query.sort);
@@ -133,6 +136,10 @@ function CrmObjectTableState({
   const result = useCrmTableQuery(pageQuery, ownerId, {
     enabled: Boolean(metadataObject),
   });
+  const exportQuery = JSON.stringify({ ...pageQuery, cursor: undefined });
+  useEffect(() => {
+    onQueryChange?.(JSON.parse(exportQuery) as CrmTableQuery);
+  }, [exportQuery, onQueryChange]);
   const object = result.data?.object ?? metadataObject;
   const fields = useMemo(() => {
     if (!object) return [];
@@ -165,7 +172,7 @@ function CrmObjectTableState({
       </p>
     );
   }
-  if (metadata.isError || !metadataObject || !object) {
+  if (!metadataObject || !object) {
     return (
       <div className="space-y-2" role="alert">
         <p className="text-12 text-destructive">
@@ -229,137 +236,151 @@ function CrmObjectTableState({
     : 0;
   const last = first ? first + result.data.rows.length - 1 : 0;
   return (
-    <div className="space-y-3">
-      {controls}
-
-      {result.data.rows.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-12 text-text-tertiary">
-          No {object.plural_label.toLocaleLowerCase()} match this view.
-        </div>
-      ) : (
-        <>
-          <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  {fields.map((field) => (
-                    <TableHead key={field.key}>
-                      {isCrmSortableField(field) ? (
-                        <button
-                          type="button"
-                          className="inline-flex items-center gap-1 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                          onClick={() => toggleSort(field)}
-                        >
-                          {field.label}
-                          {sort?.field === field.key ? (
-                            sort.direction === "asc" ? (
-                              <ChevronUp aria-label="Sorted ascending" />
-                            ) : (
-                              <ChevronDown aria-label="Sorted descending" />
-                            )
-                          ) : null}
-                        </button>
-                      ) : (
-                        field.label
-                      )}
-                    </TableHead>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {result.data.rows.map((row) => {
-                  const select = onSelectRecord
-                    ? () => onSelectRecord(row.id)
-                    : undefined;
-                  return (
-                    <TableRow
-                      key={row.id}
-                      tabIndex={select ? 0 : undefined}
-                      aria-label={select ? `Open ${object.label}` : undefined}
-                      className={
-                        select
-                          ? "cursor-pointer focus-visible:outline-2 focus-visible:outline-ring"
-                          : undefined
-                      }
-                      onClick={select}
-                      onKeyDown={
-                        select
-                          ? (event) => interactiveKey(event, select)
-                          : undefined
-                      }
-                    >
-                      <RecordCells row={row} fields={fields} />
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-
-          <div className="space-y-2 md:hidden">
-            {result.data.rows.map((row) => (
-              <button
-                key={row.id}
-                type="button"
-                disabled={!onSelectRecord}
-                onClick={
-                  onSelectRecord ? () => onSelectRecord(row.id) : undefined
-                }
-                className="block w-full space-y-2 rounded-lg border border-border/50 bg-card p-3 text-left disabled:opacity-100"
-              >
-                {fields.map((field) => (
-                  <span
-                    key={field.key}
-                    className="grid grid-cols-[minmax(5rem,0.7fr)_minmax(0,1.3fr)] gap-3 text-12"
-                  >
-                    <span className="text-text-tertiary">{field.label}</span>
-                    <span className="min-w-0 break-words text-foreground">
-                      {renderCrmCell(
-                        field,
-                        row.values[field.key],
-                        row.links[field.key],
-                      )}
-                    </span>
-                  </span>
-                ))}
-              </button>
-            ))}
-          </div>
-        </>
+    <CrmPeopleLabels
+      ownerId={ownerId ?? object.owner_id}
+      ids={result.data.rows.flatMap((row) =>
+        fields
+          .filter((field) => field.type === "user")
+          .flatMap((field) =>
+            typeof row.values[field.key] === "string"
+              ? [row.values[field.key] as string]
+              : [],
+          ),
       )}
+    >
+      <div className="space-y-3">
+        {controls}
 
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-11 tabular-nums text-text-tertiary">
-          {first.toLocaleString()}-{last.toLocaleString()} of{" "}
-          {result.data.total_count.toLocaleString()}
-        </span>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            size="icon"
-            variant="outline"
-            aria-label="Previous page"
-            disabled={cursors.length <= 1 || result.isFetching}
-            onClick={() => setCursors((current) => current.slice(0, -1))}
-          >
-            <ChevronLeft />
-          </Button>
-          <Button
-            type="button"
-            size="icon"
-            variant="outline"
-            aria-label="Next page"
-            disabled={!result.data.next_cursor || result.isFetching}
-            onClick={() => {
-              const nextCursor = result.data?.next_cursor;
-              if (nextCursor) setCursors((current) => [...current, nextCursor]);
-            }}
-          >
-            <ChevronRight />
-          </Button>
+        {result.data.rows.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-12 text-text-tertiary">
+            No {object.plural_label.toLocaleLowerCase()} match this view.
+          </div>
+        ) : (
+          <>
+            <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    {fields.map((field) => (
+                      <TableHead key={field.key}>
+                        {isCrmSortableField(field) ? (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+                            onClick={() => toggleSort(field)}
+                          >
+                            {field.label}
+                            {sort?.field === field.key ? (
+                              sort.direction === "asc" ? (
+                                <ChevronUp aria-label="Sorted ascending" />
+                              ) : (
+                                <ChevronDown aria-label="Sorted descending" />
+                              )
+                            ) : null}
+                          </button>
+                        ) : (
+                          field.label
+                        )}
+                      </TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {result.data.rows.map((row) => {
+                    const select = onSelectRecord
+                      ? () => onSelectRecord(row.id)
+                      : undefined;
+                    return (
+                      <TableRow
+                        key={row.id}
+                        tabIndex={select ? 0 : undefined}
+                        aria-label={select ? `Open ${object.label}` : undefined}
+                        className={
+                          select
+                            ? "cursor-pointer focus-visible:outline-2 focus-visible:outline-ring"
+                            : undefined
+                        }
+                        onClick={select}
+                        onKeyDown={
+                          select
+                            ? (event) => interactiveKey(event, select)
+                            : undefined
+                        }
+                      >
+                        <RecordCells row={row} fields={fields} />
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+
+            <div className="space-y-2 md:hidden">
+              {result.data.rows.map((row) => (
+                <button
+                  key={row.id}
+                  type="button"
+                  disabled={!onSelectRecord}
+                  onClick={
+                    onSelectRecord ? () => onSelectRecord(row.id) : undefined
+                  }
+                  className="block w-full space-y-2 rounded-lg border border-border/50 bg-card p-3 text-left disabled:opacity-100"
+                >
+                  {fields.map((field) => (
+                    <span
+                      key={field.key}
+                      className="grid grid-cols-[minmax(5rem,0.7fr)_minmax(0,1.3fr)] gap-3 text-12"
+                    >
+                      <span className="text-text-tertiary">{field.label}</span>
+                      <span className="min-w-0 break-words text-foreground">
+                        {renderCrmCell(
+                          field,
+                          row.values[field.key],
+                          row.links[field.key],
+                        )}
+                      </span>
+                    </span>
+                  ))}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-11 tabular-nums text-text-tertiary">
+            {first.toLocaleString()}-{last.toLocaleString()} of{" "}
+            {result.data.total_count.toLocaleString()}
+          </span>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              aria-label="Previous page"
+              disabled={cursors.length <= 1 || result.isFetching}
+              onClick={() => setCursors((current) => current.slice(0, -1))}
+            >
+              <ChevronLeft />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="outline"
+              aria-label="Next page"
+              disabled={!result.data.next_cursor || result.isFetching}
+              onClick={() => {
+                const nextCursor = result.data?.next_cursor;
+                if (nextCursor)
+                  setCursors((current) => [...current, nextCursor]);
+              }}
+            >
+              <ChevronRight />
+            </Button>
+          </div>
         </div>
       </div>
-    </div>
+    </CrmPeopleLabels>
   );
 }
 

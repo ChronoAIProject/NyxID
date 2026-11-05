@@ -18,7 +18,7 @@ vi.mock("@/components/crm/activity-timeline", () => ({
 }));
 vi.mock("@/hooks/use-crm", () => ({
   useCrmRecord: () => ({
-    data: record,
+    data: latestRecord,
     isPending: false,
     isError: false,
     refetch: mocks.refetch,
@@ -97,7 +97,10 @@ const record: CrmRecord = {
   updated_at: "2026-11-04T00:00:00Z",
 };
 
+let latestRecord = record;
+
 beforeEach(() => {
+  latestRecord = record;
   mocks.update.mockReset();
   mocks.refetch.mockReset();
 });
@@ -123,16 +126,13 @@ it("retries a revision conflict with only the human's field delta", async () => 
         current,
       }),
     )
-    .mockResolvedValueOnce({ ...current, values: { ...current.values, name: "Contoso" } });
+    .mockResolvedValueOnce({
+      ...current,
+      values: { ...current.values, name: "Contoso" },
+    });
   const user = userEvent.setup();
 
-  render(
-    <CrmRecordSheet
-      recordId={record.id}
-      open
-      onOpenChange={vi.fn()}
-    />,
-  );
+  render(<CrmRecordSheet recordId={record.id} open onOpenChange={vi.fn()} />);
   await user.clear(screen.getByLabelText("Name *"));
   await user.type(screen.getByLabelText("Name *"), "Contoso");
   await user.click(screen.getByRole("button", { name: "Save changes" }));
@@ -157,7 +157,39 @@ it("retries a revision conflict with only the human's field delta", async () => 
     protect: [],
     unprotect: [],
   });
-  expect(mocks.update.mock.calls[1]?.[0].idempotencyKey).toBe(
+  expect(mocks.update.mock.calls[1]?.[0].idempotencyKey).not.toBe(
     mocks.update.mock.calls[0]?.[0].idempotencyKey,
+  );
+});
+
+it("keeps a dirty draft across a newer live revision and resets on equal-revision identity switch", async () => {
+  const user = userEvent.setup();
+  const view = render(
+    <CrmRecordSheet recordId={record.id} open onOpenChange={vi.fn()} />,
+  );
+  const name = screen.getByRole("textbox", { name: /^Name/ });
+  await user.clear(name);
+  await user.type(name, "Unsaved company");
+  latestRecord = {
+    ...record,
+    revision: record.revision + 1,
+    values: { ...record.values, name: "Server update" },
+  };
+  view.rerender(
+    <CrmRecordSheet recordId={record.id} open onOpenChange={vi.fn()} />,
+  );
+  expect(screen.getByRole("textbox", { name: /^Name/ })).toHaveValue(
+    "Unsaved company",
+  );
+  latestRecord = {
+    ...latestRecord,
+    id: "company-2",
+    values: { ...latestRecord.values, name: "Other company" },
+  };
+  view.rerender(
+    <CrmRecordSheet recordId="company-2" open onOpenChange={vi.fn()} />,
+  );
+  expect(screen.getByRole("textbox", { name: /^Name/ })).toHaveValue(
+    "Other company",
   );
 });

@@ -1,21 +1,37 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CrmViewRenderer } from "@/components/crm/workspace/renderer";
 import type { CrmViewEnvelope } from "@/lib/crm/views/schema";
 
-const { mockAggregate, mockTable, mockObject, mockRecordForm } = vi.hoisted(() => ({
-  mockAggregate: vi.fn(),
-  mockTable: vi.fn(),
-  mockObject: vi.fn(),
-  mockRecordForm: vi.fn(),
-}));
+const { mockAggregate, mockTable, mockObject, mockRecordForm } = vi.hoisted(
+  () => ({
+    mockAggregate: vi.fn(),
+    mockTable: vi.fn(),
+    mockObject: vi.fn(),
+    mockRecordForm: vi.fn(),
+  }),
+);
 
 vi.mock("@/hooks/use-crm", () => ({
   crmQueryKeys: { root: (owner: string | undefined) => ["crm", owner] },
   useCrmAggregate: mockAggregate,
   useCrmTableQuery: mockTable,
   useCrmObject: mockObject,
+}));
+
+vi.mock("@/components/crm/record-sheet", () => ({
+  CrmRecordSheet: ({
+    recordId,
+    ownerId,
+  }: {
+    recordId: string;
+    ownerId: string;
+  }) => (
+    <div role="dialog">
+      Record {recordId} in {ownerId}
+    </div>
+  ),
 }));
 
 vi.mock("@/components/crm/record-form", () => ({
@@ -324,3 +340,119 @@ describe("CrmViewRenderer", () => {
     expect(mockRecordForm).not.toHaveBeenCalled();
   });
 });
+
+it("opens an artifact table record with the viewer's explicit owner scope", () => {
+  render(<CrmViewRenderer envelope={exampleEnvelope} ownerId="org-1" />);
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  fireEvent.click(screen.getAllByText("Acme renewal")[0]!);
+  expect(screen.getByRole("dialog")).toHaveTextContent(
+    "Record deal-1 in org-1",
+  );
+});
+
+it.each([9007199254740991, -9007199254740991])(
+  "renders exact monetary chart values at the safe boundary %s",
+  (value) => {
+    mockAggregate.mockReturnValue({
+      isPending: false,
+      isError: false,
+      data: {
+        points: [
+          { key: "qualified", label: "Qualified", value, archived: false },
+        ],
+        unit: { format: "currency", currency: "USD" },
+        total: value,
+        truncated: false,
+      },
+    });
+    render(<CrmViewRenderer envelope={exampleEnvelope} />);
+    expect(screen.getByRole("definition")).toHaveTextContent(
+      "90,071,992,547,409.91",
+    );
+  },
+);
+
+it("renders percentage chart values using the declared fractional unit", () => {
+  mockAggregate.mockReturnValue({
+    isPending: false,
+    isError: false,
+    data: {
+      points: [
+        { key: "qualified", label: "Qualified", value: 0.125, archived: false },
+      ],
+      unit: { format: "percent" },
+      total: 0.125,
+      truncated: false,
+    },
+  });
+  render(<CrmViewRenderer envelope={exampleEnvelope} />);
+  expect(screen.getByRole("definition")).toHaveTextContent("12.5%");
+});
+
+it.each(["BarChart", "PieChart"] as const)(
+  "renders distinct sentinel-named groups and the remainder in %s",
+  (type) => {
+    mockAggregate.mockReturnValue({
+      isPending: false,
+      isError: false,
+      data: {
+        points: [
+          { key: null, label: "None", value: 1, archived: false },
+          { key: "__none__", label: "Literal none", value: 2, archived: false },
+          {
+            key: "__other__",
+            label: "Literal other",
+            value: 3,
+            archived: true,
+          },
+          { key: "__other__", label: "Other", value: 4, archived: false },
+        ],
+        unit: { format: "count" },
+        total: 10,
+        truncated: true,
+      },
+    });
+    const envelope = structuredClone(exampleEnvelope);
+    envelope.spec.elements.chart!.type = type;
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    try {
+      render(<CrmViewRenderer envelope={envelope} />);
+      expect(
+        screen.getAllByRole("term").map((node) => node.textContent),
+      ).toEqual(["None", "Literal none", "Literal other (archived)", "Other"]);
+      expect(
+        screen.getAllByRole("definition").map((node) => node.textContent),
+      ).toEqual(["1", "2", "3", "4"]);
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  },
+);
+
+it.each([-1, -9007199254740991])(
+  "refuses negative pie slices explicitly (%s)",
+  (value) => {
+    mockAggregate.mockReturnValue({
+      isPending: false,
+      isError: false,
+      data: {
+        points: [
+          { key: "qualified", label: "Qualified", value, archived: false },
+        ],
+        unit: { format: "currency", currency: "USD" },
+        total: value,
+        truncated: false,
+      },
+    });
+    const pieEnvelope = structuredClone(exampleEnvelope);
+    pieEnvelope.spec.elements.chart!.type = "PieChart";
+    render(<CrmViewRenderer envelope={pieEnvelope} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "nonnegative count or sum",
+    );
+    expect(screen.queryByRole("definition")).not.toBeInTheDocument();
+  },
+);
