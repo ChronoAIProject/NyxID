@@ -16,6 +16,9 @@ const errorSchema = z.object({
 });
 
 export const channelBotDiagnosticsSchema = z.object({
+  last_callback_challenge_at: z.string().nullish(),
+  last_route_at: z.string().nullish(),
+  last_route_result: z.string().nullish(),
   discord_gateway: z.object({
     state: gatewayStateSchema,
     reason: z.string().nullable(),

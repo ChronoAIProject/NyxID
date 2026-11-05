@@ -697,6 +697,14 @@ async fn handle_webhook_inner_impl(
     };
 
     if let Some(challenge_response) = prepared.challenge_response {
+        // This proves only callback reachability with the current verification
+        // secrets. It is not a message, a route check, or member verification.
+        if snapshot.record_callback_challenge(state.db).await.is_err() {
+            tracing::warn!(
+                bot_id,
+                "channel callback challenge diagnostics write failed"
+            );
+        }
         return Ok(Some(challenge_response));
     }
 
@@ -832,6 +840,7 @@ async fn handle_webhook_inner_impl(
     )?;
 
     crate::services::channel_inbound_service::process_inbound_messages(
+        crate::services::channel_inbound_service::InboundSource::Webhook,
         state,
         &bot,
         adapter.as_ref(),
@@ -1239,6 +1248,7 @@ mod tests {
             for _ in 0..2 {
                 assert!(
                     crate::services::channel_inbound_service::process_inbound_messages(
+                        crate::services::channel_inbound_service::InboundSource::Webhook,
                         crate::services::channel_inbound_service::InboundDeps::from(&state),
                         &bot,
                         adapter.as_ref(),
@@ -2187,6 +2197,14 @@ mod tests {
             .unwrap();
         assert_eq!(updated_bot.status, "active");
         assert!(updated_bot.webhook_registered);
+        assert_eq!(
+            updated_bot.diagnostics.last_inbound_source.as_deref(),
+            Some("webhook")
+        );
+        assert_eq!(
+            updated_bot.diagnostics.last_route_result.as_deref(),
+            Some("matched")
+        );
 
         let stored_count = db
             .collection::<crate::models::channel_message::ChannelMessage>(

@@ -18,7 +18,7 @@ export function useOrgSpecialistChannel(id: string, challenge?: string) {
       orgChannelSettingsSchema.parse(
         await assistantJson(`${root}/org-specialist`),
       ),
-    enabled: Boolean(userId),
+    enabled: Boolean(userId && id),
     retry: false,
   });
   const save = useMutation({
@@ -64,6 +64,7 @@ export function useOrgSpecialistChannel(id: string, challenge?: string) {
   const revoke = useMutation({
     mutationFn: () =>
       assistantJson(`${root}/member-link`, { method: "DELETE" }),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: key }); },
   });
   return { settings, save, issue, status, confirm, revoke };
 }

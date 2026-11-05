@@ -311,6 +311,9 @@ pub struct DiscordGatewayStatusResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDiagnosticsResponse {
+    pub last_callback_challenge_at: Option<String>,
+    pub last_route_at: Option<String>,
+    pub last_route_result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discord_gateway: Option<DiscordGatewayStatusResponse>,
     pub last_inbound_at: Option<String>,
@@ -412,6 +415,9 @@ fn diagnostics_response(
         at: e.at.to_rfc3339(),
     };
     ChannelBotDiagnosticsResponse {
+        last_callback_challenge_at: d.last_callback_challenge_at.map(|v| v.to_rfc3339()),
+        last_route_at: d.last_route_at.map(|v| v.to_rfc3339()),
+        last_route_result: d.last_route_result.clone(),
         discord_gateway: d
             .discord_gateway
             .as_ref()

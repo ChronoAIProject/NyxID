@@ -53,7 +53,19 @@ pub(crate) async fn load(
 
 pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> AppResult<Value> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
-    let admin = super::require_admin(db, actor, &b.org_id).await.is_ok();
+    let access = crate::services::org_agent_service::access(db, actor, &b.org_id).await?;
+    let member_verified = crate::services::org_agent_service::can_use(&access)
+        && db
+            .collection::<Document>(crate::models::org_channel::LINKS)
+            .find_one(doc! { "channel_id": &row.id, "org_id": &b.org_id,
+            "binding_revision": &b.revision, "user_id": actor, "active": true })
+            .projection(doc! { "_id": 1 })
+            .await?
+            .is_some();
+    let admin = matches!(
+        access,
+        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+    );
     use futures::TryStreamExt;
     let agent = db
         .collection::<AssistantAgent>("assistant_agents")
@@ -76,7 +88,7 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
         Err(e) => return Err(e),
     };
     Ok(
-        json!({"channel_id":row.id,"org_id":b.org_id,"can_manage":admin,"guest_enabled":b.guests.enabled,
+        json!({"channel_id":row.id,"org_id":b.org_id,"can_manage":admin,"member_verified":member_verified,"guest_enabled":b.guests.enabled,
         "delegated_service_ids":b.guests.service_ids,"daily_credits":b.guests.daily_credits,
         "default_daily_credits":"1","spent_today_credits":spent,"reserved_today_credits":reserved,
         "guest_payer":"organization","available_services":available,"readiness_reason":reason}),

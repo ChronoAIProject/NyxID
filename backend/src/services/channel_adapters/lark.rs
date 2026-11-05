@@ -994,6 +994,10 @@ impl PlatformAdapter for LarkFamilyAdapter {
         ))
     }
 
+    fn records_verification_result(&self) -> bool {
+        true
+    }
+
     fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
         if bot.lark_verification_token_encrypted.is_none() {
             return Err(AppError::ValidationError(format!(

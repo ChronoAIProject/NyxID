@@ -1028,6 +1028,7 @@ async fn manager_channel_http_end_to_end(org_owned: bool) {
         .await
         .unwrap();
     crate::services::channel_inbound_service::process_inbound_messages(
+        crate::services::channel_inbound_service::InboundSource::Webhook,
         (&state).into(),
         &ordinary,
         &adapter,

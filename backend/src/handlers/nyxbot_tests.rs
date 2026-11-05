@@ -6556,7 +6556,8 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
 #[tokio::test]
 async fn channel_http_links_refuse_org_specialists_with_typed_guidance() {
     use crate::errors::access_denial::{
-        ORGANIZATION_AGENT_CHANNEL_HINT, ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+        ORGANIZATION_AGENT_CHANNEL_DISABLED_MESSAGE as ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+        ORGANIZATION_AGENT_CHANNEL_HINT,
     };
     use crate::services::{feature_flag_service as flags, org_agent_tests::Fixture};
     use tower::ServiceExt;
