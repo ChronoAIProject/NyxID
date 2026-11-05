@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   triggers: vi.fn(),
   remove: vi.fn(),
   run: vi.fn(),
+  cancel: vi.fn(),
   history: vi.fn(),
   older: vi.fn(),
 }));
@@ -63,6 +64,7 @@ vi.mock("@/hooks/use-automations", () => ({
   }),
   useRunAutomation: () => ({ mutateAsync: mocks.run }),
   useAutomationRuns: mocks.history,
+  useCancelAutomationRun: () => ({ mutate: mocks.cancel, isPending: false }),
 }));
 import { AutomationEditor, AutomationsPage } from "./automations";
 import { AutomationPreferences } from "@/components/assistant/automation-preferences";
@@ -597,4 +599,71 @@ it("names webhook, paused and never-run states without placeholder dashes", () =
   expect(screen.getByText(/Schedule paused/)).toHaveTextContent("Not run yet");
   expect(screen.getByText(/No run scheduled/)).toHaveTextContent("Not run yet");
   expect(screen.queryByText(/Next: [—–-]/)).not.toBeInTheDocument();
+});
+
+it("shows a waiting coordinator deadline and sends exact run cancellation", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: {
+      pages: [
+        {
+          runs: [
+            {
+              id: "waiting-run",
+              outcome: "waiting",
+              scheduled_at: trigger.created_at,
+              duration_ms: null,
+              coordinator_deadline: "2026-10-01T01:00:00Z",
+              can_cancel: true,
+              reason: "coordinator_pending",
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AutomationsPage />);
+  await user.click(
+    screen.getAllByRole("button", { name: "Morning summary" })[0]!,
+  );
+  expect(screen.getByText(/Completion deadline/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Cancel run" }));
+  expect(mocks.cancel).toHaveBeenCalledWith({
+    triggerId: trigger.id,
+    runId: "waiting-run",
+  });
+});
+
+it("shows the coordinator timeout reason after expiry", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({
+    data: {
+      pages: [
+        {
+          runs: [
+            {
+              id: "timed-out",
+              outcome: "failed",
+              scheduled_at: trigger.created_at,
+              duration_ms: null,
+              reason: "coordinator_timeout",
+              can_cancel: false,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  render(<AutomationsPage />);
+  await user.click(
+    screen.getAllByRole("button", { name: "Morning summary" })[0]!,
+  );
+  expect(
+    screen.getByText("Coordinator deadline expired (coordinator_timeout)."),
+  ).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: "Cancel run" }),
+  ).not.toBeInTheDocument();
 });

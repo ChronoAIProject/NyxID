@@ -228,6 +228,9 @@ export function automationDefaults(
   };
 }
 export const runSchema = z.object({
+  coordinator_deadline: instant.nullish(),
+  wait_kind: z.string().nullish(),
+  can_cancel: z.boolean().optional(),
   id: z.string(),
   scheduled_at: instant,
   started_at: instant.nullable(),

@@ -33,6 +33,7 @@ import {
 import {
   useAutomationChats,
   useAutomationRuns,
+  useCancelAutomationRun,
   useRunAutomation,
   useSchedulePreview,
 } from "@/hooks/use-automations";
@@ -963,6 +964,7 @@ function AutomationHistory({
   const settings = useNyxBotSettings();
   const zone = settings.data?.timezone ?? browserTimezone();
   const history = useAutomationRuns(row.id);
+  const cancelRun = useCancelAutomationRun();
   const runs = history.data?.pages.flatMap((page) => page.runs) ?? [];
   return (
     <Dialog
@@ -978,6 +980,7 @@ function AutomationHistory({
             Up to 1,000 recent runs are retained for 90 days.
           </DialogDescription>
         </DialogHeader>
+        {cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
         {history.error ? (
           <ErrorBanner message={history.error.message} />
         ) : history.isPending ? (
@@ -1033,6 +1036,27 @@ function AutomationHistory({
                   title={run.scheduled_at ? "Scheduled" : "On demand"}
                   accessory={run.scheduled_at ? formatAutomationTime(run.scheduled_at, zone, true) : "Started by an event or request"}
                 />
+                {run.outcome === "waiting" && run.coordinator_deadline && (
+                  <p>
+                    Completion deadline{" "}
+                    {formatAutomationTime(run.coordinator_deadline, zone, true)}
+                  </p>
+                )}
+                {run.reason === "coordinator_timeout" && (
+                  <p>Coordinator deadline expired (coordinator_timeout).</p>
+                )}
+                {run.can_cancel && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={cancelRun.isPending}
+                    onClick={() =>
+                      cancelRun.mutate({ triggerId: row.id, runId: run.id })
+                    }
+                  >
+                    Cancel run
+                  </Button>
+                )}
                 {run.thread_id && (
                   <GroupedRow asChild interactive>
                     <Link
@@ -1067,6 +1091,16 @@ function AutomationHistory({
 }
 
 function automationPauseReason(reason: string): string {
-  if (["insufficient_credits", "wallet_suspended", "plan_entitlement_required", "credential_invalid", "model_unavailable", "model_not_configured"].includes(reason)) return storedError(reason);
+  if (
+    [
+      "insufficient_credits",
+      "wallet_suspended",
+      "plan_entitlement_required",
+      "credential_invalid",
+      "model_unavailable",
+      "model_not_configured",
+    ].includes(reason)
+  )
+    return storedError(reason);
   return reason.replaceAll("_", " ");
 }
