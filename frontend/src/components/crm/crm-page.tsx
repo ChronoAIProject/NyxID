@@ -1,3 +1,4 @@
+import { CrmArtifactsPanel } from "./artifacts-panel";
 import { useNyxAgentLive } from "@/hooks/use-nyxagent-live";
 import { CrmOwnerContext } from "@/lib/crm/owner-context";
 import { CrmSchemaEditor } from "@/components/crm/schema-editor";
@@ -40,9 +41,11 @@ function CrmWorkspace({ ownerId }: { readonly ownerId?: string }) {
     setCrmLocation({ object, record: undefined });
   const [mode, setMode] = useState<"table" | "pipeline">("table");
   const surface =
-    location.has("view") || location.get("surface") === "views"
-      ? "views"
-      : "records";
+    location.get("surface") === "artifacts"
+      ? "artifacts"
+      : location.has("view") || location.get("surface") === "views"
+        ? "views"
+        : "records";
   const setSurface = (next: "records" | "views") =>
     setCrmLocation({
       surface: next === "views" ? "views" : undefined,
@@ -76,7 +79,7 @@ function CrmWorkspace({ ownerId }: { readonly ownerId?: string }) {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="CRM"
+        title={surface === "artifacts" ? "Artifacts" : "CRM"}
         description="Companies, contacts, opportunities, and follow-up work."
         actions={
           surface === "records" && object && object.access !== "read" ? (
@@ -114,6 +117,9 @@ function CrmWorkspace({ ownerId }: { readonly ownerId?: string }) {
         </Button>
       </div>
 
+      {surface === "artifacts" ? (
+        <CrmArtifactsPanel ownerId={ownerId} objects={objects} />
+      ) : null}
       {surface === "views" ? <CrmViewsPanel ownerId={ownerId} /> : null}
 
       {surface === "records" && objects.isPending ? (

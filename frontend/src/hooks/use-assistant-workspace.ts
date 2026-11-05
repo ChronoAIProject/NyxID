@@ -55,10 +55,9 @@ export function useAssistantWorkspaceCounts() {
     queryFn: async () =>
       z
         .object({ count: z.number().int().nonnegative() })
-        .parse(await assistantJson("/assistant/crm/views/count")).count,
+        .parse(await assistantJson("/assistant/crm/artifacts/count")).count,
     enabled: enabled && Boolean(actor),
     retry: false,
-    refetchInterval: 30_000,
   });
   return {
     data: {

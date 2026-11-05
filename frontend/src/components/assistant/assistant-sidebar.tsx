@@ -1019,8 +1019,30 @@ export function AssistantSidebar({
           <span className="truncate">Plugins</span>
         </Link>
         {crmEnabled ? (
-          <Link to="/assistant/crm" search={{ surface: "views", owner: undefined, record: undefined, view: undefined, object: undefined }} className="flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground">
-            <FileText className="h-4 w-4 shrink-0 text-text-tertiary" /><span className="flex-1 truncate">Artifacts</span><span className="font-mono text-9 text-text-tertiary">{counts.data?.artifacts ?? 0}</span>
+          <Link
+            to="/assistant/crm"
+            search={{
+              surface: "artifacts",
+              owner: undefined,
+              record: undefined,
+              view: undefined,
+              object: undefined,
+            }}
+            activeOptions={{ includeSearch: true }}
+            activeProps={{
+              "aria-current": "page",
+              className: "bg-overlay-strong font-medium text-foreground",
+            }}
+            inactiveProps={{
+              className: "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            }}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors"
+          >
+            <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />
+            <span className="flex-1 truncate">Artifacts</span>
+            <span className="font-mono text-9 text-text-tertiary">
+              {counts.data?.artifacts ?? 0}
+            </span>
           </Link>
         ) : workspacePreview ? (
           <ComingSoonItem

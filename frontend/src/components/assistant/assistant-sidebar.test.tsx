@@ -41,13 +41,20 @@ vi.mock("@tanstack/react-router", () => ({
     to,
     search,
     children,
+    activeOptions: _activeOptions,
+    activeProps: _activeProps,
+    inactiveProps: _inactiveProps,
+    className,
     ...rest
   }: AnchorHTMLAttributes<HTMLAnchorElement> & {
     readonly to?: string;
     readonly search?: Record<string, unknown>;
     readonly children?: ReactNode;
+    readonly activeOptions?: unknown;
+    readonly activeProps?: unknown;
+    readonly inactiveProps?: unknown;
   }) => (
-    <a data-to={to} data-search={search ? JSON.stringify(search) : undefined} href={`${to ?? ""}${search ? `?${new URLSearchParams(Object.entries(search).map(([key, value]) => [key, String(value)]))}` : ""}`} {...rest}>
+    <a data-active-options={JSON.stringify(_activeOptions)} data-active-props={JSON.stringify(_activeProps)} data-inactive-props={JSON.stringify(_inactiveProps)} className={className} data-to={to} data-search={search ? JSON.stringify(search) : undefined} href={`${to ?? ""}${search ? `?${new URLSearchParams(Object.entries(search).map(([key, value]) => [key, String(value)]))}` : ""}`} {...rest}>
       {children}
     </a>
   ),
@@ -981,5 +988,5 @@ it("opens live saved artifacts when CMS is enabled", () => {
   useAuthStore.setState({ user: { ...USER, capabilities: { enabled_features: [FEATURE_FLAG.CMS_POC_V1] } } });
   renderSidebar();
   expect(screen.getByRole("link", { name: /Artifacts/ })).toHaveAttribute("data-to", "/assistant/crm");
-  expect(screen.getByRole("link", { name: /Artifacts/ })).toHaveAttribute("data-search", JSON.stringify({ surface: "views" }));
+  expect(screen.getByRole("link", { name: /Artifacts/ })).toHaveAttribute("data-search", JSON.stringify({ surface: "artifacts" }));
 });
