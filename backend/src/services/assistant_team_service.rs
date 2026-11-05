@@ -1349,7 +1349,12 @@ async fn create_specialist_inner(
         created_at: now,
         updated_at: now,
     };
-    super::crm::tools::validate_grants(db, owner, &agent.grants.crm).await?;
+    Box::pin(super::crm::tools::validate_grants(
+        db,
+        owner,
+        &agent.grants.crm,
+    ))
+    .await?;
     Box::pin(super::org_agent_service::validate_grants(db, actor, &agent)).await?;
     let authority = authority.cloned();
     let claimed_step = claimed_step.cloned();
@@ -2060,7 +2065,12 @@ pub async fn apply_grants_in_session(
         .filter(|id| !grants.service_ids.contains(id) && !grants.platform_service_ids.contains(id))
         .cloned()
         .collect();
-    super::crm::tools::validate_grants(db, &agent.user_id, &grants.crm).await?;
+    Box::pin(super::crm::tools::validate_grants(
+        db,
+        &agent.user_id,
+        &grants.crm,
+    ))
+    .await?;
     let lost_account = agent.grants.account_read && !grants.account_read;
     super::shared_agent_service::remove_grants_in_session(db, &agent.id, &removed, session).await?;
     agent.grants = grants;

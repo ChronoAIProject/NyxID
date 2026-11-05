@@ -328,9 +328,13 @@ where
         json!({"turn_id": turn_id, "status": status, "error": error, "turn_metadata": metadata});
     if !row.guest_turn
         && row.collaboration.is_none()
-        && super::crm::artifacts::enabled_for(db, &row.user_id, &artifacts)
-            .await
-            .unwrap_or(false)
+        && Box::pin(super::crm::artifacts::enabled_for(
+            db,
+            &row.user_id,
+            &artifacts,
+        ))
+        .await
+        .unwrap_or(false)
     {
         terminal["crm_artifacts"] = json!(artifacts);
     }

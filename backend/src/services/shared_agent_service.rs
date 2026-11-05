@@ -249,15 +249,7 @@ pub(crate) fn flag_enabled(
     .any(|key| key == FLAG)
 }
 
-pub fn load<'a>(
-    db: &'a Database,
-    actor: &'a str,
-    agent_ids: Option<&'a [String]>,
-) -> futures::future::BoxFuture<'a, AppResult<AccessBatch>> {
-    Box::pin(load_inner(db, actor, agent_ids))
-}
-
-async fn load_inner(
+pub async fn load(
     db: &Database,
     actor: &str,
     agent_ids: Option<&[String]>,

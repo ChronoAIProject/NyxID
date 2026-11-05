@@ -1511,19 +1511,10 @@ pub async fn for_key(
     user: &str,
     key: Option<&str>,
 ) -> AppResult<Option<ChatAuthority>> {
-    for_key_with_access(db, user, key, None).await
+    Box::pin(for_key_with_access(db, user, key, None)).await
 }
 
-pub fn for_key_with_access<'a>(
-    db: &'a Database,
-    user: &'a str,
-    key: Option<&'a str>,
-    access: Option<&'a std::sync::Arc<super::org_agent_service::RequestAccess>>,
-) -> futures::future::BoxFuture<'a, AppResult<Option<ChatAuthority>>> {
-    Box::pin(for_key_with_access_inner(db, user, key, access))
-}
-
-async fn for_key_with_access_inner(
+pub async fn for_key_with_access(
     db: &Database,
     user: &str,
     key: Option<&str>,

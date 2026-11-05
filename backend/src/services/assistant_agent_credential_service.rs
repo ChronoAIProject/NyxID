@@ -162,12 +162,12 @@ pub(crate) async fn authority_with_access(
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
 ) -> AppResult<KeyAuthority> {
     if !conversation.credential_api_key_id.is_empty() {
-        Box::pin(require_ordinary_key(
+        require_ordinary_key(
             db,
             &conversation.user_id,
             &conversation.credential_api_key_id,
             Some(&mut *session),
-        ))
+        )
         .await?;
     }
     super::assistant_group_service::fence_member_thread(db, conversation, session).await?;
@@ -205,12 +205,7 @@ pub(crate) async fn authority_with_access(
     };
     let snapshot = channel.as_ref().or(snapshot);
     let resolved = if snapshot.is_none() {
-        Box::pin(super::org_agent_service::resolve_agent_access(
-            db,
-            &conversation.user_id,
-            &agent,
-        ))
-        .await?
+        super::org_agent_service::resolve_agent_access(db, &conversation.user_id, &agent).await?
     } else {
         None
     };

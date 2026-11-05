@@ -1567,30 +1567,20 @@ pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantC
     get_authorized(db, user_id, id).await.map(|(row, _)| row)
 }
 
-type AuthorizedConversation = (
-    AssistantConversation,
-    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
-);
-
-pub(crate) fn get_authorized<'a>(
-    db: &'a Database,
-    user_id: &'a str,
-    id: &'a str,
-) -> futures::future::BoxFuture<'a, AppResult<AuthorizedConversation>> {
-    Box::pin(get_authorized_inner(db, user_id, id))
-}
-
-async fn get_authorized_inner(
+pub(crate) async fn get_authorized(
     db: &Database,
     user_id: &str,
     id: &str,
-) -> AppResult<AuthorizedConversation> {
+) -> AppResult<(
+    AssistantConversation,
+    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+)> {
     let row = db
         .collection::<AssistantConversation>(CONVERSATIONS)
         .find_one(owner_filter(user_id, id)?)
         .await?
         .ok_or_else(not_found)?;
-    let access = Box::pin(authorize_thread_read(db, &row)).await?;
+    let access = authorize_thread_read(db, &row).await?;
     Ok((row, access))
 }
 
@@ -2374,13 +2364,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.guest_turn = start.guest;
     }
     // Refuses destroyed agents before any write.
-    let authority = Box::pin(
-        super::assistant_agent_credential_service::authority_with_access(
-            db,
-            &row,
-            &mut *session,
-            start.org_access.as_ref(),
-        ),
+    let authority = super::assistant_agent_credential_service::authority_with_access(
+        db,
+        &row,
+        &mut *session,
+        start.org_access.as_ref(),
     )
     .await?;
     row.shared_agent_thread = authority.is_shared();
@@ -4101,7 +4089,7 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
-                    artifact_recovery_target: None,
+                                artifact_recovery_target: None,
                                 artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),

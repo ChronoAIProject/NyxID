@@ -6762,30 +6762,14 @@ async fn execute_tool_resolved_inner(
             McpToolSource::UserManaged { user_service_id, .. } => Some(user_service_id.as_str()),
             _ => None,
         };
-        let resource_proof = match box_mcp_forwarding(|| {
-            super::resource_request_proof::prepare_admitted(
-                db,
-                jwt_keys,
-                config,
-                user_id,
-                exec_ctx.api_key_id,
-                exec_ctx.api_key_credential_id,
-                proof_connection_id,
-                &target,
-                &target.service.id,
-                method.as_str(),
-                &path,
-                query.as_deref(),
-                exec_ctx.assistant_chat.is_some()
-                    && assistant_admission.is_some()
-                    && node_route.is_none()
-                    && body.as_ref().is_none_or(|bytes| bytes.is_empty())
-                    && delegated.is_empty()
-                    && server_owned_headers.is_empty(),
-            )
-        })
-        .await
-        {
+        let resource_proof = match super::resource_request_proof::prepare_admitted(
+            db, jwt_keys, config, user_id, exec_ctx.api_key_id, exec_ctx.api_key_credential_id,
+            proof_connection_id, &target, &target.service.id, method.as_str(), &path,
+            query.as_deref(), exec_ctx.assistant_chat.is_some()
+                && assistant_admission.is_some() && node_route.is_none()
+                && body.as_ref().is_none_or(|bytes| bytes.is_empty())
+                && delegated.is_empty() && server_owned_headers.is_empty(),
+        ).await {
             Ok(proof) => proof,
             Err(error) => {
                 billing.reject_before_send(&metered, "resource_proof_authority_changed", false).await?;

@@ -4,15 +4,7 @@ use super::*;
 use crate::models::async_service_operation::AsyncServiceOperation;
 use crate::services::async_service_operation as watches;
 
-pub(super) fn call<'a>(
-    state: &'a AppState,
-    watch: &'a AsyncServiceOperation,
-    name: &'a str,
-) -> futures::future::BoxFuture<'a, crate::errors::AppResult<mcp_service::ToolResponse>> {
-    Box::pin(call_inner(state, watch, name))
-}
-
-async fn call_inner(
+pub(super) async fn call(
     state: &AppState,
     watch: &AsyncServiceOperation,
     name: &str,

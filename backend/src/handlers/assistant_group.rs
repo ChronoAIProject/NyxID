@@ -237,7 +237,7 @@ async fn group_response_for(
 
 /// Start (or keep queued) the members a group has addressed.
 pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
-    let result: AppResult<()> = Box::pin(async {
+    let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
         crate::services::assistant_group_kind::require_legacy(&group)?;
         if crate::services::org_group_service::is_org(&group) {
@@ -256,7 +256,7 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
             if !groups::take_pending(&state.db, owner, group_id, agent_id).await? {
                 continue;
             }
-            match Box::pin(run_member(state, owner, &group, agent_id)).await {
+            match run_member(state, owner, &group, agent_id).await {
                 Ok(()) => {}
                 // Gone or refused: the member is not retried.
                 Err(
@@ -274,7 +274,7 @@ pub(crate) async fn advance(state: &AppState, owner: &str, group_id: &str) {
             }
         }
         Ok(())
-    })
+    }
     .await;
     if let Err(error) = result {
         tracing::debug!(%error, "Group advance deferred");
@@ -403,14 +403,7 @@ async fn run_member(
         reply_channel: None,
     };
     let limit = team_pool_limit(state, owner).await + 1;
-    let started = match Box::pin(start_server_turn(
-        state,
-        owner,
-        start,
-        Pool::Team { owner, limit },
-    ))
-    .await
-    {
+    let started = match start_server_turn(state, owner, start, Pool::Team { owner, limit }).await {
         Err(AppError::NotFound(_) | AppError::Forbidden(_)) => {
             return refuse_member(state, owner, group, agent_id).await;
         }
@@ -481,7 +474,7 @@ pub(crate) async fn member_settled(
             _ => {}
         }
     }
-    let result: AppResult<()> = Box::pin(async {
+    let result: AppResult<()> = async {
         let group = groups::get(&state.db, owner, group_id).await?;
         // A completed worker may race roster removal and even re-addition.
         // Only the current member thread may publish or hand off its result.
@@ -516,7 +509,10 @@ pub(crate) async fn member_settled(
                     &state.db, row, &message,
                 ))
                 .await?;
-                crate::services::crm::artifacts::publish_group(&state.db, row, &message).await?;
+                Box::pin(crate::services::crm::artifacts::publish_group(
+                    &state.db, row, &message,
+                ))
+                .await?;
                 let members = groups::members(&state.db, owner, &group).await?;
                 let roster: Vec<AssistantAgent> =
                     members.iter().map(|member| member.agent.clone()).collect();
@@ -565,7 +561,7 @@ pub(crate) async fn member_settled(
             }
         }
         Ok(())
-    })
+    }
     .await;
     if let Err(error) = result {
         tracing::debug!(%error, "Group reply not posted");
@@ -623,17 +619,7 @@ pub(crate) async fn post(
     text: &str,
     author: Option<&AssistantAgent>,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    Box::pin(post_with_uploads(
-        state,
-        owner,
-        group_id,
-        text,
-        author,
-        &[],
-        None,
-        None,
-    ))
-    .await
+    post_with_uploads(state, owner, group_id, text, author, &[], None, None).await
 }
 
 /// NyxBot posts into a group from one of its own threads (`follower`): the
@@ -648,7 +634,7 @@ pub(crate) async fn post_and_follow(
     author: Option<&AssistantAgent>,
     follower: &str,
 ) -> AppResult<(GroupMessage, Vec<String>)> {
-    Box::pin(post_with_uploads(
+    post_with_uploads(
         state,
         owner,
         group_id,
@@ -657,7 +643,7 @@ pub(crate) async fn post_and_follow(
         &[],
         None,
         Some(follower),
-    ))
+    )
     .await
 }
 
@@ -797,7 +783,7 @@ async fn post_with_uploads(
     // stay bounded by NyxBot's event-turn guards and the hourly cap.
     groups::reset_hops(&state.db, owner, group_id).await?;
     groups::address(&state.db, owner, group_id, &addressed).await?;
-    Box::pin(advance(state, owner, group_id)).await;
+    advance(state, owner, group_id).await;
     Ok((message, addressed))
 }
 
@@ -1264,7 +1250,7 @@ pub async fn list_messages(
     } else {
         pending_actions(&state, &owner, &id).await?
     };
-    let crm_enabled = crate::services::crm::enabled(&state.db, &owner).await?;
+    let crm_enabled = Box::pin(crate::services::crm::enabled(&state.db, &owner)).await?;
     let mut messages: Vec<_> = rows
         .into_iter()
         .map(|row| message_response(row, &agents, crm_enabled))
@@ -1353,7 +1339,7 @@ pub async fn post_message(
             ),
         ));
     }
-    let (message, addressed) = Box::pin(post_with_uploads(
+    let (message, addressed) = post_with_uploads(
         &state,
         &owner,
         &id,
@@ -1362,13 +1348,13 @@ pub async fn post_message(
         &body.attachment_ids,
         body.recipient_agent_ids.as_deref(),
         None,
-    ))
+    )
     .await?;
     let agents = team::agents(&state.db, &message.user_id, true).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({
-            "message": message_response(message, &agents, crate::services::crm::enabled(&state.db, &owner).await?),
+            "message": message_response(message, &agents, Box::pin(crate::services::crm::enabled(&state.db, &owner)).await?),
             "addressed_agent_ids": addressed,
         })),
     ))

@@ -324,7 +324,7 @@ pub async fn virtual_service_for(
                 .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
         );
     }
-    if super::crm::tools::available(db, chat)
+    if Box::pin(super::crm::tools::available(db, chat))
         .await
         .unwrap_or(false)
     {
