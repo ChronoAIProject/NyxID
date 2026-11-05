@@ -18,10 +18,11 @@ use crate::models::{
     crm_saved_view::{COLLECTION_NAME as VIEWS, CrmSavedView},
 };
 
+use super::query;
 use super::records::{
     ReceiptContext, insert_receipt, lookup_receipt, receipt_in_session, recover_duplicate,
 };
-use super::{objects, query};
+use crate::models::crm_object::{COLLECTION_NAME as OBJECTS, CrmObject};
 
 const MAX_ELEMENTS: usize = 60;
 const MAX_DEPTH: usize = 8;
@@ -49,7 +50,7 @@ pub struct ViewResponse {
     pub title: String,
     pub revision: i64,
     pub envelope: Value,
-    pub created_by: CrmActor,
+    pub created_by: super::activities::ActivityActorResponse,
     pub valid: bool,
     pub errors: Vec<CrmValidationIssue>,
     pub created_at: String,
@@ -192,19 +193,46 @@ struct RecordFormProps {
     submit_label: Option<String>,
 }
 
-pub async fn list(db: &Database, owner_id: &str) -> AppResult<Vec<ViewResponse>> {
+#[derive(Debug, Serialize)]
+pub struct ViewPage {
+    pub views: Vec<ViewResponse>,
+    pub next_cursor: Option<String>,
+}
+
+pub async fn list_page(db: &Database, owner_id: &str, cursor: Option<&str>) -> AppResult<ViewPage> {
+    let mut filter = doc! {"owner_id": owner_id, "deleted_at": mongodb::bson::Bson::Null};
+    if let Some(cursor) = cursor {
+        Uuid::parse_str(cursor).map_err(|_| super::validation_error("cursor", "is invalid"))?;
+        filter.insert("_id", doc! {"$gt": cursor});
+    }
     let rows: Vec<CrmSavedView> = db
         .collection::<CrmSavedView>(VIEWS)
-        .find(doc! {"owner_id": owner_id, "deleted_at": mongodb::bson::Bson::Null})
-        .sort(doc! {"updated_at": -1, "_id": -1})
+        .find(filter)
+        .sort(doc! {"_id": 1})
+        .limit(21)
+        .max_time(std::time::Duration::from_secs(10))
         .await?
         .try_collect()
         .await?;
+    let has_more = rows.len() > 20;
+    let mut rows = rows;
+    rows.truncate(20);
+    let next_cursor = has_more
+        .then(|| rows.last().map(|row| row.id.clone()))
+        .flatten();
+    let metadata = load_metadata(db, owner_id).await?;
     let mut responses = Vec::with_capacity(rows.len());
     for row in rows {
-        responses.push(response(db, row).await);
+        let errors = validate_metadata(owner_id, &row.envelope, &metadata);
+        let mut item = valid_response(row);
+        item.valid = errors.is_empty();
+        item.errors = errors;
+        responses.push(item);
     }
-    Ok(responses)
+    Ok(ViewPage {
+        views: responses,
+        next_cursor,
+    })
 }
 
 pub async fn get(db: &Database, owner_id: &str, id: &str) -> AppResult<ViewResponse> {
@@ -214,6 +242,15 @@ pub async fn get(db: &Database, owner_id: &str, id: &str) -> AppResult<ViewRespo
         .await?
         .ok_or_else(|| AppError::NotFound("CRM view not found".into()))?;
     Ok(response(db, row).await)
+}
+
+/// Authorizes deletion retries against the retained row; ordinary reads still
+/// exclude soft-deleted views. The delete service alone decides receipt replay.
+pub async fn for_delete(db: &Database, owner_id: &str, id: &str) -> AppResult<CrmSavedView> {
+    db.collection::<CrmSavedView>(VIEWS)
+        .find_one(doc! {"_id": id, "owner_id": owner_id})
+        .await?
+        .ok_or_else(|| AppError::NotFound("CRM view not found".into()))
 }
 
 pub async fn raw_by_id(db: &Database, id: &str) -> AppResult<CrmSavedView> {
@@ -234,7 +271,6 @@ pub async fn create(
         return Ok(response);
     }
     validate_title(&input.title)?;
-    validate_for_save(db, owner_id, &input.envelope).await?;
     let context = (
         db.clone(),
         owner_id.to_owned(),
@@ -254,6 +290,8 @@ pub async fn create(
                     });
                 }
                 let now = Utc::now();
+                // Every CRM schema writer holds this same owner fence until commit.
+                validate_for_save(db, owner, &input.envelope).await?;
                 let row = CrmSavedView {
                     id: Uuid::new_v4().to_string(),
                     owner_id: owner.clone(),
@@ -290,7 +328,6 @@ pub async fn update(
         return Ok(response);
     }
     validate_title(&input.title)?;
-    validate_for_save(db, owner_id, &input.envelope).await?;
     let context = (
         db.clone(),
         owner_id.to_owned(),
@@ -318,6 +355,7 @@ pub async fn update(
                 if current.revision != input.expected_revision {
                     return Err(view_revision_conflict(current));
                 }
+                validate_for_save(db, owner, &input.envelope).await?;
                 let now = Utc::now();
                 let updated = db
                     .collection::<CrmSavedView>(VIEWS)
@@ -410,12 +448,74 @@ pub async fn delete(
     recover_duplicate(db, receipt.as_ref(), result).await
 }
 
+async fn load_metadata(db: &Database, owner_id: &str) -> AppResult<BTreeMap<String, CrmObject>> {
+    let rows: Vec<CrmObject> = db
+        .collection::<CrmObject>(OBJECTS)
+        .find(doc! {"owner_id": owner_id})
+        .limit(100)
+        .max_time(std::time::Duration::from_secs(10))
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|object| (object.key.clone(), object))
+        .collect())
+}
+
+fn parse_bounded(envelope: &Value) -> Result<Envelope, Vec<CrmValidationIssue>> {
+    if envelope.to_string().len() > 65_536 {
+        return Err(vec![issue("envelope", "must not exceed 65536 bytes")]);
+    }
+    let parsed: Envelope = serde_json::from_value(envelope.clone())
+        .map_err(|error| vec![issue("envelope", format!("invalid envelope: {error}"))])?;
+    if parsed.queries.len() > MAX_QUERIES
+        || parsed.spec.elements.len() > MAX_ELEMENTS
+        || parsed
+            .spec
+            .elements
+            .values()
+            .map(|e| e.children.len())
+            .sum::<usize>()
+            > MAX_ELEMENTS
+    {
+        return Err(vec![issue(
+            "envelope",
+            "at most 12 queries, 60 elements and 60 edges are allowed",
+        )]);
+    }
+    if parsed
+        .spec
+        .elements
+        .values()
+        .any(|e| e.props.to_string().len() > 8192)
+    {
+        return Err(vec![issue(
+            "spec.elements",
+            "component props must not exceed 8192 bytes",
+        )]);
+    }
+    Ok(parsed)
+}
+
 pub async fn validate(db: &Database, owner_id: &str, envelope: &Value) -> Vec<CrmValidationIssue> {
-    let parsed: Envelope = match serde_json::from_value(envelope.clone()) {
+    if let Err(errors) = parse_bounded(envelope) {
+        return errors;
+    }
+    match load_metadata(db, owner_id).await {
+        Ok(metadata) => validate_metadata(owner_id, envelope, &metadata),
+        Err(_) => vec![issue("envelope", "object metadata is unavailable")],
+    }
+}
+
+fn validate_metadata(
+    owner_id: &str,
+    envelope: &Value,
+    metadata: &BTreeMap<String, CrmObject>,
+) -> Vec<CrmValidationIssue> {
+    let parsed = match parse_bounded(envelope) {
         Ok(parsed) => parsed,
-        Err(error) => {
-            return vec![issue("envelope", format!("invalid envelope: {error}"))];
-        }
+        Err(errors) => return errors,
     };
     let mut errors = Vec::new();
     if parsed.format_version != 1 {
@@ -439,10 +539,20 @@ pub async fn validate(db: &Database, owner_id: &str, envelope: &Value) -> Vec<Cr
             ));
         }
         let result = match view_query {
-            ViewQuery::Table { query } => query::validate_table_query(db, owner_id, query).await,
-            ViewQuery::Aggregate { query } => {
-                query::validate_aggregate_query(db, owner_id, query).await
-            }
+            ViewQuery::Table { query } => metadata
+                .get(&query.object)
+                .cloned()
+                .ok_or_else(|| AppError::NotFound("object".into()))
+                .and_then(|object| {
+                    query::validate_table_metadata(owner_id, object, query).map(|v| v.object)
+                }),
+            ViewQuery::Aggregate { query } => metadata
+                .get(&query.object)
+                .cloned()
+                .ok_or_else(|| AppError::NotFound("object".into()))
+                .and_then(|object| {
+                    query::validate_aggregate_metadata(owner_id, object, query).map(|v| v.object)
+                }),
         };
         match result {
             Ok(object) => {
@@ -466,15 +576,14 @@ pub async fn validate(db: &Database, owner_id: &str, envelope: &Value) -> Vec<Cr
             )),
         }
     }
-    validate_spec(db, owner_id, &parsed, &query_objects, &mut errors).await;
+    validate_spec(&parsed, &query_objects, metadata, &mut errors);
     errors
 }
 
-async fn validate_spec(
-    db: &Database,
-    owner_id: &str,
+fn validate_spec(
     envelope: &Envelope,
     query_objects: &BTreeMap<&str, crate::models::crm_object::CrmObject>,
+    metadata: &BTreeMap<String, CrmObject>,
     errors: &mut Vec<CrmValidationIssue>,
 ) {
     if envelope.spec.elements.len() > MAX_ELEMENTS {
@@ -491,7 +600,6 @@ async fn validate_spec(
     }
     let mut edge_count = 0_usize;
     let mut parent_counts: HashMap<&str, usize> = HashMap::new();
-    let mut structural_errors = false;
     for (id, element) in &envelope.spec.elements {
         if !valid_id(id) {
             errors.push(issue(
@@ -502,7 +610,6 @@ async fn validate_spec(
         if !matches!(element.element_type.as_str(), "Stack" | "Grid")
             && !element.children.is_empty()
         {
-            structural_errors = true;
             errors.push(issue(
                 format!("spec.elements.{id}.children"),
                 "only Stack and Grid elements may have children",
@@ -512,7 +619,6 @@ async fn validate_spec(
         let mut children = HashSet::new();
         for (index, child) in element.children.iter().enumerate() {
             if !children.insert(child.as_str()) {
-                structural_errors = true;
                 errors.push(issue(
                     format!("spec.elements.{id}.children.{index}"),
                     "child ids must not be duplicated",
@@ -520,7 +626,6 @@ async fn validate_spec(
                 continue;
             }
             if !envelope.spec.elements.contains_key(child) {
-                structural_errors = true;
                 errors.push(issue(
                     format!("spec.elements.{id}.children.{index}"),
                     "must reference an existing element",
@@ -529,10 +634,9 @@ async fn validate_spec(
                 *parent_counts.entry(child).or_default() += 1;
             }
         }
-        validate_element(db, owner_id, id, element, envelope, query_objects, errors).await;
+        validate_element(id, element, envelope, query_objects, metadata, errors);
     }
     if edge_count > MAX_ELEMENTS {
-        structural_errors = true;
         errors.push(issue(
             "spec.elements",
             "must contain at most 60 child edges",
@@ -542,14 +646,12 @@ async fn validate_spec(
         let parents = parent_counts.get(id.as_str()).copied().unwrap_or(0);
         if id == &envelope.spec.root {
             if parents != 0 {
-                structural_errors = true;
                 errors.push(issue(
                     format!("spec.elements.{id}"),
                     "spec.root must not be a child",
                 ));
             }
         } else if parents != 1 {
-            structural_errors = true;
             errors.push(issue(
                 format!("spec.elements.{id}"),
                 "every non-root element must have exactly one parent",
@@ -559,18 +661,14 @@ async fn validate_spec(
     if envelope.spec.elements.contains_key(&envelope.spec.root) {
         validate_tree_reachability(envelope, errors);
     }
-    if structural_errors {
-        return;
-    }
 }
 
-async fn validate_element(
-    db: &Database,
-    owner_id: &str,
+fn validate_element(
     id: &str,
     element: &ViewElement,
     envelope: &Envelope,
     query_objects: &BTreeMap<&str, crate::models::crm_object::CrmObject>,
+    metadata: &BTreeMap<String, CrmObject>,
     errors: &mut Vec<CrmValidationIssue>,
 ) {
     let base = format!("spec.elements.{id}.props");
@@ -618,7 +716,20 @@ async fn validate_element(
             if let Some(props) = props::<ChartProps>(&element.props, &base, errors) {
                 validate_title_prop(&props.title, &format!("{base}.title"), errors);
                 match envelope.queries.get(&props.query_id) {
-                    Some(ViewQuery::Aggregate { query }) if query.group_by.is_some() => {}
+                    Some(ViewQuery::Aggregate { query }) if query.group_by.is_some() => {
+                        if element.element_type == "PieChart"
+                            && !matches!(
+                                query.measure,
+                                query::AggregateMeasure::Count
+                                    | query::AggregateMeasure::Sum { .. }
+                            )
+                        {
+                            errors.push(issue(
+                                format!("{base}.queryId"),
+                                "pie charts require count or sum measures",
+                            ));
+                        }
+                    }
                     Some(_) => errors.push(issue(
                         format!("{base}.queryId"),
                         "must reference a grouped aggregate query",
@@ -634,7 +745,15 @@ async fn validate_element(
         "ObjectTable" => {
             if let Some(props) = props::<ObjectTableProps>(&element.props, &base, errors) {
                 match envelope.queries.get(&props.query_id) {
-                    Some(ViewQuery::Table { .. }) => {
+                    Some(ViewQuery::Table { query }) => {
+                        if let (Some(columns), Some(select)) = (&props.columns, &query.select) {
+                            if columns.iter().any(|column| !select.contains(column)) {
+                                errors.push(issue(
+                                    format!("{base}.columns"),
+                                    "displayed columns must be included in query.select",
+                                ));
+                            }
+                        }
                         if let Some(columns) = &props.columns
                             && let Some(object) = query_objects.get(props.query_id.as_str())
                         {
@@ -659,7 +778,13 @@ async fn validate_element(
         "PipelineBoard" => {
             if let Some(props) = props::<PipelineBoardProps>(&element.props, &base, errors) {
                 match envelope.queries.get(&props.query_id) {
-                    Some(ViewQuery::Table { .. }) => {
+                    Some(ViewQuery::Table { query }) => {
+                        if query.include_archived {
+                            errors.push(issue(
+                                format!("{base}.queryId"),
+                                "pipeline boards require include_archived=false",
+                            ));
+                        }
                         if query_objects
                             .get(props.query_id.as_str())
                             .is_some_and(|object| object.pipeline.is_none())
@@ -694,8 +819,8 @@ async fn validate_element(
                         "must contain 1 to 100 characters",
                     ));
                 }
-                match objects::get(db, owner_id, &props.object).await {
-                    Ok(object) => {
+                match metadata.get(&props.object) {
+                    Some(object) => {
                         if let Some(fields) = &props.fields {
                             errors.extend(query::validate_live_fields(
                                 &object,
@@ -704,7 +829,7 @@ async fn validate_element(
                             ));
                         }
                     }
-                    Err(_) => errors.push(issue(format!("{base}.object"), "object is unavailable")),
+                    None => errors.push(issue(format!("{base}.object"), "object is unavailable")),
                 }
             }
         }
@@ -809,7 +934,7 @@ async fn response(db: &Database, row: CrmSavedView) -> ViewResponse {
         title: row.title,
         revision: row.revision,
         envelope: row.envelope,
-        created_by: row.created_by,
+        created_by: row.created_by.into(),
         valid,
         errors,
         created_at: row.created_at.to_rfc3339(),
@@ -824,7 +949,7 @@ fn valid_response(row: CrmSavedView) -> ViewResponse {
         title: row.title,
         revision: row.revision,
         envelope: row.envelope,
-        created_by: row.created_by,
+        created_by: row.created_by.into(),
         valid: true,
         errors: vec![],
         created_at: row.created_at.to_rfc3339(),
@@ -848,6 +973,7 @@ fn issue(path: impl Into<String>, message: impl Into<String>) -> CrmValidationIs
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::crm::objects;
     use serde_json::json;
 
     #[test]
@@ -946,9 +1072,13 @@ mod tests {
         too_many["spec"]["elements"]["Root"]["children"] =
             Value::Array((0..61).map(|_| json!("Leaf")).collect());
         let errors = validate(&db, &owner, &too_many).await;
-        assert!(errors.iter().any(|error| {
-            error.path == "spec.elements" && error.message == "must contain at most 60 child edges"
-        }));
+        assert_eq!(
+            errors,
+            vec![issue(
+                "envelope",
+                "at most 12 queries, 60 elements and 60 edges are allowed"
+            )]
+        );
     }
 
     #[tokio::test]
