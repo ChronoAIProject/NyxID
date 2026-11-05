@@ -131,6 +131,16 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
 }
 #[derive(Serialize)]
 pub struct AttachmentResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_at: Option<DateTime<Utc>>,
     expired: bool,
     image_input: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -145,6 +155,11 @@ pub struct AttachmentResponse {
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
     fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
         Self {
+            filename: row.artifact.filename,
+            source: row.artifact.source,
+            result_version: row.artifact.content_revision,
+            preview_kind: row.artifact.preview_kind,
+            expires_at: row.artifact.expires_at,
             expired: false,
             image_input: row.image_input,
             image_input_reason: row.image_input_reason,
@@ -299,6 +314,13 @@ pub struct ConversationResponse {
     channel: Option<ChannelOriginResponse>,
 }
 impl ConversationResponse {
+    fn with_artifacts(mut self, enabled: bool) -> Self {
+        if !enabled && let Some(turn) = self.active_turn.as_mut() {
+            turn.attachments
+                .retain(|a| a.origin != "generated_artifact");
+        }
+        self
+    }
     /// Attach the owning agent (legacy rows belong to NyxBot).
     pub(crate) fn with_agent(
         mut self,
@@ -497,6 +519,36 @@ pub struct ModelRouteDiagnosticResponse {
 }
 
 #[derive(Serialize)]
+pub struct ArtifactDeliveryResponse {
+    rejected: Vec<RejectedArtifactResponse>,
+    state: String,
+    count: usize,
+    recovery_available: bool,
+}
+
+#[derive(Serialize)]
+pub struct RejectedArtifactResponse {
+    index: usize,
+    filename: String,
+    reason: &'static str,
+}
+impl From<crate::models::generated_artifact::RejectedFile> for RejectedArtifactResponse {
+    fn from(file: crate::models::generated_artifact::RejectedFile) -> Self {
+        use crate::models::generated_artifact::RejectionReason;
+        Self {
+            index: file.index,
+            filename: file.filename,
+            reason: match file.reason {
+                RejectionReason::Invalid => "invalid",
+                RejectionReason::TooLarge => "too_large",
+                RejectionReason::Unavailable => "unavailable",
+                RejectionReason::Missing => "missing",
+            },
+        }
+    }
+}
+
+#[derive(Serialize)]
 pub struct TurnFailureReasonResponse {
     model_route: Option<ModelRouteDiagnosticResponse>,
     source: String,
@@ -603,6 +655,8 @@ impl ActionOutcomeResponse {
 #[derive(Serialize)]
 pub struct MessageResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_delivery: Option<ArtifactDeliveryResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     action_outcome: Option<ActionOutcomeResponse>,
     platform_origin: Option<PlatformTurnOriginResponse>,
     recovery: Option<RecoveryResponse>,
@@ -643,6 +697,7 @@ pub struct AutomationRunResponse {
 impl From<AssistantMessage> for MessageResponse {
     fn from(row: AssistantMessage) -> Self {
         Self {
+            artifact_delivery: None,
             action_outcome: ActionOutcomeResponse::from_message(&row),
             platform_origin: row
                 .platform_origin
@@ -859,7 +914,10 @@ pub async fn list(
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<IndexResponse>> {
     let user_id = auth.user_id.to_string();
-    engine::require_enabled(&state.db, &user_id).await?;
+    let features = engine::require_enabled_features(&state.db, &user_id).await?;
+    let artifacts_enabled = features.iter().any(|key| {
+        key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
+    });
     let limit = limit(query.limit)?;
     crate::services::assistant_team_service::ensure_nyxbot(&state.db, &user_id).await?;
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
@@ -894,6 +952,7 @@ pub async fn list(
             let count = counts.get(&row.id).copied().unwrap_or(0);
             let agent_id = row.agent_id.clone();
             let mut dto = ConversationResponse::from(row)
+                .with_artifacts(artifacts_enabled)
                 .with_agent(agent_id.as_deref(), &agents)
                 .with_chat(&chats);
             dto.pending_acknowledgements = count;
@@ -987,7 +1046,10 @@ pub async fn history(
     Query(query): Query<HistoryQuery>,
 ) -> AppResult<Json<HistoryResponse>> {
     let user_id = auth.user_id.to_string();
-    engine::require_enabled(&state.db, &user_id).await?;
+    let features = engine::require_enabled_features(&state.db, &user_id).await?;
+    let artifacts_enabled = features.iter().any(|key| {
+        key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
+    });
     let limit = limit(query.limit)?;
     if query.before_seq.is_some_and(|seq| seq <= 0) {
         return Err(AppError::BadRequest("Invalid before_seq".into()));
@@ -1121,7 +1183,34 @@ pub async fn history(
         .iter()
         .filter(|ack| ack.status == "pending")
         .count() as u32;
+    let mut artifact_states = if artifacts_enabled {
+        crate::services::generated_artifacts::delivery_states(&state.db, &user_id, &id, &rows)
+            .await?
+    } else {
+        Default::default()
+    };
+    if !artifacts_enabled {
+        for row in &mut rows {
+            row.attachments.retain(|a| a.origin != "generated_artifact");
+        }
+        if let Some(turn) = conversation.active_turn.as_mut() {
+            turn.attachments
+                .retain(|a| a.origin != "generated_artifact");
+        }
+    }
     let mut messages: Vec<MessageResponse> = rows.into_iter().map(Into::into).collect();
+    for message in &mut messages {
+        message.artifact_delivery =
+            artifact_states
+                .remove(&message.id)
+                .map(|s| ArtifactDeliveryResponse {
+                    state: s.state,
+                    count: s.count,
+                    recovery_available: s.recovery_available,
+                    rejected: s.rejected.into_iter().map(Into::into).collect(),
+                });
+    }
+
     for message in &mut messages {
         message.recovery = recovery.get(&message.id).cloned().map(Into::into);
     }
@@ -1300,14 +1389,21 @@ pub async fn attachment(
     if Uuid::parse_str(&attachment_id).is_err() {
         return Err(AppError::NotFound("Attachment not found".into()));
     }
-    let (content_type, bytes) = engine::read_attachment(
+    let read = engine::read_attachment_for_caller(
         &state.db,
         &state.encryption_keys,
         &user_id,
         &id,
         &attachment_id,
+        auth.assistant_chat
+            .as_ref()
+            .map(|chat| chat.conversation_id.as_str()),
     )
     .await?;
+    let (content_type, bytes) = match read {
+        engine::AttachmentRead::Legacy(kind, bytes) => (kind, bytes),
+        engine::AttachmentRead::Generated(read) => return generated_response(read),
+    };
     let mut response = bytes.into_response();
     let headers = response.headers_mut();
     for (name, value) in [
@@ -1325,6 +1421,83 @@ pub async fn attachment(
         );
     }
     Ok(response)
+}
+fn generated_response(
+    read: crate::services::generated_artifacts::GeneratedRead,
+) -> AppResult<Response> {
+    let kind = if read.inline { "inline" } else { "attachment" };
+    let safe = crate::services::generated_artifacts::sandbox::filename(&read.filename, 0);
+    let ascii: String = safe
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || ".-_ ".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let disposition = format!(
+        "{kind}; filename=\"{ascii}\"; filename*=UTF-8''{}",
+        urlencoding::encode(&safe)
+    );
+    axum::http::Response::builder()
+        .status(200)
+        .header(
+            "content-type",
+            if read.inline {
+                read.content_type.as_str()
+            } else {
+                "application/octet-stream"
+            },
+        )
+        .header("content-length", read.bytes.len().to_string())
+        .header("content-disposition", disposition)
+        .header("cache-control", "private, no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("content-security-policy", "default-src 'none'; sandbox")
+        .body(axum::body::Body::from(bytes::Bytes::from_owner(read)))
+        .map_err(|_| AppError::Internal("Invalid attachment response".into()))
+}
+pub async fn artifact_delivery(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, message_id)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> AppResult<Json<Value>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let user = auth.user_id.to_string();
+    let features = engine::require_enabled_features(&state.db, &user).await?;
+    if !features.iter().any(|key| {
+        key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
+    }) {
+        return Err(AppError::NotFound("Assistant route not found.".into()));
+    }
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "Artifact recovery requires an empty body".into(),
+        ));
+    }
+    let row = engine::get(&state.db, &user, &id).await?;
+    if row.active_turn.is_some() {
+        return Err(AppError::AssistantTurnActive);
+    }
+    crate::services::generated_artifacts::preflight(&state.db, &user, &id, &message_id).await?;
+    crate::services::generated_artifacts::audit_recovery_request(
+        &state.db,
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        true,
+    )
+    .await;
+    crate::services::generated_artifacts::recover(
+        &state.db,
+        &state.encryption_keys,
+        &user,
+        &id,
+        &message_id,
+    )
+    .await?;
+    Ok(Json(json!({"status":"materialized"})))
 }
 #[derive(Serialize)]
 pub struct AcknowledgementResponse {
@@ -1487,7 +1660,10 @@ pub async fn change_model(
 ) -> AppResult<Json<ConversationResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
-    engine::require_enabled(&state.db, &owner).await?;
+    let features = engine::require_enabled_features(&state.db, &owner).await?;
+    let artifacts_enabled = features.iter().any(|key| {
+        key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
+    });
     require_available_model(&state, &auth, &body.model).await?;
     let (before, row) = engine::change_model(&state.db, &owner, &id, &body.model).await?;
     engine::audit_model_change(
@@ -1497,7 +1673,9 @@ pub async fn change_model(
         &before,
     )
     .await;
-    Ok(Json(ConversationResponse::from(row)))
+    Ok(Json(
+        ConversationResponse::from(row).with_artifacts(artifacts_enabled),
+    ))
 }
 pub async fn rename(
     State(state): State<AppState>,
@@ -1506,7 +1684,10 @@ pub async fn rename(
     Json(body): Json<RenameRequest>,
 ) -> AppResult<Json<ConversationResponse>> {
     let user_id = auth.user_id.to_string();
-    engine::require_enabled(&state.db, &user_id).await?;
+    let features = engine::require_enabled_features(&state.db, &user_id).await?;
+    let artifacts_enabled = features.iter().any(|key| {
+        key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
+    });
     let row = engine::rename(&state.db, &user_id, &id, &body.title).await?;
     // The same shape as the index row, so a rename never drops the agent.
     let agents = crate::services::assistant_team_service::agents(&state.db, &user_id, true).await?;
@@ -1517,6 +1698,7 @@ pub async fn rename(
     let agent_id = row.agent_id.clone();
     let chats = super::nyxbot::chats::thread_details(&state, &user_id, &[&row]).await?;
     let mut dto = ConversationResponse::from(row)
+        .with_artifacts(artifacts_enabled)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
     dto.pending_acknowledgements = count;

@@ -1830,6 +1830,18 @@ async fn v2_marked_idle_and_owner_stop_keep_main_cleanup_and_protect_only_live_r
                     ])
                     .await
                     .unwrap();
+                let artifacts = state
+                    .db
+                    .collection::<Document>(crate::models::generated_artifact::COLLECTION_NAME);
+                artifacts
+                    .insert_one(doc! {
+                        "_id": "pending-artifact", "user_id": OWNER,
+                        "conversation_id": &row.id, "state": "pending",
+                        "data_encrypted": "opaque-test-bytes",
+                        "secret_context_versions": {"data_encrypted": 1},
+                    })
+                    .await
+                    .unwrap();
                 let target = engine::request_stop_target(&state.db, OWNER, &row.id)
                     .await
                     .unwrap();
@@ -1852,6 +1864,22 @@ async fn v2_marked_idle_and_owner_stop_keep_main_cleanup_and_protect_only_live_r
                         .unwrap()
                     }
                 }
+                let discarded = artifacts
+                    .find_one(doc! {"_id": "pending-artifact"})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(discarded.get_str("state").unwrap(), "discarded");
+                assert!(matches!(
+                    discarded.get("data_encrypted"),
+                    Some(bson::Bson::Null)
+                ));
+                assert!(
+                    discarded
+                        .get_document("secret_context_versions")
+                        .unwrap()
+                        .is_empty()
+                );
                 for id in ["old-watch", "current-watch", "bound-watch"] {
                     let watch = state
                         .db

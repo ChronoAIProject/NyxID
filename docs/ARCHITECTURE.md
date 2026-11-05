@@ -2167,6 +2167,20 @@ transaction. An exact approved continuation receives a fresh current-turn ref
 only after rechecking the original pending intent and expiry. See
 [Source resources](chat/10-source-resources.md).
 
+Generated Sandbox delivery is a separate, default-off owner Web lane. Its
+async watch retains main's background execution authority and cancellation
+fences. `generated_artifacts` verifies bounded responses and file containers on
+blocking CPU workers, then materializes encrypted assistant attachments with
+memory reservations acquired before transactions. The new
+`async_service_operation_artifacts`, `assistant_artifact_deliveries` and
+`generated_artifact_content_series` collections hold pending bytes, original
+reply associations and content revisions. Each has a `purge_after` TTL index and
+joins conversation deletion and personal erasure. Live retention can shorten,
+but never extend, an attachment's immutable expiry cap. The encrypted-record
+registry includes pending bytes and generated attachment AAD; its changed digest
+requires a new generation for existing operator walks. See the
+[encrypted field inventory](security/ENCRYPTED_FIELD_INVENTORY.md).
+
 See [Uploads](chat/10-uploads.md) and [NyxAgent engine](chat/08-nyxagent-engine.md).
 
 Skill permission decisions use an outbox embedded in

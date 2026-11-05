@@ -768,6 +768,7 @@ async fn create_thread_with_kind(
     let now = Utc::now();
     let mut row = AssistantConversation {
         automation_v2: false,
+        artifact_head: None,
         collaboration: collaboration.clone(),
         owner_model_route: None,
         invocation_controlled: false,

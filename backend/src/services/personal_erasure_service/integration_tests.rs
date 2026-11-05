@@ -76,6 +76,18 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
     let mut removed = Vec::<(&str, bson::Bson)>::new();
     for (collection, mut row) in [
         (
+            "async_service_operation_artifacts",
+            doc! {"_id":"pending-file","user_id":&owner,"conversation_id":"deleted-thread","data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}},
+        ),
+        (
+            "assistant_artifact_deliveries",
+            doc! {"_id":"delivery","user_id":&owner,"conversation_id":"deleted-thread"},
+        ),
+        (
+            "generated_artifact_content_series",
+            doc! {"_id":"series","user_id":&owner,"conversation_id":"deleted-thread"},
+        ),
+        (
             "service_preferences",
             doc! {"_id":&owner,"ordered":["catalog-a"]},
         ),

@@ -839,6 +839,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
@@ -909,6 +910,7 @@ fn guest_recap_omits_owner_tool_metadata() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
@@ -1255,6 +1257,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
         automation_v2: false,
+        artifact_head: None,
         collaboration: None,
         owner_model_route: None,
         invocation_controlled: false,
@@ -1281,6 +1284,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         message_count: 0,
         active_turn: Some(ActiveTurn {
             automation_work: None,
+            artifact_watch_id: None,
             execution_task: None,
             business_system_success: false,
             delegated_images: Default::default(),
@@ -1599,6 +1603,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
     template.agent_id = Some(agent.id.clone());
     let proof = platform_test_origin(&template);
     let ids = OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: template.id,
         turn_id: Uuid::new_v4().to_string(),
         message_id: Uuid::new_v4().to_string(),
@@ -4767,6 +4772,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
             message
                 .attachments
                 .push(crate::models::assistant_conversation::TurnAttachment {
+                    artifact: Default::default(),
                     chat_delivery: None,
                     id: upload_id.clone(),
                     label: "Old source.txt".into(),
@@ -5848,6 +5854,10 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        artifact_catalog_service_id: None,
+        artifact_mode: None,
+        artifact_result: None,
+        artifact_event_turn_id: None,
         execution_task: None,
         instruction_receipt_version: 0,
         shared_execution: None,

@@ -61,3 +61,69 @@ test("Privacy holds both analytics switches with the retention note", () => {
   );
   env.harness.unmount();
 });
+
+test("Privacy analytics keeps shared group insets and wrapping controls at narrow widths and large text", () => {
+  const env = setupSettingsScreen(
+    "./PrivacySettingsScreen.tsx",
+    "PrivacySettingsScreen",
+  );
+  for (const [width, fontScale] of [
+    [402, 1],
+    [320, 1],
+    [402, 3.12],
+  ]) {
+    env.resize(width!, fontScale!);
+    const title = env.text("USAGE ANALYTICS");
+    const footer = env.text(
+      "Optional usage events are sent only when both your account and this device allow them. Security and billing records have separate retention rules.",
+    );
+    const group = env.parent(title);
+    assert.equal(env.parent(footer), group);
+    assert.ok(
+      style(group).gap >= 8,
+      "title and retention text have a stable gap from the card",
+    );
+    assert.equal(
+      style(title).paddingHorizontal,
+      style(footer).paddingHorizontal,
+    );
+    for (const label of ["Allow for my account", "Allow on this device"]) {
+      const row = env.row(label);
+      assert.equal(
+        style(row).paddingHorizontal,
+        style(title).paddingHorizontal,
+      );
+      const text = env.text(label);
+      const labels = env.parent(env.parent(text));
+      const body = env.parent(labels);
+      assert.equal(style(labels).minWidth, 0);
+      assert.equal(style(labels).flexShrink, 1);
+      assert.equal(style(body).maxWidth, "100%");
+      assert.equal(
+        style(body).flexDirection,
+        width! / fontScale! < 340 ? "column" : "row",
+      );
+      const control = elements(row).find((node) => node.type === "Switch")!;
+      assert.equal(control.props.disabled, false);
+      for (const node of [title, footer, text]) {
+        assert.ok(
+          style(node).textAlign === undefined ||
+            style(node).textAlign === "left",
+          "analytics text keeps the native left alignment",
+        );
+        assert.equal(node.props.numberOfLines, undefined);
+        assert.notEqual(node.props.allowFontScaling, false);
+        assert.equal(node.props.maxFontSizeMultiplier, undefined);
+      }
+    }
+  }
+  elements(env.row("Allow for my account"))
+    .find((node) => node.type === "Switch")!
+    .props.onValueChange(false);
+  elements(env.row("Allow on this device"))
+    .find((node) => node.type === "Switch")!
+    .props.onValueChange(true);
+  assert.deepEqual(env.mutations, [false]);
+  assert.deepEqual(env.deviceChoices, [true]);
+  env.harness.unmount();
+});

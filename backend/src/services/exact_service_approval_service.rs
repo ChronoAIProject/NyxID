@@ -494,6 +494,7 @@ pub async fn redeem_request(
             }
         };
         let exec_ctx = mcp_service::McpExecContext {
+            strict_response_utf8: false,
             execution_permission: None,
             assistant_chat: None,
             response_body_limit: None,
