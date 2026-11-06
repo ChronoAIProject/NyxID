@@ -3454,8 +3454,7 @@ async fn execution_permission_group_roots_bind_requester_audience_and_cancel_at_
     .unwrap()
     .target;
     let permit = dispatch::prepare(
-        &f.state.db,
-        &f.state.encryption_keys,
+        &f.state,
         auth.execution_permission.as_ref(),
         Some(chat),
         &key.id,

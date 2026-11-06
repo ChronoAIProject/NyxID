@@ -3944,12 +3944,17 @@ impl PreparedProxyCall {
                 .as_ref()
                 .expect("participating")
                 .enable_authoring();
-        } else if self.acknowledgement_id.is_none()
-            && auth
-                .assistant_chat
-                .as_deref()
-                .is_some_and(super::execution_permission_dispatch::proposals::supported_chat)
-        {
+        } else {
+            // A later HTTP admission must not override this adapter's inability
+            // to replay the effect. Already retained watch adapters own their
+            // continuation; a claimed resume never authors another proposal.
+            auth.execution_permission
+                .as_ref()
+                .expect("participating")
+                .retain_adapter(
+                    crate::models::execution_proposal::PreparedAdapter::Unsupported,
+                    &axum::http::HeaderMap::new(),
+                );
             tracing::info!(
                 reason = "mcp_effect_not_retainable",
                 "Execution proposal uses legacy prompts"
@@ -5514,6 +5519,18 @@ enum ToolResponseOrigin {
 }
 
 impl ToolResponse {
+    pub(crate) fn execution_receipt(status: u16, text: String) -> Self {
+        Self {
+            resources: None,
+            concurrency: None,
+            status,
+            text,
+            media: None,
+            origin: ToolResponseOrigin::Downstream,
+            body_error: None,
+        }
+    }
+
     /// Only the server's execution gate can construct this control response.
     /// Provider bodies are always downstream content, even if they resemble it.
     fn policy_refusal(refusal: serde_json::Value) -> Self {

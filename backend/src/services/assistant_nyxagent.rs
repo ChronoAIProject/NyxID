@@ -4670,7 +4670,8 @@ async fn chat_approvals(
     let scope = doc! {
         "$or":[
             {"execution_proposal":null,"requester_type":"user", "requester_id":user_id,"requester_label":&key.name,"$or":[{"user_id":user_id},{"notify_user_ids":user_id}]},
-            {"user_id":user_id,"execution_proposal.v1.key_id":credential_api_key_id}
+            {"user_id":user_id,"execution_proposal.v1.key_id":credential_api_key_id},
+            {"user_id":user_id,"execution_proposal.v2.key_id":credential_api_key_id}
         ],
     };
     let now = Utc::now();
@@ -4739,7 +4740,7 @@ pub(crate) async fn include_execution_card(
     if rows.iter().any(|row| row.id == id) {
         return Ok(());
     }
-    if let Some(row)=db.collection::<crate::models::approval_request::ApprovalRequest>("approval_requests").find_one(doc!{"_id":id,"user_id":actor,"execution_proposal.v1.conversation_id":&conversation.id,"execution_proposal.v1.key_id":&conversation.credential_api_key_id}).await? {
+    if let Some(row)=db.collection::<crate::models::approval_request::ApprovalRequest>("approval_requests").find_one(doc!{"_id":id,"user_id":actor,"$or":[{"execution_proposal.v1.conversation_id":&conversation.id,"execution_proposal.v1.key_id":&conversation.credential_api_key_id},{"execution_proposal.v2.conversation_id":&conversation.id,"execution_proposal.v2.key_id":&conversation.credential_api_key_id}]}).await? {
         rows.push(chat_approval(row,""));
     }
     Ok(())

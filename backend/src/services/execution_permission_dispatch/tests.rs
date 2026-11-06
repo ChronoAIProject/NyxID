@@ -300,8 +300,7 @@ impl Fixture {
         target: &proxy_service::ProxyTarget,
     ) -> Arc<Permit> {
         prepare(
-            &self.state.db,
-            &self.state.encryption_keys,
+            &self.state,
             Some(context),
             None,
             &self.key,
@@ -430,6 +429,13 @@ async fn twenty_duplicate_operation_claims_send_once_and_uncertain_never_replays
             principal: Principal::ApiKey(f.key.clone()),
             operation_id: initial.operation_id.clone(),
             voice_task: false,
+            ingress: OnceLock::new(),
+            idempotency: OnceLock::new(),
+            async_requested: std::sync::atomic::AtomicBool::new(false),
+            cancellation: OnceLock::new(),
+            connected_resume: OnceLock::new(),
+            connected_snapshot: OnceCell::new(),
+            wait_guard: OnceLock::new(),
             native: None,
             descendant: None,
             authoring: std::sync::atomic::AtomicBool::new(false),
@@ -496,6 +502,13 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
         principal: Principal::ApiKey(f.key.clone()),
         operation_id: initial.operation_id.clone(),
         voice_task: false,
+        ingress: OnceLock::new(),
+        idempotency: OnceLock::new(),
+        async_requested: std::sync::atomic::AtomicBool::new(false),
+        cancellation: OnceLock::new(),
+        connected_resume: OnceLock::new(),
+        connected_snapshot: OnceCell::new(),
+        wait_guard: OnceLock::new(),
         native: None,
         descendant: None,
         authoring: std::sync::atomic::AtomicBool::new(false),
@@ -561,6 +574,82 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
     }
     assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
     f.no_prompts().await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn connection_binding_survives_dispatch_locks_but_fences_destination_changes() {
+    let f = Fixture::new("execution_binding_lock").await;
+    let credential = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<bson::Document>("user_api_keys")
+        .insert_one(doc! {
+            "_id": &credential, "user_id": &f.owner, "label": "Fixture",
+            "credential_type": "api_key", "status": "active", "credential_epoch": 1_i64,
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection("agent_service_bindings")
+        .insert_one(crate::models::agent_service_binding::AgentServiceBinding {
+            id: Uuid::new_v4().to_string(),
+            api_key_id: f.key.clone(),
+            user_service_id: f.connection.clone(),
+            user_api_key_id: credential,
+            user_id: f.owner.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .unwrap();
+    let before = super::super::assistant_service_execution::connection_binding(
+        &f.state.db,
+        &f.connection,
+        &f.key,
+    )
+    .await
+    .unwrap();
+    let snapshot = authority::Snapshot::load(&f.state.db, &f.connection, &f.key, None)
+        .await
+        .unwrap();
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    snapshot.fence(&f.state.db, &mut session).await.unwrap();
+    session.commit_transaction().await.unwrap();
+    assert_eq!(
+        super::super::assistant_service_execution::connection_binding(
+            &f.state.db,
+            &f.connection,
+            &f.key,
+        )
+        .await
+        .unwrap(),
+        before,
+        "transaction locks must not invalidate an admitted watch or connection consent"
+    );
+    f.state
+        .db
+        .collection::<bson::Document>("downstream_services")
+        .update_one(
+            doc! {"_id": &f.catalog},
+            doc! {"$set": {"base_url": "https://changed.invalid"}},
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        super::super::assistant_service_execution::connection_binding(
+            &f.state.db,
+            &f.connection,
+            &f.key,
+        )
+        .await
+        .unwrap(),
+        before,
+        "the destination remains part of the live authority binding"
+    );
     f.cleanup().await;
 }
 
@@ -668,7 +757,7 @@ async fn unmarked_coordinator_adds_zero_database_commands() {
 }
 
 #[tokio::test]
-async fn gap_preserves_the_legacy_approval_chain() {
+async fn unenrolled_gap_keeps_legacy_and_enrolled_gap_creates_one_v2_review() {
     let f = Fixture::new("execution_gap_legacy").await;
     let channel = super::super::notification_service::get_or_create_channel(&f.state.db, &f.owner)
         .await
@@ -683,6 +772,15 @@ async fn gap_preserves_the_legacy_approval_chain() {
         .await
         .unwrap();
     let legacy = f.call("/proxy/s/execution-fixture/status").await;
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("approval_requests")
+            .count_documents(doc! {"execution_proposal":{"$ne":null}})
+            .await
+            .unwrap(),
+        0
+    );
     let legacy_requests = f
         .state
         .db
@@ -698,6 +796,15 @@ async fn gap_preserves_the_legacy_approval_chain() {
         .unwrap();
     f.enroll(true).await;
     let participating = f.call("/proxy/s/execution-fixture/status").await;
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("approval_requests")
+            .count_documents(doc! {"execution_proposal.version":2})
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(
         participating.0, legacy.0,
         "legacy={}, participating={}",
@@ -1112,7 +1219,7 @@ async fn both_llm_gateways_cover_personal_approval_and_keep_one_provider_attempt
         }
         assert_eq!(
             observations[0], observations[1],
-            "{route}: Gap must keep the legacy chain"
+            "{route}: either enrollment state returns one pending review and no effect"
         );
         assert_ne!(observations[0].0, StatusCode::OK);
         assert_eq!(observations[0].1, 1);
@@ -1376,6 +1483,13 @@ async fn enrollment_disable_fences_even_an_admitted_legacy_gap() {
     let mut target = f.target().await;
     let descriptor =
         super::super::operation_descriptor::build_http_descriptor("GET", "status", None);
+    // Raw input cannot be retained, so this remains a real legacy gap even
+    // though enrolled, replayable external requests now create v2 proposals.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        "application/octet-stream".parse().unwrap(),
+    );
     admit_http(
         &f.state,
         &auth,
@@ -1385,8 +1499,8 @@ async fn enrollment_disable_fences_even_an_admitted_legacy_gap() {
         "GET",
         "status",
         None,
-        b"",
-        &Default::default(),
+        b"raw payload",
+        &headers,
         None,
         &descriptor,
         false,
@@ -1456,6 +1570,13 @@ async fn operation_candidates_use_independent_claims_and_prefer_reusable_coverag
         principal: Principal::ApiKey(f.key.clone()),
         operation_id: original.operation_id.clone(),
         voice_task: false,
+        ingress: OnceLock::new(),
+        idempotency: OnceLock::new(),
+        async_requested: std::sync::atomic::AtomicBool::new(false),
+        cancellation: OnceLock::new(),
+        connected_resume: OnceLock::new(),
+        connected_snapshot: OnceCell::new(),
+        wait_guard: OnceLock::new(),
         native: None,
         descendant: None,
         authoring: std::sync::atomic::AtomicBool::new(false),
@@ -1532,8 +1653,7 @@ async fn covered_risk_keeps_webhook_policy_delegation_and_org_instruction_floors
     .target;
     let chat = auth.assistant_chat.as_deref().unwrap();
     prepare(
-        &f.state.db,
-        &f.state.encryption_keys,
+        &f.state,
         auth.execution_permission.as_ref(),
         Some(chat),
         &key.id,
@@ -2231,8 +2351,7 @@ async fn policy_change_during_admission_cannot_become_the_coverage_baseline() {
         .await
         .unwrap();
     let result = prepare(
-        &f.state.db,
-        &f.state.encryption_keys,
+        &f.state,
         Some(&context),
         None,
         &f.key,
@@ -2366,17 +2485,10 @@ async fn specialized_model_transport_claims_once_and_binds_the_actual_request() 
         endpoint: None,
         floors: &[ExecutionFloor::PersonalServiceApproval],
     };
-    let initial = prepare(
-        &f.state.db,
-        &f.state.encryption_keys,
-        Some(&context),
-        None,
-        &f.key,
-        effect(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let initial = prepare(&f.state, Some(&context), None, &f.key, effect())
+        .await
+        .unwrap()
+        .unwrap();
     let permission = grant.execution.as_mut().unwrap().v1.as_mut().unwrap();
     permission.validity = Validity::Operation {
         operation_id: initial.operation_id.clone(),
@@ -2395,17 +2507,10 @@ async fn specialized_model_transport_claims_once_and_binds_the_actual_request() 
         .unwrap()
         .operation_id
         .clone_from(&initial.operation_id);
-    let permit = prepare(
-        &f.state.db,
-        &f.state.encryption_keys,
-        Some(&context),
-        None,
-        &f.key,
-        effect(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let permit = prepare(&f.state, Some(&context), None, &f.key, effect())
+        .await
+        .unwrap()
+        .unwrap();
     let wrong = f
         .state
         .http_client
@@ -2560,3 +2665,5 @@ pub(super) mod proposal_tests;
 
 #[path = "enrollment_tests.rs"]
 mod enrollment_tests;
+#[path = "proposal_v2_tests.rs"]
+mod proposal_v2_tests;

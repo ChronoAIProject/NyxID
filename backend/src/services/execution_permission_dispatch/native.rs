@@ -11,6 +11,16 @@ pub(super) struct Native {
 }
 
 impl Native {
+    pub(super) fn policy(&self) -> &nyxid_permissions::Policy {
+        &self.binding.policy
+    }
+    pub(super) fn source(&self) -> crate::models::execution_proposal::ProposalSource {
+        crate::models::execution_proposal::ProposalSource::Native {
+            policy_id: self.binding.id.clone(),
+            revision: self.binding.revision,
+        }
+    }
+
     pub(super) fn require_effect(&self, effect: &Effect<'_>) -> AppResult<()> {
         let query =
             nyxid_permissions::parse_query(effect.query.unwrap_or("")).map_err(|_| refused())?;
@@ -74,6 +84,28 @@ impl RequestContext {
         )
         .map_err(|_| refused())?;
         fresh.operation_id.clone_from(&self.operation_id);
+        fresh.resume = self.resume().cloned();
+        fresh.async_requested.store(
+            self.async_requested
+                .load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        if let Some(token) = self.cancellation.get() {
+            fresh.bind_cancellation(token.clone());
+        }
+        if let Some(value) = self.generated_correlation.get() {
+            fresh.bind_generated_correlation(value);
+        }
+        if let Some(v) = self.ingress.get() {
+            let _ = fresh.ingress.set(v.clone());
+        }
+        if let Some(v) = self.idempotency.get() {
+            let _ = fresh.idempotency.set(v.clone());
+        }
+        if let Some(v) = self.source_credential.get() {
+            let _ = fresh.source_credential.set(v.clone());
+        }
+
         fresh.native = Some(Arc::new(Native {
             policy_digest: super::super::mcp_service::canonical_sha256(
                 serde_json::to_value(&binding.policy).map_err(encoding)?,

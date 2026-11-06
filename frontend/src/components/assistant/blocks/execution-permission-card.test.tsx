@@ -254,3 +254,37 @@ it("renders the requester's retained result as plain text without claiming anoth
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
   expect(api.post).not.toHaveBeenCalled();
 });
+
+it("shows an external v2 request without inventing a task choice", () => {
+  card({
+    ...proposal,
+    version: 2,
+    source: "API key request",
+    choices: proposal.choices.filter((choice) => choice.id !== "task"),
+    review: {
+      ...proposal.review!,
+      audience: "Only this authenticated caller",
+      reusable_unavailable: "Task is unavailable: this request has no server-owned task",
+    },
+  });
+  expect(screen.getByText("Source:")).toBeInTheDocument();
+  expect(screen.getByText("API key request")).toBeInTheDocument();
+  expect(screen.queryByRole("radio", { name: /This task/ })).not.toBeInTheDocument();
+  expect(screen.getByRole("radio", { name: /This operation/ })).toBeChecked();
+  expect(screen.getByText(/no server-owned task/)).toBeInTheDocument();
+});
+
+it("keeps login-child review Operation-only and explains external expiry", () => {
+  const first = card({
+    ...proposal, version: 2, source: "API key request",
+    choices: [proposal.choices[0]!],
+    review: {...proposal.review!, reusable_unavailable: "Login-child credentials support only this operation"},
+  });
+  expect(screen.getAllByRole("radio")).toHaveLength(1);
+  expect(screen.getByText(/Login-child credentials/)).toBeInTheDocument();
+  first.unmount(); client.clear();
+  card({...proposal, version: 2, state: "expired", can_decide: false});
+  expect(screen.getByText(/use a new request context/)).toBeInTheDocument();
+  expect(screen.queryByText(/original conversation/)).not.toBeInTheDocument();
+  expect(api.post).not.toHaveBeenCalled();
+});

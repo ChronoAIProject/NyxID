@@ -792,14 +792,11 @@ pub async fn proxy_request(
         .insert(ProxyExchangeStartedAt(started_at));
     let generated_id = !request.headers().contains_key("x-request-id");
     let request_id = ensure_proxy_request_id(request.headers_mut());
-    if generated_id
-        && auth_user
-            .assistant_chat
-            .as_deref()
-            .is_some_and(crate::services::execution_permission_dispatch::proposals::supported_chat)
-        && let Some(context) = auth_user.execution_permission.as_ref()
-    {
+    if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
         context.bind_generated_correlation(&request_id);
+    }
+    if let Some(context) = &auth_user.execution_permission {
+        context.bind_cancellation(request_cancellation(&request));
     }
     let mut resolved_slug = String::new();
     // Keep nested proxy dispatch off the handler frame (also called by
@@ -1155,14 +1152,11 @@ pub async fn proxy_request_by_slug(
         .insert(ProxyExchangeStartedAt(started_at));
     let generated_id = !request.headers().contains_key("x-request-id");
     let request_id = ensure_proxy_request_id(request.headers_mut());
-    if generated_id
-        && auth_user
-            .assistant_chat
-            .as_deref()
-            .is_some_and(crate::services::execution_permission_dispatch::proposals::supported_chat)
-        && let Some(context) = auth_user.execution_permission.as_ref()
-    {
+    if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
         context.bind_generated_correlation(&request_id);
+    }
+    if let Some(context) = &auth_user.execution_permission {
+        context.bind_cancellation(request_cancellation(&request));
     }
     let mut resolved_slug = String::new();
     let mut result = Box::pin(proxy_request_by_slug_inner(
@@ -1675,6 +1669,15 @@ async fn proxy_request_through_pool(
         return Err(AppError::BadRequest(
             "Gateway pool aliases require an AI chat priority pool".into(),
         ));
+    }
+    if let Some(pinned) = crate::services::execution_permission_dispatch::proposals::v2::pin_pool(
+        &state.db, auth_user, &pool, &headers,
+    )
+    .await?
+    {
+        plan.candidates
+            .retain(|candidate| candidate.member.user_service_id == pinned);
+        plan.max_attempts = 1;
     }
     if let Some(pinned) = crate::services::assistant_service_execution::pinned_pool_member(
         &state.db,
@@ -2504,6 +2507,14 @@ pub(crate) async fn proxy_request_by_slug_inner(
         })
         .await?
         .ok_or_else(|| AppError::ServicePoolNoViableMember(slug.into()))?;
+        let permission_pin =
+            crate::services::execution_permission_dispatch::proposals::v2::pin_pool(
+                &state.db,
+                auth_user,
+                pool,
+                request.headers(),
+            )
+            .await?;
         if let Some(pinned) = crate::services::assistant_service_execution::pinned_pool_member(
             &state.db,
             &state.node_ws_manager,
@@ -2515,6 +2526,7 @@ pub(crate) async fn proxy_request_by_slug_inner(
                 .and_then(|value| value.to_str().ok()),
         )
         .await?
+        .or(permission_pin)
         {
             if !pool
                 .members
