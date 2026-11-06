@@ -942,6 +942,9 @@ pub(super) async fn settle_result(
     if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
         return settle_chat_result(state, row, run, text, error).await;
     }
+    if matches!(run.deliver_to, DeliverTo::Notification) {
+        return settle_notification_result(state, row, run, text, error).await;
+    }
     // One settlement owns the outbound attempt. Recovery never duplicates an
     // ambiguous network send; the thread remains the durable final result.
     if run.result_claimed {
@@ -981,20 +984,7 @@ pub(super) async fn settle_result(
     let final_text = failure_text.as_deref().unwrap_or(text);
     let outcome = match &run.deliver_to {
         DeliverTo::Thread => Ok(()),
-        DeliverTo::Notification => {
-            crate::services::notification_service::send_automation_push(
-                &state.db,
-                &state.config,
-                &state.http_client,
-                state.fcm_auth.as_deref(),
-                state.apns_auth.as_deref(),
-                &run.user_id,
-                &run.label,
-                final_text,
-                &row.id,
-            )
-            .await
-        }
+        DeliverTo::Notification => unreachable!("notification uses leased settlement"),
         DeliverTo::Chat { chat_id } => {
             let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
             if error.is_none() {
@@ -1027,6 +1017,169 @@ pub(super) async fn settle_result(
             RunOutcome::Completed
         },
         error.or(outcome.err().map(|_| "result_delivery_failed")),
+        &state.config.frontend_url,
+    )
+    .await
+}
+
+async fn settle_notification_result(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    run: &TriggerRun,
+    text: &str,
+    error: Option<&str>,
+) -> AppResult<()> {
+    use crate::services::notification_service::automation::{self as push, Outcome};
+    use schedules::{
+        notification_delivery as receipt,
+        result_delivery::{self as delivery, Claim},
+    };
+    let claim = match delivery::claim(&state.db, run).await? {
+        Claim::Acquired(claim) => claim,
+        Claim::Busy => return Ok(()),
+        Claim::Legacy | Claim::Expired => {
+            return delivery::finish_unrecoverable(&state.db, run, &state.config.frontend_url)
+                .await;
+        }
+    };
+    let previous = claim.run.notification_delivery.as_ref();
+    let attempts = previous.map_or(0, |s| s.attempts);
+    if let Some(at) = previous
+        .filter(|s| s.state == "retrying")
+        .and_then(|s| s.retry_at)
+        .filter(|at| *at > Utc::now())
+    {
+        return delivery::defer(
+            &state.db,
+            &claim,
+            (at - Utc::now()).num_seconds().max(1) as u64 + 1,
+        )
+        .await;
+    }
+    let mut status = match previous.map(|s| s.state.as_str()) {
+        Some("accepted" | "failed" | "unknown") => previous.expect("present").clone(),
+        Some("sending") => {
+            receipt::status("unknown", Some("push_delivery_unknown"), attempts, None)
+        }
+        _ if attempts >= receipt::MAX_ATTEMPTS => receipt::status(
+            "failed",
+            Some("push_retries_exhausted"),
+            attempts,
+            previous.and_then(|s| s.http_status),
+        ),
+        None | Some("retrying") => {
+            let channel = push::prepare(
+                &state.db,
+                &state.config,
+                state.fcm_auth.is_some(),
+                state.apns_auth.is_some(),
+                &run.user_id,
+            )
+            .await?;
+            match channel {
+                Err(failure) => {
+                    receipt::status("failed", Some(failure.code), attempts, failure.http_status)
+                }
+                Ok(channel) => {
+                    let sending = receipt::status("sending", None, attempts + 1, None);
+                    if !receipt::save(&state.db, &claim, &sending).await? {
+                        return Ok(());
+                    }
+                    let failure = error.map(|code| {
+                        if code == "capacity_exceeded" {
+                            crate::services::assistant_turn_observability::capacity_message(
+                                run.capacity_wait_ms,
+                            )
+                        } else {
+                            engine::TurnError::new(code).message
+                        }
+                    });
+                    // Leave time to persist the receipt before this claim expires,
+                    // even if availability reads consumed the lease's slack.
+                    let seconds = (claim
+                        .expires_at
+                        .min(claim.lease_until - Duration::seconds(30))
+                        - Utc::now())
+                    .num_seconds()
+                    .max(0) as u64;
+                    let result = tokio::time::timeout(
+                        std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
+                        push::send(
+                            &state.db,
+                            &state.config,
+                            &state.http_client,
+                            state.fcm_auth.as_deref(),
+                            state.apns_auth.as_deref(),
+                            &channel,
+                            &run.label,
+                            failure.as_deref().unwrap_or(text),
+                            &row.id,
+                        ),
+                    )
+                    .await
+                    .unwrap_or(Outcome::Unknown);
+                    match result {
+                        Outcome::Accepted => receipt::status("accepted", None, attempts + 1, None),
+                        Outcome::Unknown => receipt::status(
+                            "unknown",
+                            Some("push_delivery_unknown"),
+                            attempts + 1,
+                            None,
+                        ),
+                        Outcome::Refused(failure) => {
+                            let delay = failure.retry_after.filter(|delay| {
+                                attempts + 1 < receipt::MAX_ATTEMPTS
+                                    && *delay
+                                        < (claim.expires_at - Utc::now()).num_seconds().max(0)
+                                            as u64
+                            });
+                            let mut status = receipt::status(
+                                if delay.is_some() {
+                                    "retrying"
+                                } else {
+                                    "failed"
+                                },
+                                Some(if failure.retry_after.is_some() && delay.is_none() {
+                                    "push_retries_exhausted"
+                                } else {
+                                    failure.code
+                                }),
+                                attempts + 1,
+                                failure.http_status,
+                            );
+                            status.retry_at =
+                                delay.map(|seconds| Utc::now() + Duration::seconds(seconds as i64));
+                            status
+                        }
+                    }
+                }
+            }
+        }
+        Some(_) => receipt::status("unknown", Some("push_delivery_unknown"), attempts, None),
+    };
+    // Save the outcome before releasing the lease. A crash after acceptance can
+    // finish from this receipt; a crash before it remains visibly uncertain.
+    if !receipt::save(&state.db, &claim, &status).await? {
+        return Ok(());
+    }
+    if let Some(at) = status.retry_at.take() {
+        return delivery::defer(
+            &state.db,
+            &claim,
+            (at - Utc::now()).num_seconds().max(1) as u64 + 1,
+        )
+        .await;
+    }
+    let accepted = status.state == "accepted";
+    delivery::finish(
+        &state.db,
+        &claim,
+        if accepted && error.is_none() {
+            RunOutcome::Completed
+        } else {
+            RunOutcome::Failed
+        },
+        error.or(status.reason.as_deref()),
         &state.config.frontend_url,
     )
     .await

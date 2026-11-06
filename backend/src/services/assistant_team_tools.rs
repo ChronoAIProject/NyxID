@@ -1122,6 +1122,7 @@ pub(crate) fn schedule_schema() -> Value {
 pub(crate) fn delivery_schema() -> Value {
     json!({
         "type": "object",
+        "description": "Result destination: thread saves in the web thread; chat sends to an authorized channel chat; notification is mobile push only and requires enabled push with a registered mobile device. Linking Telegram notifications does not enable mobile push.",
         "properties": {
             "type": {"type": "string", "enum": ["thread", "chat", "notification"]},
             "chat_id": string(64),
