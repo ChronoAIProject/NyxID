@@ -845,9 +845,7 @@ async fn target_in_session(
         .await
         {
             Ok(access) => access,
-            Err(AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable) => {
-                return Ok(None);
-            }
+            Err(AppError::Forbidden(_)) => return Ok(None),
             Err(e) => return Err(e),
         };
         if access.check_source_conversation(row).is_err() {

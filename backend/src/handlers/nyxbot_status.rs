@@ -140,9 +140,12 @@ pub(crate) async fn waiting(
                 "Waiting for you to verify your {} account with {bot}",
                 platform_name(&row.platform)
             ),
-            detail: match super::org_access_holds(state, &row).await? {
-                true => verification_hint(state, &row).await?,
-                false => None,
+            detail: match super::org_access(state, &row).await {
+                Ok(super::OrgAccess::Holds) => verification_hint(state, &row).await?,
+                Ok(super::OrgAccess::Lost) => None,
+                Ok(super::OrgAccess::Unavailable) | Err(_) => Some(
+                    "This assistant is temporarily unavailable. Please try again later.".into(),
+                ),
             },
             since: row.updated_at,
             expires_at: row.link_code_expires_at,
@@ -571,6 +574,7 @@ pub(crate) async fn check_deliveries(state: &AppState) -> AppResult<()> {
     for row in rows {
         if let Err(error) = check_delivery(state, &row).await {
             tracing::debug!(%error, "NyxBot delivery check deferred");
+            continue;
         }
         // A gateway update that failed or raced is retried here.
         match super::chats::sync_gateway_groups(state, &row, false).await {
@@ -585,8 +589,12 @@ pub(crate) async fn check_deliveries(state: &AppState) -> AppResult<()> {
 async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
     // A demoted or removed org admin's link to the org's bot is released,
     // even if no message ever arrives to trigger it.
-    if !super::org_access_holds(state, row).await? {
-        return super::release_org_channel(state, row).await;
+    match super::org_access(state, row).await? {
+        super::OrgAccess::Holds => {}
+        super::OrgAccess::Lost => return super::release_org_channel(state, row).await,
+        super::OrgAccess::Unavailable => {
+            return Err(crate::errors::AppError::SecurityReadinessUnavailable);
+        }
     }
     if row.transport == "gateway" && row.gateway_source.is_some() {
         return crate::services::nyxbot_gateway_source::check_status(state, row).await;

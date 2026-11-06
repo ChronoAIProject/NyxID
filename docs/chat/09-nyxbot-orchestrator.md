@@ -1863,8 +1863,10 @@ First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 Other live org admins can manage/unlink the binding without reading member DMs
 or obtaining provider keys. Relinking resets verification and guest exposure;
 changing personal ↔ org target requires disconnect/reconnect. Loss of the
-transport admin, org/bot/agent authority, or feature readiness retires the link
-with `org_access_lost`. Guest-policy changes invalidate pending guest authority.
+transport admin or org/bot/agent authority retires the link with
+`org_access_lost`. Flag-off, unavailable security readiness and dependency errors
+suspend new work and defer retryable deliveries without deleting the binding,
+route or key; work resumes when availability returns. Guest-policy changes invalidate pending guest authority.
 Relay/native/gateway use the same local validator; CMA never decides membership
 or payer. A verified private chat moves between relay and gateway with its member
 home reply binding and guest execution lane; adoption is atomic and keeps the

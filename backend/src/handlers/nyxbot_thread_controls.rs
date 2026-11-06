@@ -182,7 +182,7 @@ pub async fn stop_thread(
 pub(crate) async fn list_tool(state: &AppState, owner: &str, args: &Value) -> AppResult<Value> {
     let mut channels = Vec::new();
     for channel in super::list(state, owner).await? {
-        if super::org_access_holds(state, &channel).await? {
+        if super::org_access(state, &channel).await? == super::OrgAccess::Holds {
             channels.push(channel);
         }
     }
