@@ -2491,6 +2491,25 @@ pub(crate) fn looks_secret(text: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
+/// Shared by the native schema boundary and both memory stores; never echo input.
+pub(crate) fn validate_memory_text(text: &str) -> AppResult<&str> {
+    use crate::errors::memory_write::MemoryWriteReason as Reason;
+    let text = text.trim();
+    let reason = if text.is_empty() {
+        Some(Reason::NoteEmpty)
+    } else if text.chars().count() > MAX_MEMORY_NOTE_CHARS {
+        Some(Reason::NoteTooLong)
+    } else if looks_secret(text) {
+        Some(Reason::SecretDetected)
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(AppError::MemoryWrite(reason));
+    }
+    Ok(text)
+}
+
 /// Remember a note, or replace one by ID. Bounded; never secrets.
 pub async fn remember(
     db: &Database,
@@ -2502,37 +2521,38 @@ pub async fn remember(
     let current = maintained_agent(db, owner, agent_id).await?;
     let actor = owner;
     let owner = current.user_id.as_str();
-    let text = text.trim();
-    if text.is_empty() || text.chars().count() > MAX_MEMORY_NOTE_CHARS {
-        return Err(AppError::ValidationError(format!(
-            "A memory note must contain 1 to {MAX_MEMORY_NOTE_CHARS} characters"
-        )));
+    use crate::errors::memory_write::MemoryWriteReason as Reason;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::MemoryWrite(Reason::MemoryConflict));
     }
-    if looks_secret(text) {
-        return Err(AppError::ValidationError(
-            "Memory never stores credentials or secrets".into(),
-        ));
-    }
+    let text = validate_memory_text(text)?;
     let now = Utc::now();
     let collection = db.collection::<AssistantAgent>(AGENTS);
     if let Some(replace_id) = replace_id {
+        // Return the exact post-write snapshot. A later delete/replace must not
+        // turn a committed save into an apparent failure or another write's receipt.
         let updated = collection
-            .update_one(
-                doc! {"_id": agent_id, "user_id": owner, "memory.id": replace_id},
+            .find_one_and_update(
+                doc! {"_id": agent_id, "user_id": owner, "destroyed_at": bson::Bson::Null, "memory.id": replace_id},
                 doc! {"$set": {"memory.$.text": text,
                 "memory.$.updated_at": bson::DateTime::from_chrono(now)}},
             )
+            .return_document(ReturnDocument::After)
             .await?;
-        if updated.matched_count != 1 {
-            return Err(AppError::NotFound("Memory note not found".into()));
-        }
+        let Some(updated) = updated else {
+            let current = maintained_agent(db, actor, agent_id).await?;
+            return Err(AppError::MemoryWrite(if current.destroyed_at.is_some() {
+                Reason::MemoryConflict
+            } else {
+                Reason::ReplaceTargetNotFound
+            }));
+        };
         super::org_agent_service::audit_change(db, actor, &current, "memory").await;
-        let agent = agent(db, actor, agent_id).await?;
-        return agent
+        return updated
             .memory
             .into_iter()
             .find(|note| note.id == replace_id)
-            .ok_or_else(|| AppError::NotFound("Memory note not found".into()));
+            .ok_or(AppError::MemoryWrite(Reason::MemoryInternalError));
     }
     let note = MemoryNote {
         id: Uuid::new_v4().to_string(),
@@ -2553,10 +2573,14 @@ pub async fn remember(
         )
         .await?;
     if pushed.matched_count != 1 {
-        agent(db, owner, agent_id).await?;
-        return Err(AppError::Conflict(format!(
-            "Memory holds at most {MAX_MEMORY_NOTES} notes; forget or replace one first"
-        )));
+        let current = maintained_agent(db, actor, agent_id).await?;
+        return Err(AppError::MemoryWrite(
+            if current.destroyed_at.is_none() && current.memory.len() >= MAX_MEMORY_NOTES {
+                Reason::MemoryFull
+            } else {
+                Reason::MemoryConflict
+            },
+        ));
     }
     super::org_agent_service::audit_change(db, actor, &current, "memory").await;
     Ok(note)

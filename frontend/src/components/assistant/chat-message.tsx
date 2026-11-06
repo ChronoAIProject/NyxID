@@ -122,8 +122,22 @@ function ThinkingBlock({
 }
 
 function toolFailureCopy(
-  failure: { kind: string; status?: number } | null | undefined,
+  failure: { kind: string; status?: number; reason?: string } | null | undefined,
 ): string {
+  // Fixed native diagnostics only. Unknown/legacy reasons keep the generic copy;
+  // neither note contents nor arbitrary tool error messages reach this panel.
+  switch (failure?.reason) {
+    case "note_too_long": return "Validation: the note exceeds 500 characters. Shorten it or split it into smaller facts.";
+    case "note_empty": return "Validation: the note is empty. Supply a non-empty fact.";
+    case "secret_detected": return "Validation: the note resembles a credential or secret. Remove secret values before saving.";
+    case "invalid_note": return "Validation: invalid memory arguments. Use 1–500 characters and a current note ID when replacing.";
+    case "memory_full": return "Capacity: memory holds at most 50 notes. Replace or forget a note first.";
+    case "replace_target_not_found": return "Conflict: the note to replace no longer exists. Inspect current notes before retrying.";
+    case "memory_conflict": return "Conflict: memory or the agent changed. Inspect current notes before retrying.";
+    case "memory_unauthorized": return "Authorization: memory is unavailable here or this caller cannot edit it. Use an authorized private thread.";
+    case "memory_storage_error": return "Storage: the write could not be confirmed. Check current notes before retrying; it may already have saved.";
+    case "memory_internal_error": return "Internal error: the write could not be confirmed. Check current notes before retrying.";
+  }
   switch (failure?.kind) {
     case "service_status":
       return failure.status == null

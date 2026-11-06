@@ -1234,6 +1234,24 @@ pub(crate) async fn execute_tool(
     tool_name: &str,
     args: &Value,
 ) -> (Value, bool) {
+    let (mut value, error) = execute_tool_inner(state, chat, tool_name, args).await;
+    if tool_name == "nyxid__remember"
+        && error
+        && (chat.guest || chat.collaboration_thread)
+        && value.get("details").is_none()
+    {
+        let reason = crate::errors::memory_write::MemoryWriteReason::MemoryUnauthorized;
+        value["details"] = json!({"reason": reason, "category": reason.category()});
+    }
+    (value, error)
+}
+
+async fn execute_tool_inner(
+    state: &AppState,
+    chat: &ChatAuthority,
+    tool_name: &str,
+    args: &Value,
+) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     if chat.guest {
         return (acks::guest_refusal(), true);
@@ -1453,11 +1471,12 @@ async fn execute_authorized_tool_impl(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            let tool = crate::services::assistant_account_tools::error_result_for(
-                error,
-                Some(chat),
-                &state.config.frontend_url,
-            );
+            let project_error = if name == "remember" {
+                crate::services::assistant_account_tools::memory_error_result_for
+            } else {
+                crate::services::assistant_account_tools::error_result_for
+            };
+            let tool = project_error(error, Some(chat), &state.config.frontend_url);
             (tool.value, true)
         }
     };
@@ -1483,6 +1502,9 @@ async fn execute_authorized_tool_impl(
             "agent_id": chat.agent_id,
             "tool_name": tool_name,
             "outcome": if outcome.1 {"refused"} else {"success"},
+            "reason": if name == "remember" { outcome.0["details"]["reason"].clone() } else { Value::Null },
+            "note_chars": if name == "remember" { args["text"].as_str().map(|s| s.chars().count()) } else { None },
+            "replace_requested": if name == "remember" { Some(args["replace_id"].is_string()) } else { None },
         })),
     )
     .await;
