@@ -4,6 +4,8 @@ use super::*;
 /// No public request deserializes this object.
 #[derive(Clone)]
 pub struct Resume {
+    pub(crate) connected_wait: Option<Arc<super::v2::blocking::WaitGuard>>,
+    pub version: u32,
     pub request_id: String,
     pub claim_id: String,
     pub effect_id: String,
@@ -26,6 +28,9 @@ impl Resume {
         session: &mut ClientSession,
         dispatch: bool,
     ) -> AppResult<()> {
+        if self.version == 2 {
+            return super::v2::fence_resume(self, db, session, dispatch).await;
+        }
         let row = db
             .collection::<ApprovalRequest>(REQUESTS)
             .find_one(doc! {"_id":&self.request_id})
@@ -51,6 +56,9 @@ pub(crate) async fn resume_turn(
     egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
     row: &AssistantConversation,
 ) -> AppResult<Option<String>> {
+    if let Some(note) = Box::pin(super::v2::resume_voice(state, row)).await? {
+        return Ok(Some(note));
+    }
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
     };
@@ -159,6 +167,8 @@ pub(crate) async fn resume_turn(
             continue;
         }
         let resume = Resume {
+            connected_wait: None,
+            version: 1,
             source_credential_id: p.source_credential_id.clone(),
             request_id: id.into(),
             claim_id: claim_id.clone(),
@@ -280,6 +290,20 @@ pub(crate) async fn result_for_human(
     state: &crate::AppState,
     row: &ApprovalRequest,
 ) -> AppResult<Option<String>> {
+    if row
+        .execution_proposal
+        .as_ref()
+        .is_some_and(|p| p.version == 2)
+    {
+        return Ok(super::v2::decrypt_result(state, row).await?.map(|r| {
+            format!(
+                "HTTP {}{}: {}",
+                r.status,
+                if r.partial { " (partial response)" } else { "" },
+                r.body
+            )
+        }));
+    }
     let Some(p) = row
         .execution_proposal
         .as_ref()

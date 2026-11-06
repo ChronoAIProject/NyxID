@@ -400,6 +400,9 @@ pub struct McpCatalogDiagnostics {
 }
 
 pub struct McpOperationCatalog {
+    /// Authorized but unavailable rows, for refusal diagnostics only. Never execute
+    /// or advertise these as callable; node-scope exclusions are not included.
+    pub unavailable_connections: Vec<McpToolService>,
     pub unpublished_services: Vec<McpToolService>,
     pub services: Vec<McpToolService>,
     pub diagnostics: McpCatalogDiagnostics,
@@ -963,6 +966,46 @@ pub async fn load_operation_catalog(
     node_scope: NodeScope<'_>,
     service_scope: ServiceScope<'_>,
 ) -> AppResult<McpOperationCatalog> {
+    load_operation_catalog_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        node_scope,
+        service_scope,
+        None,
+    )
+    .await
+}
+
+/// Authorization configuration keeps temporary credential/route outages visible.
+/// This view must never be used to advertise executable tools. All ownership,
+/// platform ACL, operation-contract and node-scope rules remain shared.
+pub async fn load_authorization_catalog(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    service_scope: ServiceScope<'_>,
+    targets: &[String],
+) -> AppResult<McpOperationCatalog> {
+    load_operation_catalog_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        NodeScope::Unrestricted,
+        service_scope,
+        Some(targets),
+    )
+    .await
+}
+
+async fn load_operation_catalog_inner(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    node_scope: NodeScope<'_>,
+    service_scope: ServiceScope<'_>,
+    authorization_targets: Option<&[String]>,
+) -> AppResult<McpOperationCatalog> {
     let node_scope_restricted = matches!(node_scope, NodeScope::Allowed(_));
     let grants =
         crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
@@ -970,8 +1013,9 @@ pub async fn load_operation_catalog(
     let options = UserToolLoadOptions {
         providers: &providers,
         service_scope,
+        authorization_targets,
     };
-    let (mut visible, shadowed_connections) = load_user_tools_with_grants(
+    let (visible, shadowed_connections) = load_user_tools_with_grants(
         db,
         node_ws_manager,
         user_id,
@@ -1021,7 +1065,14 @@ pub async fn load_operation_catalog(
                 && !node_scope_excluded_service_ids.contains(service.service_id.as_str())
         })
         .count();
-    visible.retain(|service| service.executable);
+    let (mut visible, mut unavailable_connections): (Vec<_>, Vec<_>) = visible
+        .into_iter()
+        .partition(|service| authorization_targets.is_some() || service.executable);
+    unavailable_connections.retain(|service| {
+        !node_scope_excluded_service_ids.contains(&service.service_id)
+            && operation_set_is_publishable(service)
+    });
+    retain_unambiguous_identities(&mut unavailable_connections);
 
     visible.sort_by(|left, right| left.service_id.cmp(&right.service_id));
     for service in &mut visible {
@@ -1064,6 +1115,7 @@ pub async fn load_operation_catalog(
         .filter(|service| service.is_generic_proxy)
         .count();
     Ok(McpOperationCatalog {
+        unavailable_connections,
         unpublished_services,
         services: visible,
         diagnostics: McpCatalogDiagnostics {
@@ -1077,6 +1129,39 @@ pub async fn load_operation_catalog(
             shadowed_connections,
         },
     })
+}
+
+/// Metadata-only refusal for a service already filtered by the caller's ACL.
+/// Node names require their own read authorization; unknown topology stays hidden.
+pub async fn unavailable_service_error(
+    db: &mongodb::Database,
+    actor: &str,
+    service: &McpToolService,
+) -> AppResult<AppError> {
+    if let McpToolSource::UserManaged {
+        node_id: Some(node_id),
+        ..
+    } = &service.source
+        && !node_id.is_empty()
+    {
+        let nodes =
+            super::node_service::get_nodes_by_ids(db, std::slice::from_ref(node_id)).await?;
+        if let Some(node) = nodes.first() {
+            let access = super::org_service::resolve_owner_access(db, actor, &node.user_id).await?;
+            if super::node_service::node_access_can_read(&access) {
+                return Ok(AppError::NodeOffline(format!(
+                    "{} ({})",
+                    node.name, node.id
+                )));
+            }
+        }
+        return Ok(AppError::NodeOffline(
+            "Configured node is unavailable".into(),
+        ));
+    }
+    Ok(AppError::BadRequest(
+        "Service credential unavailable; reconnect the service before executing".into(),
+    ))
 }
 
 fn operation_set_is_publishable(service: &McpToolService) -> bool {
@@ -1195,6 +1280,7 @@ async fn load_user_tools_inner(
     let options = UserToolLoadOptions {
         providers: &providers,
         service_scope,
+        authorization_targets: None,
     };
     let (services, _) = load_user_tools_with_grants(
         db,
@@ -1210,6 +1296,7 @@ async fn load_user_tools_inner(
 }
 
 struct UserToolLoadOptions<'scope, 'data> {
+    authorization_targets: Option<&'data [String]>,
     providers: &'data HashMap<String, crate::models::provider_config::ProviderConfig>,
     service_scope: ServiceScope<'scope>,
 }
@@ -2305,6 +2392,10 @@ async fn load_callable_user_services(
     // temporarily unavailable preferred connection still owns its slug.
     let mut candidates = Vec::new();
     for us in personal_services {
+        // A retained deletion marker is not a temporary execution outage.
+        if options.authorization_targets.is_some() && us.deleted_at.is_some() {
+            continue;
+        }
         let primary_in_scope = us
             .node_id
             .as_deref()
@@ -2327,6 +2418,12 @@ async fn load_callable_user_services(
             providers,
             grants,
         ) {
+            // Unavailable platform bindings can mean the live audience grant
+            // was revoked. Authorization must preserve that boundary; only
+            // ordinary credential and node outages are grantable while offline.
+            Some(info) if options.authorization_targets.is_some() && !info.is_executable => {
+                continue;
+            }
             Some(info) => info,
             None => classify_credential(&us, &active_key_map, has_route),
         };
@@ -2338,6 +2435,10 @@ async fn load_callable_user_services(
         });
     }
     for (us, org_user_id) in org_services {
+        // A retained deletion marker is not a temporary execution outage.
+        if options.authorization_targets.is_some() && us.deleted_at.is_some() {
+            continue;
+        }
         let primary_in_scope = us
             .node_id
             .as_deref()
@@ -2360,6 +2461,12 @@ async fn load_callable_user_services(
             providers,
             grants,
         ) {
+            // Unavailable platform bindings can mean the live audience grant
+            // was revoked. Authorization must preserve that boundary; only
+            // ordinary credential and node outages are grantable while offline.
+            Some(info) if options.authorization_targets.is_some() && !info.is_executable => {
+                continue;
+            }
             Some(info) => info,
             None => classify_credential(&us, &active_key_map, has_route),
         };
@@ -2374,7 +2481,11 @@ async fn load_callable_user_services(
     // Choose a winner independently for each slug, then retain the original
     // catalog order for the selected rows. Preference IDs affect collision
     // ownership, not the slots used by discovery ordering.
-    let winner_indices = select_slug_winner_indices(&candidates, service_scope, user_id);
+    let preference_scope = options
+        .authorization_targets
+        .map(ServiceScope::Preferring)
+        .unwrap_or(service_scope);
+    let winner_indices = select_slug_winner_indices(&candidates, preference_scope, user_id);
     let shadowed_connections = candidates.len().saturating_sub(winner_indices.len());
     let mut selected: Vec<ResolvedUserService> = candidates
         .into_iter()
@@ -3833,12 +3944,17 @@ impl PreparedProxyCall {
                 .as_ref()
                 .expect("participating")
                 .enable_authoring();
-        } else if self.acknowledgement_id.is_none()
-            && auth
-                .assistant_chat
-                .as_deref()
-                .is_some_and(super::execution_permission_dispatch::proposals::supported_chat)
-        {
+        } else {
+            // A later HTTP admission must not override this adapter's inability
+            // to replay the effect. Already retained watch adapters own their
+            // continuation; a claimed resume never authors another proposal.
+            auth.execution_permission
+                .as_ref()
+                .expect("participating")
+                .retain_adapter(
+                    crate::models::execution_proposal::PreparedAdapter::Unsupported,
+                    &axum::http::HeaderMap::new(),
+                );
             tracing::info!(
                 reason = "mcp_effect_not_retainable",
                 "Execution proposal uses legacy prompts"
@@ -5403,6 +5519,18 @@ enum ToolResponseOrigin {
 }
 
 impl ToolResponse {
+    pub(crate) fn execution_receipt(status: u16, text: String) -> Self {
+        Self {
+            resources: None,
+            concurrency: None,
+            status,
+            text,
+            media: None,
+            origin: ToolResponseOrigin::Downstream,
+            body_error: None,
+        }
+    }
+
     /// Only the server's execution gate can construct this control response.
     /// Provider bodies are always downstream content, even if they resemble it.
     fn policy_refusal(refusal: serde_json::Value) -> Self {
@@ -10003,6 +10131,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
             execution_voice_task: false,
@@ -11081,6 +11210,7 @@ mod tests {
         let options = UserToolLoadOptions {
             providers: &providers,
             service_scope: ServiceScope::Unrestricted,
+            authorization_targets: None,
         };
 
         let (visible_while_disabled, _) = load_callable_user_services(

@@ -192,6 +192,7 @@ pub async fn mutate(
             }
             security_readiness_service::require(db, "permissions:execution-dispatch-v1").await?;
             security_readiness_service::require(db, "permissions:execution-authoring-v1").await?;
+            security_readiness_service::require(db, "permissions:execution-authoring-v2").await?;
         }
         if *kind != FlagTargetKind::Global {
             let id = target_id

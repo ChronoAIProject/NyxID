@@ -144,6 +144,38 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+/// Preserve conversation-wide Stop cleanup except for another live run.
+pub async fn cancel_unrelated(
+    db: &Database,
+    owner: &str,
+    thread: &str,
+    target: Option<&str>,
+) -> AppResult<()> {
+    let ctx = (
+        db.clone(),
+        owner.to_owned(),
+        thread.to_owned(),
+        target.map(str::to_owned),
+    );
+    super::transaction_service::run_db_only(db, &ctx, |session, (db, owner, thread, target)| Box::pin(async move {
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner}, doc! {"$inc": {"automation_handoff_version": 1_i64}}).session(&mut *session).await?;
+        let protected = super::trigger_schedule::continuation::stop_protected_runs_in_session(db, owner, target.as_deref(), session).await?;
+        db.collection::<bson::Document>(WATCHES).update_many(doc! {
+            "user_id": owner, "conversation_id": thread, "state": {"$in": ["submitting", "waiting", "ready", "queued"]},
+            "delivery.automation_work.run_id": {"$nin": &protected},
+        }, doc! {"$unset": {"secret_context_versions.result_encrypted": ""}, "$set": {
+            "state": "cancelling", "result_encrypted": null, "lease_id": null, "lease_until": null, "poll_at": bson::DateTime::now()
+        }}).session(&mut *session).await?;
+        // Generated files are admitted only for ordinary Web turns. Preserve
+        // their conversation-wide Stop cleanup beside waiting automations.
+        super::generated_artifacts::discard_in_session(db, doc! {"user_id": owner, "conversation_id": thread, "state": "pending"}, session).await?;
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner},
+            doc! {"$pull": {"pending_events": {"kind": EVENT_KIND, "automation_work.run_id": {"$nin": &protected}}}}
+        ).session(session).await?;
+        Ok(())
+    })).await
+}
+
 /// Reserve before submission, under an owner-wide write fence, so parallel
 /// submissions cannot exceed bounds or leave an unwatchable upstream job.
 #[cfg(test)]
@@ -228,7 +260,8 @@ pub async fn reserve_with_artifacts(
             let mut delivery = if let Some(parent) = event_id(&row) {
                 watches.find_one(doc!{"_id":parent,"user_id":&chat.user_id,"conversation_id":&row.id,"state":"queued"}).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
+                DeliveryBinding{
+            automation_work: turn.automation_work.clone(),invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
             };
             // Never a parent operation's stored field wholesale.
             match super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|live| !live.stop_requested) {
@@ -598,11 +631,14 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;return Ok(false);
             };
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
+            if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, &w.conversation_id, work, session).await?;}
             if row.pending_events.len()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
             if let Some(task) = &w.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let event = AgentEvent {
+                automation_work: w.delivery.automation_work.clone(),
                 execution_task: w.execution_task.clone(),
+                channel_contexts: Vec::new(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,
@@ -758,6 +794,62 @@ fn channel_question(event: &AgentEvent) -> bool {
 /// Async results wait for their own event turn. Never redirect a web turn or
 /// coalesce results from different delivery places into a single reply.
 pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec<AgentEvent> {
+    if row
+        .pending_events
+        .iter()
+        .any(|e| e.automation_work.is_some())
+    {
+        // Root results are exclusively consumed with the scheduler's run claim.
+        let selected_work = (origin == TurnOrigin::Event)
+            .then(|| {
+                row.pending_events
+                    .iter()
+                    .filter(|e| {
+                        e.kind == EVENT_KIND
+                            || e.automation_work
+                                .as_ref()
+                                .is_some_and(|w| w.role != "coordinator")
+                    })
+                    .find_map(|e| e.automation_work.as_ref())
+                    .cloned()
+            })
+            .flatten();
+        let mut ordinary = Vec::new();
+        let mut selected = Vec::new();
+        let mut deferred = Vec::new();
+        for event in std::mem::take(&mut row.pending_events) {
+            if event.automation_work.is_none() {
+                ordinary.push(event);
+            } else if selected_work.is_some() && event.automation_work == selected_work {
+                selected.push(event);
+            } else {
+                deferred.push(event);
+            }
+        }
+        row.pending_events = if selected_work.is_some() {
+            selected
+        } else {
+            ordinary.clone()
+        };
+        // Reuse the legacy invocation/async partition inside this exact work.
+        // Remove only the binding during selection; restore it on every event.
+        if let Some(work) = selected_work.as_ref() {
+            for event in &mut row.pending_events {
+                event.automation_work = None;
+            }
+            let mut result = select_events(row, origin);
+            for event in result.iter_mut().chain(row.pending_events.iter_mut()) {
+                event.automation_work = Some(work.clone());
+            }
+            row.pending_events.extend(ordinary);
+            row.pending_events.extend(deferred);
+            return result;
+        }
+        let result = select_events(row, origin);
+        row.pending_events.extend(deferred);
+        return result;
+    }
+
     if origin == TurnOrigin::Event
         && let Some(index) = row
             .pending_events
@@ -822,6 +914,7 @@ pub fn apply_delivery(row: &mut AssistantConversation, w: &AsyncServiceOperation
         );
         turn.voice_request_id = w.delivery.voice_request_id.clone();
         turn.trigger_run_id = w.delivery.trigger_run_id.clone();
+        turn.automation_work = w.delivery.automation_work.clone();
         turn.also_deliver.clear();
     }
 }
@@ -962,6 +1055,7 @@ pub async fn bind_in_session(
     );
     turn.voice_request_id = w.delivery.voice_request_id.clone();
     turn.trigger_run_id = w.delivery.trigger_run_id.clone();
+    turn.automation_work = w.delivery.automation_work.clone();
     // A bound event that disagrees with its carrier resolves to None.
     if turn.report_to.is_some()
         && turn.report_to
@@ -972,7 +1066,14 @@ pub async fn bind_in_session(
     {
         turn.report_to = None;
     }
-    if let Some(id) = &turn.trigger_run_id {
+    if let Some(work) = turn
+        .automation_work
+        .as_ref()
+        .filter(|w| w.role == "coordinator")
+    {
+        let limit = super::trigger_schedule::continuation::CONTINUATION_LIMIT;
+        if db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).update_one(doc! {"_id": &work.run_id, "user_id": &row.user_id, "outcome": "started", "coordinator.protocol": 2, "coordinator.deadline": {"$gt": bson::DateTime::now()}, "coordinator.continuations": {"$lt": i64::from(limit)}}, doc! {"$set": {"turn_id": &turn.turn_id, "coordinator.closed": false}, "$inc": {"coordinator.continuations": 1_i64, "coordinator.version": 1_i64}}).session(&mut *session).await?.matched_count != 1 { return Err(AppError::AssistantTurnRequired); }
+    } else if let Some(id) = &turn.trigger_run_id {
         db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
             .update_one(
                 doc! {"_id":id,"user_id":&row.user_id,"outcome":"started"},

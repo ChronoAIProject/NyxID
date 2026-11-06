@@ -97,14 +97,20 @@ export function ServiceGrantPicker({
             key.credential_source.org_id === org &&
             key.credential_source.allowed)),
     )
-    .map((key) => ({ slug: org ? key.id : key.slug, label: key.label }));
+    .map((key) => ({
+      slug: org ? key.id : key.slug,
+      label: key.label,
+      unavailable: key.execution_unavailable_reason ??
+        (key.credential_missing || (key.credential_binding === "platform" && key.platform_key_available === false)
+          ? "credential unavailable" : undefined),
+    }));
   const services = [
     ...new Map(inventory.map((service) => [service.slug, service])).values(),
   ];
   const known = new Set(services.map((service) => service.slug));
   const rows = [
     ...services,
-    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug })),
+    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug, unavailable: undefined })),
   ];
   useDrawerSearchEntries(keys.isPending ? [] : rows.map((service) => ({
     id: `service-${service.slug}`, title: service.label, breadcrumb: `Access › Services › ${service.slug}`,
@@ -191,6 +197,11 @@ export function ServiceGrantPicker({
                   <span className="mt-0.5 block font-mono type-secondary text-text-tertiary">
                     {service.slug}
                   </span>
+                  {service.unavailable ? (
+                    <span className="mt-0.5 block type-secondary text-warning">
+                      Currently not executable ({service.unavailable}).
+                    </span>
+                  ) : null}
                 </span>
                 <Check
                   aria-hidden

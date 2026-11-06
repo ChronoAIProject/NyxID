@@ -42,6 +42,13 @@ pub struct ChannelBotSubscriptionState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotDiagnostics {
+    /// Authenticated URL challenge only; never message receipt or activation.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_callback_challenge_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_route_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_route_result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord_gateway: Option<super::discord_gateway::DiscordGatewayStatus>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

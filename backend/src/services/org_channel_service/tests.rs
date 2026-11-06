@@ -255,12 +255,30 @@ async fn same_org_admin_only_linking_and_default_off() {
     for actor in [&f.org.member, &f.org.viewer, &f.org.outsider] {
         assert!(link_target(db, actor, &f.bot, &f.agent).await.is_err());
     }
+    assert!(
+        require_target(db, &f.org.member, &f.agent)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("organization admin")
+    );
+    let mut inactive = f.bot.clone();
+    inactive.is_active = false;
+    assert!(
+        link_target(db, &f.org.admin, &inactive, &f.agent)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("bot is inactive")
+    );
     let mut foreign = f.bot.clone();
     foreign.user_id = f.org.admin.clone();
     assert!(
         link_target(db, &f.org.admin, &foreign, &f.agent)
             .await
-            .is_err()
+            .unwrap_err()
+            .to_string()
+            .contains("same organization")
     );
     foreign.user_id = uuid::Uuid::new_v4().to_string();
     assert!(
@@ -286,6 +304,13 @@ async fn same_org_admin_only_linking_and_default_off() {
         link_target(db, &f.org.admin, &f.bot, &f.agent)
             .await
             .is_err()
+    );
+    assert!(
+        require_target(db, &f.org.admin, &f.agent)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("disabled for this account")
     );
     assert!(!transport_holds(db, &f.channel).await.unwrap());
     db.drop().await.unwrap();
@@ -1936,5 +1961,172 @@ async fn private_gateway_adoption_preserves_member_home_and_guest_lane_atomicall
         0,
         "private history is not published"
     );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn lark_credentials_do_not_verify_an_org_member() {
+    use crate::services::{
+        channel_adapters::lark::LarkFamilyAdapter, channel_verification_service as checks,
+    };
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let f = Fixture::new("org_lark_setup_independent").await;
+    let state = &f.org.state;
+    let db = &state.db;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            serde_json::json!({"code":0,"tenant_access_token":"test-token","expire":7200}),
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    for platform in ["lark", "feishu"] {
+        let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
+        let mut bot = f.bot.clone();
+        bot.platform = platform.into();
+        bot.bot_token_encrypted = state
+            .encryption_keys
+            .encrypt(b"cli_app:app-secret")
+            .await
+            .unwrap();
+        bot.lark_verification_token_encrypted = Some(
+            state
+                .encryption_keys
+                .encrypt(b"verification-token")
+                .await
+                .unwrap(),
+        );
+        bot.status = "pending_webhook".into();
+        bot.webhook_registered = false;
+        db.collection::<ChannelBot>("channel_bots")
+            .replace_one(doc! {"_id":&bot.id}, &bot)
+            .await
+            .unwrap();
+        let result = checks::verify(
+            db,
+            &state.encryption_keys,
+            &state.http_client,
+            &adapter,
+            &bot,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result.status,
+            crate::models::channel_bot::VerificationStatus::Verified
+        ));
+        let bot = crate::services::channel_bot_service::get_bot(db, &bot.id)
+            .await
+            .unwrap();
+        assert_eq!(bot.status, "pending_webhook");
+        assert!(!bot.webhook_registered);
+        assert!(bot.diagnostics.last_inbound_at.is_none());
+        assert_eq!(
+            management::view(db, &f.org.member, &f.channel)
+                .await
+                .unwrap()["member_verified"],
+            false
+        );
+        assert!(
+            sender(db, &f.channel, "member-chat", true, &f.agent.id)
+                .await
+                .is_err()
+        );
+    }
+    db.collection::<ChannelBot>("channel_bots")
+        .replace_one(doc! {"_id":&f.bot.id}, &f.bot)
+        .await
+        .unwrap();
+    let issued = links::issue(db, &f.org.member, &f.channel).await.unwrap();
+    let id = issued["id"].as_str().unwrap();
+    links::receive(
+        db,
+        &f.channel,
+        "member-chat",
+        issued["code"].as_str().unwrap(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        management::view(db, &f.org.member, &f.channel)
+            .await
+            .unwrap()["member_verified"],
+        false
+    );
+    links::confirm(db, &f.org.member, &f.channel, id)
+        .await
+        .unwrap();
+    assert_eq!(
+        management::view(db, &f.org.member, &f.channel)
+            .await
+            .unwrap()["member_verified"],
+        true
+    );
+    assert_eq!(
+        management::view(db, &f.org.admin, &f.channel)
+            .await
+            .unwrap()["member_verified"],
+        false
+    );
+    let mut rebound = f.channel.clone();
+    rebound.org_specialist.as_mut().unwrap().revision = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        management::view(db, &f.org.member, &rebound).await.unwrap()["member_verified"],
+        false
+    );
+    f.org.revoke(&f.org.member).await;
+    assert_eq!(
+        management::view(db, &f.org.member, &f.channel)
+            .await
+            .unwrap()["member_verified"],
+        false
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn setup_guidance_keeps_readiness_and_expiry_checks_closed() {
+    let f = Fixture::new("org_channel_setup_guards").await;
+    let db = &f.org.state.db;
+    let issued = links::issue(db, &f.org.member, &f.channel).await.unwrap();
+    let id = issued["id"].as_str().unwrap();
+    let code = issued["code"].as_str().unwrap();
+    links::receive(db, &f.channel, "member-chat", code, None)
+        .await
+        .unwrap();
+    db.collection::<Document>(crate::models::org_channel::CHALLENGES).update_one(doc!{"_id":id},
+        doc!{"$set":{"expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::seconds(1))}}).await.unwrap();
+    assert!(
+        links::status(db, &f.org.member, &f.channel, id)
+            .await
+            .is_err()
+    );
+    assert!(
+        links::confirm(db, &f.org.member, &f.channel, id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        management::view(db, &f.org.member, &f.channel)
+            .await
+            .unwrap()["member_verified"],
+        false
+    );
+    // A live incompatible replica produces the existing distinct readiness error.
+    let replicas = db.collection::<Document>(crate::models::security_replica::COLLECTION_NAME);
+    let mut replica = replicas.find_one(doc! {}).await.unwrap().unwrap();
+    replica.insert("_id", "unready-extra-replica");
+    replica.insert("instance_name", "unready-extra-replica");
+    replicas.insert_one(replica).await.unwrap();
+    assert!(matches!(
+        require_target(db, &f.org.admin, &f.agent).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
     db.drop().await.unwrap();
 }

@@ -2631,6 +2631,20 @@ async fn cma_origin_exact_candidates_and_connection_discovery_ignore_terminal_hi
 async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_task_and_actor() {
     for global in [false, true] {
         use crate::services::execution_permission_dispatch::phase_b_tests as permissions;
+        async fn released(a: &AsyncFixture, catalog: &str) {
+            // ToolResponse intentionally holds its service slot through delivery.
+            // Finish that delivery and wait for the normal asynchronous release;
+            // keep the fixture's one-request capacity limit intact.
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let held = a.f.state.db.collection::<bson::Document>(
+                    crate::models::service_concurrency::COLLECTION_NAME,
+                ).count_documents(doc! {"service_id": catalog, "person_id": &a.f.owner, "leases.0": {"$exists": true}}).await.unwrap();
+                if held == 0 { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("the delivered response releases its service slot");
+        }
         for outcome in ["covered", "gap", "prohibited"] {
             let a = AsyncFixture::new().await;
             permissions::enroll_cohort(&a.f.state.db, &a.f.owner, global).await;
@@ -2687,6 +2701,7 @@ async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_tas
                     .await
                     .unwrap();
             }
+            released(&a, &catalog).await;
             let before = a.calls.lock().unwrap().len();
             let result =
                 async_operations::call(&a.f.state, &watch, &watch.contract.status_operation).await;
@@ -2699,14 +2714,16 @@ async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_tas
                 a.calls.lock().unwrap().len(),
                 before + usize::from(outcome == "covered")
             );
+            drop(result);
+            released(&a, &catalog).await;
             assert_eq!(
                 a.f.state
                     .db
                     .collection::<bson::Document>("approval_requests")
-                    .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                    .count_documents(doc! {"execution_proposal.version":2})
                     .await
                     .unwrap(),
-                0
+                u64::from(outcome == "gap")
             );
             if outcome != "gap" {
                 assert_eq!(
@@ -2720,16 +2737,79 @@ async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_tas
                 );
             }
             if outcome == "gap" {
-                assert!(
+                use crate::services::execution_permission_dispatch::proposals;
+                let requests =
                     a.f.state
                         .db
-                        .collection::<bson::Document>("approval_requests")
-                        .count_documents(doc! {})
-                        .await
-                        .unwrap()
-                        > 0,
-                    "watch gap retains legacy approval"
+                        .collection::<crate::models::approval_request::ApprovalRequest>(
+                            "approval_requests",
+                        );
+                let pending = requests
+                    .find_one(doc! {"execution_proposal.version":2})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let p = proposals::v2::proposal(&pending).unwrap();
+                let choice = p.choices.iter().find(|c| c.id == "operation").unwrap();
+                proposals::decide(
+                    &a.f.state,
+                    &a.f.owner,
+                    &pending.id,
+                    &proposals::Decision {
+                        approved: true,
+                        expected_revision: p.revision,
+                        choice_id: Some(choice.id.clone()),
+                        choice_digest: Some(choice.digest.clone()),
+                        idempotency_key: uuid::Uuid::new_v4().to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+                watches::defer(&a.f.state.db, &watch).await.unwrap();
+                a.due().await;
+                let resumed = watches::claim(&a.f.state.db).await.unwrap().unwrap();
+                assert_ne!(resumed.lease_id, watch.lease_id);
+                let result = async_operations::call(
+                    &a.f.state,
+                    &resumed,
+                    &resumed.contract.status_operation,
+                )
+                .await;
+                assert!(
+                    result.is_ok(),
+                    "watch resume: {}",
+                    result.as_ref().unwrap_err()
                 );
+                drop(result);
+                released(&a, &catalog).await;
+                assert_eq!(a.calls.lock().unwrap().len(), before + 1);
+                let finished = requests
+                    .find_one(doc! {"_id":&pending.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    proposals::v2::proposal(&finished).unwrap().state,
+                    "completed"
+                );
+                assert!(
+                    async_operations::call(
+                        &a.f.state,
+                        &resumed,
+                        &resumed.contract.status_operation
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(
+                    requests
+                        .count_documents(doc! {"execution_proposal.version":2})
+                        .await
+                        .unwrap(),
+                    2,
+                    "another poll is a separate occurrence"
+                );
+                assert_eq!(a.calls.lock().unwrap().len(), before + 1);
             }
             if outcome == "covered" {
                 // A status permission does not cover result or cancellation.
@@ -2739,6 +2819,85 @@ async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_tas
                         .is_err()
                 );
                 assert_eq!(a.calls.lock().unwrap().len(), before + 1);
+                // Result and cancellation each need their own decision. Their
+                // completed receipts survive a worker lease rollover without send.
+                let mut watch = watch.clone();
+                for (index, name) in [
+                    watch.contract.result_operation.clone(),
+                    watch.contract.cancel_operation.clone().unwrap(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if index == 1 {
+                        assert!(
+                            async_operations::call(&a.f.state, &watch, &name)
+                                .await
+                                .is_err()
+                        );
+                    }
+                    use crate::services::execution_permission_dispatch::proposals;
+                    if index == 1 {
+                        let previous = a.f.state.db.collection::<crate::models::approval_request::ApprovalRequest>("approval_requests")
+                        .find_one(doc! {"execution_proposal.v2.source.operation": &watch.contract.result_operation}).await.unwrap().unwrap();
+                        let receipt = proposals::v2::proposal(&previous).unwrap();
+                        assert_eq!(
+                            receipt.state, "completed",
+                            "cancellation must not rewrite a completed result"
+                        );
+                        assert!(!receipt.delivery_abandoned);
+                    }
+                    let pending =
+                        a.f.state
+                            .db
+                            .collection::<crate::models::approval_request::ApprovalRequest>(
+                                "approval_requests",
+                            )
+                            .find_one(doc! {"execution_proposal.version":2,"status":"pending"})
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    let p = proposals::v2::proposal(&pending).unwrap();
+                    let choice = p.choices.iter().find(|c| c.id == "operation").unwrap();
+                    proposals::decide(
+                        &a.f.state,
+                        &a.f.owner,
+                        &pending.id,
+                        &proposals::Decision {
+                            approved: true,
+                            expected_revision: p.revision,
+                            choice_id: Some(choice.id.clone()),
+                            choice_digest: Some(choice.digest.clone()),
+                            idempotency_key: uuid::Uuid::new_v4().to_string(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    let result = async_operations::call(&a.f.state, &watch, &name).await;
+                    assert!(
+                        result.is_ok(),
+                        "watch operation {name}: {}",
+                        result.as_ref().unwrap_err()
+                    );
+                    drop(result);
+                    released(&a, &catalog).await;
+                    assert_eq!(a.calls.lock().unwrap().len(), before + 2 + index);
+                    watches::defer(&a.f.state.db, &watch).await.unwrap();
+                    a.due().await;
+                    let next = watches::claim(&a.f.state.db).await.unwrap().unwrap();
+                    assert_ne!(next.lease_id, watch.lease_id);
+                    watch = next;
+                    assert!(
+                        async_operations::call(&a.f.state, &watch, &name)
+                            .await
+                            .is_ok()
+                    );
+                    assert_eq!(
+                        a.calls.lock().unwrap().len(),
+                        before + 2 + index,
+                        "retained receipt prevents another provider attempt"
+                    );
+                }
                 let mut uncertain = watch.clone();
                 uncertain.state = "submitting".into();
                 uncertain.operation_id = None;
@@ -2772,7 +2931,7 @@ async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_tas
                         .await
                         .is_err()
                 );
-                assert_eq!(a.calls.lock().unwrap().len(), before + 1);
+                assert_eq!(a.calls.lock().unwrap().len(), before + 3);
             }
             a.f.state.db.drop().await.unwrap();
         }

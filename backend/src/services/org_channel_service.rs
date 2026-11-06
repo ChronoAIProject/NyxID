@@ -67,6 +67,7 @@ pub struct Access {
     execution: Execution,
     origin: ChannelOrigin,
     agent: AssistantAgent,
+    member_private_source: bool,
 }
 impl std::fmt::Debug for Access {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -150,6 +151,20 @@ impl Access {
         }
         Ok(())
     }
+
+    /// A member's private agent home can accept sources from multiple bound
+    /// bots. Its latest reply preference is not the authority of queued work.
+    /// Only a live private member source may replace that preference for this
+    /// check; group/guest/follow lanes retain their exact persisted binding.
+    pub(crate) fn check_source_conversation(&self, row: &AssistantConversation) -> AppResult<()> {
+        if self.member_private_source && row.channel.is_none() {
+            let mut scoped = row.clone();
+            scoped.reply_channel = Some(self.origin.clone());
+            self.check_conversation(&scoped)
+        } else {
+            self.check_conversation(row)
+        }
+    }
 }
 
 pub(crate) async fn require_admin(db: &Database, actor: &str, org: &str) -> AppResult<()> {
@@ -172,13 +187,14 @@ pub(crate) async fn link_target(
         return Ok(None);
     }
     require_target(db, actor, agent).await?;
-    if bot.user_id != agent.user_id
-        || agent.is_nyxbot()
-        || agent.destroyed_at.is_some()
-        || !bot.is_active
-    {
+    if bot.user_id != agent.user_id {
         return Err(AppError::ValidationError(
-            "Choose an active specialist and bot owned by the same organization".into(),
+            "The bot and specialist must be owned by the same organization".into(),
+        ));
+    }
+    if !bot.is_active {
+        return Err(AppError::ValidationError(
+            "The organization bot is inactive".into(),
         ));
     }
     Ok(Some(Binding {
@@ -200,12 +216,21 @@ pub(crate) async fn require_target(
         return Ok(());
     }
     if !super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await? {
-        return Err(AppError::organization_agent_channel_unsupported());
+        return Err(AppError::organization_agent_channels_disabled());
     }
     enabled(db, actor).await?;
-    require_admin(db, actor, &agent.user_id).await?;
+    if !matches!(
+        super::org_agent_service::access(db, actor, &agent.user_id).await?,
+        super::org_service::OwnerAccess::AsOrgAdmin { .. }
+    ) {
+        return Err(AppError::Forbidden(
+            "Only an organization admin can connect this specialist to a channel bot".into(),
+        ));
+    }
     if agent.is_nyxbot() || agent.destroyed_at.is_some() {
-        return Err(denied());
+        return Err(AppError::ValidationError(
+            "Choose an active organization specialist".into(),
+        ));
     }
     Ok(())
 }
@@ -486,6 +511,9 @@ pub(crate) async fn validate_in_session(
     live_doc(db,session,crate::models::channel_conversation::COLLECTION_NAME,doc!{"_id":&channel.route_id,"user_id":&execution.org_id,
         "channel_bot_id":&channel.channel_bot_id,"agent_api_key_id":&channel.route_api_key_id,"is_active":true,"retired_by_transfer":{"$ne":true}},fence).await?;
     Ok(Access {
+        member_private_source: !execution.guest
+            && origin.thread.is_none()
+            && thread.kind.as_deref() == Some("private"),
         channel,
         execution: execution.clone(),
         origin: origin.clone(),

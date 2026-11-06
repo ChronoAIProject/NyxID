@@ -193,8 +193,11 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        automation_work: None,
+        automation_parent: None,
         execution_enrollment: request.execution_task.is_some(),
         execution_parent: None,
+        channel_context: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),

@@ -1,4 +1,4 @@
-# Explicit execution permissions (#2193 / #2194 Phases A–B / #2195 Part A)
+# Explicit execution permissions (#2193 / #2194 Phases A–B / #2195 Parts A–B1)
 
 **Status: default-off contract, dispatch, and assistant permission authoring.**
 The #2195 Part A flow below adds human permission updates and exact-effect resume
@@ -292,7 +292,7 @@ through ordinary HTTP proxy or MCP endpoint/generic/prepared HTTP. Guest,
 platform/channel/automation, old in-flight turns without recorded lineage,
 ordinary API-key/external and standalone LLM-gateway callers retain their existing
 gap behavior. Unsupported managed/composite transformations also retain legacy
-prompts. Phase B adapters always retain the legacy gap chain; they never create Part A proposals.
+prompts. Phase B adapters never create Part A proposals; the B1 section below adds separately tagged proposals for eligible sources.
 
 The existing `ApprovalRequest` carries one versioned `execution_proposal`.
 Ceilings and prohibitions run before its creation. It consolidates only missing
@@ -423,7 +423,7 @@ original request's visible-message TaskRef through confirmation continuations an
 recovery. Cancellation fences the same root. This applies only to bounded HTTP/MCP
 calls from the isolated task thread, not the live session, WS or media stream.
 
-A Phase B gap keeps today's native/proxy/MCP/watch confirmation behavior (including
+Before B1, a Phase B gap kept the native/proxy/MCP/watch confirmation behavior (including
 existing background refusal when no live decision can be requested). Covered
 suppresses only the three eligible floors; independent Machine, org, webhook,
 exact-use and resource ceilings remain. No Phase B gap creates an execution
@@ -508,7 +508,7 @@ the person eligible under the normal precedence; resource ACLs remain independen
 
 Production heartbeats advertise `permissions:execution-enrollment-v1` with the
 reader/dispatch/authoring capabilities. Global/org enables and clear-that-enables
-require all four. An org-disable clear is conservatively gated when any
+require these capabilities plus the B1 authoring-v2 capability below. An org-disable clear is conservatively gated when any
 global/org-scoped positive could apply, without scanning members to prove overlap;
 a personal-disable clear uses live effective resolution. Explicit disables remain
 available when readiness is red.
@@ -530,3 +530,115 @@ The flag is rollout control. A send racing disable may complete, and off→on ca
 allow pending marked work under still-valid permission. Exact permission revocation
 and claim fences are unchanged. Cache invalidation is neither authority revocation
 nor a rollback procedure.
+
+## Permission updates: #2195 Part B1
+
+B1 adds a v2 proposal envelope alongside unchanged assistant-chat v1 proposals.
+An enrolled personal API key can request a consolidated permission through the
+ordinary UUID/slug/selected-pool proxy or supported MCP HTTP operations, either
+standalone LLM gateway, native personal Google/Drive REST/MCP, an admitted async
+watch operation, or a human-origin voice task. Machine service HTTP remains on
+its legacy gap path until Part B2 and a negotiated node release. Device-key voice,
+delegated/OAuth-client/service-account principals, guests and live sessions are
+excluded. Enrollment uses #2246's effective person/org/global flag resolution:
+a process-local single-flag snapshot and already-loaded person hints select
+candidates, then live single-flag resolution admits or drains marked work. The
+registry default is off; production currently enables the flag globally. Every
+v2 create, decision, claim, sweep and readback uses the same live resolver.
+
+### External requests and readback
+
+External requests have no server TaskRef and cannot choose Task validity. Parent
+keys may choose Operation (default), an enforceable window, or persistent
+permission. Login-child credentials offer Operation only, bound to that exact
+child: approval cannot silently authorize sibling credentials. Native permission
+keys retain their existing personal adapters, resource-policy verification and
+90-day credential cap.
+
+Only for callers explicitly opting into NyxID async approval, a bounded
+`Idempotency-Key` is a keyed-hash deduplication locator under the full
+actor/key/child/source/effect/authority binding. Its downstream meaning is
+preserved. Reusing it for different inputs conflicts. Connected callers always
+get a per-request occurrence, even when they supply the same idempotency key:
+a retry after timeout or disconnect asks again. Without a dedupe key, an async
+call also allocates one occurrence; a lost initial handle cannot be matched to
+a new, unlabelled request. `x-nyxid-operation-id` retains its existing durable-claim
+meaning. Receipt identity expires with retained request metadata; it is not a
+permanent provider idempotency guarantee.
+
+Ordinary external proxy (UUID, slug and selected pool), MCP and standalone LLM
+requests keep the legacy **connected wait by default**, using the acting person's
+notification channel `approval_timeout_secs`. Native permission-key requests use
+the same rule. Approval resumes the exact effect on the original connection and
+returns the real HTTP response, MCP tool result or LLM stream through its original
+adapter. Rejection and expiry retain the legacy error wording. Timeout or
+disconnect permanently marks the occurrence `not_sent`, expires the decision and
+removes the retained payload: a later approval or sweep cannot send it.
+Notifications are claimed once and sent inline immediately after the review
+commits; the maintenance sweep is a recovery backstop. Connected waits poll at
+the legacy 1000 ms cadence and remain immediately cancellable. Wait and terminal
+decision errors include an absolute approval URL based on `FRONTEND_URL`.
+
+Background execution and polling require the explicit HTTP header
+`X-NyxID-Approval-Mode: async` (including on MCP POST). Missing or other values
+keep the connected wait. `Idempotency-Key` and `Prefer: respond-async` alone never
+opt into NyxID background work; they retain their downstream semantics. The
+NyxID control header is never forwarded to the provider. Opted-in calls return
+`approval_required` immediately; add an idempotency key when retries must join
+the same occurrence. Server-owned watches and voice continuations retain their existing
+durable source lifecycle. They do not borrow a foreground request's waiter.
+
+For opted-in requests the approval-required response carries the opaque request ID. Poll
+`GET /api/v1/approvals/requests/{id}/status` with the **same parent key, login child
+(if any), and actor**. The additive `execution` field reports state, a safe failure
+code and an encrypted-at-rest bounded result after completion. Wrong credentials
+get not-found-shaped responses. Polling cannot enqueue, approve, claim or send an
+operation. Review and decision remain first-party-human-only; mobile and Telegram
+remain link-only. The web inbox displays the source and available validity
+choices, and existing grants inspection/revocation remains available.
+
+### Resumption and source fences
+
+The decision, permission and source-specific durable resume intent commit in one
+transaction. Every occurrence has an independent preparation/send CAS regardless
+of whether its permission is reusable. Reauthentication, selected connection,
+credential replacement epoch, policy/endpoint snapshot, original task/source and
+remaining independent floors are checked again. A stale preparer is recoverable
+only before its send barrier. Dispatched/unknown effects never resend. Pool occurrences pin the selected
+connection on retries and resume, and fence the original pool configuration and
+membership before sending; round-robin changes cannot select a new recipient of
+the approved effect.
+Transaction lock counters are excluded from connection digests; policy,
+credential and destination changes still invalidate the binding.
+
+Native pending review is typed and exits before the permission engine's primary
+DispatchMark. Verification reads remain separate and cannot consume the primary
+claim. Watches park a single status/result/cancel occurrence and reacquire their
+lease; a later poll is a new occurrence, and submission never grants its
+lifecycle. Voice continuations retain the original human request and task root.
+LLM responses stream to a connected waiter after approval. Explicitly asynchronous
+output is a bounded retained receipt and is never reconstructed by calling the
+model again. Only opted-in requests can continue after the original caller leaves;
+status polling never claims or dispatches an effect.
+
+The encrypted retained adapter input, including overhead, remains capped at
+256 KiB. Unsupported/raw/multipart/oversized or unrecoverable inputs (including
+translating AI-chat pools, source-bearer forwarding and submissions needing automatic watch registration) fall through
+before a proposal write, with a metadata-only reason code. Results/payloads have
+24-hour retention, and partial or unavailable results are reported explicitly.
+Permissions outlive credentials only according to their reviewed validity;
+permission does not prolong an expired key, admission deadline or stopped task.
+
+### Rollout
+
+Activation additionally requires `permissions:execution-authoring-v2` across all
+replicas, alongside the existing reader, dispatch, v1 authoring and broad-enrollment
+capabilities. Global activation is already live, so v2 becomes applicable to that
+cohort as soon as all replicas advertise the new capability.
+Deploy readers, source runners, indexes, refusal paths and web DTOs first; drain
+old writers before enrolling a cohort. Unenrolled requests perform no new
+preparation or reads. V1 and legacy card decisions are unchanged, and legacy
+handlers refuse any proposal before mutation. Disable and drain pending v2 work
+on upgraded replicas before rollback. The existing `expires_at` TTL and
+persistent-grant sentinel are unchanged; there is no backfill or new environment
+variable.

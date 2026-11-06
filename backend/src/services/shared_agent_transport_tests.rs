@@ -718,8 +718,11 @@ async fn shared_transports_async_mcp_survives_settlement_and_two_replica_polling
             .await
             .unwrap();
             let start = crate::services::assistant_nyxagent::TurnStart {
+                automation_work: None,
+                automation_parent: None,
                 execution_enrollment: false,
                 execution_parent: None,
+                channel_context: None,
                 owner_instruction_source: None,
                 media_event_ids: Vec::new(),
                 channel_uploads: Vec::new(),

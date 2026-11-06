@@ -33,6 +33,7 @@ import {
 import {
   useAutomationChats,
   useAutomationRuns,
+  useCancelAutomationRun,
   useRunAutomation,
   useSchedulePreview,
 } from "@/hooks/use-automations";
@@ -963,6 +964,8 @@ function AutomationHistory({
   const settings = useNyxBotSettings();
   const zone = settings.data?.timezone ?? browserTimezone();
   const history = useAutomationRuns(row.id);
+  const cancelRun = useCancelAutomationRun();
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const runs = history.data?.pages.flatMap((page) => page.runs) ?? [];
   return (
     <Dialog
@@ -978,6 +981,22 @@ function AutomationHistory({
             Up to 1,000 recent runs are retained for 90 days.
           </DialogDescription>
         </DialogHeader>
+        <Dialog open={cancelling !== null} onOpenChange={(open) => { if (!open) setCancelling(null); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Cancel this automation run?</DialogTitle>
+              <DialogDescription>Stop this run and its delegated work. Completed actions remain completed.</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setCancelling(null)}>Keep run</Button>
+              <Button variant="destructive" disabled={cancelRun.isPending} onClick={() => {
+                if (cancelling) cancelRun.mutate({ triggerId: row.id, runId: cancelling });
+                setCancelling(null);
+              }}>Confirm cancellation</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        {cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
         {history.error ? (
           <ErrorBanner message={history.error.message} />
         ) : history.isPending ? (
@@ -1021,7 +1040,11 @@ function AutomationHistory({
                           ` (HTTP ${run.failure_reason.http_status})`}
                       </p>
                     ) : (
-                      run.reason && <p>{run.reason.replaceAll("_", " ")}</p>
+                      run.reason && <p>{run.reason === "coordinator_timeout"
+                        ? "Coordinator deadline expired (coordinator_timeout)."
+                        : run.outcome === "waiting" && run.wait_kind === "coordinator"
+                          ? "Waiting for delegated work to finish"
+                          : run.reason.replaceAll("_", " ")}</p>
                     )}
                     {run.duration_ms !== null && (
                       <p>{(run.duration_ms / 1000).toFixed(1)} seconds</p>
@@ -1033,6 +1056,22 @@ function AutomationHistory({
                   title={run.scheduled_at ? "Scheduled" : "On demand"}
                   accessory={run.scheduled_at ? formatAutomationTime(run.scheduled_at, zone, true) : "Started by an event or request"}
                 />
+                {run.outcome === "waiting" && run.coordinator_deadline && (
+                  <GroupedRow
+                    title="Completion deadline"
+                    accessory={formatAutomationTime(run.coordinator_deadline, zone, true)}
+                  />
+                )}
+                {run.can_cancel && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={cancelRun.isPending}
+                    onClick={() => setCancelling(run.id)}
+                  >
+                    Cancel run
+                  </Button>
+                )}
                 {run.thread_id && (
                   <GroupedRow asChild interactive>
                     <Link

@@ -1524,6 +1524,23 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v2.locator":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("execution_proposal_locator_v2".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v2.locator":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc!{"execution_proposal.version":1,"execution_proposal.v2.state":1,"execution_proposal.v2.maintenance_at":1,"created_at":1}).build()).await?;
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants
@@ -3628,6 +3645,14 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
     ensure_billing_ledger_dedupe_index(&billing_ledger).await?;
+    for keys in [
+        doc! { "event_type": 1, "created_at": 1, "owner_id": 1 },
+        doc! { "movement": 1, "created_at": 1, "owner_id": 1 },
+    ] {
+        billing_ledger
+            .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
     billing_ledger
         .create_index(
             IndexModel::builder()

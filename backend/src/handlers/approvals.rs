@@ -200,6 +200,9 @@ pub struct ApprovalGrantsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution:
+        Option<crate::services::execution_permission_dispatch::proposals::v2::ExecutionView>,
     pub status: String,
     pub expires_at: String,
 }
@@ -782,6 +785,28 @@ pub async fn get_request_status(
         ));
     }
     let request = approval_service::get_request(&state.db, &request_id).await?;
+    if request
+        .execution_proposal
+        .as_ref()
+        .is_some_and(|p| p.version == 2)
+    {
+        let execution = crate::services::execution_permission_dispatch::proposals::v2::readback(
+            &state, &auth_user, &request,
+        )
+        .await
+        .map_err(|error| match error {
+            AppError::NotFound(_) => AppError::NotFound("Approval request not found".into()),
+            error => error,
+        })?;
+        return Ok(Json(ApprovalStatusResponse {
+            status: request.status,
+            expires_at: request.expires_at.to_rfc3339(),
+            execution: Some(execution),
+        }));
+    }
+    if auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
+        return Err(AppError::NotFound("Approval request not found".into()));
+    }
     let owner_user_id = auth_user.effective_approval_owner_user_id();
     let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
         AppError::Forbidden("Session-authenticated callers cannot poll approval status".to_string())
@@ -841,6 +866,7 @@ pub async fn get_request_status(
     }
 
     Ok(Json(ApprovalStatusResponse {
+        execution: None,
         status: request.status,
         expires_at: request.expires_at.to_rfc3339(),
     }))
@@ -2327,6 +2353,7 @@ mod tests {
     #[test]
     fn approval_status_response_serialization() {
         let resp = ApprovalStatusResponse {
+            execution: None,
             status: "pending".to_string(),
             expires_at: "2025-01-01T00:05:00Z".to_string(),
         };

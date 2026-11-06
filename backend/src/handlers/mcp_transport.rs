@@ -1638,6 +1638,7 @@ pub async fn mcp_post(
     >,
     request: Request<Body>,
 ) -> Response {
+    let cancellation = crate::downstream_disconnect::request_cancellation(&request);
     let headers = request.headers().clone();
     let body = match super::body_limit::read_request_body(
         request,
@@ -1681,6 +1682,11 @@ pub async fn mcp_post(
         }
         Err(resp) => return resp,
     };
+
+    if let Some(context) = &auth.execution_permission {
+        context.capture_idempotency(&headers);
+        context.bind_cancellation(cancellation);
+    }
 
     // Per-agent rate limit runs after auth, before any work. For OAuth/session
     // callers it is a no-op (no api_key_id / rps). This mirrors the REST proxy.
@@ -3275,6 +3281,19 @@ fn dispatch_service_tool<'a>(
         let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
             Some(pair) => pair,
             None => {
+                if let Some(response) = box_tool_future(|| {
+                    unavailable_tool_result(
+                        state,
+                        auth,
+                        tool_name,
+                        &catalog.unavailable_connections,
+                        request.id.clone(),
+                    )
+                })
+                .await
+                {
+                    return response;
+                }
                 if mcp_service::unpublished_tool(
                     &state.db,
                     tool_name,
@@ -3392,7 +3411,7 @@ fn dispatch_service_tool<'a>(
             }
             .await;
             if let Err(error) = result {
-                return tool_result(request.id.clone(), &error.to_string(), true);
+                return permission_admission_failure(state, request.id.clone(), error);
             }
         }
         let mut auto_allowed = match box_tool_future(|| {
@@ -4316,6 +4335,26 @@ fn guest_tool_allowed(tool_name: &str) -> bool {
         )
 }
 
+fn permission_admission_failure(
+    state: &AppState,
+    id: Option<serde_json::Value>,
+    error: crate::errors::AppError,
+) -> Response {
+    if let crate::errors::AppError::ApprovalFailed {
+        request_id, reason, ..
+    } = error
+    {
+        let result = approval_service::wait_failure_result(
+            crate::errors::AppError::Forbidden(reason),
+            &request_id,
+            &state.config.frontend_url,
+        );
+        tool_result(id, &result.to_string(), true)
+    } else {
+        tool_result(id, &error.to_string(), true)
+    }
+}
+
 fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<auth::AuthUser> {
     let user_id = uuid::Uuid::parse_str(&auth.user_id)
         .map_err(|_| crate::errors::AppError::Unauthorized("Invalid caller".into()))?;
@@ -4881,6 +4920,19 @@ async fn handle_meta_call_tool(
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
+            if let Some(response) = box_tool_future(|| {
+                unavailable_tool_result(
+                    state,
+                    auth,
+                    tool_name,
+                    &catalog.unavailable_connections,
+                    request_id.clone(),
+                )
+            })
+            .await
+            {
+                return response;
+            }
             if mcp_service::unpublished_tool(
                 &state.db,
                 tool_name,
@@ -4982,7 +5034,7 @@ async fn handle_meta_call_tool(
         }
         .await;
         if let Err(error) = result {
-            return tool_result(request_id.clone(), &error.to_string(), true);
+            return permission_admission_failure(state, request_id.clone(), error);
         }
     }
     let mut auto_allowed = match box_tool_future(|| {
@@ -5423,6 +5475,35 @@ async fn handle_meta_search(
         serde_json::to_string_pretty(&response_json).unwrap_or_default()
     };
     tool_result(request_id, &text, false)
+}
+
+/// Return diagnostics only after service and operation authorization.
+async fn unavailable_tool_result(
+    state: &AppState,
+    auth: &McpAuthContext,
+    tool_name: &str,
+    unavailable: &[mcp_service::McpToolService],
+    request_id: Option<serde_json::Value>,
+) -> Option<Response> {
+    let (service, endpoint) = mcp_service::resolve_tool_call(tool_name, unavailable)?;
+    // Discovery can include ungranted specialist connections. Diagnostics must
+    // not reveal their topology or override operation/guest scope refusals.
+    if ensure_service_in_scope(auth, service, request_id.clone()).is_err()
+        || !crate::services::agent_operation_scope_service::endpoint_visible(
+            &auth.assistant_operation_scopes,
+            service,
+            endpoint,
+        )
+        || guest_turn(auth)
+    {
+        return None;
+    }
+    let error = mcp_service::unavailable_service_error(&state.db, &auth.user_id, service)
+        .await
+        .ok()?;
+    Some(tool_result(request_id, &serde_json::json!({
+        "error": error.error_key(), "error_code": error.error_code(), "message": error.to_string(),
+    }).to_string(), true))
 }
 
 /// Load connected services through the same node- and service-scoped chain
@@ -9900,6 +9981,7 @@ mod org_agent_mcp_tests {
             &f.state.db,
             &f.state.node_ws_manager,
             &f.admin,
+            &f.admin,
             std::slice::from_ref(&organization),
         )
         .await
@@ -11082,6 +11164,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
             execution_voice_task: false,
@@ -11833,6 +11916,10 @@ mod schedule_retry_identity_tests {
         assert_eq!(chat_retry_digest(&other), chat_activity_digest(&other));
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_offline_grant_tests.rs"]
+mod mcp_offline_grant_tests;
 
 #[cfg(test)]
 mod broad_enrollment_tests {

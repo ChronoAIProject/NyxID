@@ -497,10 +497,10 @@ async fn in_progress_note(
     note
 }
 
-/// Turn-scoped input context: drained events, a channel sender's context,
-/// and for NyxBot its roster, direct
-/// user chats with specialists and pending permission requests. NyxID-authored
-/// and bounded; lookup failures only omit a note.
+/// Optional turn hints: drained events, legacy prose notes, and for NyxBot its
+/// roster, direct user chats with specialists and pending permission requests.
+/// NyxID-authored and bounded; lookup failures only omit optional hints.
+/// Required channel provenance is rendered separately by `channel_turn_context`.
 pub(crate) async fn turn_notes(
     state: &AppState,
     row: &AssistantConversation,
@@ -1564,8 +1564,8 @@ async fn execute_turn_inner(
         }
         None => String::new(),
     };
-    // Turn-scoped NyxID notes: team state, direct chats, drained events and
-    // channel sender context. Lookup failures only omit a note.
+    // Optional turn hints: team state, direct chats and drained events.
+    // Required authenticated channel provenance is prepared separately below.
     let agent =
         match crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await
         {
@@ -1581,6 +1581,13 @@ async fn execute_turn_inner(
         .and_then(|_| egress.checking_notice(row))
         .map(AbortOnDropHandle::new);
     decisions.push_str(&turn_notes(state, row, agent.as_ref(), previous).await);
+    // Authenticated channel provenance is required, including every retained
+    // queued source. Never run with a partially rendered or omitted identity.
+    decisions.push_str(
+        &super::channel_turn_context::turn_notes(&state.db, row)
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?,
+    );
     decisions.push_str(
         &crate::services::async_service_operation::input_context(
             &state.db,

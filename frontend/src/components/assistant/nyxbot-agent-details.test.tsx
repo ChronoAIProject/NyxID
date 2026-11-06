@@ -18,7 +18,7 @@ vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({
     isPending: false,
     data: [
-      { id: "github-key", slug: "github", label: "GitHub", is_active: true },
+      { id: "github-key", slug: "github", label: "GitHub", is_active: true, execution_unavailable_reason: "node home-server offline" },
       { id: "slack-key", slug: "slack", label: "Slack", is_active: true },
     ],
   }),
@@ -213,7 +213,7 @@ it("forgets a memory note", async () => {
   });
 });
 
-it("replaces a specialist's grants with a dirty-gated save", async () => {
+it("replaces a specialist's grants with a dirty-gated save even when a granted node is offline", async () => {
   const { user } = renderSheet({ tab: "grants" });
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const grants = await within(sheet).findByLabelText("Grants", { selector: "form" });
@@ -221,6 +221,7 @@ it("replaces a specialist's grants with a dirty-gated save", async () => {
     screen.queryByRole("region", { name: "Unsaved changes" }),
   ).not.toBeInTheDocument();
   expect(within(grants).getByRole("checkbox", { name: /GitHub/ })).toBeChecked();
+  expect(within(grants).getByText(/Currently not executable \(node home-server offline\)/)).toBeVisible();
   const guests = within(grants).getByRole("list", { name: "Guest access" });
   expect(within(guests).getByLabelText("github", { selector: '[role="combobox"]' })).toHaveTextContent(
     "Look things up only",

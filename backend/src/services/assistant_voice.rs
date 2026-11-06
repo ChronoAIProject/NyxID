@@ -250,6 +250,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
@@ -427,6 +428,7 @@ pub(crate) async fn publish_result(
                 let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+            automation_work: None,
                         execution_task: None,
                         delegated_images: Default::default(),
                         media_event_ids: Vec::new(),
@@ -679,6 +681,7 @@ pub(crate) async fn result_message(
         return Ok(None);
     }
     Ok(Some(AssistantMessage {
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -920,6 +923,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),

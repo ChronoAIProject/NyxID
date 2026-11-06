@@ -1287,12 +1287,14 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
     // after it was created.
     for stale in [
         GroupFollower {
+            automation: None,
             conversation_id: home.id.clone(),
             since_seq: 1,
             created_at: Utc::now() - chrono::Duration::hours(30),
             expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
         },
         GroupFollower {
+            automation: None,
             conversation_id: home.id.clone(),
             since_seq: 1,
             created_at: Utc::now() - chrono::Duration::hours(25),
@@ -1403,18 +1405,21 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
     // classification is frozen afterwards.
     let at = Utc::now();
     let live = GroupFollower {
+        automation: None,
         conversation_id: home.id.clone(),
         since_seq: 3,
         created_at: at - chrono::Duration::hours(1),
         expires_at: Some(at + chrono::Duration::hours(1)),
     };
     let expired_at_take = GroupFollower {
+        automation: None,
         conversation_id: "nyxa-other".into(),
         since_seq: 4,
         created_at: at - chrono::Duration::hours(24),
         expires_at: Some(at - chrono::Duration::milliseconds(1)),
     };
     let legacy_expired = GroupFollower {
+        automation: None,
         conversation_id: "nyxa-legacy".into(),
         since_seq: 5,
         created_at: at - chrono::Duration::hours(25),
@@ -1450,8 +1455,11 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         (org.id.clone(), false),
     ] {
         let start = TurnStart {
+            automation_work: None,
+            automation_parent: None,
             execution_enrollment: false,
             execution_parent: None,
+            channel_context: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -1936,19 +1944,27 @@ async fn shared_agents_in_personal_crews_list_route_handoff_and_revalidate() {
         fallback["addressed_agent_ids"],
         json!([group.lead_agent_id])
     );
-    let rows = groups::messages(&state.db, OWNER, &group.id, 200, None)
-        .await
-        .unwrap();
     // Wait for the lead's response before measuring the revoked-member refusal.
-    settled(&state, &group.id, rows.len()).await;
+    settled(
+        &state,
+        &group.id,
+        fallback["message"]["seq"].as_u64().unwrap() as usize + 1,
+    )
+    .await;
     let before = calls.lock().await.len();
-    send(&state, &group.id, "hello", Some(vec![shared.id.clone()]))
+    let refused = send(&state, &group.id, "hello", Some(vec![shared.id.clone()]))
         .await
         .unwrap();
     assert_eq!(calls.lock().await.len(), before);
-    let rows = groups::messages(&state.db, OWNER, &group.id, 200, None)
-        .await
-        .unwrap();
+    // A concurrent completion hook can claim the pending member before this
+    // post's advance runs. Wait for its notice, not merely the owner's message.
+    let rows = settled(
+        &state,
+        &group.id,
+        refused["message"]["seq"].as_u64().unwrap() as usize + 1,
+    )
+    .await;
+    assert_eq!(calls.lock().await.len(), before);
     assert_eq!(
         rows.last().unwrap().text,
         "Ask this agent's owner to share it with you."

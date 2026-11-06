@@ -890,7 +890,12 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                     None,
                 )
                 .await
-                .map_err(|_| Error::Denied("execution refused"))?;
+                .map_err(|error| match error {
+                    AppError::ApprovalRequired { request_id } => {
+                        Error::ApprovalPending { request_id }
+                    }
+                    _ => Error::Denied("execution refused"),
+                })?;
                 // A gap uses the legacy personal review, not a new proposal or send.
                 let Some(permit) = &target.execution_permission else {
                     return Err(Error::Denied("legacy review required"));
@@ -909,7 +914,7 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                 response
             }
         }
-        for outcome in ["covered", "gap", "prohibited"] {
+        for outcome in ["covered", "gap", "prohibited", "proposal"] {
             let (state, owner, connection) = fixture().await;
             let (key, binding) = issue(&state, &owner, &connection).await;
             phase_b_tests::enroll_cohort(&state.db, &owner, global).await;
@@ -920,7 +925,7 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                 .await
                 .unwrap();
             state.db.collection::<Document>("service_approval_configs").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"service_id":&binding.catalog_service_id,"service_name":"Drive","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
-            if outcome != "gap" {
+            if !matches!(outcome, "gap" | "proposal") {
                 let mut grant = phase_b_tests::grant(
                     &state,
                     &auth,
@@ -941,6 +946,23 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                     .await
                     .unwrap();
             }
+            if outcome == "proposal" {
+                auth.execution_permission.as_ref().unwrap().retain_adapter(
+                    crate::models::execution_proposal::PreparedAdapter::Native {
+                        uri: "/api/v1/permission-execution/rest/drive/v3/files/report".into(),
+                        method: "PATCH".into(),
+                        body: r#"{"name":"Reviewed"}"#.into(),
+                        content_type: Some("application/json".into()),
+                        mcp: false,
+                    },
+                    &[(
+                        axum::http::HeaderName::from_static("x-nyxid-approval-mode"),
+                        axum::http::HeaderValue::from_static("async"),
+                    )]
+                    .into_iter()
+                    .collect(),
+                );
+            }
             let native = Arc::new(Native {
                 state: state.clone(),
                 auth,
@@ -949,8 +971,8 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                 primary: AtomicUsize::new(0),
                 verification: AtomicUsize::new(0),
             });
-            let engine = engine(state.db.clone(), binding, native.clone()).unwrap();
-            let result = engine
+            let native_engine = engine(state.db.clone(), binding.clone(), native.clone()).unwrap();
+            let result = native_engine
                 .execute(nyxid_permissions::Request {
                     method: axum::http::Method::PATCH,
                     path: "/drive/v3/files/report".into(),
@@ -963,6 +985,11 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                 .await;
             if outcome == "covered" {
                 assert!(result.is_ok(), "{result:?}");
+            } else if outcome == "proposal" {
+                assert!(
+                    matches!(result, Err(Error::ApprovalPending { .. })),
+                    "{result:?}"
+                );
             } else {
                 assert!(matches!(result, Err(Error::Denied(_))), "{result:?}");
             }
@@ -978,8 +1005,87 @@ async fn execution_permission_native_verified_plan_separates_primary_claim_from_
                     .count_documents(doc! {})
                     .await
                     .unwrap(),
-                0
+                u64::from(outcome == "proposal")
             );
+            if outcome == "proposal" {
+                use crate::services::execution_permission_dispatch::proposals::{self, v2};
+                let row = state
+                    .db
+                    .collection::<crate::models::approval_request::ApprovalRequest>(
+                        "approval_requests",
+                    )
+                    .find_one(doc! {"execution_proposal.version":2})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let proposal = v2::proposal(&row).unwrap();
+                let choice = proposal
+                    .choices
+                    .iter()
+                    .find(|c| c.id == "operation")
+                    .unwrap();
+                let approved = proposals::decide(
+                    &state,
+                    &owner,
+                    &row.id,
+                    &proposals::Decision {
+                        approved: true,
+                        expected_revision: proposal.revision,
+                        choice_id: Some(choice.id.clone()),
+                        choice_digest: Some(choice.digest.clone()),
+                        idempotency_key: uuid::Uuid::new_v4().to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+                let (resume, _) = v2::claim_for_test(&state, &approved)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut auth = native.auth.clone();
+                dispatch::RequestContext::for_resume(&mut auth, resume).unwrap();
+                let replay = Arc::new(Native {
+                    state: state.clone(),
+                    auth,
+                    binding: binding.clone(),
+                    drive: MockDrive::default(),
+                    primary: AtomicUsize::new(0),
+                    verification: AtomicUsize::new(0),
+                });
+                let replay_engine =
+                    engine(state.db.clone(), binding.clone(), replay.clone()).unwrap();
+                let result = replay_engine
+                    .execute(nyxid_permissions::Request {
+                        method: axum::http::Method::PATCH,
+                        path: "/drive/v3/files/report".into(),
+                        query: Default::default(),
+                        body: serde_json::to_vec(&serde_json::json!({"name":"Reviewed"}))
+                            .unwrap()
+                            .into(),
+                        content_type: Some("application/json".into()),
+                    })
+                    .await;
+                assert!(result.is_ok(), "{result:?}");
+                assert_eq!(replay.primary.load(Ordering::SeqCst), 1);
+                assert!(replay.verification.load(Ordering::SeqCst) > 0);
+                let sent = state
+                    .db
+                    .collection::<crate::models::approval_request::ApprovalRequest>(
+                        "approval_requests",
+                    )
+                    .find_one(doc! {"_id":&row.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(v2::proposal(&sent).unwrap().state, "dispatched");
+                set_paused(&state.db, &owner, &binding.id, binding.revision, true)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    v2::readback(&state, &native.auth, &sent).await,
+                    Err(AppError::NotFound(_))
+                ));
+            }
             state.db.drop().await.unwrap();
         }
     }
@@ -1045,9 +1151,13 @@ async fn execution_permission_native_rest_and_mcp_gaps_and_denials_exit_before_p
                     "/api/v1/permission-execution/mcp",
                     post(crate::handlers::permission_keys::mcp).layer(billing),
                 )
+                .route(
+                    "/api/v1/approvals/requests/{id}/status",
+                    axum::routing::get(crate::handlers::approvals::get_request_status),
+                )
                 .with_state(state.clone());
             let rest = router.clone().oneshot(Request::builder().uri("/api/v1/permission-execution/rest/youtube/v3/videos?id=VIDEO_ID&part=snippet%2Cstatistics")
-            .header("authorization",format!("Bearer {}",key.full_key)).body(Body::empty()).unwrap()).await.unwrap();
+            .header("x-nyxid-approval-mode","async").header("authorization",format!("Bearer {}",key.full_key)).body(Body::empty()).unwrap()).await.unwrap();
             let status = rest.status();
             let text = String::from_utf8(
                 to_bytes(rest.into_body(), 1024 * 1024)
@@ -1058,8 +1168,8 @@ async fn execution_permission_native_rest_and_mcp_gaps_and_denials_exit_before_p
             .unwrap();
             assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
             assert!(!text.contains("uncertain"), "{text}");
-            let response = router.oneshot(Request::builder().method("POST").uri("/api/v1/permission-execution/mcp")
-            .header("authorization",format!("Bearer {}",key.full_key)).header("content-type","application/json")
+            let response = router.clone().oneshot(Request::builder().method("POST").uri("/api/v1/permission-execution/mcp")
+            .header("x-nyxid-approval-mode","async").header("authorization",format!("Bearer {}",key.full_key)).header("content-type","application/json")
             .body(Body::from(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"google_request","arguments":{"method":"GET","path":"/youtube/v3/videos","query":{"id":"VIDEO_ID","part":"snippet,statistics"}}}}).to_string())).unwrap()).await.unwrap();
             let value: serde_json::Value =
                 serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
@@ -1067,14 +1177,46 @@ async fn execution_permission_native_rest_and_mcp_gaps_and_denials_exit_before_p
             assert_eq!(value["result"]["isError"], true, "{value}");
             assert!(!value.to_string().contains("uncertain"));
             assert!(upstream.received_requests().await.unwrap().is_empty());
+            if !denied {
+                let pending: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let id = pending["request_id"].as_str().unwrap();
+                let receipt = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(format!("/api/v1/approvals/requests/{id}/status"))
+                            .header("authorization", format!("Bearer {}", key.full_key))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(receipt.status(), StatusCode::OK);
+                let receipt: serde_json::Value = serde_json::from_slice(
+                    &to_bytes(receipt.into_body(), 1024 * 1024).await.unwrap(),
+                )
+                .unwrap();
+                assert_eq!(receipt["execution"]["state"], "pending");
+                assert!(receipt.get("execution_proposal").is_none());
+                assert!(
+                    upstream.received_requests().await.unwrap().is_empty(),
+                    "polling must never dispatch"
+                );
+                assert!(text.contains("request_id"), "{text}");
+                assert!(
+                    value["result"]["execution"]["request_id"].is_string(),
+                    "{value}"
+                );
+            }
+
             assert_eq!(
                 state
                     .db
                     .collection::<Document>("approval_requests")
-                    .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                    .count_documents(doc! {"execution_proposal.version":2})
                     .await
                     .unwrap(),
-                0
+                if denied { 0 } else { 2 }
             );
             if denied {
                 assert_eq!(

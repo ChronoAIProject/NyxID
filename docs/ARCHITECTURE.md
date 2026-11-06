@@ -67,6 +67,18 @@ Settlement reuses admitted billing meters and retains pending provider evidence
 until cleanup completes. The default-off rollout requires all API replicas to
 understand adapter-origin tool authority before activation.
 
+Automation coordinator completion adds per-run provenance to existing turns,
+events, confirmation cards, async operations and group followers. The scheduler
+owns admission and final settlement; direct assignments use the metadata-only
+`assistant_direct_handoffs` collection, indexed by owner/run and both conversation
+roles, with absolute TTL at the run's retention boundary. Result enqueue and
+receipt/follower retirement commit transactionally. Child lifecycle fences write
+their own conversation, while cancellation retires the run and its descendants.
+Personal erasure removes receipts by exact owner; conversation deletion removes
+both parent and child roles after publishing any pending child failure. The
+feature is default-off and requires fleet readiness only for new enrollment;
+persisted work continues to drain after disabling it. See [NyxBot schedules](NYXBOT_SCHEDULES.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)

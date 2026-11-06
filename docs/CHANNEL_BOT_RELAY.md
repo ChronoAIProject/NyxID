@@ -945,7 +945,7 @@ This integration supports **WhatsApp Business Platform through Meta's Cloud API*
 
 Meta subscriptions are app-wide: each bot accepts only the `whatsapp_business_account` object, `messages` field, `whatsapp` product, its exact `metadata.phone_number_id`, and its configured WABA ID when present. The bot remains `pending_webhook` until a matching signed event contains a usable inbound message or a recognized status with message ID, recipient and timestamp. Empty or unrelated signed events do not activate it. Activation checks the current owner, credentials and lifecycle; a concurrent first message may continue when another event already activated the same bot under the same credentials. Managed activation also fences rotation of the shared Meta secret. A shared app callback does not relay the app's other numbers. Use separate apps or Meta's supported [webhook overrides](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/override) to route each number to its matching NyxID bot URL.
 
-Rotate credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`, or PATCH `bot_token`/`app_secret`. Rotation preserves the Verify Token and phone identity. The Verify Bot action preserves WhatsApp's subscription secret; existing platforms retain their original verification lifecycle and response statuses.
+Rotate credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`, or PATCH `bot_token`/`app_secret`. Rotation preserves the Verify Token and phone identity. The Verify Bot action preserves WhatsApp's subscription secret. Lark/Feishu also use credential-only verification records (see the setup observations below); other platforms retain their original verification lifecycle and response statuses.
 
 **Verify Bot checks access to the configured phone through Graph.** Detail and successful verify responses include optional `last_verification` metadata: a check ID, `pending`/`verified`/`failed`/`incomplete` status, start/completion timestamps, and a locally authored error message. Failed checks are persisted before returning the API error. They remain separate from historical `status` and `webhook_registered`; a prior webhook observation does not prove that current credentials or routing work. Credential replacement invalidates the result, and a superseded attempt cannot overwrite a newer one. A pending check older than its 30-second deadline is displayed as incomplete without mutating credentials or the stored attempt. Managed checks use the exact loaded shared-secret snapshot; rotation invalidates the observation. Managed activation and verification use MongoDB transactions to fence shared-secret changes, requiring a replica set.
 
@@ -1574,6 +1574,41 @@ Scoped to the bot owner's account -- only resolves identities linked to the user
 
 Return `202 Accepted` with an empty body, then POST the reply asynchronously. Inline HTTP 200 response bodies are not sent to the platform (ADR-013). `reply.text` is optional when declared media attachments or supported platform metadata carry the content.
 
+NyxBot also supplies structured, server-derived channel context in the current
+turn's input for Direct and gateway delivery, personal owner/guest and verified
+org member/guest messages, and followed children. `identity.platform` is
+canonical, `identity.channel_bot_id` is the stable internal Bot identity, and
+`identity.bot_username` is the current platform username/mailbox address when
+available. Usernames remain complete through 1,024 bytes; oversized values are
+omitted with `bot_username_omitted=true`. Editable labels/names are JSON-escaped
+display data bounded to 80 characters before encoding. Conversation kind, follow
+status, verified sender kind/classification and original-message eligibility are
+separate structured fields. This context grants no authority or ACL changes.
+
+Provenance is stored on the active turn, separately from the bounded prose note,
+and resolved again from the bound channel/Bot for model preparation.
+Forwarded/quoted reference and guest guidance therefore cannot be truncated by
+long labels. Guest model-setup waits preserve the same structured source.
+Verified member and personal owner questions queued while busy retain
+independently scoped context per `source_event_id`; coalescing never transfers
+one Bot's identity to another source. Pruning removes only the revoked source's
+context. Runtime notes name both queued `event_id` and source ID, and a required
+identity lookup failure fails preparation before sending a bare question to the
+model. Joining an already running repeated question adds only a reply recipient.
+An unrelated app turn inherits no channel identity from a saved reply
+destination.
+
+Org sources retain their exact server-authored origin and are revalidated
+against live org, specialist, Bot, sender-link and transport authority.
+`sender.classification` distinguishes `org_member` and `org_guest` from personal
+`owner` and `guest`; the linking administrator supplies transport only. A
+private member home can receive queued questions from different bound bots, with
+each source validated independently of the latest reply preference. Different
+org bindings do not coalesce. Matching sources retain their individual source
+IDs; group transcript and privacy guidance appear once per validated
+channel/partition per turn. Guest constraints and org billing guidance remain
+part of required source context, outside the prose-note budget.
+
 ### Agent -> NyxID (Async, HTTP 202 then POST later)
 
 If the agent needs more time (LLM inference, tool calls, etc.), it returns `202 Accepted` with an empty body, then calls back when ready. The reply endpoint accepts either the agent's API key or the per-callback reply token minted with the inbound payload:
@@ -1782,7 +1817,18 @@ To self-heal an existing bot:
 
 1. Read the bot's Event Subscriptions settings in the Lark / Feishu console.
 2. Update the bot with its Verification Token and, if enabled in the console, its Encrypt Key.
-3. Wait for the next verified inbound webhook or `url_verification` challenge. NyxID will auto-promote the bot from `pending_webhook` to `active` after successful verification.
+3. Complete the `url_verification` challenge in the platform console. NyxID verifies the configured token (and signature/encryption when configured) and records callback reachability only. A challenge does **not** activate the bot, mark a real inbound message, or verify a NyxID member.
+4. Send a real message to the bot. An authenticated non-challenge event can promote `pending_webhook` to `active`; the parsed message separately records inbound receipt, before route lookup. Activation alone does not prove routing, member identity, or an agent answer.
+
+### Lark / Feishu setup observations (#2242)
+
+**Verify Bot checks app credentials only** (tenant-token access and required stored verification configuration). Its durable result does not activate the bot or register/verify the platform callback. The standalone Channel bot page keeps six checks separate: app credentials, callback challenge, a real authenticated inbound, route/agent connection, your member identity, and outbound delivery. A missing or legacy observation means “not yet observed” or “unavailable”, never a confirmed misconfiguration. Delivery proves a platform send, not a substantive model response. Observations are historical and should be refreshed after each setup step.
+
+For an organization specialist, choose **Continue setup / Verify my chat account** on the bot page. It opens the bound agent's **Channels** tab focused on that exact connection (`/assistant?agent=<agent-id>&details=channels&connection=<binding-id>`). Each member, including admins, must independently generate a code in their own first-party session, DM it to this bot, wait for the authenticated observation, and click **Confirm my account**. The page explains waiting and offers a new code after the ten-minute expiry. Connecting the bot, verifying credentials, and completing Lark's challenge never auto-confirm a member or grant guest access. Existing membership, binding-revision and expiry checks still run at confirmation and execution.
+
+Health diagnostics add optional `last_callback_challenge_at`, `last_route_at`, and `last_route_result` (`matched`, `no_route`, `unavailable`). `last_inbound_source` comes from the actual receive path (`webhook`, `poll`, or Discord Gateway), not a pre-activation registration snapshot. A real inbound with `no_route` is still a received message even if no `ChannelMessage` was created. These observations contain no message content, member codes or credentials.
+
+Organization connection refusals distinguish the disabled `nyxbot:org-specialist-channels` flag, security rollout readiness, admin permission, and a bot/specialist owner mismatch. The existing typed refusal and readiness codes remain unchanged.
 
 You can update the bot either via the API or the CLI:
 

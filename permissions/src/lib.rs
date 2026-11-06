@@ -23,6 +23,8 @@ pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("execution permission review pending")]
+    ApprovalPending { request_id: String },
     #[error("invalid permission policy: {0}")]
     Policy(&'static str),
     #[error("request denied: {0}")]

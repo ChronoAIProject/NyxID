@@ -468,6 +468,8 @@ pub struct AppConfig {
     // Node Proxy
     /// Stable pod/host identity. The process generation is created at startup.
     pub instance_name: String,
+    /// Enroll new assistant automation runs only after fleet readiness.
+    pub automation_continuation_v2_enabled: bool,
     pub security_rollout: crate::services::security_readiness_service::RolloutConfig,
     /// Dedicated private listener for inter-replica traffic.
     pub internal_bind_addr: String,
@@ -1309,6 +1311,7 @@ impl AppConfig {
                 .or_else(|_| env::var("POD_NAME"))
                 .or_else(|_| env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "nyxid-backend".to_string()),
+            automation_continuation_v2_enabled: env::var("AUTOMATION_CONTINUATION_V2_ENABLED").is_ok_and(|v| v == "true"),
             security_rollout: crate::services::security_readiness_service::RolloutConfig::parse(
                 &env::var("SECURITY_ROLLOUT_REPLICAS").unwrap_or_default(),
                 env::var("SECURITY_ROLLOUT_DRAINED").is_ok_and(|v| v == "true"),
@@ -2027,6 +2030,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),

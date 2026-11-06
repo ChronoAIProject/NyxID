@@ -79,7 +79,7 @@ async fn authenticate(
 fn error_status(error: &Error) -> StatusCode {
     match error {
         Error::Policy(_) => StatusCode::BAD_REQUEST,
-        Error::Denied(_) => StatusCode::FORBIDDEN,
+        Error::Denied(_) | Error::ApprovalPending { .. } => StatusCode::FORBIDDEN,
         Error::HookDenied { .. } => StatusCode::FORBIDDEN,
         Error::HookUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         Error::Timeout => StatusCode::GATEWAY_TIMEOUT,
@@ -285,6 +285,9 @@ pub async fn handle_mcp(engine: &Engine, body: Bytes) -> Response {
             match engine.execute(request).await {
                 Ok(response) => {
                     json!({"content":[{"type":"text","text":String::from_utf8_lossy(&response.body)}],"isError":false})
+                }
+                Err(Error::ApprovalPending { request_id }) => {
+                    json!({"content":[{"type":"text","text":"Execution permission review pending"}],"isError":true,"execution":{"request_id":request_id,"state":"pending"}})
                 }
                 Err(error) => {
                     json!({"content":[{"type":"text","text":error.to_string()}],"isError":true})

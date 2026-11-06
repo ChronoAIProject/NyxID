@@ -226,9 +226,12 @@ pub mod telegram_managers;
 
 pub mod nyxbot_gateway_releases;
 
+pub mod billing_benefits;
 pub mod monitoring;
 
 pub mod collaboration_group;
 
 pub mod cma_sessions;
 pub mod org_specialist_channels;
+
+pub(crate) mod execution_permission_resume;

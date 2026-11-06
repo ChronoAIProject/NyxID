@@ -8,20 +8,55 @@ pub(crate) async fn cancel_in_session(
     mut filter: Document,
     reason: &str,
 ) -> AppResult<()> {
+    fn v2_selector(filter: Document) -> Document {
+        filter
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    bson::Bson::Document(d) => bson::Bson::Document(v2_selector(d)),
+                    bson::Bson::Array(items) => bson::Bson::Array(
+                        items
+                            .into_iter()
+                            .map(|v| match v {
+                                bson::Bson::Document(d) => bson::Bson::Document(v2_selector(d)),
+                                v => v,
+                            })
+                            .collect(),
+                    ),
+                    v => v,
+                };
+                (
+                    key.replace("execution_proposal.v1.", "execution_proposal.v2."),
+                    value,
+                )
+            })
+            .collect()
+    }
+    let mut second = v2_selector(filter.clone());
+    second.insert("execution_proposal.version", 2);
     filter.insert("execution_proposal.version", VERSION as i32);
     let mut cursor = db
         .collection::<Document>(REQUESTS)
-        .find(filter.clone())
-        .projection(doc! {"_id":1})
+        .find(doc! {"$or":[filter.clone(),second]})
+        .projection(doc! {"_id":1,"execution_proposal.version":1})
         .session(&mut *session)
         .await?;
-    let ids = cursor
-        .stream(&mut *session)
-        .try_collect::<Vec<_>>()
-        .await?
-        .into_iter()
-        .filter_map(|row| row.get_str("_id").ok().map(str::to_owned))
+    let rows = cursor.stream(&mut *session).try_collect::<Vec<_>>().await?;
+    let v2_ids = rows
+        .iter()
+        .filter(|r| {
+            r.get_document("execution_proposal")
+                .is_ok_and(|p| p.get_i32("version").ok() == Some(2))
+        })
+        .filter_map(|r| r.get_str("_id").ok().map(str::to_owned))
         .collect::<Vec<_>>();
+    let ids = rows
+        .into_iter()
+        .filter_map(|r| r.get_str("_id").ok().map(str::to_owned))
+        .collect::<Vec<_>>();
+    if !v2_ids.is_empty() {
+        super::v2::cancel_in_session(db, session, doc! {"_id":{"$in":v2_ids}}, reason).await?;
+    }
     retire_operations(db, session, &ids).await?;
     filter.insert(
         "execution_proposal.v1.state",
@@ -56,6 +91,7 @@ fn event(row: &ApprovalRequest, p: &Proposal) -> crate::models::assistant_conver
 /// Indexed, bounded maintenance on new-format rows only. Existing turn/request
 /// paths never load proposal state unless their enrollment/source hint is present.
 pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
+    Box::pin(super::v2::sweep(state)).await?;
     let rows:Vec<ApprovalRequest>=state.db.collection::<ApprovalRequest>(REQUESTS).find(doc!{
         "execution_proposal.version":VERSION as i32,"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting","denied","expired","completed","not_sent","unknown"]},
         "execution_proposal.v1.delivered_turn_id":null,"execution_proposal.v1.delivery_abandoned":{"$ne":true},

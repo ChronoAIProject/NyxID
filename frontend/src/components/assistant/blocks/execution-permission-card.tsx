@@ -105,8 +105,8 @@ export function ExecutionPermissionCard({
       {current.review && (
         <dl className="space-y-1 text-12">
           <div>
-            <dt className="inline text-muted-foreground">Agent: </dt>
-            <dd className="inline">{current.review.agent}</dd>
+            <dt className="inline text-muted-foreground">{current.source ? "Source: " : "Agent: "}</dt>
+            <dd className="inline">{current.source ?? current.review.agent}</dd>
           </div>
           <div>
             <dt className="inline text-muted-foreground">Connection: </dt>
@@ -199,8 +199,9 @@ export function ExecutionPermissionCard({
       )}
       {current.state === "expired" && (
         <p className="text-12">
-          Return to the original conversation and explicitly request the task
-          again. This expired operation will not be sent.
+          {current.version === 2
+            ? "This expired operation will not be sent. To request a new operation, use a new request context."
+            : "Return to the original conversation and explicitly request the task again. This expired operation will not be sent."}
         </p>
       )}
       {error && (

@@ -69,6 +69,7 @@ export const creditGrantSchema = z.object({
   reclaimed: creditsSchema.optional(),
   terminal_amount: creditsSchema.optional(),
   held: creditsSchema.optional(),
+  available: creditsSchema.optional(),
   revoke_requested_at: z.string().nullable().optional(),
   amount_credits: z.number().int().nonnegative(),
   amount: creditsSchema.optional(),
@@ -342,6 +343,8 @@ export const userAllowanceBalanceSchema = z.object({
   consumed_quantity: z.number().int().nonnegative(),
   reserved_quantity: z.number().int().nonnegative(),
   remaining_quantity: z.number().int().nonnegative(),
+  held_quantity: z.number().int().nonnegative().optional(),
+  total_quantity: z.number().int().nonnegative().optional(),
 });
 
 export const userAllowanceListSchema = z.object({
@@ -541,4 +544,13 @@ export const allocationSummarySchema = z.object({
     restricted: creditsSchema,
     generated_at: z.string(),
   }),
+});
+
+export const billingBenefitsSchema = z.object({
+  summary: allocationSummarySchema.shape.summary,
+  grants: z.array(creditGrantSchema),
+  total_grants: z.number().int().nonnegative(),
+  page: z.number().int().positive(),
+  per_page: z.number().int().positive(),
+  allowances: z.array(userAllowanceBalanceSchema),
 });

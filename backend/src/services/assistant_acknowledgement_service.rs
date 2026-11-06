@@ -711,6 +711,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id,
@@ -1010,6 +1011,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
             execution_voice_task: false,
@@ -1049,6 +1051,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) execution_group_id: Option<String>,
     pub(crate) execution_unsupported: bool,
     pub(crate) execution_voice_task: bool,
@@ -1310,6 +1313,7 @@ async fn notify_nyxbot_denied(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
                 let message = AssistantMessage {
+            automation_work: None,
                     execution_task: None,
                     delegated_images: Default::default(),
                     media_event_ids: Vec::new(),
@@ -1479,6 +1483,14 @@ pub fn organization_agent_channel_refusal() -> Value {
     })
 }
 
+/// Keep the known disabled-flag condition distinct from unsupported shortcuts.
+pub fn organization_agent_channel_disabled_refusal() -> Value {
+    let mut refusal = organization_agent_channel_refusal();
+    refusal["message"] =
+        crate::errors::access_denial::ORGANIZATION_AGENT_CHANNEL_DISABLED_MESSAGE.into();
+    refusal
+}
+
 /// What a guest turn is told when a service call goes beyond what the owner
 /// lets guests do with that service.
 pub fn guest_service_refusal(service: &str, access: GuestAccess) -> Value {
@@ -1570,7 +1582,13 @@ pub async fn for_key_with_access(
     if agent.destroyed_at.is_some() {
         return Err(not_found());
     }
-    let confirmation_policy = if let Some(run_id) = conversation
+    let confirmation_policy = if let Some(work) = conversation
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.as_ref())
+    {
+        work.confirmation_policy
+    } else if let Some(run_id) = conversation
         .active_turn
         .as_ref()
         .and_then(|turn| turn.trigger_run_id.as_deref())
@@ -1595,6 +1613,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        automation_work: live.and_then(|t| t.automation_work.clone()),
         execution_group_id: conversation
             .collaboration
             .as_ref()
@@ -1608,10 +1627,11 @@ pub async fn for_key_with_access(
         execution_unsupported: (conversation.automation_thread
             && conversation.voice_parent_conversation_id.is_none())
             || conversation.platform_thread.is_some()
-            || conversation
-                .active_turn
-                .as_ref()
-                .is_some_and(|t| t.trigger_run_id.is_some() || t.channel_adapter_origin.is_some()),
+            || conversation.active_turn.as_ref().is_some_and(|t| {
+                t.trigger_run_id.is_some()
+                    || t.automation_work.is_some()
+                    || t.channel_adapter_origin.is_some()
+            }),
         execution_task: conversation
             .active_turn
             .as_ref()
@@ -1736,6 +1756,23 @@ pub(crate) async fn fence(
         .session(&mut *session)
         .await?
         .ok_or_else(not_found)?;
+    if let Some(work) = chat.automation_work.as_ref() {
+        if row.active_turn.as_ref().is_none_or(|t| {
+            t.stop_requested
+                || Some(&t.turn_id) != chat.turn_id.as_ref()
+                || t.automation_work.as_ref() != Some(work)
+        }) {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        super::trigger_schedule::continuation::fence_work(
+            db,
+            &chat.user_id,
+            &chat.conversation_id,
+            work,
+            session,
+        )
+        .await?;
+    }
     let key = db
         .collection::<ApiKey>(KEYS)
         .find_one(doc! {"_id": &chat.api_key_id, "user_id": &chat.user_id, "is_active": true})
@@ -2244,6 +2281,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
         activity_id: super::machine_activity_service::activity_id(),
@@ -2432,7 +2470,7 @@ async fn request_candidate_in_session(
     row.requested_turn_id = conversation
         .active_turn
         .as_ref()
-        .filter(|turn| turn.trigger_run_id.is_some())
+        .filter(|turn| turn.trigger_run_id.is_some() || turn.automation_work.is_some())
         .map(|turn| turn.turn_id.clone())
         .or_else(|| started_by.as_ref().map(|message| message.turn_id.clone()));
     row.voice_request_id = conversation
@@ -3161,6 +3199,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        automation_work: None,
         execution_group_id: target
             .collaboration
             .as_ref()
@@ -3384,7 +3423,40 @@ pub(crate) async fn decide_in_session(
             .session(&mut *session)
             .await?;
     }
-    if let Some(run_id) = &row.trigger_run_id {
+    if let Some(work) = row.automation_work.as_ref() {
+        if work.role != "coordinator" {
+            let mut event = crate::models::assistant_acknowledgement::bind_continuation(
+                row.routing.as_ref(),
+                super::assistant_team_service::event(
+                    "automation_confirmation_decided",
+                    format!(
+                        "The owner {} request {}: {}. {} {}",
+                        if allow { "allowed" } else { "denied" },
+                        row.id,
+                        super::assistant_nyxagent::excerpt(&row.summary, 1200),
+                        if allow {
+                            "Retry the exact approved call with this acknowledgement_id and continue the task."
+                        } else {
+                            "Do not execute or retry the denied action; finish what you can and report."
+                        },
+                        DECISION_NARRATION
+                    ),
+                    None,
+                ),
+            );
+            event.id = format!("automation-decision:{}", row.id);
+            event.automation_work = Some(work.clone());
+            super::assistant_nyxagent::append_events_in_session(
+                db,
+                user,
+                &row.conversation_id,
+                &[event],
+                session,
+            )
+            .await?;
+        }
+        super::trigger_schedule::continuation::wake_in_session(db, &work.run_id, session).await?;
+    } else if let Some(run_id) = &row.trigger_run_id {
         // Durable wakeup in the decision transaction. Settlement
         // reads card state and writes this same work row, preventing
         // a simultaneous settlement from overwriting the wakeup.

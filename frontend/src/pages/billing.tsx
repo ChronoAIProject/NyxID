@@ -1,11 +1,20 @@
 import { useOrgs } from "@/hooks/use-orgs";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { rememberBillingCheckout } from "@/lib/billing-checkout-return";
 import { useAuthStore } from "@/stores/auth-store";
 import { BillingBill } from "@/components/billing/billing-bill";
 import { useAccountPanel } from "@/hooks/use-account-panel";
-import { billingPanelSearch, type AccountPanelParams } from "@/lib/assistant/account-panel-search";
+import {
+  billingPanelSearch,
+  type AccountPanelParams,
+} from "@/lib/assistant/account-panel-search";
 import { useEffect, useEffectEvent, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -18,14 +27,13 @@ import {
   useTopUpBilling,
 } from "@/hooks/use-billing";
 import { useCatalog } from "@/hooks/use-keys";
-import { BillingBenefits } from "@/components/billing/billing-benefits";
+import { AvailableBenefits } from "@/components/billing/available-benefits";
 import { BillingMachines } from "@/components/billing/billing-machines";
-import { BillingWalletCard } from "@/components/billing/billing-wallet-card";
+import { BillingWalletActions } from "@/components/billing/billing-wallet-card";
 import { BillingTopUpHistory } from "@/components/billing/billing-topup-history";
 import { BillingUsageSummary } from "@/components/billing/billing-usage-summary";
 import { BillingUsageExplorer } from "@/components/billing/billing-usage-explorer";
 import { BillingActivity } from "@/components/billing/billing-activity";
-import { BenefitHelp } from "@/components/billing/benefit-help";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -43,47 +51,109 @@ import {
 } from "@/schemas/billing";
 import "@/components/billing/billing-page.css";
 
-export function BillingPage({ presentation = "page" }: { readonly presentation?: "page" | "panel" } = {}) {
+export function BillingPage({
+  presentation = "page",
+}: { readonly presentation?: "page" | "panel" } = {}) {
   const account = useAccountPanel();
   const locationSearch = useSearch({ strict: false });
-  const search = normalizeBillingSearch(presentation === "panel" ? billingPanelSearch(account.current) : locationSearch);
+  const search = normalizeBillingSearch(
+    presentation === "panel"
+      ? billingPanelSearch(account.current)
+      : locationSearch,
+  );
   const orgs = useOrgs();
   const navigate = useNavigate();
-  const admins = (orgs.data ?? []).filter((org) => org.your_role === "admin" || org.your_role === "owner");
+  const admins = (orgs.data ?? []).filter(
+    (org) => org.your_role === "admin" || org.your_role === "owner",
+  );
   const ownerId = search.ownerId;
   const selected = admins.find((org) => org.id === ownerId);
   const allowed = !ownerId || Boolean(selected);
   function selectOwner(value: string) {
     const next = value === "personal" ? undefined : value;
     if (presentation === "panel") {
-      void account.update({ panelOwnerId: next, panelService: undefined, panelServices: undefined, panelAction: undefined }, "push");
+      void account.update(
+        {
+          panelOwnerId: next,
+          panelService: undefined,
+          panelServices: undefined,
+          panelAction: undefined,
+        },
+        "push",
+      );
     } else {
-      void navigate({ to: "/billing", search: billingUrlSearch({ ...search, ownerId: next, services: [], action: undefined }) });
+      void navigate({
+        to: "/billing",
+        search: billingUrlSearch({
+          ...search,
+          ownerId: next,
+          services: [],
+          action: undefined,
+        }),
+      });
     }
   }
-  return <div className="billing-page space-y-6">
-    {presentation === "page" && <PageHeader title="Billing & Usage" description="Your balance, benefits, and usage in one place." />}
-    <div className="flex flex-wrap items-center gap-3">
-      <Label htmlFor="billing-owner">Billing owner</Label>
-      <Select value={ownerId ?? "personal"} onValueChange={selectOwner}>
-        <SelectTrigger id="billing-owner" className="w-full sm:w-64"><SelectValue placeholder="Organization" /></SelectTrigger>
-        <SelectContent>
-          <SelectItem value="personal">Personal</SelectItem>
-          {admins.map((org) => <SelectItem key={org.id} value={org.id}>{org.display_name ?? org.slug}</SelectItem>)}
-        </SelectContent>
-      </Select>
+  return (
+    <div className="billing-page space-y-6">
+      {presentation === "page" && (
+        <PageHeader
+          title="Billing & Usage"
+          description="Your balance, benefits, and usage in one place."
+        />
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <Label htmlFor="billing-owner">Billing owner</Label>
+        <Select value={ownerId ?? "personal"} onValueChange={selectOwner}>
+          <SelectTrigger id="billing-owner" className="w-full sm:w-64">
+            <SelectValue placeholder="Organization" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="personal">Personal</SelectItem>
+            {admins.map((org) => (
+              <SelectItem key={org.id} value={org.id}>
+                {org.display_name ?? org.slug}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {orgs.isError && (
+        <ErrorBanner
+          message="Organizations could not be loaded."
+          onRetry={() => void orgs.refetch()}
+        />
+      )}
+      {ownerId && orgs.isLoading ? (
+        <Skeleton className="h-40 w-full" />
+      ) : !allowed ? (
+        <p role="alert" className="type-body text-muted-foreground">
+          Organization billing is available only to its admins. Select Personal
+          or an organization you administer.
+        </p>
+      ) : (
+        <BillingContent
+          key={ownerId ?? "personal"}
+          presentation={presentation}
+          ownerId={ownerId}
+        />
+      )}
     </div>
-    {orgs.isError && <ErrorBanner message="Organizations could not be loaded." onRetry={() => void orgs.refetch()} />}
-    {ownerId && orgs.isLoading ? <Skeleton className="h-40 w-full" /> : !allowed ?
-      <p role="alert" className="type-body text-muted-foreground">Organization billing is available only to its admins. Select Personal or an organization you administer.</p> :
-      <BillingContent key={ownerId ?? "personal"} presentation={presentation} ownerId={ownerId} />}
-  </div>;
+  );
 }
 
-function BillingContent({ presentation, ownerId }: { presentation: "page" | "panel"; ownerId?: string }) {
+function BillingContent({
+  presentation,
+  ownerId,
+}: {
+  presentation: "page" | "panel";
+  ownerId?: string;
+}) {
   const account = useAccountPanel();
   const locationSearch: Record<string, unknown> = useSearch({ strict: false });
-  const rawSearch = presentation === "panel" ? billingPanelSearch(account.current) : locationSearch;
+  const rawSearch =
+    presentation === "panel"
+      ? billingPanelSearch(account.current)
+      : locationSearch;
   const search = normalizeBillingSearch(rawSearch);
   const navigate = useNavigate();
   const { tab, period } = search;
@@ -104,9 +174,13 @@ function BillingContent({ presentation, ownerId }: { presentation: "page" | "pan
         .filter((group) => selected.includes(group.key))
         .flatMap((group) => group.rows)
     : (usageQuery.data?.rows ?? []);
-  const walletUnavailable = (Boolean(ownerId) && walletQuery.data === null) || isBillingNotConfigured(walletQuery.error);
+  const walletUnavailable =
+    (Boolean(ownerId) && walletQuery.data === null) ||
+    isBillingNotConfigured(walletQuery.error);
   const wallet = walletQuery.data ?? undefined;
-  const needsSubscription = Boolean(ownerId && wallet && !wallet.lago_subscription_id);
+  const needsSubscription = Boolean(
+    ownerId && wallet && !wallet.lago_subscription_id,
+  );
   const billingCapability = usageQuery.data?.billing;
   const billingReady = Boolean(
     billingCapability?.charging_enabled && billingCapability?.lago_configured,
@@ -121,7 +195,14 @@ function BillingContent({ presentation, ownerId }: { presentation: "page" | "pan
       const params: AccountPanelParams = {
         ...("tab" in patch ? { panelTab: patch.tab } : {}),
         ...("period" in patch ? { panelPeriod: patch.period } : {}),
-        ...("services" in patch ? { panelServices: patch.services?.length ? patch.services : undefined, panelService: undefined } : {}),
+        ...("services" in patch
+          ? {
+              panelServices: patch.services?.length
+                ? patch.services
+                : undefined,
+              panelService: undefined,
+            }
+          : {}),
         ...("action" in patch ? { panelAction: patch.action } : {}),
       };
       void account.update(params, replace ? "replace" : "push");
@@ -149,11 +230,20 @@ function BillingContent({ presentation, ownerId }: { presentation: "page" | "pan
   const selectionStale =
     selected.length !== search.services.length ||
     rawSearch.service !== undefined;
-  const pruneSelection = useEffectEvent(() => updateSearch({ services: selected }, true));
+  const pruneSelection = useEffectEvent(() =>
+    updateSearch({ services: selected }, true),
+  );
   const selectionKey = JSON.stringify(selected);
   useEffect(() => {
-    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale) pruneSelection();
-  }, [usageQuery.isSuccess, usageQuery.isFetching, selectionStale, selectionKey, search.tab]);
+    if (usageQuery.isSuccess && !usageQuery.isFetching && selectionStale)
+      pruneSelection();
+  }, [
+    usageQuery.isSuccess,
+    usageQuery.isFetching,
+    selectionStale,
+    selectionKey,
+    search.tab,
+  ]);
   const topUpReady = Boolean(wallet) && billingReady && !needsSubscription;
   const topUpSettled =
     !walletQuery.isLoading && (!usageQuery.isLoading || !wallet);
@@ -168,7 +258,9 @@ function BillingContent({ presentation, ownerId }: { presentation: "page" | "pan
   } else if (!search.action && topUpHandled) {
     setTopUpHandled(false);
   }
-  const consumeTopUp = useEffectEvent(() => updateSearch({ tab: "billing", action: undefined }, true));
+  const consumeTopUp = useEffectEvent(() =>
+    updateSearch({ tab: "billing", action: undefined }, true),
+  );
   useEffect(() => {
     if (wantsTopUp) consumeTopUp();
   }, [wantsTopUp]);
@@ -208,6 +300,28 @@ function BillingContent({ presentation, ownerId }: { presentation: "page" | "pan
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
         </TabsList>
+        <AvailableBenefits
+          key={ownerId ?? "personal"}
+          catalog={catalog}
+          ownerId={ownerId}
+          actions={
+            <BillingWalletActions
+              wallet={wallet}
+              loading={walletQuery.isLoading}
+              unavailable={walletUnavailable}
+              error={walletQuery.error}
+              onRetry={() => void walletQuery.refetch()}
+              onProvision={() => void handleProvisionWallet()}
+              provisioning={provisionWallet.isPending}
+              billingReady={billingReady}
+              needsSubscription={needsSubscription}
+              onTopUp={handleTopUp}
+              topUpPending={topUpBilling.isPending}
+              topUpOpen={topUpOpen}
+              onTopUpOpenChange={setTopUpOpen}
+            />
+          }
+        />
         {billingCapability && !billingReady && (
           <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-14 text-warning">
             Billing is not available on this deployment.
@@ -228,33 +342,14 @@ function BillingContent({ presentation, ownerId }: { presentation: "page" | "pan
               onRetry={() => void usageQuery.refetch()}
             />
           )}
-          <BillingWalletCard
-            titleHelp={
-              <BenefitHelp label="Wallet">
-                <p>
-                  Credits available for paid usage after free allowances and
-                  eligible grants. The available balance excludes reservations,
-                  unsettled charges, and expiry holds. 1 credit = 1 USD.
-                </p>
-              </BenefitHelp>
-            }
-            wallet={wallet}
-            loading={walletQuery.isLoading}
-            unavailable={walletUnavailable}
-            error={walletQuery.error}
-            onRetry={() => void walletQuery.refetch()}
-            onProvision={() => void handleProvisionWallet()}
-            provisioning={provisionWallet.isPending}
-            billingReady={billingReady}
-            needsSubscription={needsSubscription}
-            onTopUp={handleTopUp}
-            topUpPending={topUpBilling.isPending}
-            topUpOpen={topUpOpen}
-            onTopUpOpenChange={setTopUpOpen}
-          />
-          <BillingBenefits catalog={catalog} ownerId={ownerId} />
           {!ownerId && <BillingMachines />}
-          <BillingBill enabled={billingReady && (!ownerId || Boolean(wallet?.lago_subscription_id))} ownerId={ownerId} />
+          <BillingBill
+            enabled={
+              billingReady &&
+              (!ownerId || Boolean(wallet?.lago_subscription_id))
+            }
+            ownerId={ownerId}
+          />
           <BillingTopUpHistory ownerId={ownerId} presentation={presentation} />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
