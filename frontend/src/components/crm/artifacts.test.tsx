@@ -121,6 +121,27 @@ it("renders a saved view and an empty dataset with reopen links", async () => {
   expect(screen.getByText("No records yet.")).toBeInTheDocument();
 });
 
+it.each([
+  [0, "No records yet."],
+  [1, "1 record"],
+  [2, "2 records"],
+  [null, "Unknown records"],
+] as const)(
+  "renders an object artifact with total %s as %s",
+  async (total, expected) => {
+    state.object = { data: { key: "asset", plural_label: "Assets" } };
+    state.count = { data: { points: [], total } };
+    await renderCrmRoute(
+      <CrmArtifacts
+        artifacts={[
+          { ...artifact, id: "o", kind: "object", object_key: "asset" },
+        ]}
+      />,
+    );
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  },
+);
+
 it("treats session expiry as reauthentication, not deletion", () => {
   state.record = {
     isError: true,

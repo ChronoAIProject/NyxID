@@ -10,6 +10,7 @@ import {
   type CrmImportResult,
 } from "@/hooks/use-crm";
 import { parseCrmImport } from "@/lib/crm/import";
+import { formatCrmCount } from "@/lib/crm/format-count";
 import type { CrmObject, CrmTableQuery } from "@/schemas/crm";
 function download(value: unknown, filename: string) {
   const url = URL.createObjectURL(
@@ -291,7 +292,7 @@ export function CrmImportExport({
           {preview ? (
             <div className="space-y-2">
               <p className="type-group-label">
-                {preview.rows.length} rows ·{" "}
+                {formatCrmCount(preview.rows.length, "row")} ·{" "}
                 {preview.rows.filter((r) => r.action === "create").length}{" "}
                 create ·{" "}
                 {preview.rows.filter((r) => r.action === "update").length}{" "}

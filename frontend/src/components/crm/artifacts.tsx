@@ -8,6 +8,7 @@ import { CrmViewRenderer } from "./workspace/renderer";
 import type { TurnCrmArtifact } from "@/schemas/assistant-nyxagent";
 import { renderCrmCell } from "@/lib/crm/field-kinds";
 import { CrmOwnerContext } from "@/lib/crm/owner-context";
+import { formatCrmCount } from "@/lib/crm/format-count";
 
 function Frame({
   title,
@@ -157,7 +158,9 @@ function ObjectArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
       <p className="text-12 text-text-secondary">
         {total === 0
           ? "No records yet."
-          : `${total?.toLocaleString() ?? "Unknown"} records`}
+          : total == null
+            ? "Unknown records"
+            : formatCrmCount(total, "record")}
       </p>
     </Frame>
   );
