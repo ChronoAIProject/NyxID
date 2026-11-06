@@ -237,6 +237,26 @@ the CMA conversation and work details while keeping the status card compact.
 The checked timestamp includes the date and time so old observations are
 identifiable after the tracking window ends.
 
+A pending Responses request still reported as running after ten minutes shows
+**Taking longer than usual**, with a notice that CMA still reports it as running
+and the option to inspect progress or ask NyxBot to cancel that task. This is an
+elapsed-request-time hint, not a no-progress detector or remote execution timeout;
+`checked_at` records polling, not actual work. It does not resubmit or cancel the
+request. Specific approval, connection, terminal and unavailable states take
+precedence. The notice updates while the card is open and clears on completion.
+When the existing two-hour watch deadline expires, the card explicitly explains
+that automatic tracking ended and CMA may still be running.
+
+When CMA execution is enabled and the operation has a verified local Agent
+reference, **View execution** opens a right-side Sheet within the current
+NyxBot chat. The shared Agent view presents the continuous Conversation and
+Desktop tabs, locating the operation's response only after its Agent binding
+is verified. Closing the Sheet preserves the source chat, draft, and reading
+position and disposes its live observers and desktop connection. **Back to
+chat** returns focus to the composer. The Sheet can expand on desktop and uses
+the full width on narrow screens. Direct `/assistant/cma-agents/:agentId`
+links continue to render the same view as a standalone page.
+
 History returns an owner/thread-scoped `cma_operations` metadata snapshot,
 including settled operations whose initiating turn is on an older message page.
 The transport attaches each card by `turn_id` after projecting stored and live

@@ -1,11 +1,16 @@
-import { render, screen, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CmaOperation } from "@/schemas/cma-operation";
 import { CmaOperationCard } from "./cma-operation-card";
 
 const flags = vi.hoisted(() => ({ cma: false }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => flags.cma }));
-beforeEach(() => { flags.cma = false; });
+beforeEach(() => {
+  flags.cma = false;
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-10-22T10:01:00Z"));
+});
+afterEach(() => { vi.useRealTimers(); });
 
 const operation: CmaOperation = {
   id: "watch-1", turn_id: "turn-1", kind: "cma_response", operation_id: "resp_agt_coffee_1",
@@ -15,19 +20,70 @@ const operation: CmaOperation = {
 };
 
 describe("CMA delegation card", () => {
-  it("links the verified internal Agent and exact response when enabled", () => {
+  it("warns about elapsed time without declaring a running request failed", () => {
+    vi.setSystemTime(new Date("2026-10-22T10:11:00Z"));
+    render(<CmaOperationCard operation={{ ...operation, checked_at: "2026-10-22T10:10:59Z" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Taking longer than usual");
+    expect(screen.getByText(/CMA still reports it as running/)).toBeInTheDocument();
+    expect(screen.getByText(/ask NyxBot to cancel this task/)).toBeInTheDocument();
+    expect(screen.getByText(/Tracking progress/)).toBeInTheDocument();
+    expect(screen.queryByText(/no progress/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+  });
+
+  it("updates the elapsed-time notice while open and removes it on completion", () => {
+    vi.setSystemTime(new Date("2026-10-22T10:09:00Z"));
+    const { rerender, unmount } = render(<CmaOperationCard operation={operation} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Working");
+    act(() => { vi.advanceTimersByTime(60_000); });
+    expect(screen.getByRole("status")).toHaveTextContent("Taking longer than usual");
+    rerender(<CmaOperationCard operation={{ ...operation, status: "completed", state: "delivered", reason: "completed" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Completed");
+    expect(screen.queryByText(/CMA still reports it as running/)).not.toBeInTheDocument();
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    { status: "waiting_approval" },
+    { status: "waiting_for_connection" },
+    { status: "queued" },
+    { status: "paused" },
+    { state: "cancelled" },
+    { state: "cancelling" },
+    { state: "ready", reason: "timeout" },
+    { kind: "cma_provisioning" as const, status: "running" },
+    { created_at: "invalid" },
+    { created_at: "2026-10-23T10:00:00Z" },
+  ])("preserves specific states instead of adding an elapsed-time warning: %j", (patch) => {
+    vi.setSystemTime(new Date("2026-10-22T10:30:00Z"));
+    render(<CmaOperationCard operation={{ ...operation, ...patch }} />);
+    expect(screen.queryByText("Taking longer than usual")).not.toBeInTheDocument();
+    expect(screen.queryByText(/CMA still reports it as running/)).not.toBeInTheDocument();
+  });
+
+  it("explains that a tracking timeout does not stop the remote task", () => {
+    render(<CmaOperationCard operation={{ ...operation, state: "delivered", reason: "timeout" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Tracking timed out");
+    expect(screen.getByText(/CMA may still be running/)).toBeInTheDocument();
+    expect(screen.getByText(/before submitting it again/)).toBeInTheDocument();
+  });
+
+  it("offers the internal Agent panel when a local reference is available", () => {
     flags.cma = true;
     render(<CmaOperationCard operation={{ ...operation, agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19", response_id: "rsp-one" }} />);
-    expect(screen.getByRole("link", { name: /View execution/ })).toHaveAttribute("href", "/assistant/cma-agents/0dc85e4c-6aaf-47de-9df0-e07a69b8ee19?response=rsp-one");
+    expect(screen.getByRole("button", { name: /View execution/ })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /View execution/ })).not.toBeInTheDocument();
   });
   it("does not invent an internal reference from a remote Agent ID", () => {
     flags.cma = true;
     render(<CmaOperationCard operation={operation} />);
-    expect(screen.queryByRole("link", { name: /View execution/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /View execution/ })).not.toBeInTheDocument();
   });
   it("hides the internal execution entry when the feature is disabled", () => {
     render(<CmaOperationCard operation={{ ...operation, agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19", response_id: "rsp-one" }} />);
-    expect(screen.queryByRole("link", { name: /View execution/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /View execution/ })).not.toBeInTheDocument();
   });
   it("shows live execution identity and updates the same card when the job completes", () => {
     const { rerender } = render(<CmaOperationCard operation={operation} />);
@@ -79,6 +135,22 @@ describe("CMA delegation card", () => {
   it("does not claim that stopping the tracker cancelled CMA", () => {
     render(<CmaOperationCard operation={{ ...operation, state: "cancelled" }} />);
     expect(screen.getByText("Tracking ended. CMA may still be running.")).toBeInTheDocument();
+  });
+
+  it("distinguishes a failed creation submission from an uncertain outcome", () => {
+    const failed: CmaOperation = {
+      ...operation, kind: "cma_provisioning", operation_id: null, agent_id: null,
+      status: null, state: "delivered", reason: "submission_failed",
+    };
+    const { rerender } = render(<CmaOperationCard operation={failed} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Submission failed");
+    expect(screen.queryByText(/final outcome could not be confirmed/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "CMA progress" }).querySelector("svg")).toBeNull();
+
+    rerender(<CmaOperationCard operation={{ ...failed, reason: "submission_uncertain" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Submission unconfirmed");
+    expect(screen.getByText(/final outcome could not be confirmed/)).toBeInTheDocument();
   });
 
   it("distinguishes confirmed response cancellation from an ordinary incomplete response", () => {

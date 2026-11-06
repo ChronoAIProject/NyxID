@@ -36,11 +36,6 @@ export function AssistantCmaSandboxDetailPage() {
       {query.data && (
         <CmaSandboxCard key={query.data.id} sandbox={query.data} detail />
       )}
-      <p className="mt-6 text-12 leading-relaxed text-text-tertiary">
-        Billed through CMA. Price and accrued charges are unknown here. Pausing
-        or deleting an Agent does not confirm that all resource charges have
-        stopped.
-      </p>
     </div>
   );
 }

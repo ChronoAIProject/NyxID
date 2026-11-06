@@ -59,7 +59,7 @@
             "required": true,
             "schema": {
               "type": "string",
-              "description": "Stable key. Retain the exact request bytes and this key for recovery. Use 1-200 ASCII graphic characters, excluding double quotes and backslashes."
+              "description": "Use a fresh UUID for each NEW creation intent. In NyxBot, first call nyxid__list_cma_resources and copy its new_creation_idempotency_key here. Never invent date/counter keys or reuse another creation's key. Once chosen, retain the exact body and this key through confirmation, credential setup and receipt-loss recovery; do not substitute a later inventory key. Use 1-200 ASCII graphic characters, excluding double quotes and backslashes."
             }
           }
         ],
@@ -93,11 +93,11 @@
                   },
                   "machine_included": {
                     "type": "boolean",
-                    "description": "Retained desktop-capable Sandbox configuration. Omit when selecting an existing parent. The current desktop preparation flow separately requires desktop=true."
+                    "description": "Include a shared desktop in a new Sandbox. Set true for ordinary shared-desktop requests, including 带共享桌面. This option does not require desktop=true or initial_message; the Agent can be created and wait for later work. Omit when selecting an existing parent."
                   },
                   "desktop": {
                     "type": "boolean",
-                    "description": "Explicitly request CMA desktop preparation. Requires initial_message with the exact first task. Set true when the task requires the current desktop flow; availability is checked by CMA for the selected environment."
+                    "description": "Opt into CMA's separate desktop preparation-and-first-task flow only when specifically requested. Requires initial_message with the exact first task and verified runtime support. Omit for ordinary shared-desktop creation; use machine_included for that option. Availability of this flow does not determine machine_included availability."
                   },
                   "initial_message": {
                     "type": "string",

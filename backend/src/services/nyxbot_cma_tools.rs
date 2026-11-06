@@ -108,7 +108,7 @@ pub fn schema(name: &str) -> Value {
 }
 pub fn description(name: &str) -> String {
     match name {
-        "list_cma_resources" => "Read the personal allocation of Sandboxes created through NyxID and their live Agent facts with bounded pagination. This does not allocate, reserve or select an Agent; Agents can share an environment and context across chats.",
+        "list_cma_resources" => "Read the personal allocation of Sandboxes created through NyxID and their live Agent facts with bounded pagination. Returns a fresh new_creation_idempotency_key: copy it into Idempotency-Key for one NEW creation intent; never replace an existing creation's key during confirmation or recovery. This does not allocate, reserve or select an Agent; Agents can share an environment and context across chats.",
         "cma_save_attachment" => "Copy an original attachment from this conversation to a path relative to the CMA filesystem API root /home/. Returns path, absolute_path, size and SHA256. Use the returned absolute_path in Agent commands regardless of the Agent's working directory. A different existing file is not overwritten. Requires the current CMA grant and action policy.",
         "cma_request_owner" => "Ask the owner to finish the stated step on the selected Agent's shared desktop. A card opens that exact Agent in NyxID. End this turn and wait; the owner's Done decision wakes a new event turn. Never click or infer completion yourself.",
         _ => "",
@@ -363,7 +363,7 @@ pub async fn execute(
             }
             next_cursor = page.next_cursor;
         }
-        let value = json!({"sandboxes":sandbox_list,"agents":rows.iter().map(agent_summary).collect::<Vec<_>>(),"next_cursor":next_cursor});
+        let value = resource_list_result(&sandbox_list, &rows, next_cursor);
         if value.to_string().len() > 64 * 1024 {
             return Err(AppError::Conflict("cma_resource_page_too_large".into()));
         }
@@ -563,6 +563,21 @@ pub async fn snapshot(
     ))
 }
 
+fn resource_list_result(
+    sandbox_list: &sandboxes::SandboxListDto,
+    rows: &[NyxbotCmaAgent],
+    next_cursor: Option<String>,
+) -> Value {
+    json!({
+        "sandboxes": sandbox_list,
+        "agents": rows.iter().map(agent_summary).collect::<Vec<_>>(),
+        "next_cursor": next_cursor,
+        // Supply entropy at the producer. Date/ordinal keys invented by a model
+        // collide across chats because creation identities are account-scoped.
+        "new_creation_idempotency_key": uuid::Uuid::new_v4().to_string(),
+    })
+}
+
 pub const GUIDANCE: &str = r#"
 Use CMA when it helps the task. Decide whether to reuse an existing CMA Agent,
 create a new Agent, or use other tools. Each account may have at most one
@@ -581,14 +596,28 @@ is absent or no longer active, report that the current task cannot yet be identi
 Create additional Agents inside that environment with sandbox_id or workspace_id.
 Create a Sandbox only when this allocation is empty, no creation is unresolved,
 and the task needs it. A list is not a reservation.
+Before preparing each NEW Agent or Sandbox creation, call nyxid__list_cma_resources
+and copy its new_creation_idempotency_key into the creation's Idempotency-Key.
+Use that key for only this creation intent. Do not invent date/counter keys or
+reuse a key from another creation or chat. Keep the chosen key and exact body
+through action confirmation, credential setup, and receipt-loss recovery.
+A later inventory read returns a key for a different future creation; it must
+never rotate the key of a pending or uncertain request. Do not automatically
+retry a conflicting creation with a new key to bypass the original identity.
 The inline create_agent profile.permission_mode accepts guarded or autonomous.
 When the user wants approval before commands or file changes, explicitly select
 guarded. Do not invent ask/default permission values or silently omit the requested mode.
-For CMA's desktop preparation flow, explicitly set desktop=true in create_agent
-and include the user's exact first task in initial_message. CMA retains that task
-during preparation and executes it afterward; do not invent a task just to enable desktop.
-machine_included is a separate retained Sandbox option; preserve the requested
-options and the exact body/key when recovering a creation.
+For an ordinary request for a shared desktop (including "带共享桌面" or
+"Include a shared desktop"), set machine_included=true when creating a new
+Sandbox. This option does not require desktop=true or initial_message. If the
+user only wants the Agent created, omit both fields and wait for later work;
+do not ask for or invent a first task just to include a shared desktop. When
+reusing an existing parent, omit machine_included and check its desktop capability.
+Only use desktop=true when the user specifically requests CMA's separate desktop
+preparation-and-first-task flow. That flow requires the user's exact first task
+in initial_message and verified runtime support. Its unsupported result does
+not establish that the machine_included shared-desktop option is unavailable.
+Preserve the requested options and the exact body/key when recovering a creation.
 Run work with cma__run_task using the selected agent_id, stream=true, and a stable
 Idempotency-Key. If conversation is supplied, it must equal that agent_id.
 After nyxid__cma_save_attachment, use the returned absolute_path in Agent commands.
@@ -629,6 +658,34 @@ mod tests {
     };
     use crate::models::downstream_service::ProxyOperationRule;
 
+    #[test]
+    fn resource_reads_supply_distinct_creation_keys_without_allocating() {
+        let inventory = sandboxes::SandboxListDto {
+            sandboxes: Vec::new(),
+            next_cursor: None,
+            occupied: 0,
+            limit: 1,
+            conflict: false,
+            inventory_complete: true,
+        };
+        let mut keys = std::collections::HashSet::new();
+        for _ in 0..16 {
+            let result = resource_list_result(&inventory, &[], None);
+            let key = result["new_creation_idempotency_key"]
+                .as_str()
+                .expect("a new creation must use a server-generated key");
+            super::super::nyxbot_cma_gateway::validate_idempotency_key(key).unwrap();
+            assert_eq!(uuid::Uuid::parse_str(key).unwrap().get_version_num(), 4);
+            assert!(
+                keys.insert(key.to_owned()),
+                "separate creation intents collided"
+            );
+            assert_eq!(result["sandboxes"]["occupied"], 0);
+            assert_eq!(result["sandboxes"]["limit"], 1);
+            assert_eq!(result["agents"], json!([]));
+            assert!(result["next_cursor"].is_null());
+        }
+    }
     #[test]
     fn resource_summary_keeps_the_name_bound_to_its_remote_identity() {
         let mut row = NyxbotCmaAgent {

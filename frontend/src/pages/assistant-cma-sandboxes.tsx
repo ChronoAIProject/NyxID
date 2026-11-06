@@ -364,13 +364,6 @@ export function CmaSandboxCard({
           </div>
         </div>
       </section>
-      {detail && (
-        <p className="mt-4 text-12 leading-relaxed text-text-tertiary">
-          Retirement permanently removes this environment and its Agents,
-          workspaces and files. CMA determines final billing and retained
-          charges.
-        </p>
-      )}
       {action && (
         <SandboxActionDialog
           key={`${sandbox.id}:${action}`}

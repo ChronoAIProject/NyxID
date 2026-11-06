@@ -739,6 +739,16 @@ for limits and lifecycle semantics.
 
 ### CMA operation cards
 
+The native `nyxid__list_cma_resources` tool also returns a fresh UUID v4 in
+`new_creation_idempotency_key`. NyxBot copies it into `Idempotency-Key` for one
+new Agent or Sandbox creation intent instead of inventing date/counter keys
+that can collide across chats under the account-scoped creation identity.
+Inventory reads do not reserve quota or submit a creation. Once an intent has
+chosen its key, confirmation, credential setup and uncertain-submission recovery
+retain that exact key and body; a later inventory read must not replace them.
+This supplies a key to the producer flow; the existing admission checks remain
+authoritative and still reject conflicting manually supplied keys.
+
 The `cma` catalog service has compiled adapters for the following exact HTTP
 operations. Each adapter requires a unique matching GET operation on the same
 service destination; instance aliases and operation names may differ. A custom

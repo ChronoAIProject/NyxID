@@ -146,7 +146,7 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
   if (view === "approvals") return <ApprovalsView />;
   return (
     <div
-      className="h-full overflow-y-auto px-4 py-6 sm:px-6 lg:px-10"
+      className={`h-full px-4 py-6 sm:px-6 lg:px-10 ${view === "cma-agent" ? "overflow-hidden" : "overflow-y-auto"}`}
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
       <Suspense

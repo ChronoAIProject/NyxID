@@ -181,22 +181,31 @@ it("uses one Conversation view beside Desktop with requests shared across chats"
     }),
   ).not.toBeInTheDocument();
 });
-it("opens the newest conversation and keeps old replies and technical records folded", () => {
+it("shows every request and reply chronologically while keeping technical records out of the conversation", () => {
+  mocks.history.mockReturnValue(history([...turns].reverse()));
   render(<AssistantCmaAgentPage />);
   const latest = within(screen.getByRole("region", { name: "Latest request" }));
   expect(latest.getByText("Example Domain").tagName).toBe("STRONG");
   expect(latest.getByText("Work request")).toBeInTheDocument();
-  expect(latest.getByText("Assistant reply")).toBeInTheDocument();
+  expect(latest.getAllByText("Review assistant")).toHaveLength(1);
   expect(latest.getByText("Waiting for confirmation")).toBeInTheDocument();
-  expect(screen.queryByText("Earlier setup reply")).not.toBeInTheDocument();
+  expect(screen.getByText("Earlier setup reply")).toBeInTheDocument();
+  expect(
+    screen
+      .getByText("Earlier setup reply")
+      .compareDocumentPosition(screen.getByText("Open the example page")) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("button", { name: /Latest request|Earlier request/ }),
+  ).not.toBeInTheDocument();
   expect(screen.queryByText("Raw tool output")).not.toBeInTheDocument();
   fireEvent.click(latest.getByRole("button", { name: /Execution details/ }));
-  expect(latest.getByText("Raw tool output")).toBeInTheDocument();
-  expect(latest.getByText("Status changed")).toBeInTheDocument();
-  fireEvent.click(
-    screen.getByRole("button", { name: /Prepare the workspace/ }),
+  const details = within(
+    screen.getByRole("dialog", { name: "Execution details" }),
   );
-  expect(screen.getByText("Earlier setup reply")).toBeInTheDocument();
+  expect(details.getByText("Raw tool output")).toBeInTheDocument();
+  expect(details.getByText("Status changed")).toBeInTheDocument();
   expect(mocks.history).toHaveBeenCalledWith("local-agent", true);
   expect(mocks.stream).toHaveBeenCalledWith(
     "local-agent",
@@ -206,11 +215,11 @@ it("opens the newest conversation and keeps old replies and technical records fo
     "24",
   );
 });
-it("opens the exact earlier turn and offers a query-free latest link", () => {
+it("marks the exact earlier request without hiding newer replies", () => {
   linkedResponse();
   render(<AssistantCmaAgentPage />);
   expect(
-    screen.getByText(/You are viewing an earlier request/),
+    screen.getByText(/Opened at the request from your chat/),
   ).toBeInTheDocument();
   const linked = within(screen.getByRole("region", { name: "Linked request" }));
   expect(linked.getByText("Earlier setup reply")).toBeInTheDocument();
@@ -218,14 +227,14 @@ it("opens the exact earlier turn and offers a query-free latest link", () => {
   expect(
     linked.queryByText("Waiting for confirmation"),
   ).not.toBeInTheDocument();
-  expect(screen.queryByText("Example Domain")).not.toBeInTheDocument();
+  expect(linked.getByText("From your chat")).toBeInTheDocument();
+  expect(screen.getByText("Example Domain")).toBeInTheDocument();
   expect(
     screen.queryByText("Untrusted response output"),
   ).not.toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "View latest" })).toHaveAttribute(
-    "href",
-    "/assistant/cma-agents/local-agent",
-  );
+  expect(
+    screen.getByRole("button", { name: "Jump to latest" }),
+  ).toBeInTheDocument();
 });
 it("does not select any turn when the exact response belongs to another assistant", () => {
   linkedResponse("agt-other");
@@ -239,7 +248,7 @@ it("does not select any turn when the exact response belongs to another assistan
   expect(
     screen.queryByText("Untrusted response output"),
   ).not.toBeInTheDocument();
-  expect(screen.queryByText("Example Domain")).not.toBeInTheDocument();
+  expect(screen.getByText("Example Domain")).toBeInTheDocument();
 });
 it("leaves an unbound old link unresolved instead of choosing the latest conversation", () => {
   linkedResponse();
@@ -250,8 +259,9 @@ it("leaves an unbound old link unresolved instead of choosing the latest convers
   expect(
     screen.getByText(/could not be located in the available conversation/),
   ).toBeInTheDocument();
-  expect(screen.queryByText("Earlier setup reply")).not.toBeInTheDocument();
-  expect(screen.queryByText("Example Domain")).not.toBeInTheDocument();
+  expect(screen.getByText("Earlier setup reply")).toBeInTheDocument();
+  expect(screen.getByText("Example Domain")).toBeInTheDocument();
+  expect(screen.queryByText("From your chat")).not.toBeInTheDocument();
 });
 it("keeps interrupted outcomes distinct from completed or cancelled", () => {
   mocks.history.mockReturnValue(
@@ -279,6 +289,7 @@ it("preserves the entry being read on live arrivals and scrolls only when asked"
   HTMLElement.prototype.scrollIntoView = scroll;
   try {
     const { rerender } = render(<AssistantCmaAgentPage />);
+    scroll.mockClear();
     mocks.history.mockReturnValue(
       history([
         ...turns,
@@ -295,30 +306,137 @@ it("preserves the entry being read on live arrivals and scrolls only when asked"
     const latest = within(
       screen.getByRole("region", { name: "Latest request" }),
     );
-    expect(latest.getByRole("button")).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
+    expect(latest.getByText("Read another page")).toBeInTheDocument();
     expect(scroll).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "View new activity" }));
-    expect(
-      latest.getByRole("button", { name: /Latest request/ }),
-    ).toHaveAttribute("aria-expanded", "true");
     expect(scroll).toHaveBeenCalledTimes(1);
   } finally {
     HTMLElement.prototype.scrollIntoView = previous;
   }
 });
-it("does not reset a reader's expanded entries when more execution details load", () => {
+it("keeps the execution details dialog open when more activity loads", () => {
   linkedResponse();
   const { rerender } = render(<AssistantCmaAgentPage />);
   fireEvent.click(
-    screen.getByRole("button", { name: /Open the example page/ }),
+    within(screen.getByRole("region", { name: "Latest request" })).getByRole(
+      "button",
+      { name: /Execution details/ },
+    ),
   );
   mocks.snapshot.mockReturnValue({ ...snapshot(), isFetchingNextPage: true });
   rerender(<AssistantCmaAgentPage />);
-  expect(screen.getByText("Example Domain")).toBeInTheDocument();
-  expect(screen.getByText("Earlier setup reply")).toBeInTheDocument();
+  expect(
+    screen.getByRole("dialog", { name: "Execution details" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Raw tool output")).toBeInTheDocument();
+});
+
+it("notifies about a new reply in the same request without scrolling the reader", () => {
+  const scroll = vi.fn();
+  const previous = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = scroll;
+  try {
+    linkedResponse();
+    const { rerender } = render(<AssistantCmaAgentPage />);
+    scroll.mockClear();
+    mocks.history.mockReturnValue(
+      history([
+        turns[0]!,
+        {
+          ...turns[1]!,
+          status: "completed",
+          messages: [
+            ...turns[1]!.messages,
+            message(25, "assistant", "The page check is finished."),
+          ],
+        },
+      ]),
+    );
+    rerender(<AssistantCmaAgentPage />);
+    expect(screen.getByText("The page check is finished.")).toBeInTheDocument();
+    expect(screen.getByText("Earlier setup reply")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View new activity" }),
+    ).toBeInTheDocument();
+    expect(scroll).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "View new activity" }));
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("button", { name: "View new activity" }),
+    ).not.toBeInTheDocument();
+  } finally {
+    HTMLElement.prototype.scrollIntoView = previous;
+  }
+});
+
+it("keeps older history in place without announcing it as new activity", () => {
+  const scroll = vi.fn();
+  const previous = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = scroll;
+  try {
+    mocks.history.mockReturnValue(history([turns[1]!]));
+    const { rerender } = render(<AssistantCmaAgentPage />);
+    scroll.mockClear();
+    mocks.history.mockReturnValue(history());
+    rerender(<AssistantCmaAgentPage />);
+    expect(screen.getByText("Earlier setup reply")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "View new activity" }),
+    ).not.toBeInTheDocument();
+    expect(scroll).not.toHaveBeenCalled();
+  } finally {
+    HTMLElement.prototype.scrollIntoView = previous;
+  }
+});
+
+it("preserves an expanded long request across transcript refreshes", () => {
+  const longRequest = "Keep all of this request visible when expanded. ".repeat(
+    20,
+  );
+  mocks.history.mockReturnValue(
+    history([
+      {
+        ...turns[0]!,
+        messages: [message(9, "user", longRequest), turns[0]!.messages[1]!],
+      },
+      turns[1]!,
+    ]),
+  );
+  const { rerender } = render(<AssistantCmaAgentPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Show full message" }));
+  mocks.snapshot.mockReturnValue({ ...snapshot(), isFetchingNextPage: true });
+  rerender(<AssistantCmaAgentPage />);
+  expect(screen.getByRole("button", { name: "Show less" })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  expect(screen.getByText(longRequest.trim())).toBeInTheDocument();
+});
+
+it("scrolls to a verified historical request once and never to an unverified link", () => {
+  const targets: HTMLElement[] = [];
+  const previous = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = function () {
+    targets.push(this);
+  };
+  try {
+    linkedResponse();
+    const { rerender, unmount } = render(<AssistantCmaAgentPage />);
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toBe(
+      screen.getByRole("region", { name: "Linked request" }),
+    );
+    mocks.snapshot.mockReturnValue({ ...snapshot(), isFetchingNextPage: true });
+    rerender(<AssistantCmaAgentPage />);
+    expect(targets).toHaveLength(1);
+    unmount();
+    targets.length = 0;
+    linkedResponse("agt-other");
+    render(<AssistantCmaAgentPage />);
+    expect(targets).toHaveLength(0);
+  } finally {
+    HTMLElement.prototype.scrollIntoView = previous;
+  }
 });
 it("pauses conversation observation on Desktop and unmounts the viewer when returning", async () => {
   const user = userEvent.setup();
