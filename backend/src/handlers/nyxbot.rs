@@ -5337,17 +5337,19 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     } else {
-        // Native sources have no negotiated attachment ingestion here.
-        // Preserve presence for the existing unavailable-media note; never
-        // fetch gateway-supplied locators or silently claim the files were read.
-        let declared = if row.platform == "discord" {
+        (0, None)
+    };
+    // Discord's provider attachment presence predates relay ingestion and must
+    // survive disabled/ineligible ingestion. Presence only drives the explicit
+    // unavailable-media note; it never authorizes fetching gateway locators.
+    let source_media_declared = if row.platform == "discord" {
+        source_media_declared.max(
             activity["kind"]["attachments"]
                 .as_array()
-                .map_or(0, Vec::len)
-        } else {
-            0
-        };
-        (declared, None)
+                .map_or(0, Vec::len),
+        )
+    } else {
+        source_media_declared
     };
     let retention = if media.is_some() {
         ChronoDuration::days(7)

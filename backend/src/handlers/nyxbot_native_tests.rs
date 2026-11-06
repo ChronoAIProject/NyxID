@@ -1259,6 +1259,18 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
     let output = body_text(respond(&state, &key, &request, "703").await).await;
     assert!(output.contains(recovery::MEDIA_UNAVAILABLE), "{output}");
     assert!(calls.lock().await.is_empty());
+    let media_event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id":&row.id,"event_id":"discord:100:703"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(media_event.source_media_declared, Some(1));
+    assert!(
+        media_event.media.is_none(),
+        "native media never acquires a fetch claim"
+    );
     let response = respond(&state, &key, &native_event(&row, "704", "Hello"), "704").await;
     let id = response.headers()["x-cma-response-id"]
         .to_str()

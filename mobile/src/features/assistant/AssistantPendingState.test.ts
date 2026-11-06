@@ -35,6 +35,7 @@ function render(file: string, name: string, props: any) {
     "lucide-react-native": new Proxy({}, { get: (_, key) => String(key) }),
     "../../components/AgentAvatar": { AgentAvatar: "Avatar" },
     "./AssistantMessageFooter": { AssistantMessageTime: "Time" },
+    "./AssistantAttachmentView": { AssistantAttachmentView: "Attachment" },
     "../../components/workspace/WorkspaceUI": {
       Card: "Card",
       Label: "Label",
