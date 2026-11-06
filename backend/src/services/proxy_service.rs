@@ -196,6 +196,7 @@ pub async fn authorize_master_credential(
             "Destination targets do not support platform keys".into(),
         ));
     }
+    super::platform_key_service::require_ordinary_use(service)?;
     super::retired_service_service::require_available(service)?;
     super::security_readiness_service::require_platform(db, actor_addressed_policy_required())
         .await?;
@@ -265,6 +266,7 @@ pub async fn authorize_master_credential_server_chosen(
             "Destination targets do not support platform keys".into(),
         ));
     }
+    super::platform_key_service::require_ordinary_use(service)?;
     super::retired_service_service::require_available(service)?;
     if let Some(config) = &service.platform_key
         && (!config.enabled
@@ -1211,6 +1213,7 @@ pub async fn resolve_admin_proxy_target(
 
     // A misconfigured platform row is a server fault, not a caller error:
     // the caller had no say in which service this is.
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::Internal(format!(
@@ -1303,6 +1306,7 @@ pub async fn resolve_curation_proxy_target(
         .find_one(doc! {"_id": service_id, "is_active": true, "service_type": "http"})
         .await?
         .ok_or_else(|| AppError::NotFound("HTTP catalog service not found".into()))?;
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     let scope_authorized_editor =
         sa.purpose == ServiceAccountPurpose::CatalogEditor && sa.catalog_scope_authorized;
@@ -1407,6 +1411,7 @@ pub async fn resolve_proxy_target(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
@@ -1642,6 +1647,7 @@ pub async fn resolve_proxy_target_lenient(
         .await?
         .ok_or_else(|| AppError::NotFound("Downstream service not found".to_string()))?;
 
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     if !service.is_active {
         return Err(AppError::BadRequest("Service is inactive".to_string()));
@@ -3602,6 +3608,7 @@ async fn load_catalog_proxy_authorization_for_user_service(
         return Ok(CatalogProxyAuthorization::default());
     };
     super::destination_routing::validate_credential_source(&service)?;
+    super::platform_key_service::require_ordinary_use(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
         auth_scheme: service.auth_scheme.clone(),
@@ -8668,6 +8675,7 @@ mod tests {
             }),
         );
         let config = crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec!["pilot".into()],

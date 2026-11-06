@@ -110,8 +110,25 @@ pub enum PlatformKeyAudience {
     Public,
 }
 
+/// A restrictive purpose is sticky and cannot be cleared by legacy catalog forms.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyPurpose {
+    #[default]
+    Ordinary,
+    ModelRoute,
+    ModelOffering,
+}
+
+fn ordinary_platform_key_purpose(purpose: &PlatformKeyPurpose) -> bool {
+    *purpose == PlatformKeyPurpose::Ordinary
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformKeyConfig {
+    // Keep legacy authority snapshots/digests byte-compatible when unset.
+    #[serde(default, skip_serializing_if = "ordinary_platform_key_purpose")]
+    pub purpose: PlatformKeyPurpose,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]

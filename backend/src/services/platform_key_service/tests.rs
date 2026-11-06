@@ -31,6 +31,7 @@ fn platform_service() -> DownstreamService {
     service.auth_method = "bearer".into();
     service.auth_key_name = "Authorization".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],
@@ -1572,6 +1573,7 @@ async fn server_chosen_accepts_implicit_and_explicit_public_only() {
         None,
         service.platform_key.clone(),
         Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![],

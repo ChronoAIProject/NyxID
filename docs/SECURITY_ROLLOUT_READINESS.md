@@ -194,3 +194,14 @@ off when absent. Old nodes keep legacy prompts indefinitely. Drain/remove all
 Machine-variant proposal rows, including terminal receipts, before a binary
 rollback to readers without this capability. Disabling authoring never converts
 a retained occurrence into a legacy request or permits another send.
+
+## Platform model foundation
+
+PR 1 advertises `inference:platform-model-registry-v1` for the registry, entitlement
+readers and restricted catalog-credential purpose. It does not advertise complete
+execution, model-price billing or the paired NyxAgent contract. The default-off
+`inference:platform-models` flag cannot be enabled until all required local and
+fleet capabilities are implemented and ready. Reads and disabling remain usable.
+Upgrade and drain every credential consumer before enabling model-only catalog
+records: old replicas ignore their additive purpose field. The restriction remains
+enforced when the flag is off. See [the registry contract](PLATFORM_MODELS.md).

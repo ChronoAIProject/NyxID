@@ -1,0 +1,329 @@
+use super::*;
+use crate::{
+    errors::AppError,
+    models::user::{COLLECTION_NAME as USERS, User, UserType},
+    services::role_service,
+    test_utils,
+};
+use bson::doc;
+use uuid::Uuid;
+
+async fn setup() -> (AppState, AuthUser, AuthUser, AuthUser) {
+    let db = test_utils::connect_transaction_test_database("platform_models_api").await;
+    registry::ensure_indexes(&db).await.unwrap();
+    test_utils::init_test_audit_chain_hmac_key();
+    role_service::seed_system_roles(&db).await.unwrap();
+    let roles = role_service::get_platform_role_ids(&db).await.unwrap();
+    let mut auths = Vec::new();
+    for role in [Some(roles.admin), Some(roles.operator), None] {
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_utils::test_user(&id, UserType::Person);
+        if let Some(role) = role {
+            user.role_ids.push(role);
+        }
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        auths.push(test_utils::test_auth_user(&id));
+    }
+    (
+        test_utils::test_app_state(db),
+        auths.remove(0),
+        auths.remove(0),
+        auths.remove(0),
+    )
+}
+fn input() -> CreateRequest {
+    CreateRequest {
+        public_id: "nyxid/gemini-3-pro".into(),
+        display_name: "Gemini 3 Pro".into(),
+        description: "Gemini model".into(),
+        family: ModelFamily::Gemini,
+        capabilities: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn admin_writes_operator_reads_and_private_projection() {
+    let (state, admin, operator, person) = setup().await;
+    assert!(matches!(
+        create(State(state.clone()), person.clone(), Json(input())).await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        create(State(state.clone()), operator.clone(), Json(input())).await,
+        Err(AppError::Forbidden(_))
+    ));
+    let Json(model) = create(State(state.clone()), admin.clone(), Json(input()))
+        .await
+        .unwrap();
+    assert!(
+        admin_get(State(state.clone()), person, Path(model.id.clone()))
+            .await
+            .is_err()
+    );
+    let Json(view) = admin_get(State(state.clone()), operator, Path(model.id.clone()))
+        .await
+        .unwrap();
+    assert!(!view.execution_ready);
+    assert_eq!(view.revision, 1);
+    let mut delegated = admin.clone();
+    delegated.auth_method = AuthMethod::Delegated;
+    assert!(
+        admin_get(State(state.clone()), delegated, Path(model.id.clone()))
+            .await
+            .is_err()
+    );
+    let row = registry::get(&state.db, &model.id).await.unwrap();
+    let public = serde_json::to_value(PublicModel::from(&row)).unwrap();
+    let mut fields = public
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        vec![
+            "availability",
+            "capabilities",
+            "description",
+            "display_name",
+            "id"
+        ]
+    );
+    for field in [
+        "routes",
+        "routing_revision_id",
+        "billing_service_id",
+        "family",
+        "project",
+        "location",
+        "credential_service_id",
+        "entitlements",
+    ] {
+        assert!(public.get(field).is_none());
+    }
+    let user_id = admin.user_id.to_string();
+    let Json(explanation) = explain(
+        State(state.clone()),
+        admin,
+        Path(model.id),
+        Query(ExplainQuery { user_id }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(explanation.policy_reason, "no_entitlement");
+    assert!(!explanation.executable);
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn disabled_discovery_is_empty_and_does_not_create_rows() {
+    let (state, admin, _, person) = setup().await;
+    let _ = create(State(state.clone()), admin, Json(input()))
+        .await
+        .unwrap();
+    let Json(result) = public_list(
+        State(state.clone()),
+        person.clone(),
+        Query(ListQuery {
+            after: None,
+            limit: Some(10),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(result.models.is_empty());
+    assert!(result.next_after.is_none());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(ROUTING_COLLECTION)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    for method in [
+        AuthMethod::Relay,
+        AuthMethod::ServiceAccount,
+        AuthMethod::Delegated,
+    ] {
+        let mut auth = person.clone();
+        auth.auth_method = method;
+        auth.scope = "proxy".into();
+        assert!(
+            public_list(
+                State(state.clone()),
+                auth,
+                Query(ListQuery {
+                    after: None,
+                    limit: None
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn route_selectors_and_public_id_changes_are_closed_inputs() {
+    assert!(serde_json::from_value::<CreateRequest>(serde_json::json!({"public_id":"nyxid/gemini-3-pro","display_name":"Gemini","family":"gemini","route":"bypass"})).is_err());
+    assert!(serde_json::from_value::<UpdateRequest>(serde_json::json!({"expected_revision":1,"public_id":"nyxid/other","display_name":"Gemini","description":"","capabilities":{},"lifecycle":"draft","enabled":false})).is_err());
+}
+
+#[tokio::test]
+async fn catalog_purpose_is_sticky_and_hidden_from_non_admins() {
+    use crate::models::downstream_service::{
+        DownstreamService, PlatformKeyConfig, PlatformKeyPurpose, test_helpers::dummy_service,
+    };
+    let (state, admin, _, person) = setup().await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let mut service = dummy_service();
+    service.id = Uuid::new_v4().to_string();
+    service.created_by = admin.user_id.to_string();
+    service.visibility = "private".into();
+    service.auth_method = "bearer".into();
+    service.auth_key_name = "Authorization".into();
+    service.service_category = "internal".into();
+    service.requires_user_credential = false;
+    service.is_active = true;
+    service.provider_config_id = None;
+    service.platform_key = Some(PlatformKeyConfig {
+        purpose: PlatformKeyPurpose::ModelRoute,
+        enabled: true,
+        ..Default::default()
+    });
+    let collection = state
+        .db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME);
+    collection.insert_one(&service).await.unwrap();
+    assert!(
+        crate::services::catalog_service::enforce_catalog_read_access(
+            &state.db,
+            &person.user_id.to_string(),
+            &service
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::services::catalog_service::enforce_catalog_read_access(
+            &state.db,
+            &admin.user_id.to_string(),
+            &service
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        crate::handlers::services::get_service(
+            State(state.clone()),
+            admin.clone(),
+            Path(service.id.clone())
+        )
+        .await
+        .is_ok()
+    );
+    let mut delegated = admin.clone();
+    delegated.auth_method = AuthMethod::Delegated;
+    assert!(
+        crate::handlers::services::get_service(
+            State(state.clone()),
+            delegated,
+            Path(service.id.clone())
+        )
+        .await
+        .is_err()
+    );
+    assert!(matches!(
+        crate::handlers::endpoints::list_endpoints(
+            State(state.clone()),
+            person.clone(),
+            Path(service.id.clone())
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        crate::handlers::services_helpers::resolve_service_or_user_service(
+            &state,
+            &service.id,
+            &person.user_id.to_string()
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    let body:crate::handlers::services::UpdateServiceRequest=serde_json::from_value(serde_json::json!({"platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[]}})).unwrap();
+    assert!(
+        crate::handlers::services::update_service(
+            State(state.clone()),
+            admin,
+            Default::default(),
+            Path(service.id.clone()),
+            Json(body)
+        )
+        .await
+        .is_err()
+    );
+    let live = collection
+        .find_one(doc! {"_id":&service.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        live.platform_key.unwrap().purpose,
+        PlatformKeyPurpose::ModelRoute
+    );
+    let filter =
+        crate::services::catalog_service::visibility_filter(&person.user_id.to_string(), &[]);
+    assert_eq!(collection.count_documents(filter).await.unwrap(), 0);
+    state.db.drop().await.unwrap();
+}
+
+#[test]
+fn platform_model_metadata_route_matches_billing_inventory() {
+    use crate::services::billing::route_inventory::{BILLING_ROUTE_INVENTORY, BillingRoutePolicy};
+    let mounted = crate::routes::mounted_billing_route_inventory();
+    let row = mounted
+        .iter()
+        .find(|r| r.route == "/api/v1/llm/models")
+        .unwrap();
+    assert!(matches!(row.policy, BillingRoutePolicy::Exempt(_)));
+    assert!(BILLING_ROUTE_INVENTORY.contains(row));
+}
+
+#[tokio::test]
+async fn dormant_platform_model_never_falls_through_to_a_provider() {
+    use crate::services::billing::{BillingIngress, route_inventory::BillingRoutePolicy};
+    use axum::{body::Body, http::Request};
+    let (state, admin, _, person) = setup().await;
+    let _ = create(State(state.clone()), admin, Json(input()))
+        .await
+        .unwrap();
+    for model in ["nyxid/gemini-3-pro", "nyxid/unknown"] {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/llm/gateway/v1/chat/completions")
+            .body(Body::from(
+                serde_json::json!({"model":model,"messages":[]}).to_string(),
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(BillingRoutePolicy::Metered(BillingIngress::LlmGateway));
+        assert!(matches!(
+            crate::handlers::llm_gateway::gateway_request(
+                State(state.clone()),
+                person.clone(),
+                Path("chat/completions".into()),
+                request
+            )
+            .await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+    state.db.drop().await.unwrap();
+}

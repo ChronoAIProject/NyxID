@@ -3323,6 +3323,7 @@ async fn platform_binding(f: &mut Fixture) -> ProviderAccount {
         .await
         .unwrap();
     catalog.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![f.b.user_id.clone()],
