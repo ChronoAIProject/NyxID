@@ -490,7 +490,7 @@ function VoiceConversation({
               >
                 <Text style={[styles.helpText, { color: colors.textPrimary }]}>
                   {inputMode === "automatic"
-                    ? "Your microphone is on while unmuted. NyxBot answers when you pause."
+                    ? `Your microphone is on while unmuted. ${agentName} answers when you pause.`
                     : "Audio is sent only while you hold the microphone. Release to send."}{" "}
                   Use headphones if you hear echo.
                 </Text>
