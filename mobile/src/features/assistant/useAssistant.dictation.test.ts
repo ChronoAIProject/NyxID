@@ -112,7 +112,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       ]),
     ),
     "react-native": {
-        Platform: { OS: "ios" },
+      Platform: { OS: "ios" },
       AppState: {
         get currentState() {
           return appState;
@@ -169,6 +169,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       Square: "Square",
       X: "X",
     },
+    "./DictationWaveform": { DictationWaveform: "DictationWaveform" },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../theme/designTokens": { fonts: {} },
     "../../components/workspace/WorkspaceUI": {

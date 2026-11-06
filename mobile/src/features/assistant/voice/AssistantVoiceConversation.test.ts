@@ -1,3 +1,7 @@
+import {
+  composerInputMinHeight,
+  composerVoiceMinHeight,
+} from "../composerGeometry";
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
@@ -99,6 +103,7 @@ function elements(root: Element): Element[] {
 }
 function setup(
   input: {
+    viewport?: { width: number; height: number; fontScale: number };
     active?: boolean;
     source?: VoiceOption;
     saved?: VoicePreferences;
@@ -111,6 +116,7 @@ function setup(
   } = {},
 ) {
   const events: unknown[][] = [];
+  const layoutAnimations: unknown[] = [];
   let focused = true;
   let online = true;
   const keyboard = new Map<string, (event: any) => void>();
@@ -129,6 +135,7 @@ function setup(
     output: { value: 0 },
     speaking: false,
     media: undefined as unknown,
+    subscribeLevel: () => () => {},
   };
   const voice = {
     media: { id: 1 },
@@ -249,9 +256,13 @@ function setup(
           return { remove: () => keyboard.delete(name) };
         },
       },
-      LayoutAnimation: { configureNext() {}, Presets: { easeInEaseOut: {} } },
+      LayoutAnimation: {
+        configureNext: (preset: unknown) => layoutAnimations.push(preset),
+        Presets: { easeInEaseOut: "easeInEaseOut" },
+      },
       StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-      useWindowDimensions: () => ({ width: 390, height: 844 }),
+      useWindowDimensions: () =>
+        input.viewport ?? { width: 390, height: 844, fontScale: 1 },
       Animated: {
         View: "Animated.View",
         Value: class {
@@ -288,7 +299,9 @@ function setup(
         "X",
         "Mic",
         "MicOff",
-        "Ellipsis",
+        "CircleHelp",
+        "Phone",
+        "Radio",
         "PhoneOff",
         "Volume2",
         "VolumeX",
@@ -335,6 +348,8 @@ function setup(
         return levels;
       },
     },
+    "../DictationWaveform": { DictationWaveform: "DictationWaveform" },
+    "../composerGeometry": { composerInputMinHeight, composerVoiceMinHeight },
     "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
     "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
   });
@@ -359,6 +374,7 @@ function setup(
     props,
     keyboard,
     events,
+    layoutAnimations,
     voice,
     levels,
     query,
@@ -699,12 +715,9 @@ test("both listening modes time the connected call, and Hold to talk keeps its e
     /Talk any time|Resume audio/,
     "no helpers once connected",
   );
-  phone.button("Call options").props.onPress();
+  phone.button("Voice help").props.onPress();
   phone.harness.render();
-  assert.ok(
-    phone.button("No sound? Resume audio"),
-    "helpers live in the ⋯ menu",
-  );
+  assert.ok(phone.button("Resume audio"), "recovery lives in the help popover");
   phone.harness.unmount();
 });
 
@@ -818,13 +831,15 @@ test("only unsealed live captions appear in the voice composer", () => {
     active: true,
     snapshot: {
       ...snapshot,
-      captions: ["one", "two", "three"].map((text, index) => ({
-        id: `caption-${index}`,
-        speaker: index % 2 ? ("assistant" as const) : ("user" as const),
-        text,
-        sealed: index < 2,
-        complete: index < 2,
-      })),
+      captions: ["one", "two", "three", "agent still talking"].map(
+        (text, index) => ({
+          id: `caption-${index}`,
+          speaker: index % 2 ? ("assistant" as const) : ("user" as const),
+          text,
+          sealed: index < 2,
+          complete: index < 2,
+        }),
+      ),
     },
   });
   const text = f.text();
@@ -843,7 +858,7 @@ test("a call without tasks shows no tasks tray", () => {
 test("voice is a composer with the animated bubble on top, not a page over the chat", () => {
   const idle = setup();
   assert.equal(
-    idle.all().some((row) => row.type === "Modal"),
+    idle.all().some((row) => row.type === "Modal" && row.props.visible),
     false,
   );
   const frame = idle.all().find((row) => row.type === "ComposerFrame")!;
@@ -943,38 +958,28 @@ test("connecting displays a placeholder and the active call starts at 00:00 rega
   f.harness.unmount();
 });
 
-test("minimizing preserves media and session; tapping or typing expands and text uses the supplied chat send", () => {
+test("voice is speech-only in both sizes, and row expansion preserves the media and session", () => {
   const f = setup({ active: true });
   const media = f.media();
-  const textEvents: any[] = [];
-  Object.assign(f.props, {
-    draft: "",
-    onChangeText: (text: string) => textEvents.push(text),
-    onSendText: () => textEvents.push("send"),
-    canSendText: true,
-  });
+  assert.equal(
+    f.all().some((n) => n.type === "TextInput"),
+    false,
+  );
+  assert.ok(f.all().some((n) => n.type === "DictationWaveform"));
   f.props.minimized = true;
   f.harness.render();
   assert.equal(f.media().key, media.key);
   assert.equal(f.media().props.media, media.props.media);
   assert.equal(f.events.length, 0);
   assert.equal(
-    f.all().some((n) => n.props.accessibilityLabel === "Listening mode"),
+    f.all().some((n) => n.type === "TextInput"),
     false,
   );
+  assert.ok(f.all().some((n) => n.type === "DictationWaveform"));
   assert.ok(f.button("Expand voice composer").props.style.minWidth >= 44);
   assert.ok(f.button("Expand voice composer").props.style.minHeight >= 44);
   f.button("Expand voice composer").props.onPress();
-  const input = f.all().find((n) => n.type === "TextInput")!;
-  input.props.onFocus();
-  input.props.onChangeText("Keep working");
-  assert.deepEqual(textEvents, ["Keep working"]);
-  assert.deepEqual(
-    f.events.map((e) => e[0]),
-    ["expand", "expand", "expand"],
-  );
-  input.props.onSubmitEditing();
-  assert.deepEqual(textEvents, ["Keep working", "send"]);
+  assert.deepEqual(f.events, [["expand"]]);
   f.props.minimized = false;
   f.harness.render();
   assert.equal(f.media().key, media.key);
@@ -982,34 +987,263 @@ test("minimizing preserves media and session; tapping or typing expands and text
     f.events.some((e) => e[0] === "end" || e[0] === "start"),
     false,
   );
-  f.keyboard.get("keyboardDidShow")!({ endCoordinates: { screenY: 330 } });
-  f.harness.flush();
-  assert.ok(
-    f
-      .all()
-      .some((n) => n.type === "ScrollView" && n.props.style?.maxHeight < 140),
+  f.harness.unmount();
+});
+
+for (const state of [
+  "connecting",
+  "connected",
+  "idle",
+  "options",
+  "minimized",
+]) {
+  test(`pricing is absent in ${state} voice`, () => {
+    const f = setup({
+      active:
+        state === "connected" || state === "options" || state === "minimized",
+      source: {
+        ...source,
+        pricing: {
+          metric: "voice_seconds",
+          credits_per_unit: "0.025",
+          sync_status: "synced",
+          components: [],
+        } as any,
+      },
+    });
+    if (state === "connecting") {
+      f.voice.starting = true;
+      f.harness.render();
+    }
+    if (state === "options") f.button("Voice help").props.onPress();
+    if (state === "minimized") {
+      f.props.minimized = true;
+      f.harness.render();
+    }
+    f.harness.flush();
+    assert.doesNotMatch(f.text(), /credits|tariff|0\.025|per second/i);
+    assert.equal(
+      f.all().some((n) => n.props.accessibilityLabel === "Voice tariff"),
+      false,
+    );
+    f.harness.unmount();
+  });
+}
+
+for (const viewport of [
+  { width: 375, height: 667, fontScale: 1 },
+  { width: 440, height: 956, fontScale: 1 },
+  { width: 834, height: 1194, fontScale: 1 },
+  { width: 375, height: 834, fontScale: 2.5 },
+]) {
+  test(`minimized voice shares normal composer insets and single-line geometry at ${viewport.width}pt/${viewport.fontScale} text scale`, () => {
+    const f = setup({ active: true, viewport });
+    f.props.minimized = true;
+    f.harness.render();
+    const row = f.all().find((n) => n.props.testID === "voice-compact-row")!;
+    assert.equal(
+      row.props.style[1].minHeight,
+      composerVoiceMinHeight(viewport.fontScale),
+    );
+    const frame = f.all().find((n) => n.type === "ComposerFrame")!;
+    assert.equal(frame.props.style.paddingHorizontal, 4);
+    assert.equal(frame.props.style.paddingVertical, 4);
+    const end = f.button("End voice and close");
+    assert.ok(end.props.style({ pressed: false })[0].width >= 44);
+    assert.equal(row.props.style[0].alignItems, "center");
+    f.harness.unmount();
+  });
+}
+
+for (const minimized of [false, true]) {
+  for (const reducedMotion of [false, true]) {
+    test(`hold to talk transmits on press/release in ${minimized ? "minimized" : "expanded"} voice with Reduce Motion ${reducedMotion}`, () => {
+      const f = setup({
+        active: true,
+        reducedMotion,
+        saved: { ...saved, input_mode: "push_to_talk" },
+      });
+      f.props.minimized = minimized;
+      f.harness.render();
+      const button = f.button("Hold to talk");
+      assert.equal(button.props.disabled, false);
+      assert.equal(f.aura().phase, "resting");
+      assert.match(f.text(), /Hold to talk/);
+      assert.ok(f.all().some((n) => n.props.testID === "voice-hold-halo"));
+      button.props.onPressIn();
+      f.harness.render();
+      assert.equal(
+        f.voice.holding,
+        true,
+        "compact PTT must not be cancelled by the minimized effect",
+      );
+      assert.equal(f.aura().phase, "listening");
+      assert.equal(
+        f.button("Hold to talk").props.accessibilityState.selected,
+        true,
+      );
+      assert.equal(
+        f.button("Hold to talk").props.accessibilityHint,
+        "Release to send",
+      );
+      assert.match(f.text(), /Release to send/);
+      f.button("Hold to talk").props.onPressOut();
+      f.harness.render();
+      assert.equal(f.voice.holding, false);
+      assert.equal(f.aura().phase, "resting");
+      assert.deepEqual(f.events, [
+        ["hold", true],
+        ["hold", false],
+      ]);
+      assert.equal(
+        f.all().some((n) => n.type === "TextInput"),
+        false,
+      );
+      f.harness.unmount();
+    });
+  }
+}
+
+test("changing size releases an existing hold and retains the listening mode", () => {
+  const f = setup({ active: true });
+  f.button("Hold to talk mode").props.onPress();
+  f.harness.render();
+  f.button("Hold to talk").props.onPressIn();
+  f.harness.render();
+  f.props.minimized = true;
+  f.harness.render();
+  assert.equal(f.voice.holding, false);
+  f.button("Hold to talk").props.onPressIn();
+  f.harness.render();
+  assert.equal(f.voice.holding, true);
+  f.button("Hold to talk").props.onPressOut();
+  f.button("Expand voice composer").props.onPress();
+  f.props.minimized = false;
+  f.harness.render();
+  assert.equal(
+    f.button("Hold to talk mode").props.accessibilityState.selected,
+    true,
+  );
+  f.button("Hands-free mode").props.onPress();
+  f.harness.render();
+  assert.ok(f.button("Mute microphone"));
+  assert.equal(
+    f.all().some((n) => n.props.accessibilityLabel === "Hold to talk"),
+    false,
   );
   f.harness.unmount();
 });
 
-test("paid tariff and saved voice remain visible while auto-start is connecting", () => {
-  const f = setup({
-    source: {
-      ...source,
-      pricing: {
-        metric: "voice_seconds",
-        credits_per_unit: "0.025",
-        sync_status: "synced",
-        components: [],
-      } as any,
-    },
+for (const mode of ["automatic", "push_to_talk"] as const) {
+  test(`the compact voice help popover explains ${mode}, dismisses and resumes audio without pricing`, async () => {
+    const f = setup({ active: true, saved: { ...saved, input_mode: mode } });
+    assert.equal(
+      f.all().some((n) => n.props.accessibilityLabel === "Call options"),
+      false,
+    );
+    const help = f.button("Voice help");
+    assert.ok(help.props.style({ pressed: false })[0].width >= 44);
+    help.props.onPress();
+    f.harness.render();
+    assert.equal(f.modal().visible, true);
+    assert.match(
+      f.text(),
+      mode === "automatic" ? /answers when you pause/ : /Release to send/,
+    );
+    assert.match(f.text(), /headphones if you hear echo/);
+    assert.doesNotMatch(f.text(), /tariff|credits per|0\.025/i);
+    f.button("Close voice help").props.onPress();
+    f.harness.render();
+    assert.equal(
+      f.all().some((n) => n.type === "Modal"),
+      false,
+    );
+    f.button("Voice help").props.onPress();
+    f.harness.render();
+    f.button("Dismiss voice help").props.onPress();
+    f.harness.render();
+    assert.equal(
+      f.all().some((n) => n.type === "Modal"),
+      false,
+    );
+    f.button("Voice help").props.onPress();
+    f.harness.render();
+    f.modal().onRequestClose();
+    f.harness.render();
+    assert.equal(
+      f.all().some((n) => n.type === "Modal"),
+      false,
+    );
+    f.button("Voice help").props.onPress();
+    f.harness.render();
+    await f.button("Resume audio").props.onPress();
+    f.harness.render();
+    assert.deepEqual(f.events, [["resume"]]);
+    assert.equal(
+      f.all().some((n) => n.type === "Modal"),
+      false,
+    );
+    f.button("Voice help").props.onPress();
+    f.harness.render();
+    f.props.minimized = true;
+    f.harness.render();
+    assert.equal(
+      f.all().some((n) => n.type === "Modal"),
+      false,
+    );
+    f.harness.unmount();
   });
-  f.voice.starting = true;
-  f.harness.render();
-  assert.match(f.text(), /Cedar voice/);
-  assert.match(f.text(), /0.025 credits per second/);
-  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Voice tariff"));
-  assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
-  assert.equal(f.events.filter((e) => e[0] === "start").length, 1);
-  f.harness.unmount();
-});
+}
+
+for (const reducedMotion of [false, true]) {
+  test(`changing listening mode animates its header width unless Reduce Motion is ${reducedMotion}`, () => {
+    const f = setup({ active: true, reducedMotion });
+    f.button("Hold to talk mode").props.onPress();
+    f.harness.render();
+    assert.deepEqual(
+      f.layoutAnimations,
+      reducedMotion ? [] : ["easeInEaseOut"],
+    );
+    f.harness.unmount();
+  });
+}
+
+for (const width of [375, 440, 834]) {
+  test(`the ${width}pt header mode toggle labels only its active radio, keeps 44pt targets and saves preferences`, async () => {
+    const f = setup({
+      active: true,
+      viewport: { width, height: 834, fontScale: 2.5 },
+    });
+    const radios = () =>
+      f.all().filter((n) => n.props.accessibilityRole === "radio");
+    assert.equal(radios().length, 2);
+    for (const radio of radios()) {
+      assert.ok(radio.props.style[0].minWidth >= 44);
+      assert.ok(radio.props.style[0].minHeight >= 44);
+    }
+    const children = (label: string) => elements(f.button(label));
+    assert.ok(children("Hands-free mode").some((n) => n.type === "Phone"));
+    assert.ok(children("Hands-free mode").some((n) => n.type === "Text"));
+    assert.ok(children("Hold to talk mode").some((n) => n.type === "Radio"));
+    assert.equal(
+      children("Hold to talk mode").some((n) => n.type === "Text"),
+      false,
+    );
+    f.button("Hold to talk mode").props.onPress();
+    f.harness.render();
+    await f.harness.settle();
+    assert.equal(
+      children("Hands-free mode").some((n) => n.type === "Text"),
+      false,
+    );
+    assert.ok(children("Hold to talk mode").some((n) => n.type === "Text"));
+    assert.deepEqual(f.events.slice(0, 2), [
+      ["mode", "push_to_talk"],
+      ["save", "push_to_talk"],
+    ]);
+    f.voice.starting = true;
+    f.harness.render();
+    assert.ok(radios().every((n) => n.props.disabled));
+    f.harness.unmount();
+  });
+}

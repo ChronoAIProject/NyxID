@@ -948,7 +948,6 @@ function GroupChat({
                 canParticipate &&
                 !chat.isError &&
                 chat.online &&
-                !draft.length &&
                 !uploads.files.length
               }
               busy={chat.sending || uploads.session.sending}
@@ -967,10 +966,6 @@ function GroupChat({
               onClose={() => setVoiceOpen(false)}
               minimized={voiceMinimized}
               onExpand={() => resizeVoice(false)}
-              draft={draft}
-              onChangeText={edit}
-              canSendText={canSend}
-              onSendText={() => void send()}
               recipientLabel={
                 recipients.ids
                   .map((id) =>

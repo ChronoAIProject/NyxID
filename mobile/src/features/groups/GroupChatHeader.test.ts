@@ -360,15 +360,21 @@ test("the header Modal discards capture before opening and fences an utterance a
   assert.equal(voice().props.enabled, true);
   const oldSender = voice().props.onSend;
   let discarded = false;
-  voice().props.captureControl.current = () => { discarded = true; };
+  voice().props.captureControl.current = () => {
+    discarded = true;
+  };
   f.identity().props.onPress();
   assert.equal(discarded, true, "capture stops before Modal presentation");
   assert.equal(await oldSender("old confidential utterance"), false);
   f.h.flush();
-  assert.ok(nodes(f.h.value()).some((n) => n.type === "Modal" && n.props.visible));
+  assert.ok(
+    nodes(f.h.value()).some((n) => n.type === "Modal" && n.props.visible),
+  );
   assert.equal(voice().props.enabled, false);
   assert.equal(await voice().props.onSend("behind modal"), false);
-  nodes(f.h.value()).find((n) => n.props.accessibilityLabel === "Message Researcher")!.props.onPress();
+  nodes(f.h.value())
+    .find((n) => n.props.accessibilityLabel === "Message Researcher")!
+    .props.onPress();
   f.h.flush();
   assert.equal(voice().props.enabled, true);
   assert.equal(await oldSender("late final after recipient change"), false);
@@ -384,7 +390,10 @@ test("the real crew attachment control never passes its native press event to th
     (n) => n.type === "ComposerAttachButton",
   )!;
   attach.props.onPress({ nativeEvent: { timestamp: 1 } });
-  assert.deepEqual(f.attachmentChoices.map((args) => args.length), [0]);
+  assert.deepEqual(
+    f.attachmentChoices.map((args) => args.length),
+    [0],
+  );
   f.h.unmount();
 });
 
@@ -392,11 +401,14 @@ test("a capture-time recipient binding still uses the current crew authority gat
   const f = setup();
   f.identity().props.onPress();
   f.h.flush();
-  nodes(f.h.value()).find((n) => n.props.accessibilityLabel === "Message Researcher")!.props.onPress();
+  nodes(f.h.value())
+    .find((n) => n.props.accessibilityLabel === "Message Researcher")!
+    .props.onPress();
   f.h.flush();
   f.submit().props.onPress();
   f.h.flush();
-  const sender = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!.props.onSend;
+  const sender = nodes(f.h.value()).find((n) => n.type === "CrewVoice")!.props
+    .onSend;
   f.chat.data.group.members[1].unavailable = true;
   f.h.render();
   assert.equal(await sender("retained utterance"), false);
@@ -794,20 +806,19 @@ test("a refused spoken mention retains its exact recipient binding when the rost
   f.h.unmount();
 });
 
-test("typing into crew voice pauses capture until the draft is empty, including whitespace", () => {
+test("crew voice exposes only speech controls and ending restores the normal composer", () => {
   const f = setup();
+  f.input().props.onChangeText(" ");
+  f.h.flush();
   f.submit().props.onPress();
   f.h.flush();
   const panel = () => nodes(f.h.value()).find((n) => n.type === "CrewVoice")!;
-  panel().props.onChangeText(" ");
-  f.h.flush();
-  assert.equal(panel().props.enabled, false);
-  panel().props.onChangeText("typed draft");
-  f.h.flush();
-  assert.equal(panel().props.enabled, false);
-  panel().props.onChangeText("");
-  f.h.flush();
+  for (const prop of ["draft", "onChangeText", "onSendText", "canSendText"])
+    assert.equal(prop in panel().props, false);
   assert.equal(panel().props.enabled, true);
+  panel().props.onClose();
+  f.h.flush();
+  assert.equal(f.input().props.value, " ");
   f.h.unmount();
 });
 

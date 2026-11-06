@@ -919,6 +919,8 @@ test("unmount aborts pending draft creation and late success cannot navigate", a
 
 test("transcript interaction minimizes voice in place, tapping expands it and closing restores the entry", async () => {
   const x = setup(A);
+  x.input().props.onChangeText(" ");
+  x.harness.flush();
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   assert.equal(x.button("Open voice call"), undefined);
@@ -935,14 +937,12 @@ test("transcript interaction minimizes voice in place, tapping expands it and cl
   x.voice()!.props.onExpand();
   x.harness.flush();
   assert.equal(x.voice()!.props.minimized, false);
-  x.voice()!.props.onChangeText("A typed note");
-  x.harness.flush();
-  assert.equal(x.voice()!.props.draft, "A typed note");
-  assert.equal(x.voice()!.props.canSendText, true);
+  for (const prop of ["draft", "onChangeText", "onSendText", "canSendText"])
+    assert.equal(prop in x.voice()!.props, false);
   x.voice()!.props.onClose();
   x.harness.flush();
   assert.equal(x.voice(), undefined);
-  assert.equal(x.input().props.value, "A typed note");
+  assert.equal(x.input().props.value, " ");
   x.harness.unmount();
 });
 

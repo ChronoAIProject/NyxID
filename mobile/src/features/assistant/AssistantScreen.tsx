@@ -1428,10 +1428,6 @@ export function AssistantScreen({
             agentName={agentName}
             minimized={voiceMinimized}
             onExpand={() => changeVoiceSize(false)}
-            draft={draft}
-            onChangeText={updateDraft}
-            onSendText={() => void sendDraft()}
-            canSendText={canSend || canGuideSend}
             onClose={() => setVoiceThread(undefined)}
             onUpdate={() => void assistant.recover()}
           />

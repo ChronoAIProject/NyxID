@@ -15,7 +15,7 @@ import { fonts } from "../../theme/designTokens";
 import { formatElapsed } from "./voice/dictationLevel";
 import type { ComposerDictationState } from "./useComposerDictation";
 
-const BAR_PITCH = 5;
+import { DictationWaveform } from "./DictationWaveform";
 
 export function ComposerDictationButton({
   dictation,
@@ -90,7 +90,8 @@ export function ComposerDictationReview({
   dictation: ComposerDictationState;
   draft?: string;
 }) {
-  if (dictation.active) return <DictationInline dictation={dictation} draft={draft} />;
+  if (dictation.active)
+    return <DictationInline dictation={dictation} draft={draft} />;
   if (!dictation.error) return null;
   return (
     <View style={styles.notice}>
@@ -190,7 +191,10 @@ function DictationInline({
       <View style={styles.inlineWaveRow}>
         <View style={styles.inlineMeter}>
           {capturing ? (
-            <DictationWaveform subscribe={dictation.subscribeLevel} height={22} />
+            <DictationWaveform
+              subscribe={dictation.subscribeLevel}
+              height={22}
+            />
           ) : (
             <View style={styles.inlineStatus}>
               <ActivityIndicator size="small" color={colors.textSecondary} />
@@ -275,56 +279,6 @@ function DictationInline({
   );
 }
 
-/** One bar per recognizer volume sample (about 90ms), newest at the trailing edge. */
-function DictationWaveform({
-  subscribe,
-  height,
-}: {
-  subscribe: ComposerDictationState["subscribeLevel"];
-  height: number;
-}) {
-  const { colors } = useTheme();
-  const [width, setWidth] = useState(0);
-  const [levels, setLevels] = useState<number[]>([]);
-  const count = Math.max(0, Math.floor(width / BAR_PITCH));
-  const capacity = useRef(count);
-  capacity.current = count;
-  useEffect(
-    () =>
-      subscribe((level) =>
-        setLevels((previous) =>
-          [...previous, level].slice(-Math.max(1, capacity.current)),
-        ),
-      ),
-    [subscribe],
-  );
-  const bars = [
-    ...Array<number>(Math.max(0, count - levels.length)).fill(0),
-    ...levels.slice(-count),
-  ];
-  return (
-    <View
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
-      onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
-      style={[styles.wave, { height }]}
-    >
-      {bars.map((level, index) => (
-        <View
-          key={index}
-          style={[
-            styles.bar,
-            {
-              height: 3 + level * (height - 3),
-              backgroundColor: colors.textSecondary,
-            },
-          ]}
-        />
-      ))}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   target: {
     width: 44,
@@ -362,13 +316,4 @@ const styles = StyleSheet.create({
   noticeActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   status: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
-  wave: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    gap: BAR_PITCH - 3,
-    overflow: "hidden",
-  },
-  bar: { width: 3, borderRadius: 1.5 },
 });

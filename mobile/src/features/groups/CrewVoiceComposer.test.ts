@@ -1,3 +1,4 @@
+import { composerVoiceMinHeight } from "../assistant/composerGeometry";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
@@ -44,7 +45,6 @@ function setup(withNativeRecognition = false) {
     recipientLabel: "Researcher and Designer",
     enabled: true,
     minimized: false,
-    draft: "",
     messages: [{ seq: 1, role: "agent", text: "old reply" }],
     onExpand: () => events.push("expand"),
     onClose: () => events.push("close"),
@@ -52,9 +52,6 @@ function setup(withNativeRecognition = false) {
       events.push(["send", text]);
       return send.promise;
     },
-    onChangeText: (text: string) => events.push(["draft", text]),
-    canSendText: true,
-    onSendText: () => events.push("text-send"),
   };
   const h = hookHarness<E>(
     {
@@ -116,6 +113,11 @@ function setup(withNativeRecognition = false) {
       "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
       "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
       "../../theme/designTokens": { fonts: {} },
+      "../assistant/DictationWaveform": {
+        DictationWaveform: "DictationWaveform",
+      },
+      "../DictationWaveform": { DictationWaveform: "DictationWaveform" },
+      "../composerGeometry": { composerVoiceMinHeight },
       "../assistant/ChatComposer": { ChatComposerFrame: "Frame" },
       "../assistant/useComposerDictation": {
         useComposerDictation: (p: any) => {
@@ -260,9 +262,6 @@ test("crew voice automatically listens, sends native utterances once and retains
   const f = setup();
   assert.deepEqual(f.events, ["start"]);
   assert.equal(f.options().continuous, false);
-  const expand = f.all().find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
-  assert.ok(expand.props.style.minWidth >= 44);
-  assert.ok(expand.props.style.minHeight >= 44);
   assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
   f.dictation.active = false;
   f.dictation.recording = true;
@@ -284,12 +283,16 @@ test("crew voice automatically listens, sends native utterances once and retains
     false,
   );
   assert.equal(f.events.includes("stop-speech"), false);
-  const input = f.all().find((n) => n.type === "TextInput")!;
-  input.props.onChangeText("typed");
-  input.props.onSubmitEditing();
-  assert.deepEqual(f.events.slice(-2), [["draft", "typed"], "text-send"]);
+  assert.equal(
+    f.all().some((n) => n.type === "TextInput"),
+    false,
+  );
+  const expand = f
+    .all()
+    .find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
+  expand.props.onPress();
   assert.ok(f.events.includes("expand"));
-  assert.equal(f.events.includes("stop-speech"), true);
+  assert.equal(f.events.includes("stop-speech"), false);
   f.h.unmount();
 });
 
@@ -371,29 +374,23 @@ test("crew replies arriving during admission are read, and sheets suspend then r
   f.h.unmount();
 });
 
-test("typing releases capture and playback before publishing the draft", () => {
+test("crew voice has no typing or text-send controls in either size", () => {
   const f = setup();
-  const input = f.all().find((node) => node.type === "TextInput")!;
-  input.props.onChangeText(" ");
-  const discard = f.events.indexOf("discard");
-  const stop = f.events.indexOf("stop-speech");
-  const edit = f.events.findIndex(
-    (event) => Array.isArray(event) && event[0] === "draft",
-  );
-  assert.ok(discard >= 0 && stop >= 0 && edit > discard && edit > stop);
-  f.props.draft = " ";
-  f.props.enabled = false;
-  f.h.render();
-  assert.equal(f.options().enabled, false);
+  for (const minimized of [false, true]) {
+    f.props.minimized = minimized;
+    f.h.render();
+    assert.equal(
+      f.all().some((n) => n.type === "TextInput"),
+      false,
+    );
+    assert.ok(f.all().some((n) => n.type === "DictationWaveform"));
+  }
   f.h.unmount();
 });
 
 test("permission prompts can return to listening, the clock starts on capture, and background closes crew voice", () => {
   const f = setup();
   f.advance(8000);
-  const expand = f.all().find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
-  assert.ok(expand.props.style.minWidth >= 44);
-  assert.ok(expand.props.style.minHeight >= 44);
   assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
   f.dictation.phase = "permission";
   f.app("inactive");
@@ -442,7 +439,9 @@ test("crew shell shares aura, header, central mic, End and compact row with priv
   assert.ok(
     f.all().some((n) => n.props.accessibilityLabel === "Expand voice composer"),
   );
-  const expand = f.all().find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
+  const expand = f
+    .all()
+    .find((n) => n.props.accessibilityLabel === "Expand voice composer")!;
   assert.ok(expand.props.style.minWidth >= 44);
   assert.ok(expand.props.style.minHeight >= 44);
   assert.ok(f.all().some((n) => n.props.accessibilityLabel === "Call time -"));
@@ -609,7 +608,6 @@ for (const transition of [
   "blur",
   "disabled",
   "sheet",
-  "typing",
 ]) {
   test(`silence re-arm timer is cancelled on ${transition}`, () => {
     const f = setup();
@@ -636,12 +634,6 @@ for (const transition of [
       f.h.render();
     }
     if (transition === "sheet") f.sheet(true);
-    if (transition === "typing") {
-      f.props.enabled = false;
-      f.all()
-        .find((n) => n.type === "TextInput")!
-        .props.onChangeText("typed");
-    }
     if (transition !== "unmount") f.h.flush();
     assert.equal(f.pendingTimers(), 0);
     const starts = f.events.filter((e) => e === "start").length;
@@ -712,7 +704,10 @@ for (const transition of ["close", "background", "unmount"]) {
     const f = setup(true);
     await f.h.settle();
     assert.equal(f.events.filter((e) => e === "native-start").length, 1);
-    if (transition === "close") f.all().find((n) => n.props.accessibilityLabel === "End voice and close")!.props.onPress();
+    if (transition === "close")
+      f.all()
+        .find((n) => n.props.accessibilityLabel === "End voice and close")!
+        .props.onPress();
     else if (transition === "background") f.background();
     else f.h.unmount();
     f.h.flush();
@@ -720,3 +715,48 @@ for (const transition of ["close", "background", "unmount"]) {
     f.h.unmount();
   });
 }
+
+test("real crew recognition promotes live user words and removes them from both panel sizes on send", async () => {
+  const f = setup(true);
+  await f.h.settle();
+  const spoken = "Review the launch checklist";
+  f.emitNative("result", { isFinal: false, results: [{ transcript: spoken }] });
+  f.h.flush();
+  assert.ok(
+    f
+      .all()
+      .some(
+        (n) =>
+          n.type === "Text" &&
+          n.props.children === spoken &&
+          n.props.style[0].fontSize === 18,
+      ),
+  );
+  f.props.minimized = true;
+  f.h.render();
+  assert.ok(
+    f.all().some((n) => n.type === "Text" && n.props.children === spoken),
+  );
+  f.emitNative("result", { isFinal: true, results: [{ transcript: spoken }] });
+  f.emitNative("end");
+  f.h.flush();
+  assert.equal(
+    f.all().some((n) => n.type === "Text" && n.props.children === spoken),
+    false,
+  );
+  assert.equal(
+    f.events.filter(
+      (e) => Array.isArray(e) && e[0] === "send" && e[1] === spoken,
+    ).length,
+    1,
+  );
+  f.send.resolve(true);
+  await f.h.settle();
+  f.props.minimized = false;
+  f.h.render();
+  assert.equal(
+    f.all().some((n) => n.type === "Text" && n.props.children === spoken),
+    false,
+  );
+  f.h.unmount();
+});

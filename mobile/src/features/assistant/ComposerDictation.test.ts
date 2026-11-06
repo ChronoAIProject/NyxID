@@ -41,6 +41,9 @@ function setup({ introSeen = true, granted = false } = {}) {
     },
   };
   const h = hookHarness<Element>({
+    "../../lib/accessibility/useReducedMotion": {
+      useReducedMotion: () => false,
+    },
     "react/jsx-runtime": {
       ...Object.fromEntries(
         ["jsx", "jsxs"].map((key) => [
@@ -135,6 +138,10 @@ function setup({ introSeen = true, granted = false } = {}) {
       OverflowScrollView: "OverflowScrollView",
     },
   });
+  h.mock(
+    "./DictationWaveform",
+    h.load(fileURLToPath(new URL("./DictationWaveform.tsx", import.meta.url))),
+  );
   const components = h.load(
     fileURLToPath(new URL("./ComposerDictation.tsx", import.meta.url)),
   ) as {
@@ -270,7 +277,8 @@ test("listening stays in the composer: words above a streaming waveform, Discard
   assert.ok(
     tree.indexOf(words) <
       tree.findIndex(
-        (node) => node.props.importantForAccessibility === "no-hide-descendants",
+        (node) =>
+          node.props.importantForAccessibility === "no-hide-descendants",
       ),
     "the words sit above the waveform line",
   );
@@ -294,7 +302,10 @@ test("with nothing said yet the waveform takes the field's place; an existing dr
   const empty = all(
     render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
   );
-  assert.equal(empty.some((node) => node.type === "ScrollView"), false);
+  assert.equal(
+    empty.some((node) => node.type === "ScrollView"),
+    false,
+  );
   x.dictation.final = "and a window seat";
   x.dictation.text = "and a window seat";
   const tree = all(
@@ -311,7 +322,10 @@ test("with nothing said yet the waveform takes the field's place; an existing dr
       [node.props.children].flat().includes("Book a table for two"),
   )!;
   assert.ok(draft, "the draft is shown without its trailing space");
-  assert.deepEqual([draft.props.children].flat(), ["Book a table for two", " "]);
+  assert.deepEqual([draft.props.children].flat(), [
+    "Book a table for two",
+    " ",
+  ]);
 });
 
 test("pending phases keep Discard available while Done waits for capture", () => {
@@ -387,11 +401,18 @@ test("the first tap dictates in the composer at once; no intro sheet or window o
   const x = setup({ introSeen: false });
   const button = x.mic();
   assert.equal(button.type, "Pressable");
-  assert.match(button.props.accessibilityHint, /Nothing is sent until you tap Send/);
+  assert.match(
+    button.props.accessibilityHint,
+    /Nothing is sent until you tap Send/,
+  );
   button.props.onPress();
   await tick();
   assert.deepEqual(x.events, ["keyboard", "start"]);
   const held = setup({ introSeen: false });
   held.mic().props.onLongPress();
-  assert.deepEqual(held.events, ["keyboard", "start"], "push-to-talk starts at once");
+  assert.deepEqual(
+    held.events,
+    ["keyboard", "start"],
+    "push-to-talk starts at once",
+  );
 });

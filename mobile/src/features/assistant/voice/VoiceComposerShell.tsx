@@ -1,50 +1,28 @@
+import { type ComponentProps, type ReactNode } from "react";
 import {
-  useEffect,
-  useState,
-  type ComponentProps,
-  type ReactNode,
-} from "react";
-import {
-  Keyboard,
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   useWindowDimensions,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { ArrowUp, Mic, PhoneOff } from "lucide-react-native";
+import { PhoneOff } from "lucide-react-native";
 import { useTheme } from "../../../theme/ThemeContext";
 import { fonts } from "../../../theme/designTokens";
 import { ChatComposerFrame } from "../ChatComposer";
+import {
+  DictationWaveform,
+  type LevelSubscription,
+} from "../DictationWaveform";
+import { composerVoiceMinHeight } from "../composerGeometry";
 import { VoiceComposerAura } from "./VoiceComposerAura";
 
-/** Reserve transcript space above either voice composer, including with the keyboard open. */
+/** Content grows only as needed, within the current phone/tablet window. */
 export function useVoiceComposerHeight() {
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const [keyboardTop, setKeyboardTop] = useState<number>();
-  useEffect(() => {
-    const show = Keyboard.addListener("keyboardDidShow", (event) =>
-      setKeyboardTop(event.endCoordinates.screenY),
-    );
-    const hide = Keyboard.addListener("keyboardDidHide", () =>
-      setKeyboardTop(undefined),
-    );
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
-  return Math.max(
-    88,
-    Math.min(height, keyboardTop ?? height) -
-      insets.top -
-      insets.bottom -
-      60 -
-      96,
-  );
+  return Math.max(88, height - insets.top - insets.bottom - 60 - 96);
 }
 
 /** The same voice surface surrounds native crew speech and private realtime calls. */
@@ -79,116 +57,174 @@ export function VoiceComposerHeader({
   children?: ReactNode;
 }) {
   const { colors } = useTheme();
+  const { fontScale } = useWindowDimensions();
+  const separateTitle = fontScale > 1.8 && !!children;
   return (
     <View style={styles.header}>
-      <View style={styles.headerText}>
+      <View style={styles.headerTop}>
+        {!separateTitle ? (
+          <Text
+            numberOfLines={1}
+            style={[
+              styles.title,
+              styles.headerText,
+              { color: colors.textPrimary },
+            ]}
+          >
+            {name}
+          </Text>
+        ) : null}
+        {children}
+      </View>
+      {separateTitle ? (
         <Text
           numberOfLines={1}
           style={[styles.title, { color: colors.textPrimary }]}
         >
           {name}
         </Text>
+      ) : null}
+      <View style={styles.statusRow}>
         <Text
           numberOfLines={1}
+          accessibilityLiveRegion="polite"
           style={[
             styles.status,
+            styles.headerText,
             { color: error ? colors.danger : colors.textSecondary },
           ]}
         >
-          <Text accessibilityLiveRegion="polite">{status}</Text>
-          <Text
-            accessibilityLabel={`Call time ${duration}`}
-            style={[styles.elapsed, { color: colors.textSecondary }]}
-          >{`  ${duration}`}</Text>
+          {status}
         </Text>
-      </View>
-      {children}
-    </View>
-  );
-}
-
-export function VoiceComposerTextRow({
-  minimized,
-  status,
-  duration,
-  draft = "",
-  onExpand,
-  onChangeText,
-  onSendText,
-  canSendText,
-  onClose,
-  inputLabel = "Message during voice",
-}: {
-  minimized: boolean;
-  status: string;
-  duration: string;
-  draft?: string;
-  onExpand?: () => void;
-  onChangeText?: (text: string) => void;
-  onSendText?: () => void;
-  canSendText?: boolean;
-  onClose: () => void;
-  inputLabel?: string;
-}) {
-  const { colors } = useTheme();
-  return (
-    <View style={styles.compactRow}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="Expand voice composer"
-        onPress={onExpand}
-        style={styles.compactExpand}
-      >
-        <Mic size={20} color={colors.textPrimary} />
-        {minimized && !onChangeText ? (
-          <Text
-            numberOfLines={1}
-            style={[styles.status, { color: colors.textPrimary }]}
-          >
-            {status}
-          </Text>
-        ) : null}
-      </Pressable>
-      {onChangeText ? (
-        <TextInput
-          accessibilityLabel={inputLabel}
-          value={draft}
-          onFocus={onExpand}
-          onChangeText={(text) => {
-            onExpand?.();
-            onChangeText(text);
-          }}
-          placeholder={minimized ? status : "Message"}
-          placeholderTextColor={colors.textSecondary}
-          style={[styles.voiceInput, { color: colors.textPrimary }]}
-          returnKeyType="send"
-          onSubmitEditing={() => {
-            if (canSendText) onSendText?.();
-          }}
-        />
-      ) : null}
-      {minimized ? (
         <Text
           accessibilityLabel={`Call time ${duration}`}
           style={[styles.elapsed, { color: colors.textSecondary }]}
         >
           {duration}
         </Text>
-      ) : null}
-      {draft.trim() && onSendText ? (
-        <VoiceIconButton
-          label="Send message during voice"
-          disabled={!canSendText}
-          onPress={onSendText}
+      </View>
+    </View>
+  );
+}
+
+export function VoiceComposerCompactRow({
+  status,
+  duration,
+  liveText,
+  instruction,
+  controls,
+  crew = false,
+  subscribeLevel,
+  onExpand,
+  onClose,
+}: {
+  status: string;
+  duration: string;
+  liveText?: string;
+  instruction?: string;
+  controls?: ReactNode;
+  crew?: boolean;
+  subscribeLevel: LevelSubscription;
+  onExpand?: () => void;
+  onClose: () => void;
+}) {
+  const { colors } = useTheme();
+  const { fontScale = 1 } = useWindowDimensions();
+  if (controls) {
+    return (
+      <View
+        testID="voice-compact-row"
+        style={[
+          styles.compactHoldRow,
+          { minHeight: composerVoiceMinHeight(fontScale, crew) },
+        ]}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Expand voice composer"
+          accessibilityHint={`${status}. Call time ${duration}. Tap to expand for listening mode options${liveText ? `. ${liveText}` : ""}`}
+          onPress={onExpand}
+          style={styles.compactHoldExpand}
+        />
+        <View pointerEvents="none" style={styles.compactHoldTop}>
+          <Text
+            numberOfLines={1}
+            style={[styles.compactHoldSpeech, { color: colors.textPrimary }]}
+          >
+            {liveText || status}
+          </Text>
+          <Text
+            accessibilityLabel={`Call time ${duration}`}
+            style={[styles.elapsed, { color: colors.textSecondary }]}
+          >
+            {duration}
+          </Text>
+        </View>
+        <View pointerEvents="box-none" style={styles.compactHoldBottom}>
+          <View pointerEvents="none" style={styles.compactHoldMeter}>
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.compactHoldInstruction,
+                { color: colors.textSecondary },
+              ]}
+            >
+              {instruction}
+            </Text>
+            <DictationWaveform subscribe={subscribeLevel} />
+          </View>
+          {controls}
+          <VoiceIconButton label="End voice and close" onPress={onClose}>
+            <PhoneOff size={20} color={colors.danger} />
+          </VoiceIconButton>
+        </View>
+      </View>
+    );
+  }
+  return (
+    <View
+      testID="voice-compact-row"
+      style={[
+        styles.compactRow,
+        { minHeight: composerVoiceMinHeight(fontScale, crew) },
+      ]}
+    >
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Expand voice composer"
+        accessibilityHint={`${status}. Call time ${duration}. Tap to expand for listening mode options${liveText ? `. ${liveText}` : ""}`}
+        onPress={onExpand}
+        style={styles.compactExpand}
+      >
+        <View style={styles.compactMeter}>
+          {liveText ? (
+            <Text
+              numberOfLines={1}
+              style={[styles.liveSpeech, { color: colors.textPrimary }]}
+            >
+              {liveText}
+            </Text>
+          ) : null}
+          {instruction ? (
+            <Text style={[styles.status, { color: colors.textSecondary }]}>
+              {instruction}
+            </Text>
+          ) : null}
+          <View style={styles.waveRow}>
+            <DictationWaveform subscribe={subscribeLevel} />
+          </View>
+        </View>
+        <Text
+          accessibilityLabel={`Call time ${duration}`}
+          style={[styles.elapsed, { color: colors.textSecondary }]}
         >
-          <ArrowUp size={20} color={colors.textPrimary} />
-        </VoiceIconButton>
-      ) : null}
-      {minimized ? (
-        <VoiceIconButton label="End voice and close" onPress={onClose}>
-          <PhoneOff size={20} color={colors.danger} />
-        </VoiceIconButton>
-      ) : null}
+          {duration}
+        </Text>
+      </Pressable>
+      {controls}
+      <VoiceIconButton label="End voice and close" onPress={onClose}>
+        <PhoneOff size={20} color={colors.danger} />
+      </VoiceIconButton>
     </View>
   );
 }
@@ -268,34 +304,62 @@ export function VoiceMainButton({
 
 const styles = StyleSheet.create({
   frame: { gap: 10, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 10 },
-  compactFrame: { paddingHorizontal: 8, paddingVertical: 4 },
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    minHeight: 36,
-    paddingLeft: 4,
-  },
+  compactFrame: { paddingHorizontal: 4, paddingVertical: 4 },
+  header: { gap: 2, minHeight: 36, paddingLeft: 4 },
+  headerTop: { flexDirection: "row", alignItems: "center", gap: 8 },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   headerText: { flex: 1, minWidth: 0 },
   title: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 20 },
   status: { fontFamily: fonts.body, fontSize: 13, lineHeight: 18 },
   elapsed: { fontFamily: fonts.mono, fontSize: 12, lineHeight: 18 },
-  compactRow: { flexDirection: "row", alignItems: "center", minHeight: 44 },
-  compactExpand: {
-    minWidth: 44,
-    flexDirection: "row",
-    gap: 10,
-    alignItems: "center",
-    minHeight: 44,
-    paddingHorizontal: 8,
+  compactHoldRow: {
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    gap: 4,
+    justifyContent: "center",
   },
-  voiceInput: {
+  compactHoldExpand: {
+    ...StyleSheet.absoluteFillObject,
+    minWidth: 44,
+    minHeight: 44,
+  },
+  compactHoldTop: { flexDirection: "row", alignItems: "center", gap: 12 },
+  compactHoldSpeech: {
     flex: 1,
     minWidth: 0,
-    minHeight: 44,
-    fontFamily: fonts.body,
-    fontSize: 14,
+    fontFamily: fonts.bodyRegular,
+    fontSize: 16,
+    lineHeight: 20,
   },
+  compactHoldBottom: { flexDirection: "row", alignItems: "center", gap: 8 },
+  compactHoldMeter: {
+    flex: 1,
+    minWidth: 0,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    minHeight: 44,
+  },
+  compactHoldInstruction: {
+    flexShrink: 1,
+    fontFamily: fonts.bodySemi,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  compactRow: { flexDirection: "row", alignItems: "center", minHeight: 44 },
+  compactExpand: {
+    flex: 1,
+    minWidth: 44,
+    minHeight: 44,
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "center",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  compactMeter: { flex: 1, minWidth: 0, gap: 6 },
+  waveRow: { height: 22, flexDirection: "row", alignItems: "center" },
+  liveSpeech: { fontFamily: fonts.bodyRegular, fontSize: 16, lineHeight: 22 },
   controls: {
     flexDirection: "row",
     alignItems: "center",
@@ -303,9 +367,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   icon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     alignItems: "center",
     justifyContent: "center",
   },

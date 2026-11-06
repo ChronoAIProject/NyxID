@@ -13,12 +13,13 @@ import { useSharedValue } from "react-native-reanimated";
 import {
   VoiceComposerShell,
   VoiceComposerHeader,
-  VoiceComposerTextRow,
+  VoiceComposerCompactRow,
   VoiceComposerControls,
   VoiceMainButton,
   VoiceIconButton,
   useVoiceComposerHeight,
 } from "../assistant/voice/VoiceComposerShell";
+import { DictationWaveform } from "../assistant/DictationWaveform";
 import { voiceSpeechText } from "../assistant/voice/voiceSpeechText";
 import { useComposerDictation } from "../assistant/useComposerDictation";
 import type { GroupMessage } from "./groupContracts";
@@ -33,10 +34,6 @@ type Props = {
   onClose: () => void;
   minimized: boolean;
   onExpand: () => void;
-  draft: string;
-  onChangeText: (text: string) => void;
-  canSendText: boolean;
-  onSendText: () => void;
   recipientLabel: string;
   captureKey: string;
   captureControl?: { current: (() => void) | undefined };
@@ -157,7 +154,9 @@ export function CrewVoiceComposer(props: Props) {
     const control = props.captureControl;
     if (!control) return;
     control.current = () => recognition.current.discard();
-    return () => { control.current = undefined; };
+    return () => {
+      control.current = undefined;
+    };
   }, [props.captureControl]);
 
   function stopPlayback() {
@@ -432,7 +431,7 @@ export function CrewVoiceComposer(props: Props) {
     >
       {!props.minimized && (
         <ScrollView
-          style={{ maxHeight: Math.max(44, panelHeight - 64) }}
+          style={{ maxHeight: Math.max(44, panelHeight - 24) }}
           keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.content}
         >
@@ -442,11 +441,21 @@ export function CrewVoiceComposer(props: Props) {
             duration={duration}
             error={!!notice}
           />
-          <Label muted>
-            To {props.recipientLabel}. Speak to send. New agent replies are read
-            aloud.
+          <View style={styles.waveRow}>
+            <DictationWaveform subscribe={dictation.subscribeLevel} />
+          </View>
+          {dictation.text && !sending ? (
+            <Text
+              selectable
+              accessibilityLiveRegion="polite"
+              style={[styles.liveSpeech, { color: colors.textPrimary }]}
+            >
+              {dictation.text}
+            </Text>
+          ) : null}
+          <Label muted style={styles.recipient}>
+            To {props.recipientLabel}
           </Label>
-          {dictation.text ? <Label>{dictation.text}</Label> : null}
           {notice ? (
             <Label accessibilityRole="alert" style={{ color: colors.danger }}>
               {notice}
@@ -487,9 +496,6 @@ export function CrewVoiceComposer(props: Props) {
                   />
                 )}
               </VoiceMainButton>
-              <Text style={[styles.holdHint, { color: colors.textSecondary }]}>
-                {paused ? "Paused" : "Hands-free"}
-              </Text>
             </View>
             <VoiceIconButton large label="End voice and close" onPress={close}>
               <PhoneOff color={colors.danger} size={20} />
@@ -497,36 +503,25 @@ export function CrewVoiceComposer(props: Props) {
           </VoiceComposerControls>
         </ScrollView>
       )}
-      <VoiceComposerTextRow
-        minimized={props.minimized}
-        status={status}
-        duration={duration}
-        inputLabel="Message during crew voice"
-        draft={props.draft}
-        onExpand={props.onExpand}
-        onChangeText={(text) => {
-          clearRearm();
-          setRearming(false);
-          recognition.current.discard();
-          stopPlayback();
-          setSpeaking(false);
-          props.onChangeText(text);
-        }}
-        onSendText={props.onSendText}
-        canSendText={props.canSendText}
-        onClose={close}
-      />
+      {props.minimized && (
+        <VoiceComposerCompactRow
+          crew
+          status={status}
+          duration={duration}
+          liveText={!sending ? dictation.text : undefined}
+          subscribeLevel={dictation.subscribeLevel}
+          onExpand={props.onExpand}
+          onClose={close}
+        />
+      )}
     </VoiceComposerShell>
   );
 }
 const styles = StyleSheet.create({
   content: { gap: 10 },
+  waveRow: { height: 22, flexDirection: "row" },
+  liveSpeech: { fontFamily: fonts.bodyRegular, fontSize: 18, lineHeight: 26 },
+  recipient: { fontSize: 12, lineHeight: 17 },
   sideSpacer: { width: 48, height: 48 },
   holdColumn: { alignItems: "center", gap: 6 },
-  holdHint: {
-    fontFamily: fonts.bodySemi,
-    fontSize: 12,
-    lineHeight: 16,
-    minHeight: 16,
-  },
 });
