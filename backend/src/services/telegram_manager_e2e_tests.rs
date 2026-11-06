@@ -1589,9 +1589,19 @@ mod production_router_recovery {
         assert!(body["request"]["revision"] == bound.revision);
         assert!(body["request"]["expires_at"] == bound.expires_at.to_rfc3339());
         assert!(body["request"]["can_open_creation_form"] == true);
-        assert!(
-            body["creation_url"]
-                == "https://t.me/newbot/NyxSetupBot/scoped_recovery_bot?name=Scoped+recovery"
+        let suggestions = crate::services::telegram_new_service::username_suggestions(&bound);
+        assert_eq!(body["request"]["username_suggestions"], json!(suggestions));
+        assert_eq!(body["username_suggestions"].as_array().unwrap().len(), 3);
+        for (index, username) in suggestions.iter().enumerate() {
+            assert_eq!(body["username_suggestions"][index]["username"], *username);
+            assert_eq!(
+                body["username_suggestions"][index]["creation_url"],
+                format!("https://t.me/newbot/NyxSetupBot/{username}?name=Scoped+recovery")
+            );
+        }
+        assert_eq!(
+            body["creation_url"],
+            body["username_suggestions"][0]["creation_url"]
         );
         for field in [
             "challenge_hash",

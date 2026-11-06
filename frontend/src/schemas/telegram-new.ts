@@ -37,6 +37,7 @@ export const telegramNewRequestSchema = z.object({
   connection_error: z.string().nullable().optional(),
   prompt_delivery: telegramPromptDeliverySchema.nullable().optional(),
   can_open_creation_form: z.boolean().optional(),
+  username_suggestions: z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{1,28}bot$/).min(5).max(32)).length(3).optional(),
   setup_notice: z.object({
     reason: z.string(),
     message: z.string(),
@@ -65,15 +66,21 @@ export const telegramNewLaunchSchema = z.object({
     }, "Invalid Telegram launch URL"),
 });
 
-export const telegramCreationLinkSchema = z.object({
-  request: telegramNewRequestSchema,
-  creation_url: z.string().url().refine((value) => {
+const telegramCreationUrlSchema = z.string().url().refine((value) => {
     const url = new URL(value);
     return url.origin === "https://t.me" && !url.username && !url.password && !url.hash
       && /^\/newbot\/[A-Za-z0-9_]{5,32}\/[A-Za-z0-9_]{5,32}$/.test(url.pathname)
       && [...url.searchParams.keys()].every((key) => key === "name")
       && url.searchParams.getAll("name").length === 1;
-  }, "Invalid Telegram creation URL"),
+  }, "Invalid Telegram creation URL");
+
+export const telegramCreationLinkSchema = z.object({
+  request: telegramNewRequestSchema,
+  creation_url: telegramCreationUrlSchema,
+  username_suggestions: z.array(z.object({
+    username: z.string().regex(/^[A-Za-z][A-Za-z0-9_]{1,28}bot$/).min(5).max(32),
+    creation_url: telegramCreationUrlSchema,
+  })).length(3).optional(),
 });
 
 export const telegramNewBeginSchema = z.object({

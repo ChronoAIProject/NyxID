@@ -142,13 +142,23 @@ impl TelegramNewService<'_> {
             Err(error) => return Err(error),
         }
         let mut text = creation_message(&request);
+        text.push_str(&usernames::username_message(&request));
+        let mut choices = Vec::new();
         if request.auto_connect
             && request.setup_authority.is_none()
             && request.creation_context.is_some()
         {
-            match self.creation_link(&request.actor_user_id, &request.id).await {
-                Ok((_, url)) => text.push_str(&format!("\n\nButton missing? <a href=\"{}\">Open the same creation form</a>. Use the same Telegram account and check the NyxID destination above.", html_escape(&url))),
-                Err(_) => tracing::info!(request_id = %request.id, "Telegram instruction recovery link unavailable"),
+            match self
+                .creation_link(&request.actor_user_id, &request.id)
+                .await
+            {
+                Ok((_, url)) => {
+                    choices = creation_suggestions(&request, &url)?;
+                    text.push_str("\n\nButton missing? Choose Open creation form below, or use an alternative username. Use the same Telegram account and check the NyxID destination above.");
+                }
+                Err(_) => {
+                    tracing::info!(request_id = %request.id, "Telegram instruction recovery link unavailable")
+                }
             }
         }
         let phase_started_at = match self
@@ -165,7 +175,7 @@ impl TelegramNewService<'_> {
         if !prompt_dispatch_has_budget(phase_started_at, Utc::now()) {
             return Ok(());
         }
-        let instructions = self.api.send_prompt(token, json!({"chat_id": user, "text": format!("{text}\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again."), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}})).await;
+        let instructions = self.api.send_prompt(token, json!({"chat_id": user, "text": format!("{text}\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again."), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": usernames::username_keyboard(&request, &choices)})).await;
         if let Err(diagnostic) = instructions {
             self.set_prompt_outcome(
                 &request,
@@ -202,7 +212,7 @@ impl TelegramNewService<'_> {
         if !prompt_dispatch_has_budget(phase_started_at, Utc::now()) {
             return Ok(());
         }
-        let creation = json!({"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>(), "suggested_username": suggested_bot_username(&request.label)});
+        let creation = json!({"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>(), "suggested_username": username_suggestions(&request)[0]});
         let result = self.api.send_prompt(token, json!({"chat_id": user, "text": "Tap Create bot below to open Telegram's creation form.", "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": creation}]], "resize_keyboard": true, "one_time_keyboard": true}})).await;
         self.set_prompt_outcome(
             &request,
