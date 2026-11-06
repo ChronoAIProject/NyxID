@@ -129,7 +129,7 @@ const workspaceTitles: Record<WorkspaceView, string> = {
   machines: "Machines",
   sandboxes: "Sandboxes",
   "sandbox-detail": "Sandbox",
-  "cma-agent": "CMA execution",
+  "cma-agent": "Cloud assistant",
   "machine-setup": "Add a machine",
   "machine-pair": "Pair a machine",
 };

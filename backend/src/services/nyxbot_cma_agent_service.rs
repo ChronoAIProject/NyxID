@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::nyxbot_cma_gateway::{
     CmaAgent, CmaDesktopDescriptor, CmaGateway, CmaGatewayError, validate_remote_id,
 };
+use super::nyxbot_cma_sandbox_service::NYXID_CREATED_SOURCE;
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -185,18 +186,15 @@ pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<Nyxbot
 
 async fn parent_ref(db: &Database, row: &NyxbotCmaAgent) -> AppResult<Option<NyxbotCmaSandbox>> {
     let Some(remote) = &row.cma_sandbox_id else {
-        return Ok(None);
+        return Err(AppError::NotFound("CMA Agent parent not found".into()));
     };
     let parent = db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
-        .find_one(doc! {"user_id":&row.user_id,"cma_service_id":&row.cma_service_id,"cma_sandbox_id":remote}).await?;
-    if row.sandbox_generation.is_some_and(|generation| {
-        parent
-            .as_ref()
-            .is_none_or(|parent| parent.generation != generation)
-    }) {
+        .find_one(doc! {"user_id":&row.user_id,"cma_service_id":&row.cma_service_id,"cma_sandbox_id":remote,"source":NYXID_CREATED_SOURCE}).await?
+        .ok_or_else(|| AppError::NotFound("CMA Agent parent not found".into()))?;
+    if row.sandbox_generation != Some(parent.generation) {
         return Err(AppError::Conflict("cma_sandbox_generation_changed".into()));
     }
-    Ok(parent)
+    Ok(Some(parent))
 }
 
 fn verify_observation(row: &NyxbotCmaAgent, remote: &CmaAgent) -> AppResult<()> {
@@ -228,10 +226,13 @@ pub async fn require_bound(
     id: &str,
 ) -> AppResult<(NyxbotCmaAgent, Option<NyxbotCmaSandbox>)> {
     let row = get_owned(db, owner, id).await?;
-    if gateway.service_id(owner).await? != row.cma_service_id {
+    let (service_id, parent) = tokio::try_join!(
+        async { gateway.service_id(owner).await.map_err(AppError::from) },
+        parent_ref(db, &row),
+    )?;
+    if service_id != row.cma_service_id {
         return Err(AppError::Conflict("cma_deployment_changed".into()));
     }
-    let parent = parent_ref(db, &row).await?;
     Ok((row, parent))
 }
 
@@ -240,11 +241,39 @@ async fn verify_parent(gateway: &dyn CmaGateway, owner: &str, remote: &CmaAgent)
         .sandbox_id
         .as_deref()
         .ok_or_else(|| AppError::Conflict("cma_agent_parent_unavailable".into()))?;
-    let parent = gateway.get_sandbox(owner, parent_id).await?;
+    verify_parent_id(gateway, owner, parent_id).await
+}
+
+async fn verify_parent_id(gateway: &dyn CmaGateway, owner: &str, parent_id: &str) -> AppResult<()> {
+    let parent = gateway.get_sandbox_authority(owner, parent_id).await?;
     if parent.id != parent_id || parent.owner_id.as_deref() != Some(owner) {
         return Err(AppError::Forbidden("CMA Agent owner mismatch".into()));
     }
     Ok(())
+}
+
+async fn read_verified_agent(
+    gateway: &dyn CmaGateway,
+    owner: &str,
+    row: &NyxbotCmaAgent,
+) -> AppResult<CmaAgent> {
+    // The persisted parent is immutable and already bound to this owner and
+    // generation. Its live read need not wait for another Agent GET.
+    let parent_id = row
+        .cma_sandbox_id
+        .as_deref()
+        .ok_or_else(|| AppError::Conflict("cma_agent_parent_unavailable".into()))?;
+    let (remote, ()) = tokio::try_join!(
+        async {
+            gateway
+                .get_agent(owner, &row.cma_agent_id)
+                .await
+                .map_err(AppError::from)
+        },
+        verify_parent_id(gateway, owner, parent_id),
+    )?;
+    verify_observation(row, &remote)?;
+    Ok(remote)
 }
 
 fn observation_fields(remote: &CmaAgent, now: DateTime<Utc>) -> Document {
@@ -290,16 +319,10 @@ pub async fn register_live(
         .ok_or_else(|| AppError::Conflict("cma_agent_parent_unavailable".into()))?;
     let db = super::transaction_service::durable_database(db);
     ensure_indexes(&db).await?;
-    let mut parent = db
-        .collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
-        .find_one(doc! {"user_id":owner,"cma_service_id":&service_id,"cma_sandbox_id":parent_id})
-        .await?;
-    if parent.is_none() {
-        let claimed =
-            super::nyxbot_cma_sandbox_service::claim(&db, gateway, owner, parent_id, None).await?;
-        parent = Some(super::nyxbot_cma_sandbox_service::get_owned(&db, owner, &claimed.id).await?);
-    }
-    parent.ok_or_else(|| AppError::Conflict("cma_agent_parent_unavailable".into()))?;
+    db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
+        .find_one(doc! {"user_id":owner,"cma_service_id":&service_id,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE})
+        .await?
+        .ok_or_else(|| AppError::NotFound("Sandbox was not created through NyxID".into()))?;
     let now = Utc::now();
     let mut set = observation_fields(&remote, now);
     if remote.status == "deleted" {
@@ -338,7 +361,7 @@ pub async fn register_live(
             // A real parent write serializes this insert with receipt folding,
             // so a late registration cannot recreate a discarded generation.
             let parent=db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
-                .find_one_and_update(doc! {"user_id":owner,"cma_service_id":service,"cma_sandbox_id":parent_id},doc! {"$inc":{"agent_reference_version":1}})
+                .find_one_and_update(doc! {"user_id":owner,"cma_service_id":service,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE},doc! {"$inc":{"agent_reference_version":1}})
                 .return_document(ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::Conflict("cma_agent_parent_unavailable".into()))?;
             let identity=doc! {"user_id":owner,"cma_service_id":service,"cma_agent_id":&remote.id};
@@ -480,25 +503,99 @@ fn unavailable_desktop(reason: &str) -> CmaDesktopDescriptor {
     }
 }
 
-/// Revalidate immutable row/parent identity while a response is streaming.
+fn verify_reference(current: &NyxbotCmaAgent, original: &NyxbotCmaAgent) -> AppResult<()> {
+    if current.id != original.id
+        || current.user_id != original.user_id
+        || current.cma_agent_id != original.cma_agent_id
+        || current.cma_service_id != original.cma_service_id
+        || current.cma_sandbox_id != original.cma_sandbox_id
+        || current.cma_workspace_id != original.cma_workspace_id
+        || current.cma_worktree_id != original.cma_worktree_id
+        || current.sandbox_generation != original.sandbox_generation
+    {
+        return Err(AppError::Forbidden("CMA Agent authority changed".into()));
+    }
+    Ok(())
+}
+
+async fn revalidate_reference(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    owner: &str,
+    original: &NyxbotCmaAgent,
+) -> AppResult<(NyxbotCmaAgent, Option<NyxbotCmaSandbox>)> {
+    let ((), (current, parent)) = tokio::try_join!(
+        require_enabled(db, owner),
+        require_bound(db, gateway, owner, &original.id),
+    )?;
+    verify_reference(&current, original)?;
+    Ok((current, parent))
+}
+
+/// Revalidate immutable row/parent identity and live remote ownership.
 pub async fn revalidate(
     db: &Database,
     gateway: &dyn CmaGateway,
     owner: &str,
     original: &NyxbotCmaAgent,
 ) -> AppResult<()> {
-    require_enabled(db, owner).await?;
-    let (current, _) = require_bound(db, gateway, owner, &original.id).await?;
-    if current.cma_agent_id != original.cma_agent_id
-        || current.cma_service_id != original.cma_service_id
-        || current.cma_sandbox_id != original.cma_sandbox_id
-        || current.sandbox_generation != original.sandbox_generation
-    {
-        return Err(AppError::Forbidden("CMA Agent authority changed".into()));
+    let (current, _) = revalidate_reference(db, gateway, owner, original).await?;
+    read_verified_agent(gateway, owner, &current).await?;
+    Ok(())
+}
+
+async fn stream_observation(
+    gateway: &dyn CmaGateway,
+    owner: &str,
+    row: &NyxbotCmaAgent,
+    parent: Option<&NyxbotCmaSandbox>,
+    response: Option<&str>,
+    desktop: bool,
+) -> AppResult<()> {
+    let (remote, (), desktop_available) = tokio::try_join!(
+        read_verified_agent(gateway, owner, row),
+        async {
+            if let Some(response_id) = response {
+                let response = gateway
+                    .get_response(owner, &row.cma_agent_id, response_id)
+                    .await?;
+                if response.id != response_id || response.agent_id != row.cma_agent_id {
+                    return Err(AppError::Forbidden("CMA Response identity changed".into()));
+                }
+            }
+            Ok(())
+        },
+        async {
+            if desktop {
+                Ok::<_, AppError>(
+                    gateway
+                        .desktop_descriptor(owner, &row.cma_agent_id)
+                        .await?
+                        .available,
+                )
+            } else {
+                Ok(true)
+            }
+        },
+    )?;
+    if desktop && (!desktop_available || desktop_reason(&remote, parent).is_some()) {
+        return Err(AppError::Forbidden("CMA desktop is unavailable".into()));
     }
-    let remote = gateway.get_agent(owner, &original.cma_agent_id).await?;
-    verify_observation(&current, &remote)?;
-    verify_parent(gateway, owner, &remote).await
+    Ok(())
+}
+
+/// Read each live stream authority once. No observation data leaves this
+/// boundary until local provenance/generation and every remote fence pass.
+pub async fn revalidate_stream(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    owner: &str,
+    original: &NyxbotCmaAgent,
+    response: Option<&str>,
+    desktop: bool,
+) -> AppResult<()> {
+    let (current, parent) = revalidate_reference(db, gateway, owner, original).await?;
+    stream_observation(gateway, owner, &current, parent.as_ref(), response, desktop).await
 }
 
 #[cfg(test)]
@@ -677,5 +774,332 @@ mod tests {
         observed = remote();
         observed.owner_id = Some("other-owner".into());
         assert!(verify_observation(&row, &observed).is_err());
+    }
+}
+
+#[cfg(test)]
+mod stream_authority_tests {
+    use super::*;
+    use crate::services::nyxbot_cma_gateway::{
+        CmaEventSnapshot, CmaLifecycleResult, CmaResponse, CmaResult, CmaSandbox, CmaTranscript,
+    };
+    use std::{sync::Mutex, time::Duration};
+
+    struct AuthorityGateway {
+        agent: CmaAgent,
+        parent: CmaSandbox,
+        response: CmaResponse,
+        desktop: CmaDesktopDescriptor,
+        rendezvous: Option<tokio::sync::Barrier>,
+        unavailable: Option<&'static str>,
+        reads: Mutex<Vec<&'static str>>,
+    }
+
+    impl AuthorityGateway {
+        fn new() -> Self {
+            Self {
+                agent: CmaAgent {
+                    id: "agent".into(),
+                    owner_id: Some("owner".into()),
+                    sandbox_id: Some("sandbox".into()),
+                    workspace_id: Some("workspace".into()),
+                    worktree_id: Some("worktree".into()),
+                    name: None,
+                    status: "ready".into(),
+                    phase: None,
+                    revision: Some(7),
+                    profile: None,
+                    current_response_id: None,
+                    desktop: Some(true),
+                    sandbox_status: Some("active".into()),
+                    callback_url: None,
+                },
+                parent: CmaSandbox {
+                    id: "sandbox".into(),
+                    owner_id: Some("owner".into()),
+                    state: crate::models::nyxbot_cma_sandbox::SandboxObservationState::Ready,
+                    resource_state: Some("active".into()),
+                    name: None,
+                    machine_included: Some(true),
+                    cpu_millis: None,
+                    memory_mib: None,
+                    capacity_source: None,
+                    last_activity_at: None,
+                },
+                response: CmaResponse {
+                    id: "response".into(),
+                    agent_id: "agent".into(),
+                    status: "in_progress".into(),
+                    output: None,
+                },
+                desktop: CmaDesktopDescriptor {
+                    available: true,
+                    reason: None,
+                    shared: true,
+                    width: None,
+                    height: None,
+                    websocket_path: Some("/api/v1/agents/agent/desktop/ws".into()),
+                },
+                rendezvous: None,
+                unavailable: None,
+                reads: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn read(&self, resource: &'static str) -> CmaResult<()> {
+            self.reads.lock().unwrap().push(resource);
+            if let Some(rendezvous) = &self.rendezvous {
+                rendezvous.wait().await;
+            }
+            if self.unavailable == Some(resource) {
+                Err(CmaGatewayError::UpstreamAuthorizationUnavailable)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CmaGateway for AuthorityGateway {
+        async fn service_id(&self, _: &str) -> CmaResult<String> {
+            Ok("service".into())
+        }
+        async fn get_agent(&self, _: &str, id: &str) -> CmaResult<CmaAgent> {
+            assert_eq!(id, "agent");
+            self.read("agent").await?;
+            Ok(self.agent.clone())
+        }
+        async fn get_sandbox(&self, _: &str, _: &str) -> CmaResult<CmaSandbox> {
+            self.read("capacity").await?;
+            Ok(self.parent.clone())
+        }
+        async fn get_sandbox_authority(&self, _: &str, id: &str) -> CmaResult<CmaSandbox> {
+            assert_eq!(id, "sandbox");
+            self.read("parent").await?;
+            Ok(self.parent.clone())
+        }
+        async fn get_response(&self, _: &str, agent: &str, id: &str) -> CmaResult<CmaResponse> {
+            assert_eq!((agent, id), ("agent", "response"));
+            self.read("response").await?;
+            Ok(self.response.clone())
+        }
+        async fn desktop_descriptor(&self, _: &str, id: &str) -> CmaResult<CmaDesktopDescriptor> {
+            assert_eq!(id, "agent");
+            self.read("desktop").await?;
+            Ok(self.desktop.clone())
+        }
+        async fn pause_sandbox(&self, _: &str, _: &str, _: &str) -> CmaResult<CmaLifecycleResult> {
+            Err(CmaGatewayError::Unavailable)
+        }
+        async fn revive_sandbox(&self, _: &str, _: &str, _: &str) -> CmaResult<CmaLifecycleResult> {
+            Err(CmaGatewayError::Unavailable)
+        }
+        async fn retire_sandbox(&self, _: &str, _: &str, _: &str) -> CmaResult<CmaLifecycleResult> {
+            Err(CmaGatewayError::Unavailable)
+        }
+        async fn list_sandbox_events(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> CmaResult<CmaEventSnapshot> {
+            Err(CmaGatewayError::Unavailable)
+        }
+        async fn get_transcript(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> CmaResult<CmaTranscript> {
+            Err(CmaGatewayError::Unavailable)
+        }
+        async fn get_event_snapshot(
+            &self,
+            _: &str,
+            _: &str,
+            _: Option<&str>,
+        ) -> CmaResult<CmaEventSnapshot> {
+            Err(CmaGatewayError::Unavailable)
+        }
+    }
+
+    fn reference() -> NyxbotCmaAgent {
+        bson::from_document(doc! {
+            "_id":"local-agent", "user_id":"owner", "cma_service_id":"service",
+            "cma_agent_id":"agent", "cma_sandbox_id":"sandbox",
+            "cma_workspace_id":"workspace", "cma_worktree_id":"worktree",
+            "sandbox_generation":3, "last_observed_revision":7,
+            "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+        })
+        .unwrap()
+    }
+
+    fn parent_reference() -> NyxbotCmaSandbox {
+        bson::from_document(doc! {
+            "_id":"local-sandbox", "user_id":"owner", "cma_service_id":"service",
+            "label":"Sandbox", "cma_sandbox_id":"sandbox", "occupies_account_slot":true,
+            "admission_state":"associated", "creation_ref":"creation", "generation":3,
+            "source":NYXID_CREATED_SOURCE,
+            "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn parent_verification_does_not_read_display_capacity() {
+        let gateway = AuthorityGateway::new();
+        verify_parent(&gateway, "owner", &gateway.agent)
+            .await
+            .unwrap();
+        assert_eq!(*gateway.reads.lock().unwrap(), ["parent"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stream_observation_reads_required_resources_once_in_parallel_without_capacity() {
+        let mut gateway = AuthorityGateway::new();
+        // No read can finish until all four have started. Serial reads exhaust
+        // the budget even when every individual resource is available.
+        gateway.rendezvous = Some(tokio::sync::Barrier::new(4));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream_observation(
+                &gateway,
+                "owner",
+                &reference(),
+                Some(&parent_reference()),
+                Some("response"),
+                true,
+            ),
+        )
+        .await
+        .expect("independent authority reads must progress together")
+        .unwrap();
+        let mut reads = gateway.reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(reads, ["agent", "desktop", "parent", "response"]);
+    }
+
+    #[tokio::test]
+    async fn agent_events_only_read_agent_and_parent_authority() {
+        let gateway = AuthorityGateway::new();
+        stream_observation(&gateway, "owner", &reference(), None, None, false)
+            .await
+            .unwrap();
+        let mut reads = gateway.reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(reads, ["agent", "parent"]);
+    }
+
+    #[tokio::test]
+    async fn stream_observation_fails_closed_when_any_authority_read_is_unavailable() {
+        for resource in ["agent", "parent", "response", "desktop"] {
+            let mut gateway = AuthorityGateway::new();
+            gateway.unavailable = Some(resource);
+            assert!(
+                stream_observation(
+                    &gateway,
+                    "owner",
+                    &reference(),
+                    None,
+                    Some("response"),
+                    true
+                )
+                .await
+                .is_err(),
+                "{resource} authority loss must stop observation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_observation_preserves_identity_response_and_desktop_fences() {
+        for changed in [
+            "agent_owner",
+            "agent_parent",
+            "workspace",
+            "worktree",
+            "revision",
+            "parent_id",
+            "parent_owner",
+            "response_agent",
+            "response_id",
+            "desktop_disabled",
+            "desktop_unavailable",
+            "agent_stopped",
+            "sandbox_paused",
+        ] {
+            let mut gateway = AuthorityGateway::new();
+            match changed {
+                "agent_owner" => gateway.agent.owner_id = Some("other".into()),
+                "agent_parent" => gateway.agent.sandbox_id = Some("other".into()),
+                "workspace" => gateway.agent.workspace_id = Some("other".into()),
+                "worktree" => gateway.agent.worktree_id = Some("other".into()),
+                "revision" => gateway.agent.revision = Some(6),
+                "parent_id" => gateway.parent.id = "other".into(),
+                "parent_owner" => gateway.parent.owner_id = Some("other".into()),
+                "response_agent" => gateway.response.agent_id = "other".into(),
+                "response_id" => gateway.response.id = "other".into(),
+                "desktop_disabled" => gateway.agent.desktop = Some(false),
+                "desktop_unavailable" => gateway.desktop.available = false,
+                "agent_stopped" => gateway.agent.status = "stopped".into(),
+                "sandbox_paused" => gateway.agent.sandbox_status = Some("paused".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                stream_observation(
+                    &gateway,
+                    "owner",
+                    &reference(),
+                    None,
+                    Some("response"),
+                    true
+                )
+                .await
+                .is_err(),
+                "{changed} must stop observation"
+            );
+        }
+        for retiring in [false, true] {
+            let gateway = AuthorityGateway::new();
+            let mut parent = parent_reference();
+            if retiring {
+                parent.retire_requested_at = Some(Utc::now());
+            } else {
+                parent.admission_state = SandboxAdmissionState::Retired;
+            }
+            assert!(
+                stream_observation(&gateway, "owner", &reference(), Some(&parent), None, true)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn stream_reference_cannot_change_immutable_parent_or_generation() {
+        let original = reference();
+        assert!(verify_reference(&original, &original).is_ok());
+        for field in [
+            "owner",
+            "service",
+            "agent",
+            "sandbox",
+            "workspace",
+            "worktree",
+            "generation",
+        ] {
+            let mut current = original.clone();
+            match field {
+                "owner" => current.user_id = "other".into(),
+                "service" => current.cma_service_id = "other".into(),
+                "agent" => current.cma_agent_id = "other".into(),
+                "sandbox" => current.cma_sandbox_id = Some("other".into()),
+                "workspace" => current.cma_workspace_id = Some("other".into()),
+                "worktree" => current.cma_worktree_id = Some("other".into()),
+                "generation" => current.sandbox_generation = Some(4),
+                _ => unreachable!(),
+            }
+            assert!(verify_reference(&current, &original).is_err(), "{field}");
+        }
     }
 }

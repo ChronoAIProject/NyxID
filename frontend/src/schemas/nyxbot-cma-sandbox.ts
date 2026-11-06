@@ -28,6 +28,16 @@ export const cmaSandboxSchema = z.object({
   machine_included: z.boolean().nullable(),
   cpu_millis: z.number().int().nonnegative().nullable(),
   memory_mib: z.number().int().nonnegative().nullable(),
+  capacity: z
+    .object({
+      cpu_millis: z.number().int().nonnegative().nullable(),
+      memory_mib: z.number().int().nonnegative().nullable(),
+      source: z
+        .enum(["profile_revision", "runtime_allocation"])
+        .nullable()
+        .default(null),
+    })
+    .optional(),
   last_activity_at: optionalTime,
   last_observed: optionalTime,
   retire_requested_at: optionalTime,
@@ -39,6 +49,8 @@ export const cmaSandboxSchema = z.object({
 });
 export const cmaSandboxListSchema = z.object({
   sandboxes: z.array(cmaSandboxSchema),
+  occupied: z.number().int().nonnegative(),
+  limit: z.number().int().positive(),
   conflict: z.boolean(),
   inventory_complete: z.boolean(),
   next_cursor: z.string().max(1024).nullish(),
@@ -46,17 +58,6 @@ export const cmaSandboxListSchema = z.object({
 export const cmaSandboxMutationSchema = z.object({
   sandbox: cmaSandboxSchema,
   pending: z.boolean(),
-});
-export const cmaUnregisteredSchema = z.object({
-  sandboxes: z.array(
-    z.object({
-      id: z.string().min(1),
-      name: z.string().nullable(),
-      state: z.string(),
-      cpu_millis: z.number().nullable(),
-      memory_mib: z.number().nullable(),
-    }),
-  ),
 });
 export const cmaSandboxLabelSchema = z.object({
   label: z

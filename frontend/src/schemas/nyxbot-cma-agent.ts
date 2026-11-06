@@ -41,6 +41,22 @@ export const cmaTranscriptMessageSchema = z.object({
 });
 export const cmaTranscriptSchema = z.object({
   messages: z.array(cmaTranscriptMessageSchema).max(10000),
+  turns: z
+    .array(
+      z.object({
+        turn_sequence: z.number().int().positive(),
+        started_at: z.string().nullable(),
+        status: z.enum([
+          "active",
+          "completed",
+          "failed",
+          "interrupted",
+          "unknown",
+        ]),
+        messages: z.array(cmaTranscriptMessageSchema).max(10000),
+      }),
+    )
+    .max(10000),
   next_cursor: z.string().max(1024).nullable(),
 });
 export const cmaEventSchema = z.object({
@@ -55,6 +71,8 @@ export const cmaEventSchema = z.object({
     .max(128 * 1024)
     .nullable(),
   created_at: z.string().nullable(),
+  response_id: z.string().max(256).nullish(),
+  turn_sequence: z.number().int().positive().nullish(),
 });
 export const cmaEventSnapshotSchema = z.object({
   events: z.array(cmaEventSchema).max(1000),
@@ -88,4 +106,7 @@ export const cmaDesktopSchema = z.object({
 });
 export type CmaAgent = z.infer<typeof cmaAgentSchema>;
 export type CmaTranscriptMessage = z.infer<typeof cmaTranscriptMessageSchema>;
+export type CmaTranscriptTurn = z.infer<
+  typeof cmaTranscriptSchema
+>["turns"][number];
 export type CmaResourceEvent = z.infer<typeof cmaEventSchema>;

@@ -5,7 +5,7 @@ use crate::{
     mw::auth::AuthUser,
     services::{
         nyxbot_cma_agent_service as agents,
-        nyxbot_cma_gateway::{CatalogCmaGateway, CmaSandbox, validate_idempotency_key},
+        nyxbot_cma_gateway::{CatalogCmaGateway, validate_idempotency_key},
         nyxbot_cma_sandbox_service as sandboxes,
     },
 };
@@ -14,7 +14,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -26,12 +26,6 @@ pub struct PageQuery {
 pub struct LabelRequest {
     pub generation: i64,
     pub label: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClaimRequest {
-    pub sandbox_id: String,
-    pub label: Option<String>,
 }
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,11 +44,6 @@ pub struct CommandRequest {
 pub struct GenerationRequest {
     pub generation: i64,
 }
-#[derive(Serialize)]
-pub struct UnregisteredDto {
-    pub sandboxes: Vec<CmaSandbox>,
-}
-
 pub(super) async fn owner(state: &AppState, auth: &AuthUser) -> AppResult<String> {
     super::login_client_context::require_first_party_human(auth)?;
     let owner = auth.user_id.to_string();
@@ -122,34 +111,6 @@ pub async fn label(
     let owner = owner(&state, &auth).await?;
     let row = sandboxes::update_label(&state.db, &owner, &id, body.generation, &body.label).await?;
     audit(&state, &owner, &id, "rename");
-    Ok(Json(row))
-}
-pub async fn unregistered(
-    State(state): State<AppState>,
-    auth: AuthUser,
-) -> AppResult<Json<UnregisteredDto>> {
-    let owner = owner(&state, &auth).await?;
-    let gateway = CatalogCmaGateway::new(&state);
-    Ok(Json(UnregisteredDto {
-        sandboxes: sandboxes::unregistered(&state.db, &gateway, &owner).await?,
-    }))
-}
-pub async fn claim(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(body): Json<ClaimRequest>,
-) -> AppResult<Json<sandboxes::SandboxDto>> {
-    let owner = owner(&state, &auth).await?;
-    let gateway = CatalogCmaGateway::new(&state);
-    let row = sandboxes::claim(
-        &state.db,
-        &gateway,
-        &owner,
-        &body.sandbox_id,
-        body.label.as_deref(),
-    )
-    .await?;
-    audit(&state, &owner, &row.id, "claim");
     Ok(Json(row))
 }
 pub async fn commands(
@@ -299,12 +260,6 @@ mod tests {
         assert!(
             serde_json::from_value::<CommandRequest>(
                 serde_json::json!({"generation":1,"command":"pause","service_id":"other"})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<ClaimRequest>(
-                serde_json::json!({"sandbox_id":"sandbox","owner":"other"})
             )
             .is_err()
         );

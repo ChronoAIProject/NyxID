@@ -68,6 +68,11 @@ pub struct CmaApprovalScan {
     pub cursor: Option<String>,
     pub complete: bool,
     pub pending: Vec<CmaPendingApproval>,
+    /// Ordered replay binds unbound approval events only after the exact turn start.
+    #[serde(default)]
+    pub active_turn: bool,
+    #[serde(default)]
+    pub last_sequence: Option<i64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

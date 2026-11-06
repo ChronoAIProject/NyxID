@@ -1,7 +1,7 @@
 //! CMA-native bridges. These never select/create an Agent or alter its lifecycle.
 use super::{
     assistant_acknowledgement_service as acks, nyxbot_cma_agent_service as agents,
-    nyxbot_cma_gateway::{CatalogCmaGateway, CmaGateway},
+    nyxbot_cma_gateway::{CatalogCmaGateway, CmaFileWrite, CmaGateway},
     nyxbot_cma_sandbox_service as sandboxes,
 };
 use crate::{
@@ -98,7 +98,7 @@ pub fn schema(name: &str) -> Value {
             json!({"type":"object","properties":{"cursor":{"type":"string","maxLength":1024}},"required":[],"additionalProperties":false})
         }
         "cma_save_attachment" => {
-            json!({"type":"object","properties":{"agent_id":id,"attachment_id":id,"path":{"type":"string","minLength":1,"maxLength":4096},"acknowledgement_id":id},"required":["agent_id","attachment_id","path"],"additionalProperties":false})
+            json!({"type":"object","properties":{"agent_id":id,"attachment_id":id,"path":{"type":"string","minLength":1,"maxLength":4096,"description":"Path relative to the CMA filesystem API root /home/. Use the returned absolute_path in Agent commands."},"acknowledgement_id":id},"required":["agent_id","attachment_id","path"],"additionalProperties":false})
         }
         "cma_request_owner" => {
             json!({"type":"object","properties":{"agent_id":id,"reason":{"type":"string","minLength":1,"maxLength":500}},"required":["agent_id","reason"],"additionalProperties":false})
@@ -108,8 +108,8 @@ pub fn schema(name: &str) -> Value {
 }
 pub fn description(name: &str) -> String {
     match name {
-        "list_cma_resources" => "Read personal CMA Sandbox allocation and live Agent facts with bounded pagination. This does not allocate, reserve or select an Agent; Agents can share an environment and context across chats.",
-        "cma_save_attachment" => "Copy an original attachment from this conversation to a relative path in the selected CMA Agent. Returns path, size and SHA256; a different existing file is not overwritten. Requires the current CMA grant and action policy.",
+        "list_cma_resources" => "Read the personal allocation of Sandboxes created through NyxID and their live Agent facts with bounded pagination. This does not allocate, reserve or select an Agent; Agents can share an environment and context across chats.",
+        "cma_save_attachment" => "Copy an original attachment from this conversation to a path relative to the CMA filesystem API root /home/. Returns path, absolute_path, size and SHA256. Use the returned absolute_path in Agent commands regardless of the Agent's working directory. A different existing file is not overwritten. Requires the current CMA grant and action policy.",
         "cma_request_owner" => "Ask the owner to finish the stated step on the selected Agent's shared desktop. A card opens that exact Agent in NyxID. End this turn and wait; the owner's Done decision wakes a new event turn. Never click or infer completion yourself.",
         _ => "",
     }.into()
@@ -158,6 +158,10 @@ fn check_scope_inputs(
         (!body.is_empty()).then_some("application/json"),
     )
 }
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Native dispatch revalidates the complete HTTP request and action mode together"
+)]
 pub(crate) async fn scope(
     db: &Database,
     chat: &acks::ChatAuthority,
@@ -333,16 +337,33 @@ pub async fn execute(
         // The gateway checks the live key and the exact inputs for every page,
         // detail read and effect, including requests made during registration.
         let sandbox_list = sandboxes::list_live(tools.db, &gateway, &chat.user_id, None).await?;
-        let page = gateway
-            .list_agents(&chat.user_id, args.get("cursor").and_then(Value::as_str))
-            .await?;
-        let mut rows = Vec::with_capacity(page.items.len());
-        for remote in &page.items {
-            rows.push(
-                agents::register_live(tools.db, &gateway, &chat.user_id, &remote.id, None).await?,
-            );
+        let parents = sandboxes::active_created(tools.db, &chat.user_id).await?;
+        let parent_ids: std::collections::HashSet<&str> = parents
+            .iter()
+            .filter(|parent| parent.cma_service_id == catalog.id)
+            .filter_map(|parent| parent.cma_sandbox_id.as_deref())
+            .collect();
+        let mut rows = Vec::new();
+        let mut next_cursor = None;
+        if !parent_ids.is_empty() {
+            let page = gateway
+                .list_agents(&chat.user_id, args.get("cursor").and_then(Value::as_str))
+                .await?;
+            for remote in &page.items {
+                if remote
+                    .sandbox_id
+                    .as_deref()
+                    .is_some_and(|id| parent_ids.contains(id))
+                {
+                    rows.push(
+                        agents::register_live(tools.db, &gateway, &chat.user_id, &remote.id, None)
+                            .await?,
+                    );
+                }
+            }
+            next_cursor = page.next_cursor;
         }
-        let value = json!({"sandboxes":sandbox_list,"agents":rows.iter().map(agent_summary).collect::<Vec<_>>(),"next_cursor":page.next_cursor});
+        let value = json!({"sandboxes":sandbox_list,"agents":rows.iter().map(agent_summary).collect::<Vec<_>>(),"next_cursor":next_cursor});
         if value.to_string().len() > 64 * 1024 {
             return Err(AppError::Conflict("cma_resource_page_too_large".into()));
         }
@@ -409,16 +430,15 @@ pub async fn execute(
         false,
     )
     .await?;
-    if let Some(need) = gate.ask() {
-        if let Some(refusal) =
+    if let Some(need) = gate.ask()
+        && let Some(refusal) =
             acks::confirm_action(tools.db, chat, tool, args, &need, &summary).await?
-        {
-            return Ok(ToolResult {
-                value: refusal,
-                is_error: true,
-                permission_request: None,
-            });
-        }
+    {
+        return Ok(ToolResult {
+            value: refusal,
+            is_error: true,
+            permission_request: None,
+        });
     }
     let (_, bytes) =
         super::assistant_upload_service::chat_bytes(tools.db, tools.keys, chat, attachment, false)
@@ -429,28 +449,59 @@ pub async fn execute(
     }
     chat.ensure_live_turn(tools.db, None, None, "cma_save_attachment")
         .await?;
-    let parent = row.cma_sandbox_id.as_deref().ok_or_else(refused)?;
-    let sandbox = sandboxes::claim(tools.db, &gateway, &chat.user_id, parent, None).await?;
-    if sandbox.retire_requested_at.is_some()
-        || sandbox.admission_state
-            == crate::models::nyxbot_cma_sandbox::SandboxAdmissionState::Retiring
-    {
-        return Err(AppError::Conflict("cma_sandbox_retiring".into()));
-    }
-    let saved = gateway
-        .write_agent_file(&chat.user_id, &remote, field(args, "path")?, &bytes)
-        .await?;
+    let saved = write_attachment_to_created_parent(
+        tools.db,
+        &gateway,
+        &chat.user_id,
+        &row,
+        field(args, "path")?,
+        &bytes,
+    )
+    .await?;
     if let Some(auto) = gate.auto_allowed() {
         acks::record_auto_allowed(tools.db, chat, tool, args, &auto, &summary).await;
     }
     Ok(ToolResult {
-        value: json!({"path":saved.path,"size":saved.size_bytes,"sha256":saved.sha256}),
+        value: attachment_receipt(&saved),
         is_error: false,
         permission_request: None,
     })
 }
+
+/// Project only a successful gateway receipt, whose relative path, size and
+/// digest have already been checked against the exact requested write.
+fn attachment_receipt(saved: &CmaFileWrite) -> Value {
+    json!({"path":saved.path,"absolute_path":format!("/home/{}", saved.path),"size":saved.size_bytes,"sha256":saved.sha256})
+}
+
+/// Recheck the exact created parent immediately before the native file effect.
+/// The native gateway does not pass through the generic dispatch admission.
+pub(super) async fn write_attachment_to_created_parent(
+    db: &Database,
+    gateway: &dyn CmaGateway,
+    owner: &str,
+    agent: &NyxbotCmaAgent,
+    path: &str,
+    bytes: &[u8],
+) -> AppResult<super::nyxbot_cma_gateway::CmaFileWrite> {
+    if agent.user_id != owner {
+        return Err(refused());
+    }
+    let parent = agent.cma_sandbox_id.as_deref().ok_or_else(refused)?;
+    let sandbox = sandboxes::resolve_created(db, gateway, owner, parent).await?;
+    if sandbox.cma_service_id != agent.cma_service_id
+        || agent.sandbox_generation != Some(sandbox.generation)
+    {
+        return Err(AppError::Conflict("cma_sandbox_generation_changed".into()));
+    }
+    super::nyxbot_cma_admission::require_available_parent(&sandbox)?;
+    Ok(gateway
+        .write_agent_file(owner, &agent.cma_agent_id, path, bytes)
+        .await?)
+}
+
 fn agent_summary(row: &NyxbotCmaAgent) -> Value {
-    json!({"id":row.id,"agent_id":row.cma_agent_id,"sandbox_id":row.cma_sandbox_id,"workspace_id":row.cma_workspace_id,"status":row.resource_state,"last_observed":row.last_observed})
+    json!({"id":row.id,"agent_id":row.cma_agent_id,"label":row.label,"sandbox_id":row.cma_sandbox_id,"workspace_id":row.cma_workspace_id,"status":row.resource_state,"last_observed":row.last_observed,"last_known_response_id":row.source_response_id})
 }
 /// Bounded observations only. No transcript, prompt, profile or credentials.
 pub async fn snapshot(
@@ -483,14 +534,29 @@ pub async fn snapshot(
         }
     }
     let sandboxes = sandboxes::list(db, owner, None).await?;
-    let agents: Vec<NyxbotCmaAgent> = db
-        .collection(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
-        .find(doc! {"user_id":owner,"deleted_at":null})
-        .sort(doc! {"last_observed":-1})
-        .limit(8)
-        .await?
-        .try_collect()
-        .await?;
+    let parents = sandboxes::active_created(db, owner).await?;
+    let bindings: Vec<_> = parents
+        .iter()
+        .filter_map(|parent| {
+            parent.cma_sandbox_id.as_ref().map(|remote| {
+                doc! {
+                    "cma_service_id":&parent.cma_service_id,
+                    "cma_sandbox_id":remote, "sandbox_generation":parent.generation,
+                }
+            })
+        })
+        .collect();
+    let agents: Vec<NyxbotCmaAgent> = if bindings.is_empty() {
+        Vec::new()
+    } else {
+        db.collection(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
+            .find(doc! {"user_id":owner,"deleted_at":null,"$or":bindings})
+            .sort(doc! {"last_observed":-1})
+            .limit(8)
+            .await?
+            .try_collect()
+            .await?
+    };
     let resources = json!({"sandboxes":sandboxes.sandboxes.iter().map(|s|json!({"id":s.cma_sandbox_id,"status":s.observation_state,"creation":s.admission_state,"occupied":s.occupies_account_slot,"observed_at":s.last_observed})).take(8).collect::<Vec<_>>(),"agents":agents.iter().map(agent_summary).collect::<Vec<_>>()});
     Ok(format!(
         "\nCMA resources (last observed facts; query live status before acting; this is not a reservation):\n{resources}\n"
@@ -500,12 +566,34 @@ pub async fn snapshot(
 pub const GUIDANCE: &str = r#"
 Use CMA when it helps the task. Decide whether to reuse an existing CMA Agent,
 create a new Agent, or use other tools. Each account may have at most one
-non-retired Sandbox, and that Sandbox may contain several Agents.
-Create additional Agents inside that Sandbox with sandbox_id or workspace_id.
-Create a Sandbox only when none exists, no creation is unresolved, and the task needs it.
-Inspect resources as needed; a list is not a reservation.
+non-retired Sandbox created through this NyxID instance. That Sandbox may contain
+several Agents. External CMA Sandboxes do not use this allocation and are not
+imported into NyxID management. CMA's own quotas still apply independently.
+Use nyxid__list_cma_resources to inspect the NyxID-created environment and its Agents.
+Match a user-named Agent to its returned label and agent_id. Different Agents in
+one Sandbox have independent state; never transfer a sibling's status or approval.
+last_known_response_id is a previously observed Response for that Agent, including
+work started in another NyxBot chat. It is a lookup hint, not proof of a current
+task. Use get_task to verify its conversation.id and get_task_controls to check
+target_active and the current revision before proposing any control. Never invent
+a response_id or treat an old/completed Response as the current task. If this hint
+is absent or no longer active, report that the current task cannot yet be identified.
+Create additional Agents inside that environment with sandbox_id or workspace_id.
+Create a Sandbox only when this allocation is empty, no creation is unresolved,
+and the task needs it. A list is not a reservation.
+The inline create_agent profile.permission_mode accepts guarded or autonomous.
+When the user wants approval before commands or file changes, explicitly select
+guarded. Do not invent ask/default permission values or silently omit the requested mode.
+For CMA's desktop preparation flow, explicitly set desktop=true in create_agent
+and include the user's exact first task in initial_message. CMA retains that task
+during preparation and executes it afterward; do not invent a task just to enable desktop.
+machine_included is a separate retained Sandbox option; preserve the requested
+options and the exact body/key when recovering a creation.
 Run work with cma__run_task using the selected agent_id, stream=true, and a stable
 Idempotency-Key. If conversation is supplied, it must equal that agent_id.
+After nyxid__cma_save_attachment, use the returned absolute_path in Agent commands.
+Its path field is relative to the CMA filesystem API root /home/; the Agent's
+working directory may be a separate worktree.
 Reusing an Agent shares its conversation and worktree, including across NyxBot chats.
 Keep the exact body and Idempotency-Key when recovering an uncertain request.
 Manage Agent lifecycle through tools. The user can inspect an Agent's events, history,
@@ -514,6 +602,23 @@ parent environment and does not provide a desktop viewer.
 Distinguish task cancellation, Agent stop/delete, and whole-Sandbox retirement.
 Deleting an Agent does not retire its Sandbox or guarantee that resource charges stop.
 Report observed queueing, failures and cleanup outcomes without claiming unobserved success.
+NyxID action confirmation and CMA native approval are separate. Denying a NyxID
+card sends nothing to CMA; it does not reject a pending cloud approval or cancel
+the cloud task. Explain that the cloud request may still be waiting. If the user
+explicitly asks to refuse a cloud approval, send resolve_approval with decision=deny
+for the exact observed pending approval, subject to the normal NyxID confirmation.
+If they ask to stop the task, use the exact task cancellation instead. Never change
+an already confirmed control body to its opposite or retry a denied action.
+A queued control or allowed confirmation is not completed work. Check the control
+outcome and the exact Response or transcript before claiming that a file was written,
+an approval was resolved, or a task stopped. incomplete with interrupted denotes a
+cancelled CMA response; ordinary incomplete is not proof of cancellation. A NyxID
+tracking timeout only ends tracking: query the live task before describing its outcome.
+A completed response that asks a question in plain text is not a native pending
+approval. When its Agent is ready and the user answers, forward the answer with
+cma__run_task on that same Agent. Use resolve_approval only after observing the
+exact native pending approval and its current response/revision; never invent one
+from wording or a failed read. A failed read means unknown, not waiting_approval.
 "#;
 
 #[cfg(test)]
@@ -523,6 +628,98 @@ mod tests {
         AgentOperationScope, OperationScopes, ScopedOperation,
     };
     use crate::models::downstream_service::ProxyOperationRule;
+
+    #[test]
+    fn resource_summary_keeps_the_name_bound_to_its_remote_identity() {
+        let mut row = NyxbotCmaAgent {
+            id: "local-reference".into(),
+            user_id: "owner".into(),
+            cma_service_id: "service".into(),
+            cma_agent_id: "agt_test".into(),
+            cma_sandbox_id: Some("sbx_test".into()),
+            cma_workspace_id: None,
+            cma_worktree_id: None,
+            sandbox_generation: Some(1),
+            label: "状态提示复验 1105".into(),
+            profile_snapshot: None,
+            observation_state: Default::default(),
+            resource_state: Some("ready".into()),
+            phase: None,
+            last_observed: None,
+            last_observed_revision: None,
+            source_conversation_id: None,
+            source_role: None,
+            source_agent_id: None,
+            source_turn_id: None,
+            source_watch_id: None,
+            source_response_id: Some("resp_known".into()),
+            callback_url: None,
+            creation_operation_id: None,
+            deletion_operation_id: None,
+            retired_at: None,
+            deleted_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let summary = agent_summary(&row);
+        assert_eq!(summary["label"], "状态提示复验 1105");
+        assert_eq!(summary["agent_id"], "agt_test");
+        assert_eq!(summary["status"], "ready");
+        assert_eq!(summary["last_known_response_id"], "resp_known");
+        assert!(summary.get("current_response_id").is_none());
+        assert!(summary.get("user_id").is_none());
+        assert!(summary.get("profile_snapshot").is_none());
+        assert!(summary.get("source_conversation_id").is_none());
+        row.source_response_id = None;
+        assert!(agent_summary(&row)["last_known_response_id"].is_null());
+    }
+
+    #[test]
+    fn attachment_receipt_preserves_api_path_and_exposes_home_absolute_path() {
+        for (path, absolute) in [
+            ("input.txt", "/home/input.txt"),
+            (
+                "acceptance/cma-v1-attachment.txt",
+                "/home/acceptance/cma-v1-attachment.txt",
+            ),
+            (
+                "uploads/quarterly report.txt",
+                "/home/uploads/quarterly report.txt",
+            ),
+            (
+                "folder with spaces/sub folder/input.txt",
+                "/home/folder with spaces/sub folder/input.txt",
+            ),
+        ] {
+            let saved = CmaFileWrite {
+                path: path.into(),
+                size_bytes: 68,
+                sha256: "c".repeat(64),
+            };
+            let receipt = attachment_receipt(&saved);
+            assert_eq!(
+                receipt,
+                json!({
+                    "path":path,"absolute_path":absolute,"size":68,"sha256":"c".repeat(64)
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn attachment_guidance_names_the_api_root_and_agent_command_path() {
+        let description = description("cma_save_attachment");
+        assert!(description.contains("/home/"));
+        assert!(description.contains("absolute_path"));
+        assert!(description.contains("working directory"));
+        let schema = schema("cma_save_attachment");
+        let path = schema["properties"]["path"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(path.contains("/home/"));
+        assert!(path.contains("absolute_path"));
+        assert!(GUIDANCE.contains("absolute_path"));
+    }
 
     #[test]
     fn empty_resource_query_is_valid_and_unknown_inputs_are_rejected() {

@@ -6979,6 +6979,7 @@ async fn execute_resolved_proxy_inner<'a>(
                         billing_egress_permit,
                         egress_guard.as_ref(),
                         resource_proof.as_ref(),
+                        catalog_service_slug.as_deref(),
                         cma_permit.as_ref(),
                     )
                 }),

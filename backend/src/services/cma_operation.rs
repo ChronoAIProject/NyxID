@@ -8,6 +8,112 @@ use serde_json::Value;
 
 pub const APPROVAL_EVENT_KIND: &str = "cma_approval_requested";
 
+#[path = "cma_response_submission.rs"]
+pub(crate) mod submission;
+
+#[cfg(test)]
+#[path = "cma_operation_approval_tests.rs"]
+mod approval_tests;
+
+#[cfg(test)]
+#[path = "cma_operation_outcome_tests.rs"]
+mod outcome_tests;
+
+/// The compiled CMA v2 contract projects a cancelled command as incomplete /
+/// interrupted. Preserve the raw observation and classify only the exact
+/// tracked Response; ordinary incomplete results remain failures.
+pub fn response_cancelled(
+    cma: Option<&CmaOperation>,
+    operation_id: Option<&str>,
+    value: &Value,
+) -> bool {
+    let Some(cma) = cma.filter(|cma| cma.kind == Presentation::Response) else {
+        return false;
+    };
+    let (Some(agent), Some(response)) = (cma.agent_id.as_deref(), operation_id) else {
+        return false;
+    };
+    !agent.is_empty()
+        && !response.is_empty()
+        && cma.response_id.as_deref().is_none_or(|id| id == response)
+        && value["id"].as_str() == Some(response)
+        && value["conversation"]["id"].as_str() == Some(agent)
+        && value["status"].as_str() == Some("incomplete")
+        && value["incomplete_details"]["reason"].as_str() == Some("interrupted")
+        && value.get("error").is_none_or(Value::is_null)
+}
+
+/// Presentation only. Authority still binds the complete original operation,
+/// including decision, response, approval, revision and idempotency key.
+pub fn control_confirmation(
+    catalog_slug: Option<&str>,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Option<&'static str> {
+    if catalog_slug != Some("cma")
+        || method != "POST"
+        || path != "/api/v2/agents/{agent_id}/responses/{response_id}/controls"
+    {
+        return None;
+    }
+    let value: Value = serde_json::from_str(body?).ok()?;
+    match (
+        value["command"]["type"].as_str(),
+        value["command"]["decision"].as_str(),
+    ) {
+        (Some("resolve_approval"), Some("allow")) => Some(
+            "Send approval for the cloud assistant's pending action. Deny on this confirmation sends nothing to CMA and leaves that request waiting.",
+        ),
+        (Some("resolve_approval"), Some("deny")) => Some(
+            "Send a refusal for the cloud assistant's pending action. The assistant may continue another way. Deny on this confirmation sends nothing to CMA and leaves that request waiting.",
+        ),
+        (Some("resolve_approval"), Some("abort")) => Some(
+            "Dismiss the pending approval without an answer. Deny on this confirmation sends nothing to CMA and leaves that request waiting.",
+        ),
+        (Some("cancel"), _) => Some(
+            "Send a cancellation request for this cloud task. Its stopped state must still be confirmed. Deny on this confirmation sends nothing to CMA.",
+        ),
+        _ => None,
+    }
+}
+
+/// CMA's stop/delete endpoints acknowledge scheduling with an empty 202.
+/// Make that observation useful to the model without inventing completion or
+/// an operation ID. The HTTP status and original execution authority stay intact.
+pub fn agent_lifecycle_receipt(
+    catalog_slug: Option<&str>,
+    method: &str,
+    path: &str,
+    status: u16,
+    body: &str,
+) -> Option<String> {
+    if catalog_slug != Some("cma") || status != 202 || !body.trim().is_empty() {
+        return None;
+    }
+    let segments: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+    let (agent, target) = match (method, segments.as_slice()) {
+        ("DELETE", ["api", "v1", "agents", agent]) => (*agent, "deleted"),
+        ("POST", ["api", "v1", "agents", agent, "stop"]) => (*agent, "stopped"),
+        _ => return None,
+    };
+    if agent.len() > 256
+        || !agent.strip_prefix("agt_").is_some_and(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "status":"accepted", "agent_id":agent, "target_status":target,
+        "status_path":format!("/api/v1/agents/{agent}"),
+        "instructions":"CMA accepted this asynchronous lifecycle request; completion is not yet confirmed. Use get_agent for this exact agent_id to observe target_status. Do not repeat the mutation or request another confirmation just because an immediate read still shows the previous status. Report accepted/pending until the target state is observed; if observation remains unavailable, report that uncertainty instead of assuming failure."
+    }).to_string())
+}
+
 pub fn apply_contracts(catalog_slug: &str, endpoints: &mut [McpToolEndpoint]) {
     if catalog_slug != "cma" {
         return;
@@ -189,9 +295,11 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
                 *s,
                 "sandbox_creation"
                     | "sandbox_startup"
+                    | "sandbox_ready"
                     | "workspace_creation"
                     | "agent_creation"
                     | "agent_startup"
+                    | "desktop_preparation"
             )
         })
         .map(str::to_owned);
@@ -305,18 +413,18 @@ pub async fn register_observed_reference(
         .operation_id
         .as_deref()
         .or_else(|| value["id"].as_str());
-    if cma.kind == Presentation::Provisioning {
-        if let Some(operation) = operation {
-            super::nyxbot_cma_admission::record_creation_observation(
-                db,
-                &gateway,
-                &watch.user_id,
-                &service_id,
-                operation,
-                value,
-            )
-            .await?;
-        }
+    if cma.kind == Presentation::Provisioning
+        && let Some(operation) = operation
+    {
+        super::nyxbot_cma_admission::record_creation_observation(
+            db,
+            &gateway,
+            &watch.user_id,
+            &service_id,
+            operation,
+            value,
+        )
+        .await?;
     }
     let response = if cma.kind == Presentation::Response {
         let Some(id) = operation else {
@@ -403,9 +511,43 @@ fn apply_approval_page(
     }
     scan.incarnation = page.incarnation.clone();
     for event in &page.events {
-        if event.response_id.as_deref() != Some(response)
-            || event.turn_sequence != Some(scan.turn_sequence)
-        {
+        if let Some(sequence) = event.sequence {
+            if sequence <= 0 || scan.last_sequence.is_some_and(|last| sequence <= last) {
+                return Err(AppError::Conflict(
+                    "cma_approval_event_order_changed".into(),
+                ));
+            }
+            scan.last_sequence = Some(sequence);
+        } else {
+            // Older directly-bound events remain usable, but cannot establish
+            // or continue the ordered inheritance used by current CMA replay.
+            scan.active_turn = false;
+        }
+        let bound = event.response_id.as_deref() == Some(response)
+            && event.turn_sequence == Some(scan.turn_sequence);
+        if event.kind == "turn_started" {
+            if scan.active_turn {
+                scan.pending.clear();
+            }
+            scan.active_turn = bound && event.sequence == Some(scan.turn_sequence);
+            continue;
+        }
+        if matches!(
+            event.kind.as_str(),
+            "turn_completed" | "turn_failed" | "turn_interrupted"
+        ) {
+            if scan.active_turn {
+                scan.pending.clear();
+            }
+            scan.active_turn = false;
+            continue;
+        }
+        if event.kind == "conversation_gap" && scan.active_turn {
+            return Err(AppError::Conflict("cma_approval_history_incomplete".into()));
+        }
+        let inherited =
+            scan.active_turn && event.response_id.is_none() && event.turn_sequence.is_none();
+        if !bound && !inherited {
             continue;
         }
         let Some(id) = event
@@ -499,13 +641,19 @@ fn prepare_approval_scan(
             cursor: None,
             complete: false,
             pending: Vec::new(),
+            active_turn: false,
+            last_sequence: None,
         });
-    if scan.complete && scan.revision != revision {
+    let legacy_progress = scan.last_sequence.is_none() && (scan.complete || scan.cursor.is_some());
+    if (scan.complete && scan.revision != revision) || legacy_progress {
         // Finish the frozen page walk before catching up a changed revision.
         // A metadata update does not erase already-notified approval identities.
+        // Old scans have no ordered anchor; replay them from the beginning.
         scan.complete = false;
         scan.cursor = None;
         scan.revision = revision;
+        scan.active_turn = false;
+        scan.last_sequence = None;
     }
     scan
 }
@@ -566,6 +714,8 @@ async fn observe_approval(
             scan.complete = false;
             scan.cursor = None;
             scan.revision = current_revision;
+            scan.active_turn = false;
+            scan.last_sequence = None;
         } else {
             for approval in scan.pending.iter().filter(|entry| !entry.notified) {
                 events.push(approval_event(watch, agent, response, &scan, approval));
@@ -660,6 +810,8 @@ mod tests {
             cursor: None,
             complete: false,
             pending: Vec::new(),
+            active_turn: false,
+            last_sequence: None,
         };
         let mut page = CmaEventSnapshot {
             events: vec![
@@ -702,6 +854,7 @@ mod tests {
         use crate::models::async_service_operation::CmaPendingApproval;
         let mut scan = prepare_approval_scan(None, 4, 12);
         scan.cursor = Some("frozen-page-42".into());
+        scan.last_sequence = Some(42);
         scan.pending.push(CmaPendingApproval {
             approval_id: "approval_one".into(),
             notified: true,
@@ -775,6 +928,18 @@ mod tests {
         assert!(!saved.contains("private"));
         assert!(saved.contains("coffee-site-20261022"));
         assert_eq!(cma.status.as_deref(), Some("waiting_for_connection"));
+        observed(
+            &mut cma,
+            &json!({"status":"running", "phase":"sandbox_ready"}),
+        );
+        assert_eq!(cma.phase.as_deref(), Some("sandbox_ready"));
+        assert_eq!(cma.status.as_deref(), Some("running"));
+        observed(
+            &mut cma,
+            &json!({"status":"running", "phase":"desktop_preparation"}),
+        );
+        assert_eq!(cma.phase.as_deref(), Some("desktop_preparation"));
+        assert_eq!(cma.status.as_deref(), Some("running"));
         observed(
             &mut cma,
             &json!({"status":"private output", "phase":"private output", "agent_id":"sk-secret"}),

@@ -13,12 +13,10 @@ let client: QueryClient;
 function Wrapper({ children }: PropsWithChildren) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
-function mockEventStream(
-  {
-    every15Seconds,
-    ignoreAbort = false,
-  }: { every15Seconds?: Uint8Array; ignoreAbort?: boolean } = {},
-) {
+function mockEventStream({
+  every15Seconds,
+  ignoreAbort = false,
+}: { every15Seconds?: Uint8Array; ignoreAbort?: boolean } = {}) {
   const streams: {
     controller: ReadableStreamDefaultController<Uint8Array>;
     signal: AbortSignal;
@@ -97,6 +95,38 @@ it("shows a reconnectable timeout when the SSE handshake stalls", async () => {
   });
   expect(result.current.state).toBe("disconnected");
   expect(result.current.error).toMatch(/timed out/);
+});
+it("refreshes the transcript after the last event in a short burst", async () => {
+  const firstStream = mockEventStream();
+  const invalidate = vi.spyOn(client, "invalidateQueries");
+  renderHook(() => useCmaEventStream("local", "agt_one", undefined, true), {
+    wrapper: Wrapper,
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+  const send = (sequence: number, type: string) =>
+    firstStream().controller.enqueue(
+      new TextEncoder().encode(
+        `id: ${sequence}\ndata: ${JSON.stringify({ sequence, kind: { type } })}\n\n`,
+      ),
+    );
+  await act(async () => {
+    send(10, "turn_started");
+  });
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100);
+    send(11, "turn_completed");
+  });
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(900);
+  });
+  expect(invalidate).toHaveBeenCalledTimes(2);
+  expect(invalidate).toHaveBeenLastCalledWith({
+    queryKey: ["assistant", "cma", "owner", "transcript", "local"],
+  });
 });
 it.each([
   { kind: "Agent", responseId: undefined, cursor: "agent-cursor" },
@@ -185,9 +215,7 @@ it.each(["unmount", "timeout"])(
     expect(stream.signal.aborted).toBe(true);
     const timers = vi.getTimerCount();
     await act(async () => {
-      stream.controller.enqueue(
-        new TextEncoder().encode(": keep-alive\n\n"),
-      );
+      stream.controller.enqueue(new TextEncoder().encode(": keep-alive\n\n"));
     });
     expect(vi.getTimerCount()).toBe(timers);
     await act(async () => {

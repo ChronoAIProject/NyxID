@@ -12,6 +12,9 @@ function presentation(operation: CmaOperation) {
   if (state === "cancelled") return { label: "Tracking stopped", tone: "muted" };
   if (state === "cancelling") return { label: "Stopping tracking", tone: "muted" };
   if (reason === "timeout") return { label: "Tracking timed out", tone: "warning" };
+  if (kind === "cma_response" && reason === "operation_cancelled" && status === "incomplete") {
+    return { label: "Cancelled", tone: "muted" };
+  }
   if (["submission_uncertain", "submission_failed"].includes(reason ?? "")) {
     return { label: "Submission unconfirmed", tone: "warning" };
   }
@@ -72,9 +75,11 @@ function safeCmaUrl(value: string | null | undefined): string | undefined {
 const phases: Record<string, string> = {
   sandbox_creation: "Creating sandbox",
   sandbox_startup: "Starting sandbox",
+  sandbox_ready: "Preparing sandbox",
   workspace_creation: "Preparing workspace",
   agent_creation: "Creating agent",
   agent_startup: "Starting agent",
+  desktop_preparation: "Preparing desktop",
 };
 
 export function CmaOperationCard({ operation }: { readonly operation: CmaOperation }) {

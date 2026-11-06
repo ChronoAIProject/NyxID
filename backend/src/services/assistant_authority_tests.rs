@@ -2735,3 +2735,43 @@ async fn cma_wake_events_wait_for_individual_event_turns() {
     }
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn cma_owner_decision_wakes_a_capped_thread_without_releasing_other_events() {
+    use super::{assistant_team_service as team, async_service_operation as operations};
+    use crate::models::assistant_conversation::{COLLECTION_NAME, TurnOrigin};
+    let f = orchestrator_fixture("cma_owner_capped_wake").await;
+    let (card, _) = cma_owner_card(&f, "View the shared desktop").await;
+    let rows = f.state.db.collection::<bson::Document>(COLLECTION_NAME);
+    rows.update_one(
+        doc! {"_id":&f.row.id},
+        doc! {"$set":{"active_turn":bson::Bson::Null,"event_streak":team::MAX_EVENT_STREAK}},
+    )
+    .await
+    .unwrap();
+    let result = team::event(operations::EVENT_KIND, "Earlier result".into(), None);
+    engine::push_events(&f.state.db, &f.owner, &f.row.id, vec![result.clone()])
+        .await
+        .unwrap();
+    assert!(
+        team::queued(&f.state.db, Some(&f.owner))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let decided = acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    let mut queued = team::queued(&f.state.db, Some(&f.owner)).await.unwrap();
+    assert_eq!(queued.len(), 1);
+    let mut row = queued.remove(0);
+    let selected = operations::select_events(&mut row, TurnOrigin::Event);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(
+        Some(selected[0].id.as_str()),
+        decided.continuation_receipt_id.as_deref()
+    );
+    assert_eq!(row.pending_events.len(), 1);
+    assert_eq!(row.pending_events[0].id, result.id);
+    f.state.db.drop().await.unwrap();
+}

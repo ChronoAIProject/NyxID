@@ -7,7 +7,6 @@ import {
   Box,
   Clock3,
   Cpu,
-  Link2,
   MemoryStick,
   Pause,
   Pencil,
@@ -32,11 +31,9 @@ import {
 import { useFeature } from "@/hooks/use-feature-flag";
 import {
   useCmaSandboxes,
-  useClaimCmaSandbox,
   useCmaSandboxCommand,
   useRenameCmaSandbox,
   useRetireCmaSandbox,
-  useUnregisteredCmaSandboxes,
 } from "@/hooks/use-nyxbot-cma-sandboxes";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import {
@@ -89,7 +86,6 @@ function dateLabel(value: string | null) {
 export function AssistantCmaSandboxesPage() {
   const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const query = useCmaSandboxes();
-  const [linking, setLinking] = useState(false);
   if (!enabled)
     return (
       <p role="status" className="text-13 text-text-tertiary">
@@ -100,7 +96,11 @@ export function AssistantCmaSandboxesPage() {
     query.data?.sandboxes.filter(
       (row) => !row.retired_at && row.admission_state !== "retired",
     ) ?? [];
-  const confirmedEmpty = query.data?.inventory_complete && rows.length === 0;
+  const confirmedEmpty =
+    query.data?.inventory_complete &&
+    query.data.occupied === 0 &&
+    !query.data.conflict &&
+    rows.length === 0;
   return (
     <div className="mx-auto w-full max-w-4xl space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
@@ -108,7 +108,8 @@ export function AssistantCmaSandboxesPage() {
           <p className="mb-2 text-11 text-text-tertiary">Workspace</p>
           <h1 className="text-24 font-semibold tracking-tight">Sandboxes</h1>
           <p className="mt-2 text-13 text-text-tertiary">
-            A persistent environment for work you delegate to NyxBot.
+            Only Sandboxes created through NyxID appear here and use this
+            allocation.
           </p>
         </div>
         <div className="flex gap-2">
@@ -120,25 +121,19 @@ export function AssistantCmaSandboxesPage() {
             <RefreshCw />
             Refresh
           </Button>
-          {confirmedEmpty && (
-            <Button variant="outline" onClick={() => setLinking(true)}>
-              <Link2 />
-              Link existing
-            </Button>
-          )}
         </div>
       </header>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 text-12">
         <span className="flex items-center gap-2.5">
           <ShieldCheck className="size-4 text-text-tertiary" />
           Personal account{" "}
-          <span className="text-text-tertiary">/ Sandbox allocation</span>
+          <span className="text-text-tertiary">/ NyxID Sandbox allocation</span>
         </span>
         <span className="font-medium tabular-nums">
-          {query.data
-            ? rows.filter((row) => row.occupies_account_slot).length
-            : "—"}{" "}
-          <span className="text-text-tertiary">/ 1 used</span>
+          {query.data?.occupied ?? "—"}{" "}
+          <span className="text-text-tertiary">
+            / {query.data?.limit ?? "—"} used
+          </span>
         </span>
       </div>
       {query.isPending && <p role="status">Checking your environment…</p>}
@@ -156,11 +151,11 @@ export function AssistantCmaSandboxesPage() {
       {query.data?.conflict && (
         <Notice>
           <strong className="font-medium">
-            Your account has multiple existing environments.
+            Your account has multiple Sandboxes created through NyxID.
           </strong>
           <p className="mt-1">
-            Review each environment and retire those you no longer need. New
-            environments are blocked until the conflict is resolved.
+            Review each Sandbox and retire those you no longer need. New
+            Sandboxes through NyxID are blocked until the conflict is resolved.
           </p>
         </Notice>
       )}
@@ -185,23 +180,11 @@ export function AssistantCmaSandboxesPage() {
               <ArrowRight />
             </Link>
           </Button>
-          <button
-            className="mx-auto mt-4 block text-12 text-text-tertiary underline-offset-4 hover:underline"
-            onClick={() => setLinking(true)}
-          >
-            Already have a CMA environment? Link it
-          </button>
         </section>
       )}
       {rows.map((sandbox) => (
         <CmaSandboxCard key={sandbox.id} sandbox={sandbox} />
       ))}
-      <p className="text-12 leading-relaxed text-text-tertiary">
-        Billed through CMA. Resource charges follow your CMA account and plan.
-        Price and accrued charges are unknown here. Pausing an environment or
-        deleting an Agent does not confirm that all charges have stopped.
-      </p>
-      {linking && <ClaimDialog onClose={() => setLinking(false)} />}
     </div>
   );
 }
@@ -239,8 +222,17 @@ export function CmaSandboxCard({
   const retired = status === "retired" || Boolean(sandbox.retired_at);
   const actionable =
     Boolean(sandbox.cma_sandbox_id) && !pending && !unknown && !retired;
-  const capacity = (value: number | null, divisor: number, unit: string) =>
-    !unknown && status !== "creating" && value !== null && value > 0
+  const capacitySource = sandbox.capacity?.source;
+  const capacityConfirmed =
+    Boolean(sandbox.cma_sandbox_id) &&
+    (capacitySource === "profile_revision" ||
+      capacitySource === "runtime_allocation");
+  const capacity = (
+    value: number | null | undefined,
+    divisor: number,
+    unit: string,
+  ) =>
+    capacityConfirmed && value != null && value > 0
       ? `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value / divisor)} ${unit}`
       : "Not confirmed";
   return (
@@ -309,7 +301,7 @@ export function CmaSandboxCard({
         )}
         <div className="border-y border-hairline bg-overlay px-5 py-5 sm:px-6">
           <h3 className="mb-4 text-11 font-medium text-text-tertiary">
-            Configured resources
+            Resources
           </h3>
           <dl className="grid grid-cols-2 gap-5">
             <div>
@@ -318,7 +310,7 @@ export function CmaSandboxCard({
                 CPU
               </dt>
               <dd className="mt-2 text-13 font-medium">
-                {capacity(sandbox.cpu_millis, 1000, "vCPU")}
+                {capacity(sandbox.capacity?.cpu_millis, 1000, "vCPU")}
               </dd>
             </div>
             <div>
@@ -327,7 +319,7 @@ export function CmaSandboxCard({
                 Memory
               </dt>
               <dd className="mt-2 text-13 font-medium">
-                {capacity(sandbox.memory_mib, 1024, "GiB")}
+                {capacity(sandbox.capacity?.memory_mib, 1024, "GiB")}
               </dd>
             </div>
           </dl>
@@ -541,93 +533,6 @@ function SandboxActionDialog({
             </Button>
           </DialogFooter>
         </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function ClaimDialog({ onClose }: { readonly onClose: () => void }) {
-  const query = useUnregisteredCmaSandboxes(true);
-  const claim = useClaimCmaSandbox();
-  const [error, setError] = useState<string>();
-  const [pending, setPending] = useState<string>();
-  async function link(id: string) {
-    setPending(id);
-    setError(undefined);
-    try {
-      await claim.mutateAsync({ sandbox_id: id });
-      toast.success("Environment linked");
-      onClose();
-    } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Unable to link this environment.",
-      );
-    } finally {
-      setPending(undefined);
-    }
-  }
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open) onClose();
-      }}
-    >
-      <DialogContent className="md:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>Link an existing environment</DialogTitle>
-          <DialogDescription>
-            Associate an environment from your CMA account. Linking uses your
-            account’s single Sandbox allocation and does not create resources or
-            transfer ownership.
-          </DialogDescription>
-        </DialogHeader>
-        {query.isPending && (
-          <p role="status" className="text-12">
-            Checking CMA…
-          </p>
-        )}
-        {(error || query.error) && (
-          <p role="alert" className="text-12 text-destructive">
-            {error ?? query.error?.message}
-          </p>
-        )}
-        {query.data?.sandboxes.length === 0 && (
-          <p className="text-12 text-text-tertiary">
-            No unlinked environment was found in your CMA account.
-          </p>
-        )}
-        <div className="space-y-3">
-          {query.data?.sandboxes.map((row) => (
-            <div
-              key={row.id}
-              className="flex items-center justify-between gap-3 rounded-lg border border-hairline p-3"
-            >
-              <div className="min-w-0">
-                <p className="text-13 font-medium">
-                  {row.name ?? "CMA environment"}
-                </p>
-                <p className="break-all font-mono text-10 text-text-tertiary">
-                  {row.id}
-                </p>
-              </div>
-              <Button
-                disabled={Boolean(pending)}
-                isLoading={pending === row.id}
-                onClick={() => void link(row.id)}
-              >
-                Link
-              </Button>
-            </div>
-          ))}
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Close
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

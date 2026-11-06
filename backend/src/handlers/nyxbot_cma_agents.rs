@@ -27,7 +27,8 @@ use futures::{SinkExt, StreamExt};
 use mongodb::bson::{self, doc};
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 const AUTHORITY_INTERVAL: Duration = Duration::from_secs(10);
 const AUTHORITY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,8 +43,6 @@ async fn reference(
     let owner = owner(state, auth).await?;
     let row = agents::get_owned(&state.db, &owner, id).await?;
     let gateway = CatalogCmaGateway::for_service(state, &row.cma_service_id);
-    agents::require_bound(&state.db, &gateway, &owner, id).await?;
-    agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok((owner, row, gateway))
 }
 
@@ -66,6 +65,7 @@ pub async fn transcript(
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaTranscript>> {
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
+    agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok(Json(
         gateway
             .get_transcript(&owner, &row.cma_agent_id, query.cursor.as_deref())
@@ -79,6 +79,7 @@ pub async fn snapshot(
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaEventSnapshot>> {
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
+    agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok(Json(
         gateway
             .get_event_snapshot(&owner, &row.cma_agent_id, query.cursor.as_deref())
@@ -91,6 +92,7 @@ pub async fn response(
     Path((id, response_id)): Path<(String, String)>,
 ) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaResponse>> {
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
+    agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok(Json(
         gateway
             .get_response(&owner, &row.cma_agent_id, &response_id)
@@ -155,16 +157,29 @@ async fn session_live(state: &AppState, owner: &str, session: Option<uuid::Uuid>
     };
     let session =
         session.ok_or_else(|| AppError::Forbidden("A current human session is required".into()))?;
-    let user = state
-        .db
-        .collection::<User>(USERS)
-        .find_one(doc! {"_id":owner,"is_active":true})
-        .await?
+    let (user, session) = tokio::try_join!(
+        async {
+            state
+                .db
+                .collection::<User>(USERS)
+                .find_one(doc! {"_id":owner,"is_active":true})
+                .await
+        },
+        async {
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .find_one(crate::services::session_authority::authenticated(doc! {
+                    "_id":session.to_string(),"user_id":owner,"revoked":false,
+                    "expires_at":{"$gt":bson::DateTime::from_chrono(chrono::Utc::now())}
+                }))
+                .await
+        },
+    )?;
+    let user = user
         .filter(|user| user.user_type.is_person())
         .ok_or_else(|| AppError::Forbidden("Human session ended".into()))?;
-    let session=state.db.collection::<Session>(SESSIONS).find_one(crate::services::session_authority::authenticated(doc! {
-        "_id":session.to_string(),"user_id":owner,"revoked":false,"expires_at":{"$gt":bson::DateTime::from_chrono(chrono::Utc::now())}
-    })).await?.ok_or_else(||AppError::Forbidden("Human session ended".into()))?;
+    let session = session.ok_or_else(|| AppError::Forbidden("Human session ended".into()))?;
     if user.mfa_enabled && !crate::services::session_authority::satisfies_mfa(&session) {
         return Err(AppError::Forbidden(
             "Human session verification changed".into(),
@@ -175,7 +190,7 @@ async fn session_live(state: &AppState, owner: &str, session: Option<uuid::Uuid>
 
 async fn stream_authority(
     state: &AppState,
-    gateway: &CatalogCmaGateway,
+    gateway: &dyn CmaGateway,
     owner: &str,
     session: Option<uuid::Uuid>,
     row: &NyxbotCmaAgent,
@@ -183,24 +198,29 @@ async fn stream_authority(
     desktop: bool,
 ) -> AppResult<()> {
     tokio::time::timeout(AUTHORITY_TIMEOUT, async {
-        session_live(state, owner, session).await?;
-        agents::revalidate(&state.db, gateway, owner, row).await?;
-        if let Some(response) = response {
-            gateway
-                .get_response(owner, &row.cma_agent_id, response)
-                .await?;
-        }
-        if desktop
-            && !agents::desktop(&state.db, gateway, owner, &row.id)
-                .await?
-                .available
-        {
-            return Err(AppError::Forbidden("CMA desktop is unavailable".into()));
-        }
+        tokio::try_join!(
+            session_live(state, owner, session),
+            agents::revalidate_stream(&state.db, gateway, owner, row, response, desktop),
+        )?;
         Ok(())
     })
     .await
     .map_err(|_| AppError::Forbidden("CMA observation authority unavailable".into()))?
+}
+
+fn authority_interval(checked: Instant) -> tokio::time::Interval {
+    // Opening the upstream counts against the check's age. A slow open makes
+    // the first tick immediately ready; a fast open reuses the admission check.
+    let mut interval = tokio::time::interval_at(checked + AUTHORITY_INTERVAL, AUTHORITY_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval
+}
+
+fn authority_check_completed(checked: &mut Instant, interval: &mut tokio::time::Interval) {
+    *checked = Instant::now();
+    // A successful check replaces any pending tick, including one missed
+    // during downstream backpressure. It never renews the stream lifetime.
+    interval.reset_at(*checked + AUTHORITY_INTERVAL);
 }
 
 pub async fn events(
@@ -345,12 +365,13 @@ async fn relay_events(
         false,
     )
     .await?;
+    let checked = Instant::now();
     let mut upstream = gateway
         .open_event_stream(&owner, &row.cma_agent_id, response_id.as_deref(), cursor)
         .await?;
     let stream = async_stream::stream! {
-        let started=Instant::now();let mut checked=Instant::now();let mut buffer=Vec::new();let mut received=0usize;
-        let mut interval=tokio::time::interval(AUTHORITY_INTERVAL);interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let started=Instant::now();let mut checked=checked;let mut buffer=Vec::new();let mut received=0usize;
+        let mut interval=authority_interval(checked);
         let lifetime=tokio::time::sleep(Duration::from_secs(MAX_STREAM_SECONDS));tokio::pin!(lifetime);
         'relay: loop {
             tokio::select! {
@@ -358,7 +379,7 @@ async fn relay_events(
                 _=&mut lifetime=>break,
                 _=interval.tick()=>{
                     if stream_authority(&state,&gateway,&owner,auth.session_id,&row,response_id.as_deref(),false).await.is_err() {yield Ok::<Bytes,std::io::Error>(observation_error());break;}
-                    checked=Instant::now();
+                    authority_check_completed(&mut checked,&mut interval);
                 }
                 chunk=upstream.chunk()=>{
                     let chunk=match chunk {Ok(Some(chunk))=>chunk,Ok(None)=>break,Err(_)=>{yield Ok(observation_error());break;}};
@@ -373,7 +394,7 @@ async fn relay_events(
                         if started.elapsed()>=Duration::from_secs(MAX_STREAM_SECONDS) {break 'relay;}
                         if checked.elapsed()>=AUTHORITY_INTERVAL {
                             if stream_authority(&state,&gateway,&owner,auth.session_id,&row,response_id.as_deref(),false).await.is_err() {yield Ok(observation_error());break 'relay;}
-                            checked=Instant::now();
+                            authority_check_completed(&mut checked,&mut interval);
                         }
                         yield Ok(Bytes::from(frame));
                     }
@@ -465,6 +486,7 @@ pub async fn desktop_ws(
     )?;
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
     stream_authority(&state, &gateway, &owner, auth.session_id, &row, None, true).await?;
+    let checked = Instant::now();
     let upstream = gateway.open_desktop(&owner, &row.cma_agent_id).await?;
     // CMA's open enforces one viewer per shared Sandbox before our browser
     // upgrade succeeds. Neither endpoint mints a replacement Agent.
@@ -472,31 +494,34 @@ pub async fn desktop_ws(
         .max_message_size(MAX_DESKTOP_FRAME_BYTES)
         .max_frame_size(MAX_DESKTOP_FRAME_BYTES)
         .on_upgrade(move |socket| {
-            desktop_relay(state, auth, owner, row, gateway, upstream, socket)
+            desktop_relay(state, auth, row, gateway, upstream, socket, checked)
         }))
 }
 
 async fn desktop_relay(
     state: AppState,
     auth: AuthUser,
-    owner: String,
     row: NyxbotCmaAgent,
     gateway: CatalogCmaGateway,
     upstream: CmaDesktopSocket,
     socket: WebSocket,
+    checked: Instant,
 ) {
     use tokio_tungstenite::tungstenite::Message as Remote;
     let (mut remote_sink, mut remote_source) = upstream.split();
     let (mut browser_sink, mut browser_source) = socket.split();
-    let mut interval = tokio::time::interval(AUTHORITY_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut checked = checked;
+    let mut interval = authority_interval(checked);
     let lifetime = tokio::time::sleep(Duration::from_secs(MAX_STREAM_SECONDS));
     tokio::pin!(lifetime);
     loop {
         tokio::select! {
             biased;
             _=&mut lifetime=>break,
-            _=interval.tick()=>{if stream_authority(&state,&gateway,&owner,auth.session_id,&row,None,true).await.is_err(){break;}},
+            _=interval.tick()=>{
+                if stream_authority(&state,&gateway,&row.user_id,auth.session_id,&row,None,true).await.is_err(){break;}
+                authority_check_completed(&mut checked,&mut interval);
+            },
             outgoing=remote_source.next()=>{
                 let message=match outgoing {Some(Ok(Remote::Binary(bytes)))=>Message::Binary(bytes),Some(Ok(Remote::Ping(bytes)))=>Message::Ping(bytes),Some(Ok(Remote::Pong(bytes)))=>Message::Pong(bytes),_=>break};
                 if !matches!(tokio::time::timeout(Duration::from_secs(3),browser_sink.send(message)).await,Ok(Ok(()))){break;}
@@ -522,6 +547,56 @@ async fn desktop_relay(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test(start_paused = true)]
+    async fn authority_interval_reuses_the_initial_check_until_its_deadline() {
+        let checked = tokio::time::Instant::now();
+        let mut interval = authority_interval(checked);
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_pending());
+        tokio::time::advance(AUTHORITY_INTERVAL - Duration::from_millis(1)).await;
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_pending());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_upstream_open_does_not_postpone_the_next_authority_check() {
+        let checked = tokio::time::Instant::now();
+        tokio::time::advance(AUTHORITY_INTERVAL + Duration::from_secs(1)).await;
+        let mut interval = authority_interval(checked);
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn successful_authority_check_starts_the_next_interval_at_completion() {
+        let mut checked = Instant::now();
+        let mut interval = authority_interval(checked);
+        tokio::time::advance(AUTHORITY_INTERVAL).await;
+        interval.tick().await;
+        // The check starts at t=10 and completes at t=14.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        authority_check_completed(&mut checked, &mut interval);
+        assert_eq!(checked, Instant::now());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_pending());
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_ready());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn buffered_frame_authority_check_clears_an_unconsumed_interval_tick() {
+        let mut checked = Instant::now();
+        let mut interval = authority_interval(checked);
+        // Backpressure resumes at t=12, before the relay consumes its t=10
+        // tick. The buffered-frame check then completes at t=16.
+        tokio::time::advance(Duration::from_secs(12)).await;
+        tokio::time::advance(Duration::from_secs(4)).await;
+        authority_check_completed(&mut checked, &mut interval);
+        assert_eq!(checked, Instant::now());
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_pending());
+        tokio::time::advance(AUTHORITY_INTERVAL).await;
+        assert!(futures::poll!(std::pin::pin!(interval.tick())).is_ready());
+    }
+
     #[test]
     fn stream_cursors_are_bounded_and_headers_must_agree() {
         let mut headers = HeaderMap::new();

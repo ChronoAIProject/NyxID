@@ -3026,14 +3026,18 @@ pub async fn tool_delegation_summaries(
 /// Idle threads with queued events whose wake-up was deferred (full pool or
 /// a replica restart), oldest first. Bounded; loop guards still apply at wake time.
 pub async fn queued(db: &Database, owner: Option<&str>) -> AppResult<Vec<AssistantConversation>> {
-    // NyxBot threads parked at the streak cap wait for a user message; they
-    // never crowd out threads that can still wake.
+    // At the streak cap only a user message or a bound human desktop decision
+    // can resume NyxBot. Automated provider approvals still wait.
     let mut filter = doc! {
         "collaboration": null,
         "pending_events.created_at": {"$exists": true},
         "$or": [
             {"role": "subagent"},
             {"event_streak": {"$not": {"$gte": MAX_EVENT_STREAK}}},
+            {"pending_events": {"$elemMatch": {
+                "kind": super::assistant_acknowledgement_service::CMA_OWNER_EVENT_KIND,
+                "bound": true,
+            }}},
         ],
     };
     if let Some(owner) = owner {

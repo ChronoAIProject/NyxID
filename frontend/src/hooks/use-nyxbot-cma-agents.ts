@@ -184,7 +184,21 @@ export function useCmaEventStream(
         ? (resume.current.cursor ?? initialCursor ?? undefined)
         : (initialCursor ?? undefined);
     resume.current = { identity, cursor };
-    let refreshAt = 0;
+    let refreshAt = -Infinity;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      clearTimeout(refreshTimer);
+      refreshTimer = undefined;
+      if (!current()) return;
+      refreshAt = Date.now();
+      void client.invalidateQueries({
+        queryKey: [
+          ...cmaQueryKeys.root(scope.owner),
+          responseId ? "response" : "transcript",
+          id,
+        ],
+      });
+    };
     async function observe() {
       await Promise.resolve();
       if (!current()) return;
@@ -234,16 +248,12 @@ export function useCmaEventStream(
               [event],
             ),
           }));
-          if (Date.now() - refreshAt > 1_000) {
-            refreshAt = Date.now();
-            void client.invalidateQueries({
-              queryKey: [
-                ...cmaQueryKeys.root(scope.owner),
-                responseId ? "response" : "transcript",
-                id,
-              ],
-            });
-          }
+          const elapsed = Date.now() - refreshAt;
+          if (elapsed >= 1_000) refresh();
+          // Keep the final event of a burst: otherwise a completed turn can
+          // remain active in the transcript until the next unrelated event.
+          else if (refreshTimer === undefined)
+            refreshTimer = setTimeout(refresh, 1_000 - elapsed);
         }
         if (current())
           setResult((previous) => ({ ...previous, state: "disconnected" }));
@@ -258,6 +268,7 @@ export function useCmaEventStream(
                 : "CMA observation is unavailable.",
           }));
       } finally {
+        if (refreshTimer !== undefined) refresh();
         clearTimeout(timeout);
         clearTimeout(lifetime);
       }
@@ -265,6 +276,7 @@ export function useCmaEventStream(
     void observe();
     return () => {
       disposed = true;
+      clearTimeout(refreshTimer);
       clearTimeout(timeout);
       clearTimeout(lifetime);
       abort.abort();

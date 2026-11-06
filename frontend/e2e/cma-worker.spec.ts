@@ -14,6 +14,11 @@ const sandbox: CmaSandbox = {
   machine_included: true,
   cpu_millis: 2000,
   memory_mib: 4096,
+  capacity: {
+    cpu_millis: 2000,
+    memory_mib: 4096,
+    source: "profile_revision",
+  },
   last_activity_at: "2026-11-03T08:45:00Z",
   last_observed: "2026-11-03T08:46:00Z",
   retire_requested_at: null,
@@ -176,6 +181,8 @@ async function cmaApi(page: Page, options: FixtureOptions = {}) {
       return route.fulfill({
         json: {
           sandboxes: options.empty ? [] : [projection],
+          occupied: options.empty ? 0 : 1,
+          limit: 1,
           conflict: false,
           inventory_complete: true,
           next_cursor: null,
@@ -224,13 +231,49 @@ async function cmaApi(page: Page, options: FixtureOptions = {}) {
     if (path === `${agentBase}/transcript`)
       return route.fulfill({
         json: {
-          messages: [
+          messages: [],
+          turns: [
             {
-              id: "shared_message",
-              sequence: 14,
-              role: "assistant",
-              content: sharedOutput,
-              created_at: "2026-11-03T08:00:00Z",
+              turn_sequence: 10,
+              started_at: "2026-11-03T08:00:00Z",
+              status: "completed",
+              messages: [
+                {
+                  id: "request_exact",
+                  sequence: 9,
+                  role: "user",
+                  content: "Check the release",
+                  created_at: "2026-11-03T08:00:00Z",
+                },
+                {
+                  id: "reply_exact",
+                  sequence: 14,
+                  role: "assistant",
+                  content: exactOutput,
+                  created_at: "2026-11-03T08:01:00Z",
+                },
+              ],
+            },
+            {
+              turn_sequence: 20,
+              started_at: "2026-11-03T08:02:00Z",
+              status: "completed",
+              messages: [
+                {
+                  id: "request_shared",
+                  sequence: 19,
+                  role: "user",
+                  content: "Inspect the shared workspace",
+                  created_at: "2026-11-03T08:02:00Z",
+                },
+                {
+                  id: "shared_message",
+                  sequence: 24,
+                  role: "assistant",
+                  content: sharedOutput,
+                  created_at: "2026-11-03T08:03:00Z",
+                },
+              ],
             },
           ],
           next_cursor: null,
@@ -241,17 +284,37 @@ async function cmaApi(page: Page, options: FixtureOptions = {}) {
         json: {
           events: [
             {
+              id: "start_exact",
+              sequence: 10,
+              type: "turn_started",
+              response_id: responseId,
+              turn_sequence: 10,
+              status: null,
+              message: null,
+              created_at: "2026-11-03T08:00:00Z",
+            },
+            {
+              id: "start_shared",
+              sequence: 20,
+              type: "turn_started",
+              response_id: "newer_response",
+              turn_sequence: 20,
+              status: null,
+              message: null,
+              created_at: "2026-11-03T08:02:00Z",
+            },
+            {
               id: "event_snapshot",
-              sequence: 15,
-              cursor: "cursor_snapshot_15",
+              sequence: 25,
+              cursor: "cursor_snapshot_25",
               type: "tool_completed",
               status: "completed",
               message: "Shared tool completed a prior workspace inspection.",
-              created_at: "2026-11-03T08:01:00Z",
+              created_at: "2026-11-03T08:03:00Z",
             },
           ],
           next_cursor: null,
-          through_cursor: "cursor_snapshot_15",
+          through_cursor: "cursor_snapshot_25",
         },
       });
     if (path === `${agentBase}/desktop`)
@@ -394,13 +457,22 @@ for (const width of [1440, 390]) {
       page.getByText(/Simply opening this page doesn’t start one/),
     ).toBeVisible();
     await expect(page.getByRole("link", { name: "Ask NyxBot" })).toBeVisible();
+    await expect(page.getByText(/created through NyxID/)).toBeVisible();
+    await expect(page.getByText(/NyxID Sandbox allocation/)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Link existing", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByText(/Already have a CMA/)).toHaveCount(0);
     await capture(page, testInfo, "sandboxes-empty");
+    expect(
+      api.reads.some((path) => /\/(claim|unregistered)(\?|$)/.test(path)),
+    ).toBe(false);
     expect(api.writes).toEqual([]);
     expect(api.errors).toEqual([]);
     expect(api.sockets).toEqual([]);
   });
 
-  test(`Agent exact task, shared history and unavailable Desktop stay separate at ${width}px`, async ({
+  test(`Cloud assistant preserves an old link within its unified conversation at ${width}px`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: width < 768 ? 844 : 1000 });
@@ -409,38 +481,36 @@ for (const width of [1440, 390]) {
     await expect(
       page.getByRole("heading", { name: "Release research Agent" }),
     ).toBeVisible();
+    await expect(
+      page.getByRole("tab", { name: "Conversation", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/You are viewing an earlier request/),
+    ).toBeVisible();
     await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
     await expect(page.getByText(sharedOutput, { exact: true })).toHaveCount(0);
-    expect(
-      api.reads.some(
-        (path) =>
-          path.includes("/transcript") ||
-          path.includes("/events/snapshot") ||
-          path.endsWith("/desktop"),
-      ),
-    ).toBe(false);
-    await expect
-      .poll(() =>
-        api.reads.includes(`${agentBase}/responses/${responseId}/events`),
-      )
-      .toBe(true);
-    await capture(page, testInfo, "agent-exact-task");
-    await page
-      .getByRole("button", { name: "Agent history", exact: true })
-      .click();
-    await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
-    await expect(
-      page.getByText(/This Agent’s history is shared across NyxBot chats/),
-    ).toBeVisible();
-    await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
     await expect
       .poll(() =>
         api.reads.includes(
-          `${agentBase}/events?after_cursor=cursor_snapshot_15`,
+          `${agentBase}/events?after_cursor=cursor_snapshot_25`,
         ),
       )
       .toBe(true);
-    await capture(page, testInfo, "agent-shared-history");
+    expect(api.reads).toContain(`${agentBase}/transcript`);
+    expect(api.reads).not.toContain(
+      `${agentBase}/responses/${responseId}/events`,
+    );
+    await capture(page, testInfo, "assistant-linked-request");
+    await page.getByRole("link", { name: "View latest", exact: true }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/assistant/cma-agents/${agentId}$`),
+    );
+    await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
+    await expect(
+      page.getByText(/all NyxBot chats that use this assistant/),
+    ).toBeVisible();
+    await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
+    await capture(page, testInfo, "assistant-latest-conversation");
     await page.getByRole("tab", { name: "Desktop", exact: true }).click();
     const desktop = page.getByRole("region", {
       name: "Shared Sandbox desktop",
@@ -497,49 +567,42 @@ test("feature-off direct routes make no CMA calls", async ({
   expect(api.errors).toEqual([]);
 });
 
-test("an Agent link without a response never guesses the latest task", async ({
+test("a direct assistant entry opens recent conversation without inventing a response binding", async ({
   page,
 }, testInfo) => {
   const api = await cmaApi(page);
   await page.goto(`/assistant/cma-agents/${agentId}`);
   await expect(
-    page.getByText(/No latest task is selected automatically/),
+    page.getByRole("region", { name: "Latest request" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Release research Agent" }),
-  ).toBeVisible();
+  await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
   await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
-  expect(
-    api.reads.filter(
-      (path) =>
-        path.includes("/responses/") ||
-        path.includes("/events") ||
-        path.endsWith("/transcript"),
-    ),
-  ).toEqual([]);
-  await capture(page, testInfo, "agent-no-response-binding");
+  expect(api.reads.some((path) => path.includes("/responses/"))).toBe(false);
+  await capture(page, testInfo, "assistant-direct-entry");
   expect(api.writes).toEqual([]);
   expect(api.errors).toEqual([]);
 });
 
 for (const binding of ["wrong-agent", "wrong-response"] as const) {
-  test(`an Agent rejects ${binding} task output and streaming`, async ({
+  test(`an assistant rejects a ${binding} link without opening another request`, async ({
     page,
   }, testInfo) => {
     const api = await cmaApi(page, { responseBinding: binding });
     await page.goto(`/assistant/cma-agents/${agentId}?response=${responseId}`);
     await expect(page.getByRole("alert")).toHaveText(
-      binding === "wrong-agent"
-        ? "The response could not be bound to this Agent."
-        : "CMA response binding could not be verified.",
+      "The linked request is unavailable or does not belong to this assistant.",
     );
     await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
+    await expect(page.getByText(sharedOutput, { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "Linked request" }),
+    ).toHaveCount(0);
     expect(
       api.reads.some(
-        (path) => path.endsWith("/events") || path.includes("/transcript"),
+        (path) => path.includes("/responses/") && path.endsWith("/events"),
       ),
     ).toBe(false);
-    await capture(page, testInfo, `agent-${binding}`);
+    await capture(page, testInfo, `assistant-${binding}`);
     expect(api.writes).toEqual([]);
     expect(api.errors).toEqual([]);
   });

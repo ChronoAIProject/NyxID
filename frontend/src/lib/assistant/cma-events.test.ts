@@ -6,6 +6,41 @@ import {
   readCmaStream,
 } from "./cma-events";
 
+it("preserves authoritative response and turn binding from both V2 frames and projected snapshots", () => {
+  const raw = normalizeCmaEvent(
+    {
+      agent_id: "agt",
+      sequence: 25,
+      cursor: "start25",
+      kind: { type: "turn_started" },
+      response_binding: { response_id: "rsp-old", turn_sequence: 25 },
+    },
+    { agentId: "agt" },
+  );
+  const projected = normalizeCmaEvent(
+    {
+      sequence: 25,
+      cursor: "start25",
+      type: "turn_started",
+      response_id: "rsp-old",
+      turn_sequence: 25,
+    },
+    { agentId: "agt" },
+  );
+  expect(raw).toMatchObject({
+    responseId: "rsp-old",
+    turnSequence: 25,
+    sequence: 25,
+  });
+  expect(projected).toEqual(raw);
+  expect(
+    normalizeCmaEvent(
+      { sequence: 26, kind: { type: "tool_started" } },
+      { agentId: "agt" },
+    ),
+  ).toMatchObject({ responseId: undefined, turnSequence: undefined });
+});
+
 it("orders committed history by durable sequence and deduplicates only by identity", () => {
   const messages = orderCmaMessages([
     {

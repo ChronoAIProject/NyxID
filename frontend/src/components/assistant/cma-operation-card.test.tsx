@@ -50,6 +50,16 @@ describe("CMA delegation card", () => {
   });
 
   it.each([
+    ["sandbox_ready", "Preparing sandbox"],
+    ["desktop_preparation", "Preparing desktop"],
+  ])("shows CMA's %s phase without claiming the Agent is ready", (phase, label) => {
+    render(<CmaOperationCard operation={{ ...operation, kind: "cma_provisioning", status: "running", phase }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Starting");
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(within(screen.getByRole("list", { name: "CMA progress" })).getByText("Agent ready").querySelector("svg")).toBeNull();
+  });
+
+  it.each([
     [{ state: "waiting", status: "waiting_approval" }, "Needs approval"],
     [{ state: "waiting", status: "waiting_for_connection" }, "Needs connection"],
     [{ state: "waiting", status: null }, "Awaiting status"],
@@ -69,6 +79,15 @@ describe("CMA delegation card", () => {
   it("does not claim that stopping the tracker cancelled CMA", () => {
     render(<CmaOperationCard operation={{ ...operation, state: "cancelled" }} />);
     expect(screen.getByText("Tracking ended. CMA may still be running.")).toBeInTheDocument();
+  });
+
+  it("distinguishes confirmed response cancellation from an ordinary incomplete response", () => {
+    const { rerender } = render(<CmaOperationCard operation={{ ...operation, state: "delivered", status: "incomplete", reason: "operation_cancelled" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Cancelled");
+    expect(screen.queryByText(/may still be running/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Completed")).not.toBeInTheDocument();
+    rerender(<CmaOperationCard operation={{ ...operation, state: "delivered", status: "incomplete", reason: "operation_failed" }} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Incomplete");
   });
 
   it("keeps tracking an accepted agent input while the agent is initially ready", () => {

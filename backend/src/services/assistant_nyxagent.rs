@@ -2520,7 +2520,16 @@ pub(crate) async fn begin_owner_turn_in_session(
     row.guest_turn = guest;
     let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
-            row.event_streak = row.event_streak.saturating_add(1);
+            row.event_streak = if events
+                .iter()
+                .any(super::async_service_operation::cma_owner_wake_event)
+            {
+                // This exact event is a new human interaction, selected alone.
+                // Do not give automated approvals the same reset.
+                1
+            } else {
+                row.event_streak.saturating_add(1)
+            };
             let text = event_turn_text(
                 &events,
                 row.group_request_id.as_ref().map(|_| start.text.as_str()),
@@ -2537,7 +2546,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         TurnOrigin::Group => ("group", start.text.clone()),
         TurnOrigin::Trigger => ("event", start.text.clone()),
         TurnOrigin::User | TurnOrigin::Channel => {
-            // Only the owner's messages reset the event-turn guard.
+            // An owner's message resets the event-turn guard; a guest's does not.
             if !start.guest {
                 row.event_streak = 0;
                 if start.acknowledgement_id.is_none()

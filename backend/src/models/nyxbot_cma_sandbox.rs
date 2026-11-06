@@ -69,6 +69,14 @@ impl SandboxObservationState {
     }
 }
 
+/// Verified source of the resource capacity saved for this creation identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxCapacitySource {
+    ProfileRevision,
+    RuntimeAllocation,
+}
+
 /// NyxID's durable, owner-scoped reference to a CMA Sandbox.
 ///
 /// The encrypted request body is recovery material only. It is never safe to
@@ -93,6 +101,8 @@ pub struct NyxbotCmaSandbox {
     /// Serializes Agent-reference registration with exact receipt association.
     #[serde(default)]
     pub agent_reference_version: i64,
+    /// `nyxbot` is server-written creation provenance. Legacy discovered,
+    /// claimed and conflict references are outside NyxID's managed allocation.
     pub source: String,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_observed: Option<DateTime<Utc>>,
@@ -104,6 +114,8 @@ pub struct NyxbotCmaSandbox {
     pub cpu_millis: Option<u32>,
     #[serde(default)]
     pub memory_mib: Option<u32>,
+    #[serde(default)]
+    pub capacity_source: Option<SandboxCapacitySource>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
@@ -172,6 +184,7 @@ mod tests {
             resource_state: Some("provisioning".into()),
             cpu_millis: Some(2_000),
             memory_mib: Some(2_048),
+            capacity_source: None,
             last_activity_at: Some(now),
             retire_requested_at: Some(now),
             retired_at: Some(now),
@@ -238,6 +251,7 @@ mod tests {
             resource_state: None,
             cpu_millis: None,
             memory_mib: None,
+            capacity_source: None,
             last_activity_at: None,
             retire_requested_at: None,
             retired_at: None,

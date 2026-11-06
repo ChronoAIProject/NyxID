@@ -1,9 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams, useSearch } from "@tanstack/react-router";
-import { Activity, Box, History, Monitor, RefreshCw } from "lucide-react";
+import { Box, MessageSquare, Monitor, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CmaDesktopPanel } from "@/components/assistant/cma-desktop-panel";
+import { CmaConversation } from "@/components/assistant/cma-conversation";
+import {
+  CmaDisclosure,
+  CmaEmptyState,
+  CmaStatus,
+  CmaTime,
+} from "@/components/assistant/cma-execution-content";
 import { useFeature } from "@/hooks/use-feature-flag";
 import {
   useCmaAgent,
@@ -13,12 +20,8 @@ import {
   useCmaEventStream,
 } from "@/hooks/use-nyxbot-cma-agents";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
-import {
-  mergeCmaEvents,
-  orderCmaMessages,
-  snapshotCmaEvents,
-} from "@/lib/assistant/cma-events";
-import { cmaPublicText } from "@/schemas/nyxbot-cma-agent";
+import { mergeCmaEvents, snapshotCmaEvents } from "@/lib/assistant/cma-events";
+import { linkedCmaTurn } from "@/lib/assistant/cma-conversation";
 
 export function AssistantCmaAgentPage() {
   const { agentId } = useParams({ strict: false }) as { agentId: string };
@@ -26,7 +29,6 @@ export function AssistantCmaAgentPage() {
     response?: string;
     tab?: "desktop";
   };
-  // A route/response change creates a fresh scope; no state leaks from the prior Agent.
   return (
     <CmaAgentView
       key={`${agentId}:${search.response ?? ""}`}
@@ -36,7 +38,6 @@ export function AssistantCmaAgentPage() {
     />
   );
 }
-
 function CmaAgentView({
   agentId,
   responseId,
@@ -47,19 +48,13 @@ function CmaAgentView({
   readonly initialTab?: "desktop";
 }) {
   const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
-  const [tab, setTab] = useState(initialTab ?? "execution");
-  const [history, setHistory] = useState(false);
+  const [tab, setTab] = useState(initialTab ?? "conversation");
   const agent = useCmaAgent(agentId);
   const live = agent.data?.available === true;
-  const task = useCmaResponse(agentId, responseId, enabled);
-  const transcript = useCmaTranscript(
-    agentId,
-    enabled && history && tab === "execution" && live,
-  );
-  const snapshot = useCmaEventSnapshot(
-    agentId,
-    enabled && history && tab === "execution" && live,
-  );
+  const observing = enabled && live && tab === "conversation";
+  const task = useCmaResponse(agentId, responseId, observing);
+  const transcript = useCmaTranscript(agentId, observing);
+  const snapshot = useCmaEventSnapshot(agentId, observing);
   const remote = agent.data?.cma_agent_id;
   const bound = Boolean(
     responseId && task.data?.id === responseId && task.data.agent_id === remote,
@@ -67,54 +62,59 @@ function CmaAgentView({
   const stream = useCmaEventStream(
     agentId,
     remote,
-    history ? undefined : responseId,
-    enabled &&
-      live &&
-      tab === "execution" &&
-      (history ? Boolean(snapshot.data) : bound),
-    history ? snapshot.data?.pages[0]?.through_cursor : undefined,
+    undefined,
+    observing && Boolean(snapshot.data),
+    snapshot.data?.pages[0]?.through_cursor,
   );
+  const snapshotEvents = remote
+    ? snapshotCmaEvents(
+        snapshot.data?.pages.flatMap((page) => page.events) ?? [],
+        remote,
+      )
+    : [];
+  // Search every loaded binding, including entries outside the live buffer.
+  const linked = bound
+    ? linkedCmaTurn([...snapshotEvents, ...stream.events], responseId)
+    : undefined;
+  const turns = transcript.data?.pages.flatMap((page) => page.turns) ?? [];
+  const linkedTurn = turns.some((turn) => turn.turn_sequence === linked)
+    ? linked
+    : undefined;
+  const scanMore =
+    observing &&
+    bound &&
+    linked === undefined &&
+    Boolean(snapshot.hasNextPage) &&
+    (snapshot.data?.pages.length ?? 0) < 20;
+  const { fetchNextPage, isFetchingNextPage, isFetchNextPageError } = snapshot;
+  useEffect(() => {
+    if (scanMore && !isFetchingNextPage && !isFetchNextPageError)
+      void fetchNextPage();
+  }, [scanMore, isFetchingNextPage, isFetchNextPageError, fetchNextPage]);
+  const events = mergeCmaEvents(snapshotEvents, stream.events);
+  const loading = agent.isPending || transcript.isPending;
+  const locating =
+    Boolean(responseId) &&
+    live &&
+    (task.isPending ||
+      snapshot.isPending ||
+      (scanMore && !isFetchNextPageError));
+  const latest = turns.length
+    ? Math.max(...turns.map((turn) => turn.turn_sequence))
+    : undefined;
+  const linkError = responseId && (task.error || (task.data && !bound));
   if (!enabled)
     return <p role="status">CMA execution is not enabled for this account.</p>;
-  const messages = orderCmaMessages(
-    transcript.data?.pages.flatMap((page) => page.messages) ?? [],
-  );
-  const committed = new Set(
-    messages.flatMap((message) =>
-      message.sequence === null ? [] : [message.sequence],
-    ),
-  );
-  const outputs = bound ? (task.data?.output ?? []) : [];
-  const outputIds = new Set(outputs.map((item) => item.id));
-  const events = mergeCmaEvents(
-    history && remote
-      ? snapshotCmaEvents(
-          snapshot.data?.pages.flatMap((page) => page.events) ?? [],
-          remote,
-        )
-      : [],
-    stream.events,
-  ).filter(
-    (event) =>
-      !(
-        event.messageSequence !== undefined &&
-        committed.has(event.messageSequence)
-      ) && !(event.messageId && outputIds.has(event.messageId)),
-  );
   return (
     <div className="mx-auto w-full max-w-5xl space-y-6">
       <header>
-        <p className="mb-2 text-11 text-text-tertiary">CMA execution</p>
+        <p className="mb-2 text-11 text-text-tertiary">Cloud assistant</p>
         <h1 className="text-24 font-semibold tracking-tight">
-          {agent.data?.label ?? "CMA Agent"}
+          {agent.data?.label ?? "Cloud assistant"}
         </h1>
         <div className="mt-3 flex flex-wrap items-center gap-3 text-12">
-          <span className="rounded-md border border-hairline px-2 py-1">
-            {agent.data?.status ?? "Checking status"}
-          </span>
-          <span className="break-all font-mono text-text-tertiary">
-            {remote}
-          </span>
+          <span className="text-text-tertiary">Assistant status</span>
+          <CmaStatus status={agent.data?.status ?? "checking_status"} />
           {agent.data?.sandbox_id && (
             <Link
               to="/assistant/sandboxes/$sandboxId"
@@ -122,15 +122,10 @@ function CmaAgentView({
               className="inline-flex items-center gap-1.5 text-text-tertiary hover:text-foreground"
             >
               <Box className="size-3" />
-              Parent environment
+              Environment
             </Link>
           )}
         </div>
-        {agent.data?.last_observed && (
-          <p className="mt-2 text-11 text-text-tertiary">
-            Observed {new Date(agent.data.last_observed).toLocaleString()}
-          </p>
-        )}
       </header>
       {agent.error && (
         <p role="alert" className="text-13 text-destructive">
@@ -142,160 +137,167 @@ function CmaAgentView({
           role="status"
           className="rounded-lg border border-dashed border-border p-5 text-13 text-text-tertiary"
         >
-          {agent.data.unavailable_reason ??
-            "This Agent is currently unavailable. Its verified local reference is retained; remote history may no longer be readable."}
+          This assistant is currently unavailable. Its saved reference is
+          retained, but its conversation and desktop may no longer be
+          accessible.
         </p>
       )}
       <Tabs
         value={tab}
-        onValueChange={(value) => setTab(value as "desktop" | "execution")}
+        onValueChange={(value) => setTab(value as "desktop" | "conversation")}
       >
         <TabsList>
-          <TabsTrigger value="execution">
-            <Activity className="mr-1.5 size-3.5" />
-            Execution
+          <TabsTrigger value="conversation">
+            <MessageSquare className="mr-1.5 size-3.5" />
+            Conversation
           </TabsTrigger>
           <TabsTrigger value="desktop">
             <Monitor className="mr-1.5 size-3.5" />
             Desktop
           </TabsTrigger>
         </TabsList>
-        <TabsContent value="execution" className="mt-5 space-y-5">
-          <div className="flex flex-wrap items-center gap-2">
-            <Button aria-pressed={!history} onClick={() => setHistory(false)}>
-              Current task
-            </Button>
-            <Button aria-pressed={history} onClick={() => setHistory(true)}>
-              <History />
-              Agent history
-            </Button>
+        <TabsContent value="conversation" className="mt-5 space-y-5">
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="min-w-0 flex-1 text-12 leading-relaxed text-text-tertiary">
+              Work requests and replies from all NyxBot chats that use this
+              assistant. Recent activity appears first.
+            </p>
             <Button
               variant="ghost"
-              className="ml-auto"
               onClick={() => {
                 void agent.refetch();
-                if (history) {
-                  void transcript.refetch();
-                  void snapshot.refetch();
-                } else if (responseId) void task.refetch();
+                void transcript.refetch();
+                void snapshot.refetch();
+                if (responseId) void task.refetch();
                 stream.reconnect();
               }}
             >
               <RefreshCw />
-              Refresh events
+              Refresh
             </Button>
           </div>
-          {history ? (
-            <p className="rounded-lg border border-hairline p-3 text-12 text-text-tertiary">
-              This Agent’s history is shared across NyxBot chats that reuse it.
-              These records are not exclusive to the chat where you opened this
-              page.
-            </p>
-          ) : responseId ? (
-            <div className="flex flex-wrap items-center gap-3 text-12">
-              <span>Current task</span>
-              <code className="break-all text-text-tertiary">{responseId}</code>
-              <span>
-                {bound ? task.data?.status : "Verifying task binding"}
-              </span>
+          {responseId && (
+            <div className="flex flex-wrap items-center gap-3 rounded-lg border border-hairline p-3 text-12">
+              <p className="min-w-0 flex-1">
+                {locating
+                  ? "Finding the request from this link…"
+                  : linkError
+                    ? "This request link could not be verified for this assistant."
+                    : linkedTurn !== undefined
+                      ? linkedTurn === latest
+                        ? "This link points to the latest request."
+                        : "You are viewing an earlier request. Newer activity is available."
+                      : "This request could not be located in the available conversation."}
+              </p>
+              <Button asChild variant="outline">
+                <Link
+                  to="/assistant/cma-agents/$agentId"
+                  params={{ agentId }}
+                  search={{}}
+                >
+                  View latest
+                </Link>
+              </Button>
             </div>
-          ) : (
+          )}
+          {transcript.error && (
+            <p role="alert" className="text-12 text-destructive">
+              {transcript.error.message}
+            </p>
+          )}
+          {linkError && (
+            <p role="alert" className="text-12 text-destructive">
+              The linked request is unavailable or does not belong to this
+              assistant.
+            </p>
+          )}
+          {snapshot.error && (
+            <p role="alert" className="text-12 text-destructive">
+              Execution details could not be updated. Refresh to try again.
+            </p>
+          )}
+          {(loading || locating) && live && (
             <p
               role="status"
-              className="rounded-lg border border-dashed border-border p-6 text-13 text-text-tertiary"
+              className="py-6 text-center text-13 text-text-tertiary"
             >
-              Task binding is not available for this card. Open Agent history to
-              inspect shared records. No latest task is selected automatically.
+              Loading conversation…
             </p>
           )}
-          {(history ? (transcript.error ?? snapshot.error) : task.error) && (
-            <p role="alert" className="text-12 text-destructive">
-              {
-                (history ? (transcript.error ?? snapshot.error) : task.error)
-                  ?.message
-              }
-            </p>
+          {!loading && !locating && turns.length > 0 && (
+            <CmaConversation
+              key={`${responseId ?? "latest"}:${linkedTurn ?? "unresolved"}`}
+              turns={turns}
+              events={events}
+              linkedTurn={linkedTurn}
+              hasLinkedRequest={Boolean(responseId)}
+            />
           )}
-          {responseId && task.data && !bound && (
-            <p role="alert" className="text-12 text-destructive">
-              The response could not be bound to this Agent.
-            </p>
-          )}
-          <div className="space-y-3">
-            {history
-              ? messages.map((message, index) => (
-                  <RecordCard
-                    key={
-                      message.sequence ?? message.id ?? `unsequenced-${index}`
-                    }
-                    title={message.role}
-                    text={cmaPublicText(message.content)}
-                    time={message.created_at}
-                  />
-                ))
-              : outputs.map((item) => (
-                  <RecordCard
-                    key={item.id}
-                    title={
-                      item.type === "message"
-                        ? (item.role ?? "Assistant")
-                        : (item.name ?? "Tool activity")
-                    }
-                    text={cmaPublicText(item.content)}
-                    status={item.status}
-                  />
-                ))}
-            {events.map((event) => (
-              <RecordCard
-                key={event.key}
-                title={event.type.replaceAll("_", " ").replaceAll(".", " · ")}
-                text={event.message}
-                status={event.status}
-                time={event.createdAt}
+          {!loading &&
+            !locating &&
+            !turns.length &&
+            live &&
+            !transcript.error && (
+              <CmaEmptyState
+                title="No conversation yet"
+                text="Work requests and replies will appear here when this assistant starts working."
               />
-            ))}
-          </div>
-          {history && (
-            <div className="flex gap-2">
-              {transcript.hasNextPage && (
-                <Button
-                  isLoading={transcript.isFetchingNextPage}
-                  onClick={() => void transcript.fetchNextPage()}
-                >
-                  Load more history
-                </Button>
-              )}
-              {snapshot.hasNextPage && (
-                <Button
-                  isLoading={snapshot.isFetchingNextPage}
-                  onClick={() => void snapshot.fetchNextPage()}
-                >
-                  Load more events
-                </Button>
-              )}
-            </div>
+            )}
+          {transcript.hasNextPage && (
+            <Button
+              isLoading={transcript.isFetchingNextPage}
+              onClick={() => void transcript.fetchNextPage()}
+            >
+              Load more conversation
+            </Button>
           )}
-          {live && (history || bound) && (
+          {live && (
             <div className="flex flex-wrap items-center gap-3 text-11 text-text-tertiary">
               <span role="status">
                 {stream.state === "connected"
-                  ? "Following observed events"
+                  ? "Live updates connected"
                   : stream.state === "connecting"
-                    ? "Connecting to events…"
-                    : "Event connection is idle"}
+                    ? "Connecting to live updates…"
+                    : "Live updates paused"}
               </span>
               {stream.state === "disconnected" && (
                 <Button variant="outline" onClick={stream.reconnect}>
-                  Reconnect events
+                  Reconnect
                 </Button>
               )}
-              {stream.error && <span>{stream.error}</span>}
             </div>
           )}
+          <CmaDisclosure title="Assistant details">
+            <dl className="space-y-2 text-11 text-text-tertiary">
+              <div>
+                <dt>Assistant reference</dt>
+                <dd className="break-all font-mono">{remote}</dd>
+              </div>
+              {agent.data?.last_observed && (
+                <div>
+                  <dt>Last updated</dt>
+                  <dd>
+                    <CmaTime value={agent.data.last_observed} />
+                  </dd>
+                </div>
+              )}
+            </dl>
+            {stream.error && (
+              <p className="mt-3 text-12 text-text-tertiary">{stream.error}</p>
+            )}
+            {snapshot.hasNextPage && (
+              <Button
+                className="mt-3"
+                isLoading={isFetchingNextPage}
+                onClick={() => void fetchNextPage()}
+              >
+                Load more execution details
+              </Button>
+            )}
+          </CmaDisclosure>
           <p className="text-12 leading-relaxed text-text-tertiary">
-            CMA publishes committed messages and tool activity. Closing or
-            refreshing this view does not cancel the task. NyxBot continues
-            tracking it and returns results to the original chat.
+            Continue working with this assistant through NyxBot. Results return
+            to the original chat.
           </p>
         </TabsContent>
         <TabsContent value="desktop" className="mt-5">
@@ -305,36 +307,5 @@ function CmaAgentView({
         </TabsContent>
       </Tabs>
     </div>
-  );
-}
-
-function RecordCard({
-  title,
-  text,
-  status,
-  time,
-}: {
-  readonly title: string;
-  readonly text: string;
-  readonly status?: string;
-  readonly time?: string | null;
-}) {
-  return (
-    <article className="rounded-xl border border-hairline bg-card p-4 shadow-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="text-12 font-medium capitalize">{title}</h3>
-        {status && <span className="text-11 text-text-tertiary">{status}</span>}
-        {time && (
-          <time className="ml-auto text-11 text-text-tertiary" dateTime={time}>
-            {new Date(time).toLocaleString()}
-          </time>
-        )}
-      </div>
-      {text && (
-        <p className="mt-2 whitespace-pre-wrap break-words text-13 leading-relaxed text-muted-foreground">
-          {text}
-        </p>
-      )}
-    </article>
   );
 }

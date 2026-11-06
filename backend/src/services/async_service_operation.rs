@@ -315,15 +315,13 @@ pub async fn submitted(
         "operation_id":{"$literal":operation_id},"cma":{"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},"state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},"poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5))}}]).await;
     match result {
         Ok(updated) => {
-            if updated.matched_count == 1 {
-                if let (Some(cma), Some(value)) = (cma.as_ref(), parsed.as_ref()) {
-                    if let Err(error) =
-                        super::cma_operation::register_observed_reference(state, watch, cma, value)
-                            .await
-                    {
-                        tracing::debug!(watch_id=%watch.id,code=error.error_code(),"CMA receipt registration deferred");
-                    }
-                }
+            if updated.matched_count == 1
+                && let (Some(cma), Some(value)) = (cma.as_ref(), parsed.as_ref())
+                && let Err(error) =
+                    super::cma_operation::register_observed_reference(state, watch, cma, value)
+                        .await
+            {
+                tracing::debug!(watch_id=%watch.id,code=error.error_code(),"CMA receipt registration deferred");
             }
             Ok(())
         }
@@ -493,6 +491,31 @@ pub async fn owns_lease(db: &Database, w: &AsyncServiceOperation) -> AppResult<b
         .await?
         .is_some())
 }
+
+fn submission_turn_is_live(
+    w: &AsyncServiceOperation,
+    row: &AssistantConversation,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    row.id == w.conversation_id
+        && row.user_id == w.user_id
+        && row.agent_id.as_deref() == Some(w.agent_id.as_str())
+        && row.credential_api_key_id == w.api_key_id
+        && super::assistant_nyxagent::live_turn(row, now)
+            .is_some_and(|turn| turn.turn_id == w.turn_id && !turn.stop_requested)
+}
+
+/// Streaming submissions retain their watch until the original live turn can
+/// persist the receipt. A later turn or an expired/stopped binding cannot keep
+/// an orphaned submission alive. This read grants no background execution.
+pub async fn submission_in_progress(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool> {
+    let row = db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"_id":&w.conversation_id,"user_id":&w.user_id})
+        .await?;
+    Ok(row.is_some_and(|row| submission_turn_is_live(w, &row, Utc::now())))
+}
+
 pub async fn defer(db: &Database, w: &AsyncServiceOperation) -> AppResult<()> {
     let delay = (5_i64 * (1_i64 << w.attempts.min(4))).min(60);
     // The scan may have advanced after this worker's watch snapshot. Read its
@@ -792,6 +815,12 @@ pub(crate) fn cma_wake_event(event: &AgentEvent) -> bool {
     )
 }
 
+/// A bound human decision can resume a thread parked by the autonomous loop
+/// guard. Provider approvals and unbound legacy notices cannot do so.
+pub(crate) fn cma_owner_wake_event(event: &AgentEvent) -> bool {
+    event.bound && event.kind == super::assistant_acknowledgement_service::CMA_OWNER_EVENT_KIND
+}
+
 fn individual_event_turn(event: &AgentEvent) -> bool {
     event.kind == EVENT_KIND || cma_wake_event(event)
 }
@@ -799,6 +828,13 @@ fn individual_event_turn(event: &AgentEvent) -> bool {
 /// Async results wait for their own event turn. Never redirect a web turn or
 /// coalesce results from different delivery places into a single reply.
 pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec<AgentEvent> {
+    // The same owner event that permits waking past the streak cap must be
+    // consumed on its own, before any unrelated automated result/invocation.
+    if origin == TurnOrigin::Event
+        && let Some(index) = row.pending_events.iter().position(cma_owner_wake_event)
+    {
+        return vec![row.pending_events.remove(index)];
+    }
     if origin == TurnOrigin::Event
         && let Some(index) = row
             .pending_events

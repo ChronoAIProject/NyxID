@@ -823,6 +823,27 @@ mod tests {
                 Some(crate::models::service_endpoint::EndpointRisk::Read)
             );
         }
+        let creation = endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "create_agent")
+            .unwrap()
+            .request_body_schema
+            .as_ref()
+            .unwrap();
+        assert_eq!(creation["properties"]["desktop"]["type"], "boolean");
+        assert_eq!(creation["properties"]["initial_message"]["type"], "string");
+        assert!(
+            creation["properties"]["desktop"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("initial_message")
+        );
+        assert_eq!(
+            creation["properties"]["machine_included"]["type"],
+            "boolean"
+        );
+        assert_eq!(creation["required"], serde_json::json!(["name"]));
+        assert_eq!(creation["additionalProperties"], false);
         assert_eq!(
             spec_path_for_slug("cma").as_deref(),
             Some("/api/v1/catalog-specs/cma/openapi.json")

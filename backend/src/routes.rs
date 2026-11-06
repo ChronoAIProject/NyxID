@@ -2551,14 +2551,6 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::nyxbot_cma_sandboxes::list),
         )
         .route(
-            "/nyxagent/sandboxes/unregistered",
-            get(handlers::nyxbot_cma_sandboxes::unregistered),
-        )
-        .route(
-            "/nyxagent/sandboxes/claim",
-            post(handlers::nyxbot_cma_sandboxes::claim),
-        )
-        .route(
             "/nyxagent/sandboxes/{id}",
             get(handlers::nyxbot_cma_sandboxes::detail)
                 .patch(handlers::nyxbot_cma_sandboxes::label)

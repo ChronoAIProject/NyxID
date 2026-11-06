@@ -45,6 +45,8 @@ it("uses the owner-scoped management route", async () => {
     new Response(
       JSON.stringify({
         sandboxes: [],
+        occupied: 0,
+        limit: 1,
         conflict: false,
         inventory_complete: true,
       }),
@@ -63,11 +65,13 @@ it("does not read resources while the feature is disabled", () => {
   expect(transport).not.toHaveBeenCalled();
 });
 
-it("reads all inventory pages so an excess environment is never hidden", async () => {
+it("reads every NyxID inventory page while retaining the server allocation totals", async () => {
   transport.mockResolvedValueOnce(
     new Response(
       JSON.stringify({
         sandboxes: [],
+        occupied: 2,
+        limit: 1,
         conflict: true,
         inventory_complete: true,
         next_cursor: "page-two",
@@ -78,6 +82,8 @@ it("reads all inventory pages so an excess environment is never hidden", async (
     new Response(
       JSON.stringify({
         sandboxes: [],
+        occupied: 2,
+        limit: 1,
         conflict: true,
         inventory_complete: true,
         next_cursor: null,
@@ -89,6 +95,7 @@ it("reads all inventory pages so an excess environment is never hidden", async (
   expect(transport.mock.calls[1]?.[0]).toBe(
     "/api/v1/assistant/nyxagent/sandboxes?cursor=page-two",
   );
+  expect(result.current.data).toMatchObject({ occupied: 2, limit: 1 });
 });
 
 it("rejects a queued lifecycle action when the signed-in owner changes", async () => {

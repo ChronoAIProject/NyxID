@@ -8,7 +8,6 @@ import {
   cmaSandboxSchema,
   cmaSandboxListSchema,
   cmaSandboxMutationSchema,
-  cmaUnregisteredSchema,
 } from "@/schemas/nyxbot-cma-sandbox";
 
 const BASE = "/assistant/nyxagent/sandboxes";
@@ -18,8 +17,6 @@ export const cmaQueryKeys = {
     ["assistant", "cma", owner, "sandboxes"] as const,
   sandbox: (owner: string | undefined, id?: string) =>
     ["assistant", "cma", owner, "sandbox", id] as const,
-  unregistered: (owner: string | undefined) =>
-    ["assistant", "cma", owner, "unregistered"] as const,
 };
 
 export function useCmaSandboxes() {
@@ -73,20 +70,6 @@ export function useCmaSandbox(id: string | undefined) {
   });
 }
 
-export function useUnregisteredCmaSandboxes(open: boolean) {
-  const owner = useAuthStore((state) => state.user?.id);
-  const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
-  return useQuery({
-    queryKey: cmaQueryKeys.unregistered(owner),
-    queryFn: async ({ signal }) =>
-      cmaUnregisteredSchema.parse(
-        await assistantJson(`${BASE}/unregistered`, { signal }),
-      ),
-    enabled: Boolean(owner) && enabled && open,
-    retry: false,
-  });
-}
-
 function useCmaMutation<TBody, TResult>(
   run: (body: TBody, authorityGuard: () => void) => Promise<TResult>,
 ) {
@@ -130,19 +113,6 @@ export function useRenameCmaSandbox() {
       ),
   );
 }
-export function useClaimCmaSandbox() {
-  return useCmaMutation(
-    async ({ sandbox_id }: { sandbox_id: string }, authorityGuard) =>
-      cmaSandboxSchema.parse(
-        await assistantJson(`${BASE}/claim`, {
-          method: "POST",
-          body: { sandbox_id },
-          authorityGuard,
-        }),
-      ),
-  );
-}
-
 interface LifecycleRequest {
   id: string;
   generation: number;

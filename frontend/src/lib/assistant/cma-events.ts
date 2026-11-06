@@ -18,6 +18,8 @@ export interface CmaDisplayEvent {
   createdAt?: string;
   messageId?: string;
   messageSequence?: number;
+  responseId?: string;
+  turnSequence?: number;
 }
 function record(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -83,6 +85,7 @@ export function normalizeCmaEvent(
     };
   }
   const kind = record(frame.kind);
+  const binding = record(frame.response_binding);
   const type = text(kind?.type) ?? text(frame.type);
   const seq = sequence(frame.sequence);
   const cursor = text(frame.cursor) ?? eventId ?? text(frame.id);
@@ -99,6 +102,12 @@ export function normalizeCmaEvent(
       "",
     status: text(kind?.status) ?? text(kind?.to) ?? text(frame.status),
     createdAt: text(frame.appended_at) ?? text(frame.created_at),
+    responseId: text(binding?.response_id) ?? text(frame.response_id),
+    turnSequence:
+      sequence(binding?.turn_sequence) ??
+      sequence(frame.turn_sequence) ??
+      sequence(kind?.turn_sequence) ??
+      undefined,
     messageSequence:
       sequence(frame.message_sequence) ??
       (type === "message" ? (seq ?? undefined) : undefined),

@@ -7,7 +7,10 @@ import {
 } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { CmaSandbox } from "@/schemas/nyxbot-cma-sandbox";
-import { AssistantCmaSandboxesPage } from "./assistant-cma-sandboxes";
+import {
+  AssistantCmaSandboxesPage,
+  CmaSandboxCard,
+} from "./assistant-cma-sandboxes";
 
 const mocks = vi.hoisted(() => ({
   enabled: true,
@@ -15,8 +18,6 @@ const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
   command: vi.fn(),
   retire: vi.fn(),
-  claim: vi.fn(),
-  unregistered: vi.fn(),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: () => mocks.enabled,
@@ -45,8 +46,6 @@ vi.mock("@/hooks/use-nyxbot-cma-sandboxes", () => ({
   useRenameCmaSandbox: () => ({ mutateAsync: mocks.rename }),
   useCmaSandboxCommand: () => ({ mutateAsync: mocks.command }),
   useRetireCmaSandbox: () => ({ mutateAsync: mocks.retire }),
-  useClaimCmaSandbox: () => ({ mutateAsync: mocks.claim }),
-  useUnregisteredCmaSandboxes: mocks.unregistered,
 }));
 const row: CmaSandbox = {
   id: "local",
@@ -60,6 +59,11 @@ const row: CmaSandbox = {
   machine_included: true,
   cpu_millis: 4000,
   memory_mib: 8192,
+  capacity: {
+    cpu_millis: 4000,
+    memory_mib: 8192,
+    source: "profile_revision",
+  },
   last_activity_at: null,
   last_observed: "2026-11-04T00:00:00Z",
   retire_requested_at: null,
@@ -70,10 +74,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.enabled = true;
   mocks.list.mockReturnValue({
-    data: { sandboxes: [row], conflict: false, inventory_complete: true },
+    data: {
+      sandboxes: [row],
+      occupied: 1,
+      limit: 1,
+      conflict: false,
+      inventory_complete: true,
+    },
     refetch: vi.fn(),
   });
-  mocks.unregistered.mockReturnValue({ data: { sandboxes: [] } });
   mocks.retire.mockResolvedValue({
     sandbox: { ...row, admission_state: "retiring" },
     pending: true,
@@ -83,6 +92,9 @@ beforeEach(() => {
 
 it("renders the environment with real capacity and no Agent or Desktop management", () => {
   render(<AssistantCmaSandboxesPage />);
+  expect(
+    screen.getByRole("heading", { name: "Resources" }),
+  ).toBeInTheDocument();
   expect(screen.getByText("4 vCPU")).toBeInTheDocument();
   expect(screen.getByText("8 GiB")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /view details/i })).toHaveAttribute(
@@ -93,19 +105,148 @@ it("renders the environment with real capacity and no Agent or Desktop managemen
     screen.queryByRole("button", { name: /desktop|create agent/i }),
   ).not.toBeInTheDocument();
   expect(
-    screen.getByText(/price and accrued charges are unknown/i),
-  ).toBeInTheDocument();
+    screen.queryByText(/price and accrued charges are unknown/i),
+  ).not.toBeInTheDocument();
 });
 
-it("does not create anything in the empty state", () => {
+it("displays the stored capacity from its verified source", () => {
+  render(
+    <CmaSandboxCard
+      sandbox={{
+        ...row,
+        capacity: {
+          cpu_millis: 2000,
+          memory_mib: 8192,
+          source: "runtime_allocation",
+        },
+      }}
+    />,
+  );
+  expect(
+    screen.getByRole("heading", { name: "Resources" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("2 vCPU")).toBeInTheDocument();
+  expect(screen.getByText("8 GiB")).toBeInTheDocument();
+  expect(screen.queryByText("4 vCPU")).not.toBeInTheDocument();
+  expect(screen.queryByText("Configured resources")).not.toBeInTheDocument();
+});
+
+it.each([
+  "paused",
+  "provisioning",
+  "retiring",
+  "retired",
+  "unknown",
+  "failed",
+] as const)(
+  "keeps stored capacity visible while the environment is %s",
+  (state) => {
+    render(
+      <CmaSandboxCard
+        sandbox={{
+          ...row,
+          observation_state: state,
+          resource_state: state === "provisioning" ? "reviving" : state,
+          retired_at: state === "retired" ? "2026-11-04T01:00:00Z" : null,
+          capacity: {
+            cpu_millis: 4000,
+            memory_mib: 8192,
+            source: "runtime_allocation",
+          },
+        }}
+        detail
+      />,
+    );
+    expect(screen.getByText("4 vCPU")).toBeInTheDocument();
+    expect(screen.getByText("8 GiB")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Resources" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/last confirmed|previous allocation/i),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Configured resources")).not.toBeInTheDocument();
+  },
+);
+
+it("keeps verified configuration visible while paused", () => {
+  render(
+    <CmaSandboxCard
+      sandbox={{
+        ...row,
+        observation_state: "paused",
+        resource_state: "paused",
+      }}
+    />,
+  );
+  expect(
+    screen.getByRole("heading", { name: "Resources" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("4 vCPU")).toBeInTheDocument();
+  expect(screen.getByText("8 GiB")).toBeInTheDocument();
+});
+
+it.each([undefined, null])(
+  "does not present legacy numbers without a verified source (%s) as configuration",
+  (source) => {
+    render(
+      <CmaSandboxCard
+        sandbox={{
+          ...row,
+          capacity:
+            source === undefined
+              ? undefined
+              : { cpu_millis: 4000, memory_mib: 8192, source },
+        }}
+      />,
+    );
+    expect(
+      screen.getByRole("heading", { name: "Resources" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("4 vCPU")).not.toBeInTheDocument();
+    expect(screen.queryByText("8 GiB")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Not confirmed")).toHaveLength(2);
+  },
+);
+
+it("offers Ask NyxBot without importing external Sandboxes in the empty state", () => {
   mocks.list.mockReturnValue({
-    data: { sandboxes: [], conflict: false, inventory_complete: true },
+    data: {
+      sandboxes: [],
+      occupied: 0,
+      limit: 1,
+      conflict: false,
+      inventory_complete: true,
+    },
     refetch: vi.fn(),
   });
   render(<AssistantCmaSandboxesPage />);
   expect(screen.getByText("Room for your next task")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: /ask nyxbot/i })).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /link existing/i }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText(/already have a cma/i)).not.toBeInTheDocument();
+  expect(screen.getByText(/created through NyxID/i)).toBeInTheDocument();
+  expect(screen.getByText(/NyxID Sandbox allocation/i)).toBeInTheDocument();
   expect(mocks.command).not.toHaveBeenCalled();
+});
+
+it("uses the server allocation when an occupied creation has no row in the current page", () => {
+  mocks.list.mockReturnValue({
+    data: {
+      sandboxes: [],
+      occupied: 1,
+      limit: 1,
+      conflict: false,
+      inventory_complete: true,
+    },
+    refetch: vi.fn(),
+  });
+  render(<AssistantCmaSandboxesPage />);
+  expect(screen.getByText("1", { exact: true })).toBeInTheDocument();
+  expect(screen.getByText("/ 1 used")).toBeInTheDocument();
+  expect(screen.queryByText("Room for your next task")).not.toBeInTheDocument();
 });
 
 it("keeps an unknown creation occupied and does not offer retirement of an unverified target", () => {
@@ -121,6 +262,8 @@ it("keeps an unknown creation occupied and does not offer retirement of an unver
           memory_mib: null,
         },
       ],
+      occupied: 1,
+      limit: 1,
       conflict: false,
       inventory_complete: false,
     },
@@ -134,7 +277,7 @@ it("keeps an unknown creation occupied and does not offer retirement of an unver
   expect(screen.queryByText("4 vCPU")).not.toBeInTheDocument();
 });
 
-it("shows every conflicting environment rather than selecting one", () => {
+it("shows conflicting NyxID creations without counting external environments", () => {
   mocks.list.mockReturnValue({
     data: {
       sandboxes: [
@@ -142,19 +285,27 @@ it("shows every conflicting environment rather than selecting one", () => {
         {
           ...row,
           id: "second",
-          label: "Imported workspace",
+          label: "Second NyxID workspace",
           cma_sandbox_id: "sbx-two",
           occupies_account_slot: false,
         },
       ],
+      occupied: 2,
+      limit: 1,
       conflict: true,
       inventory_complete: true,
     },
     refetch: vi.fn(),
   });
   render(<AssistantCmaSandboxesPage />);
-  expect(screen.getByText("Imported workspace")).toBeInTheDocument();
-  expect(screen.getByText(/new environments are blocked/i)).toBeInTheDocument();
+  expect(screen.getByText("Second NyxID workspace")).toBeInTheDocument();
+  expect(screen.getByText("2", { exact: true })).toBeInTheDocument();
+  expect(
+    screen.getByText(/multiple Sandboxes created through NyxID/i),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/new Sandboxes through NyxID are blocked/i),
+  ).toBeInTheDocument();
   expect(
     screen.getAllByRole("button", { name: "Retire environment" }),
   ).toHaveLength(2);
@@ -203,6 +354,8 @@ it("releases a confirmed no-resource creation without claiming a remote retireme
           occupies_account_slot: false,
         },
       ],
+      occupied: 0,
+      limit: 1,
       conflict: false,
       inventory_complete: true,
     },
@@ -211,8 +364,8 @@ it("releases a confirmed no-resource creation without claiming a remote retireme
   render(<AssistantCmaSandboxesPage />);
   expect(screen.getByText("Room for your next task")).toBeInTheDocument();
   expect(
-    screen.getByRole("button", { name: /link existing/i }),
-  ).toBeInTheDocument();
+    screen.queryByRole("button", { name: /link existing/i }),
+  ).not.toBeInTheDocument();
   expect(
     screen.queryByText(/allocation remains reserved/i),
   ).not.toBeInTheDocument();

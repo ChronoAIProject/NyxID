@@ -255,7 +255,13 @@ export function describeEventNotice(text: string): EventNotice {
   match = /^Asynchronous service operation finished: ([^.]+)\./.exec(notice);
   if (match) {
     const outcome = match[1]?.trim() ?? "";
-    const ok = outcome === "done";
+    if (outcome === "operation_cancelled") {
+      return { kind: "task", tone: "neutral", summary: "Background task cancelled" };
+    }
+    if (outcome === "timeout") {
+      return { kind: "task", tone: "warning", summary: "Background tracking timed out" };
+    }
+    const ok = outcome === "done" || outcome === "completed";
     return {
       kind: "task",
       tone: ok ? "success" : "warning",

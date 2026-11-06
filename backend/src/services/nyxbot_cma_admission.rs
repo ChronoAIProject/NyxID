@@ -799,8 +799,7 @@ pub async fn admit(
             }
             _ => return Err(invalid()),
         };
-        let row = sandboxes::claim(&db, &permit.gateway, owner, &sandbox_id, None).await?;
-        sandboxes::get_owned(&db, owner, &row.id).await?
+        sandboxes::resolve_created(&db, &permit.gateway, owner, &sandbox_id).await?
     };
     let admits_work = creates_agent
         || matches!(
@@ -815,19 +814,6 @@ pub async fn admit(
         );
     if admits_work {
         require_available_parent(&sandbox)?;
-        if !creates_sandbox {
-            let inventory = sandboxes::live_inventory(&permit.gateway, owner).await?;
-            let active: Vec<_> = inventory
-                .iter()
-                .filter(|s| s.state != SandboxObservationState::Retired)
-                .collect();
-            if active.len() != 1
-                || sandbox.cma_sandbox_id.as_deref() != Some(active[0].id.as_str())
-                || !sandbox.occupies_account_slot
-            {
-                return Err(AppError::Conflict("cma_sandbox_inventory_conflict".into()));
-            }
-        }
     }
     if creates_sandbox && (sandbox.cma_sandbox_id.is_some() || !sandbox.occupies_account_slot) {
         return Err(drift());
@@ -884,7 +870,10 @@ pub async fn admit(
     Ok(Some(permit))
 }
 
-fn require_available_parent(row: &NyxbotCmaSandbox) -> AppResult<()> {
+pub(super) fn require_available_parent(row: &NyxbotCmaSandbox) -> AppResult<()> {
+    if row.source != sandboxes::NYXID_CREATED_SOURCE || !row.occupies_account_slot {
+        return Err(AppError::Conflict("cma_nyxid_sandbox_required".into()));
+    }
     if row.retire_requested_at.is_some()
         || matches!(
             row.admission_state,
@@ -900,6 +889,47 @@ fn require_available_parent(row: &NyxbotCmaSandbox) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+fn creation_refusal_confirms_no_resource(path: &str, status: u16, value: &Value) -> bool {
+    let code = value
+        .get("code")
+        .or_else(|| value.get("error"))
+        .and_then(Value::as_str);
+    if status == 409 && code == Some("sandbox_credential_setup_required") {
+        return true;
+    }
+    // These synchronous refusals precede durable admission in CMA. Match known
+    // contract violations exactly: generic validation and authorization
+    // failures can also reject recovery after an upstream policy change.
+    // NoResource additionally fences against a concurrently committed receipt.
+    path == "/api/v1/agents"
+        && status == 422
+        && value.get("status").and_then(Value::as_u64) == Some(422)
+        && ["id", "operation_id", "agent_id", "sandbox_id"]
+            .iter()
+            .all(|field| value.get(field).is_none_or(Value::is_null))
+        && match (code, value.get("type").and_then(Value::as_str)) {
+            (
+                Some("invalid_request"),
+                Some("https://spec.chrono-ai.fun/cma/1.0/problems/agent-manager-invalid-request"),
+            ) => {
+                value.get("detail").and_then(Value::as_str).is_some_and(|detail| {
+                    detail == "invalid Agent lifecycle request: desktop creation requires initial_message"
+                        // CMA checks replay before validating inline permissions,
+                        // then validates them before persisting a new operation.
+                        || detail.strip_prefix("invalid Agent lifecycle request: unsupported permission_mode ")
+                            .is_some_and(|mode| !mode.trim().is_empty())
+                })
+            }
+            (
+                Some("desktop_unsupported"),
+                Some(
+                    "https://spec.chrono-ai.fun/cma/1.0/problems/agent-manager-desktop-unsupported",
+                ),
+            ) => true,
+            _ => false,
+        }
 }
 
 impl CmaDispatchPermit {
@@ -1015,34 +1045,29 @@ impl CmaDispatchPermit {
                             finish_agent(&self.db, &self.gateway, &creation, &id).await
                         }
                     };
-                    if let Err(error) = observed {
-                        if !observation_unavailable(&error) {
-                            return Err(error);
-                        }
+                    if let Err(error) = observed
+                        && !observation_unavailable(&error)
+                    {
+                        return Err(error);
                     }
-                } else if status.as_u16() == 409
-                    && value
-                        .get("code")
-                        .or_else(|| value.get("error"))
-                        .and_then(Value::as_str)
-                        == Some("sandbox_credential_setup_required")
+                } else if creation_refusal_confirms_no_resource(&self.path, status.as_u16(), &value)
                 {
                     // This exact pre-provisioning refusal is authoritative. A
                     // late refusal cannot erase an already recorded receipt.
                     change_creation(&self.db, creation, CreationChange::NoResource).await?;
                 }
-            } else if status.is_success() {
-                if let Some(operation) = self.path.strip_prefix("/api/v1/agent-lifecycle/") {
-                    record_creation_observation(
-                        &self.db,
-                        &self.gateway,
-                        &self.owner,
-                        &self.target.id,
-                        operation,
-                        &value,
-                    )
-                    .await?;
-                }
+            } else if status.is_success()
+                && let Some(operation) = self.path.strip_prefix("/api/v1/agent-lifecycle/")
+            {
+                record_creation_observation(
+                    &self.db,
+                    &self.gateway,
+                    &self.owner,
+                    &self.target.id,
+                    operation,
+                    &value,
+                )
+                .await?;
             }
         }
         let mut rebuilt = http::Response::builder()
@@ -1255,6 +1280,162 @@ pub async fn recover_owner(db: &Database, gateway: &dyn CmaGateway, owner: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_pre_admission_refusals_confirm_no_resource() {
+        for (code, kind) in [
+            ("invalid_request", "agent-manager-invalid-request"),
+            ("desktop_unsupported", "agent-manager-desktop-unsupported"),
+        ] {
+            let problem = serde_json::json!({
+                "type": format!("https://spec.chrono-ai.fun/cma/1.0/problems/{kind}"),
+                "status": 422,
+                "code": code,
+                "detail": "invalid Agent lifecycle request: desktop creation requires initial_message",
+            });
+            assert!(creation_refusal_confirms_no_resource(
+                "/api/v1/agents",
+                422,
+                &problem
+            ));
+            for path in [
+                "/api/v1/sandboxes",
+                "/api/v1/workspaces/wks_1/agents",
+                "/api/v1/agent-lifecycle/op_1",
+            ] {
+                assert!(!creation_refusal_confirms_no_resource(path, 422, &problem));
+            }
+            for status in [200, 202, 400, 401, 403, 404, 409, 500, 503] {
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    status,
+                    &problem
+                ));
+            }
+            for (field, replacement) in [
+                (
+                    "type",
+                    serde_json::json!("https://other.test/agent-manager-invalid-request"),
+                ),
+                ("status", serde_json::json!(409)),
+                ("code", serde_json::json!("connection_required")),
+            ] {
+                let mut unrelated = problem.clone();
+                unrelated[field] = replacement;
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    422,
+                    &unrelated
+                ));
+            }
+            for field in ["id", "operation_id", "agent_id", "sandbox_id"] {
+                let mut conflicting = problem.clone();
+                conflicting[field] = serde_json::json!("existing-resource");
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    422,
+                    &conflicting
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_inline_permission_refusal_confirms_no_resource() {
+        for mode in ["ask", "default", "approval_required"] {
+            let problem = serde_json::json!({
+                "type":"https://spec.chrono-ai.fun/cma/1.0/problems/agent-manager-invalid-request",
+                "status":422,
+                "code":"invalid_request",
+                "detail":format!("invalid Agent lifecycle request: unsupported permission_mode {mode}"),
+            });
+            assert!(creation_refusal_confirms_no_resource(
+                "/api/v1/agents",
+                422,
+                &problem
+            ));
+            for path in ["/api/v1/sandboxes", "/api/v1/agent-lifecycle/op_1"] {
+                assert!(!creation_refusal_confirms_no_resource(path, 422, &problem));
+            }
+            for status in [400, 403, 409, 500] {
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    status,
+                    &problem
+                ));
+            }
+            for field in ["id", "operation_id", "agent_id", "sandbox_id"] {
+                let mut with_receipt = problem.clone();
+                with_receipt[field] = serde_json::json!("existing-resource");
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    422,
+                    &with_receipt
+                ));
+            }
+            for (field, value) in [
+                (
+                    "type",
+                    serde_json::json!("https://other.test/agent-manager-invalid-request"),
+                ),
+                ("code", serde_json::json!("permission_denied")),
+                ("status", serde_json::json!(403)),
+                (
+                    "detail",
+                    serde_json::json!(
+                        "invalid Agent lifecycle request: unsupported permission_mode "
+                    ),
+                ),
+                (
+                    "detail",
+                    serde_json::json!("permission_mode rejected after admission"),
+                ),
+            ] {
+                let mut unrelated = problem.clone();
+                unrelated[field] = value;
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    422,
+                    &unrelated
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn unclassified_creation_failures_never_confirm_no_resource() {
+        for problem in [
+            serde_json::json!({"code":"invalid_request"}),
+            serde_json::json!({
+                "code":"invalid_request", "status":422,
+                "type":"https://spec.chrono-ai.fun/cma/1.0/problems/agent-manager-invalid-request",
+                "detail":"Validation changed after an earlier admission",
+            }),
+            serde_json::json!({
+                "code":"permission_denied", "status":403,
+                "type":"https://spec.chrono-ai.fun/cma/1.0/problems/agent-manager-forbidden",
+            }),
+            serde_json::json!({"code":"temporarily_unavailable","status":503}),
+            serde_json::json!({"code":"not_authenticated","status":401}),
+            serde_json::json!({"status":"failed","id":"operation_1"}),
+            serde_json::json!({"items":[]}),
+            serde_json::Value::Null,
+        ] {
+            for status in [200, 403, 404, 409, 422, 500, 503] {
+                assert!(!creation_refusal_confirms_no_resource(
+                    "/api/v1/agents",
+                    status,
+                    &problem
+                ));
+            }
+        }
+        assert!(creation_refusal_confirms_no_resource(
+            "/api/v1/sandboxes",
+            409,
+            &serde_json::json!({"code":"sandbox_credential_setup_required"}),
+        ));
+    }
+
     fn creation() -> NyxbotCmaCreation {
         NyxbotCmaCreation {
             id: "creation".into(),
@@ -1600,13 +1781,14 @@ mod tests {
                 machine_included: Some(false),
                 cpu_millis: None,
                 memory_mib: None,
+                capacity_source: None,
                 last_activity_at: None,
             }
         }
     }
     use super::super::nyxbot_cma_gateway::{
         CmaAgent, CmaDesktopDescriptor, CmaEventSnapshot, CmaGatewayError, CmaLifecycleResult,
-        CmaPage, CmaResponse, CmaResult, CmaSandbox, CmaTranscript,
+        CmaResponse, CmaResult, CmaSandbox, CmaTranscript,
     };
     #[async_trait::async_trait]
     impl CmaGateway for RecoveryGateway {
@@ -1621,12 +1803,6 @@ mod tests {
                 serde_json::json!({"id":id,"status":"ready","agent_id":"agent_1"})
             } else {
                 serde_json::json!({"id":id,"status":"failed"})
-            })
-        }
-        async fn list_sandboxes(&self, _: &str, _: Option<&str>) -> CmaResult<CmaPage<CmaSandbox>> {
-            Ok(CmaPage {
-                items: vec![Self::sandbox()],
-                next_cursor: None,
             })
         }
         async fn get_sandbox(&self, owner: &str, id: &str) -> CmaResult<CmaSandbox> {

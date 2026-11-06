@@ -20,7 +20,7 @@ use crate::{
     errors::AppError,
     models::{
         downstream_service::DownstreamService,
-        nyxbot_cma_sandbox::SandboxObservationState,
+        nyxbot_cma_sandbox::{SandboxCapacitySource, SandboxObservationState},
         user::{COLLECTION_NAME as USERS, User},
     },
 };
@@ -31,8 +31,8 @@ pub const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CURSOR_BYTES: usize = 1024;
 pub const MAX_STREAM_SECONDS: u64 = 30 * 60;
 pub const MAX_DESKTOP_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const MAX_SANDBOX_PROFILE_READS: usize = 8;
-const SANDBOX_PROFILE_READ_BUDGET: Duration = Duration::from_secs(2);
+const MAX_SANDBOX_CAPACITY_READS: usize = 8;
+const SANDBOX_CAPACITY_READ_BUDGET: Duration = Duration::from_secs(2);
 pub type CmaDesktopSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -105,6 +105,8 @@ pub struct CmaSandbox {
     pub machine_included: Option<bool>,
     pub cpu_millis: Option<u32>,
     pub memory_mib: Option<u32>,
+    #[serde(default)]
+    pub capacity_source: Option<SandboxCapacitySource>,
     pub last_activity_at: Option<DateTime<Utc>>,
 }
 
@@ -166,8 +168,18 @@ pub struct CmaTranscriptMessage {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CmaTranscriptTurn {
+    pub turn_sequence: i64,
+    pub started_at: Option<DateTime<Utc>>,
+    pub status: String,
+    pub messages: Vec<CmaTranscriptMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CmaTranscript {
     pub messages: Vec<CmaTranscriptMessage>,
+    #[serde(default)]
+    pub turns: Vec<CmaTranscriptTurn>,
     pub next_cursor: Option<String>,
 }
 
@@ -271,12 +283,16 @@ pub trait CmaGateway: Send + Sync {
     ) -> CmaResult<CmaFileWrite> {
         Err(CmaGatewayError::Unavailable)
     }
-    async fn list_sandboxes(
+    async fn get_sandbox(&self, owner_id: &str, sandbox_id: &str) -> CmaResult<CmaSandbox>;
+    /// Exact owner/resource observation for authority checks. Display-only
+    /// capacity/profile enrichment must not consume a live stream's budget.
+    async fn get_sandbox_authority(
         &self,
         owner_id: &str,
-        cursor: Option<&str>,
-    ) -> CmaResult<CmaPage<CmaSandbox>>;
-    async fn get_sandbox(&self, owner_id: &str, sandbox_id: &str) -> CmaResult<CmaSandbox>;
+        sandbox_id: &str,
+    ) -> CmaResult<CmaSandbox> {
+        self.get_sandbox(owner_id, sandbox_id).await
+    }
     async fn pause_sandbox(
         &self,
         owner_id: &str,
@@ -533,15 +549,14 @@ impl CatalogCmaGateway {
         {
             return Err(CmaGatewayError::InvalidResponse);
         }
-        if let Some(expected) = response_id {
-            if response
+        if let Some(expected) = response_id
+            && response
                 .headers()
                 .get("x-cma-response-id")
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|value| value != expected)
-            {
-                return Err(CmaGatewayError::InvalidResponse);
-            }
+        {
+            return Err(CmaGatewayError::InvalidResponse);
         }
         Ok(response)
     }
@@ -676,6 +691,25 @@ impl CatalogCmaGateway {
             )
             .await?;
         parse_sandbox_capacity(&profile, &body)
+    }
+
+    async fn runtime_sandbox_capacity(
+        &self,
+        owner_id: &str,
+        sandbox: CmaSandbox,
+    ) -> CmaResult<SandboxCapacity> {
+        // This optional read uses the same catalog, native and watch scopes as
+        // every other owner request. A missing grant only leaves capacity unknown.
+        let (_, body) = self
+            .request(
+                owner_id,
+                reqwest::Method::GET,
+                &["api", "v1", "usage", "sandboxes", &sandbox.id],
+                None,
+                None,
+            )
+            .await?;
+        parse_sandbox_allocation(&sandbox, &body)
     }
 
     async fn request_body(
@@ -961,7 +995,7 @@ mod native_policy_tests {
     }
 
     #[test]
-    fn optional_profile_reads_do_not_bypass_catalog_operation_policy() {
+    fn optional_capacity_reads_do_not_bypass_catalog_operation_policy() {
         let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
         catalog.proxy_operation_policy =
             Some(crate::models::downstream_service::ProxyOperationPolicy {
@@ -972,12 +1006,25 @@ mod native_policy_tests {
                 }],
             });
         assert!(authorize_native_route(&catalog, "GET", "/api/v1/sandboxes/sbx_1").is_ok());
+        for path in [
+            "/api/v1/sandbox-profiles/sbp_1/revisions/7",
+            "/api/v1/usage/sandboxes/sbx_1",
+        ] {
+            assert_eq!(
+                authorize_native_route(&catalog, "GET", path),
+                Err(CmaGatewayError::Forbidden)
+            );
+        }
+        catalog.proxy_operation_policy.as_mut().unwrap().rules.push(
+            crate::models::downstream_service::ProxyOperationRule {
+                method: "GET".into(),
+                path_template: "/api/v1/usage/sandboxes/{id}".into(),
+                ..Default::default()
+            },
+        );
+        assert!(authorize_native_route(&catalog, "GET", "/api/v1/usage/sandboxes/sbx_1").is_ok());
         assert_eq!(
-            authorize_native_route(
-                &catalog,
-                "GET",
-                "/api/v1/sandbox-profiles/sbp_1/revisions/7"
-            ),
+            authorize_native_route(&catalog, "GET", "/api/v1/usage/sandboxes"),
             Err(CmaGatewayError::Forbidden)
         );
     }
@@ -1106,8 +1153,6 @@ fn observation_state(raw: &str) -> SandboxObservationState {
 }
 
 fn parse_sandbox(value: &Value, expected_owner: &str) -> CmaResult<CmaSandbox> {
-    let resource = value.get("resources").unwrap_or(value);
-    let has_pinned_profile = value.get("profile").is_some();
     let owner_id = owner(value, expected_owner)?.ok_or(CmaGatewayError::Forbidden)?;
     Ok(CmaSandbox {
         id: id(
@@ -1129,16 +1174,25 @@ fn parse_sandbox(value: &Value, expected_owner: &str) -> CmaResult<CmaSandbox> {
         resource_state: text(value, "status", 120).or_else(|| text(value, "state", 120)),
         name: text(value, "name", 120),
         machine_included: value.get("machine_included").and_then(Value::as_bool),
-        // A real SandboxView carries a pinned profile, not inline resources.
-        // Never replace an unreadable pin with inferred or latest capacity.
-        cpu_millis: (!has_pinned_profile)
-            .then(|| number(resource, "cpu_millis"))
-            .flatten(),
-        memory_mib: (!has_pinned_profile)
-            .then(|| number(resource, "memory_mib"))
-            .flatten(),
+        // SandboxView has no capacity projection. Only the exact profile or
+        // owner allocation read below can establish these optional facts.
+        cpu_millis: None,
+        memory_mib: None,
+        capacity_source: None,
         last_activity_at: date(value, "last_activity_at"),
     })
+}
+
+fn parse_exact_sandbox(
+    value: &Value,
+    expected_owner: &str,
+    expected_id: &str,
+) -> CmaResult<CmaSandbox> {
+    let sandbox = parse_sandbox(value, expected_owner)?;
+    if sandbox.id != expected_id {
+        return Err(CmaGatewayError::InvalidResponse);
+    }
+    Ok(sandbox)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1151,6 +1205,7 @@ struct PinnedSandboxProfile {
 struct SandboxCapacity {
     cpu_millis: u32,
     memory_mib: u32,
+    source: SandboxCapacitySource,
 }
 
 fn pinned_sandbox_profile(value: &Value) -> Option<PinnedSandboxProfile> {
@@ -1180,42 +1235,105 @@ fn parse_sandbox_capacity(
         memory_mib: number(content, "memory_mib")
             .filter(|value| *value > 0)
             .ok_or(CmaGatewayError::InvalidResponse)?,
+        source: SandboxCapacitySource::ProfileRevision,
     })
 }
 
-/// Optional display enrichment, bounded across the whole page. Cache only this
-/// page's exact pins (including unavailable results), never across requests.
-/// Any profile failure leaves capacity unknown without failing safety inventory.
-async fn hydrate_sandbox_capacity<F, Fut>(
+fn parse_sandbox_allocation(expected: &CmaSandbox, value: &Value) -> CmaResult<SandboxCapacity> {
+    let expected_owner = expected
+        .owner_id
+        .as_deref()
+        .ok_or(CmaGatewayError::InvalidResponse)?;
+    if value.get("owner").and_then(Value::as_str) != Some(expected_owner) {
+        return Err(CmaGatewayError::Forbidden);
+    }
+    // Allocation is a separate current-usage snapshot, not the immutable
+    // profile. Refuse lifecycle drift and require the exact public DTO identity.
+    if value.get("sandbox_id").and_then(Value::as_str) != Some(expected.id.as_str())
+        || !active_sandbox_allocation(expected)
+        || value.get("status").and_then(Value::as_str) != expected.resource_state.as_deref()
+    {
+        return Err(CmaGatewayError::InvalidResponse);
+    }
+    let allocation = value
+        .get("allocation")
+        .ok_or(CmaGatewayError::InvalidResponse)?;
+    if allocation.get("running").and_then(Value::as_bool) != Some(true) {
+        return Err(CmaGatewayError::InvalidResponse);
+    }
+    Ok(SandboxCapacity {
+        cpu_millis: number(allocation, "cpu_millis")
+            .filter(|value| *value > 0)
+            .ok_or(CmaGatewayError::InvalidResponse)?,
+        memory_mib: number(allocation, "memory_mib")
+            .filter(|value| *value > 0)
+            .ok_or(CmaGatewayError::InvalidResponse)?,
+        source: SandboxCapacitySource::RuntimeAllocation,
+    })
+}
+
+fn active_sandbox_allocation(sandbox: &CmaSandbox) -> bool {
+    sandbox.state == SandboxObservationState::Ready
+        && matches!(
+            sandbox.resource_state.as_deref(),
+            Some("active" | "ready" | "running")
+        )
+}
+
+/// Optional display enrichment with one total read count and deadline. Prefer
+/// immutable exact pins, then current owner allocation for active Sandboxes.
+/// Cache exact profile results only within this call. Failures never invalidate
+/// the lifecycle observation or authorize any account-slot transition.
+async fn hydrate_sandbox_capacity<F, Fut, A, AFut>(
     items: &mut [(CmaSandbox, Option<PinnedSandboxProfile>)],
     budget: Duration,
-    mut read: F,
+    mut read_profile: F,
+    mut read_allocation: A,
 ) where
     F: FnMut(PinnedSandboxProfile) -> Fut,
     Fut: std::future::Future<Output = CmaResult<SandboxCapacity>>,
+    A: FnMut(CmaSandbox) -> AFut,
+    AFut: std::future::Future<Output = CmaResult<SandboxCapacity>>,
 {
     let deadline = tokio::time::Instant::now() + budget;
     let mut cache = std::collections::HashMap::new();
+    let mut reads = 0;
     for (sandbox, profile) in items {
-        let Some(profile) = profile else { continue };
         sandbox.cpu_millis = None;
         sandbox.memory_mib = None;
-        let capacity = if let Some(cached) = cache.get(profile) {
-            *cached
-        } else if cache.len() < MAX_SANDBOX_PROFILE_READS && tokio::time::Instant::now() < deadline
-        {
-            let observed = tokio::time::timeout_at(deadline, read(profile.clone()))
-                .await
-                .ok()
-                .and_then(Result::ok);
-            cache.insert(profile.clone(), observed);
-            observed
+        sandbox.capacity_source = None;
+        let mut capacity = if let Some(profile) = profile {
+            if let Some(cached) = cache.get(profile) {
+                *cached
+            } else if reads < MAX_SANDBOX_CAPACITY_READS && tokio::time::Instant::now() < deadline {
+                reads += 1;
+                let observed = tokio::time::timeout_at(deadline, read_profile(profile.clone()))
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+                cache.insert(profile.clone(), observed);
+                observed
+            } else {
+                None
+            }
         } else {
             None
         };
+        if capacity.is_none()
+            && active_sandbox_allocation(sandbox)
+            && reads < MAX_SANDBOX_CAPACITY_READS
+            && tokio::time::Instant::now() < deadline
+        {
+            reads += 1;
+            capacity = tokio::time::timeout_at(deadline, read_allocation(sandbox.clone()))
+                .await
+                .ok()
+                .and_then(Result::ok);
+        }
         if let Some(capacity) = capacity {
             sandbox.cpu_millis = Some(capacity.cpu_millis);
             sandbox.memory_mib = Some(capacity.memory_mib);
+            sandbox.capacity_source = Some(capacity.source);
         }
     }
 }
@@ -1313,15 +1431,33 @@ fn parse_transcript(body: &Value, agent_id: &str) -> CmaResult<CmaTranscript> {
         .and_then(Value::as_array)
         .ok_or(CmaGatewayError::InvalidResponse)?;
     let mut messages = Vec::new();
+    let mut projected_turns = Vec::new();
     let mut seen = std::collections::HashMap::new();
     let mut last_sequence = None;
+    let mut last_turn = None;
+    let mut message_count = 0usize;
+    if turns.len() > 10_000 {
+        return Err(CmaGatewayError::InvalidResponse);
+    }
     for turn in turns {
+        let turn_sequence = turn
+            .get("turn_sequence")
+            .and_then(Value::as_i64)
+            .filter(|sequence| *sequence > 0)
+            .ok_or(CmaGatewayError::InvalidResponse)?;
+        if last_turn.is_some_and(|previous| turn_sequence <= previous) {
+            return Err(CmaGatewayError::InvalidResponse);
+        }
+        last_turn = Some(turn_sequence);
+        let mut turn_messages = Vec::new();
+        let mut turn_seen = std::collections::HashSet::new();
         let items = turn
             .get("messages")
             .and_then(Value::as_array)
             .ok_or(CmaGatewayError::InvalidResponse)?;
         for item in items {
-            if messages.len() >= 10_000 {
+            message_count += 1;
+            if message_count > 10_000 {
                 return Err(CmaGatewayError::InvalidResponse);
             }
             let sequence = item
@@ -1351,6 +1487,9 @@ fn parse_transcript(body: &Value, agent_id: &str) -> CmaResult<CmaTranscript> {
                 if previous != &message {
                     return Err(CmaGatewayError::InvalidResponse);
                 }
+                if turn_seen.insert(sequence) {
+                    turn_messages.push(message);
+                }
                 continue;
             }
             if last_sequence.is_some_and(|previous| sequence <= previous) {
@@ -1358,11 +1497,25 @@ fn parse_transcript(body: &Value, agent_id: &str) -> CmaResult<CmaTranscript> {
             }
             last_sequence = Some(sequence);
             seen.insert(sequence, message.clone());
+            turn_seen.insert(sequence);
+            turn_messages.push(message.clone());
             messages.push(message);
         }
+        let status = turn
+            .pointer("/outcome/type")
+            .and_then(Value::as_str)
+            .filter(|status| matches!(*status, "active" | "completed" | "failed" | "interrupted"))
+            .unwrap_or("unknown");
+        projected_turns.push(CmaTranscriptTurn {
+            turn_sequence,
+            started_at: date(turn, "started_at"),
+            status: status.to_owned(),
+            messages: turn_messages,
+        });
     }
     Ok(CmaTranscript {
         messages,
+        turns: projected_turns,
         next_cursor: None,
     })
 }
@@ -1561,7 +1714,7 @@ impl CmaGateway for CatalogCmaGateway {
             return Err(CmaGatewayError::InvalidResponse);
         }
         let sandbox_id = id(workspace, "sandbox_id")?;
-        self.get_sandbox(owner_id, &sandbox_id).await?;
+        self.get_sandbox_authority(owner_id, &sandbox_id).await?;
         Ok(sandbox_id)
     }
     async fn write_agent_file(
@@ -1607,33 +1760,6 @@ impl CmaGateway for CatalogCmaGateway {
             sha256: expected_sha,
         })
     }
-    async fn list_sandboxes(
-        &self,
-        owner_id: &str,
-        cursor: Option<&str>,
-    ) -> CmaResult<CmaPage<CmaSandbox>> {
-        let (_, body) = self
-            .request(
-                owner_id,
-                reqwest::Method::GET,
-                &["api", "v1", "sandboxes"],
-                cursor,
-                None,
-            )
-            .await?;
-        let mut items = page_items(&body, "sandboxes")?
-            .iter()
-            .map(|item| Ok((parse_sandbox(item, owner_id)?, pinned_sandbox_profile(item))))
-            .collect::<CmaResult<Vec<_>>>()?;
-        hydrate_sandbox_capacity(&mut items, SANDBOX_PROFILE_READ_BUDGET, |profile| {
-            self.pinned_sandbox_capacity(owner_id, profile)
-        })
-        .await;
-        Ok(CmaPage {
-            items: items.into_iter().map(|(sandbox, _)| sandbox).collect(),
-            next_cursor: next_cursor(&body)?,
-        })
-    }
     async fn get_sandbox(&self, owner_id: &str, sandbox_id: &str) -> CmaResult<CmaSandbox> {
         let (_, body) = self
             .request(
@@ -1645,17 +1771,33 @@ impl CmaGateway for CatalogCmaGateway {
             )
             .await?;
         let value = body.get("sandbox").unwrap_or(&body);
-        let item = parse_sandbox(value, owner_id)?;
-        if item.id != sandbox_id {
-            return Err(CmaGatewayError::InvalidResponse);
-        }
+        let item = parse_exact_sandbox(value, owner_id, sandbox_id)?;
         let mut items = [(item, pinned_sandbox_profile(value))];
-        hydrate_sandbox_capacity(&mut items, SANDBOX_PROFILE_READ_BUDGET, |profile| {
-            self.pinned_sandbox_capacity(owner_id, profile)
-        })
+        hydrate_sandbox_capacity(
+            &mut items,
+            SANDBOX_CAPACITY_READ_BUDGET,
+            |profile| self.pinned_sandbox_capacity(owner_id, profile),
+            |sandbox| self.runtime_sandbox_capacity(owner_id, sandbox),
+        )
         .await;
         let [(item, _)] = items;
         Ok(item)
+    }
+    async fn get_sandbox_authority(
+        &self,
+        owner_id: &str,
+        sandbox_id: &str,
+    ) -> CmaResult<CmaSandbox> {
+        let (_, body) = self
+            .request(
+                owner_id,
+                reqwest::Method::GET,
+                &["api", "v1", "sandboxes", sandbox_id],
+                None,
+                None,
+            )
+            .await?;
+        parse_exact_sandbox(body.get("sandbox").unwrap_or(&body), owner_id, sandbox_id)
     }
     async fn pause_sandbox(
         &self,
@@ -1822,6 +1964,24 @@ impl CmaGateway for CatalogCmaGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sandbox_authority_projection_keeps_exact_identity_without_profile_enrichment() {
+        let body = json!({
+            "id":"sandbox", "owner":"owner", "status":"active",
+            "profile":{"profile_id":"internal-profile", "revision":7},
+        });
+        let observed = parse_exact_sandbox(&body, "owner", "sandbox").unwrap();
+        assert_eq!(observed.id, "sandbox");
+        assert_eq!(observed.owner_id.as_deref(), Some("owner"));
+        assert_eq!(observed.state, SandboxObservationState::Ready);
+        assert_eq!((observed.cpu_millis, observed.memory_mib), (None, None));
+        assert!(parse_exact_sandbox(&body, "other", "sandbox").is_err());
+        assert!(parse_exact_sandbox(&body, "owner", "other").is_err());
+        let mut missing_owner = body;
+        missing_owner.as_object_mut().unwrap().remove("owner");
+        assert!(parse_exact_sandbox(&missing_owner, "owner", "sandbox").is_err());
+    }
+
     #[test]
     fn bounded_paths_reject_destination_and_encoded_traversal() {
         let base = validated_base("https://cma.example/prefix/").unwrap();
@@ -2036,10 +2196,15 @@ mod tests {
                 .all(|(sandbox, _)| sandbox.cpu_millis.is_none() && sandbox.memory_mib.is_none())
         );
         let mut requests = Vec::new();
-        hydrate_sandbox_capacity(&mut items, Duration::from_secs(1), |profile| {
-            requests.push(profile.clone());
-            std::future::ready(parse_sandbox_capacity(&profile, &revision))
-        })
+        hydrate_sandbox_capacity(
+            &mut items,
+            Duration::from_secs(1),
+            |profile| {
+                requests.push(profile.clone());
+                std::future::ready(parse_sandbox_capacity(&profile, &revision))
+            },
+            |_| std::future::ready(Err(CmaGatewayError::Unavailable)),
+        )
         .await;
         assert_eq!(
             requests,
@@ -2084,6 +2249,253 @@ mod tests {
         assert!(pinned_sandbox_profile(&sandbox).is_none());
     }
 
+    #[test]
+    fn unproven_inline_capacity_remains_unknown() {
+        for capacity in [
+            json!({"cpu_millis":2000,"memory_mib":8192}),
+            json!({"resources":{"cpu_millis":2000,"memory_mib":8192}}),
+        ] {
+            let mut body = json!({"id":"sbx_1","owner":"owner","status":"active"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(capacity.as_object().unwrap().clone());
+            let parsed = parse_sandbox(&body, "owner").unwrap();
+            assert_eq!((parsed.cpu_millis, parsed.memory_mib), (None, None));
+        }
+    }
+
+    fn allocation_body(id: &str) -> Value {
+        json!({
+            "sandbox_id":id,"owner":"owner","status":"active","as_of":1793791925u64,
+            "allocation":{"running":true,"cpu_millis":2000,"memory_mib":8192,"disk_gib":64}
+        })
+    }
+
+    #[test]
+    fn sandbox_allocation_parser_requires_exact_identity_and_active_state() {
+        let expected =
+            parse_sandbox(&sandbox_with_profile("sbx_1", "sbp_1", json!(7)), "owner").unwrap();
+        let body = allocation_body("sbx_1");
+        let capacity = parse_sandbox_allocation(&expected, &body).unwrap();
+        assert_eq!((capacity.cpu_millis, capacity.memory_mib), (2000, 8192));
+        assert_eq!(capacity.source, SandboxCapacitySource::RuntimeAllocation);
+        for (path, value) in [
+            ("/sandbox_id", json!("sbx_other")),
+            ("/sandbox_id", Value::Null),
+            ("/owner", json!("other")),
+            ("/owner", Value::Null),
+            ("/status", json!("ready")),
+            ("/status", Value::Null),
+        ] {
+            let mut substituted = body.clone();
+            *substituted.pointer_mut(path).unwrap() = value;
+            assert!(
+                parse_sandbox_allocation(&expected, &substituted).is_err(),
+                "accepted {path}"
+            );
+        }
+        let mut owner_alias = body;
+        owner_alias.as_object_mut().unwrap().remove("owner");
+        owner_alias["owner_id"] = json!("owner");
+        assert!(parse_sandbox_allocation(&expected, &owner_alias).is_err());
+    }
+
+    #[test]
+    fn sandbox_allocation_parser_rejects_paused_zero_and_malformed_values() {
+        let mut expected =
+            parse_sandbox(&sandbox_with_profile("sbx_1", "sbp_1", json!(7)), "owner").unwrap();
+        let body = allocation_body("sbx_1");
+        for (path, value) in [
+            ("/status", json!("paused")),
+            ("/status", json!("retired")),
+            ("/allocation/running", json!(false)),
+            ("/allocation/running", Value::Null),
+            ("/allocation/cpu_millis", json!(0)),
+            ("/allocation/memory_mib", json!(0)),
+            ("/allocation/cpu_millis", json!(-1)),
+            ("/allocation/memory_mib", json!("8192")),
+            ("/allocation/cpu_millis", json!(u64::from(u32::MAX) + 1)),
+            ("/allocation/memory_mib", Value::Null),
+            ("/allocation", Value::Null),
+        ] {
+            let mut malformed = body.clone();
+            *malformed.pointer_mut(path).unwrap() = value;
+            assert!(
+                parse_sandbox_allocation(&expected, &malformed).is_err(),
+                "accepted {path}"
+            );
+        }
+        expected.state = SandboxObservationState::Paused;
+        assert!(parse_sandbox_allocation(&expected, &body).is_err());
+        expected.state = SandboxObservationState::Ready;
+        expected.resource_state = Some("pausing".into());
+        assert!(parse_sandbox_allocation(&expected, &body).is_err());
+        expected.resource_state = Some("active".into());
+        expected.owner_id = None;
+        assert!(parse_sandbox_allocation(&expected, &body).is_err());
+    }
+
+    #[tokio::test]
+    async fn sandbox_allocation_fallback_preserves_profile_priority_and_exact_owner() {
+        let mut items = [
+            ("sbx_profile", "sbp_profile"),
+            ("sbx_fallback", "sbp_internal"),
+            ("sbx_other", "sbp_internal"),
+        ]
+        .into_iter()
+        .map(|(id, pin)| {
+            let body = sandbox_with_profile(id, pin, json!(7));
+            (
+                parse_sandbox(&body, "owner").unwrap(),
+                pinned_sandbox_profile(&body),
+            )
+        })
+        .collect::<Vec<_>>();
+        // A verified immutable profile remains useful while the runtime is paused.
+        items[0].0.state = SandboxObservationState::Paused;
+        items[0].0.resource_state = Some("paused".into());
+        let mut profiles = Vec::new();
+        let mut allocations = Vec::new();
+        hydrate_sandbox_capacity(&mut items, Duration::from_secs(1), |pin| {
+            profiles.push(pin.id.clone());
+            std::future::ready(if pin.id == "sbp_profile" {
+                parse_sandbox_capacity(&pin, &json!({"profile_id":pin.id,"revision":7,"content":{"cpu_millis":1000,"memory_mib":4096}}))
+            } else { Err(CmaGatewayError::NotFound) })
+        }, |sandbox| {
+            allocations.push((sandbox.id.clone(), sandbox.owner_id.clone()));
+            std::future::ready(parse_sandbox_allocation(&sandbox, &allocation_body(&sandbox.id)))
+        }).await;
+        assert_eq!(profiles, ["sbp_profile", "sbp_internal"]);
+        assert_eq!(
+            allocations,
+            [
+                ("sbx_fallback".into(), Some("owner".into())),
+                ("sbx_other".into(), Some("owner".into()))
+            ]
+        );
+        assert_eq!(
+            items[0].0.capacity_source,
+            Some(SandboxCapacitySource::ProfileRevision)
+        );
+        assert_eq!(
+            (items[0].0.cpu_millis, items[0].0.memory_mib),
+            (Some(1000), Some(4096))
+        );
+        for (sandbox, _) in &items[1..] {
+            assert_eq!(
+                sandbox.capacity_source,
+                Some(SandboxCapacitySource::RuntimeAllocation)
+            );
+            assert_eq!(
+                (sandbox.cpu_millis, sandbox.memory_mib),
+                (Some(2000), Some(8192))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_allocation_failures_keep_inventory_usable_and_inactive_capacity_unknown() {
+        for error in [
+            CmaGatewayError::Forbidden,
+            CmaGatewayError::UpstreamAuthorizationUnavailable,
+            CmaGatewayError::NotFound,
+            CmaGatewayError::Timeout,
+            CmaGatewayError::InvalidResponse,
+        ] {
+            let mut items = ["active", "paused", "retired", "pausing"]
+                .into_iter()
+                .map(|status| {
+                    let mut body =
+                        sandbox_with_profile(&format!("sbx_{status}"), "sbp_internal", json!(7));
+                    body["status"] = json!(status);
+                    (
+                        parse_sandbox(&body, "owner").unwrap(),
+                        pinned_sandbox_profile(&body),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let mut reads = 0;
+            hydrate_sandbox_capacity(
+                &mut items,
+                Duration::from_secs(1),
+                |_| std::future::ready(Err(CmaGatewayError::NotFound)),
+                |_| {
+                    reads += 1;
+                    std::future::ready(Err(error.clone()))
+                },
+            )
+            .await;
+            assert_eq!(reads, 1);
+            assert!(items.iter().all(|(sandbox, _)| sandbox.cpu_millis.is_none()
+                && sandbox.memory_mib.is_none()
+                && sandbox.capacity_source.is_none()));
+            assert_eq!(items[0].0.state, SandboxObservationState::Ready);
+            assert_eq!(items[1].0.state, SandboxObservationState::Paused);
+            assert_eq!(items[2].0.state, SandboxObservationState::Retired);
+        }
+    }
+
+    #[tokio::test]
+    async fn sandbox_allocation_fallback_shares_the_total_read_and_time_budget() {
+        let mut items = (0..MAX_PAGE_SIZE)
+            .map(|index| {
+                let body = sandbox_with_profile(&format!("sbx_{index}"), "sbp_internal", json!(7));
+                (
+                    parse_sandbox(&body, "owner").unwrap(),
+                    pinned_sandbox_profile(&body),
+                )
+            })
+            .collect::<Vec<_>>();
+        let reads = std::cell::Cell::new(0);
+        hydrate_sandbox_capacity(
+            &mut items,
+            Duration::from_secs(1),
+            |_| {
+                reads.set(reads.get() + 1);
+                std::future::ready(Err(CmaGatewayError::NotFound))
+            },
+            |sandbox| {
+                reads.set(reads.get() + 1);
+                std::future::ready(parse_sandbox_allocation(
+                    &sandbox,
+                    &allocation_body(&sandbox.id),
+                ))
+            },
+        )
+        .await;
+        assert_eq!(reads.get(), MAX_SANDBOX_CAPACITY_READS);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|(sandbox, _)| sandbox.capacity_source
+                    == Some(SandboxCapacitySource::RuntimeAllocation))
+                .count(),
+            MAX_SANDBOX_CAPACITY_READS - 1
+        );
+        let calls = std::cell::Cell::new(0);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            hydrate_sandbox_capacity(
+                &mut items,
+                Duration::from_millis(10),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(Err(CmaGatewayError::NotFound))
+                },
+                |_| {
+                    calls.set(calls.get() + 1);
+                    std::future::pending::<CmaResult<SandboxCapacity>>()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(items.iter().all(|(sandbox, _)| sandbox.cpu_millis.is_none()
+            && sandbox.memory_mib.is_none()
+            && sandbox.capacity_source.is_none()));
+    }
+
     #[tokio::test]
     async fn optional_profile_failures_keep_inventory_usable_and_capacity_unknown() {
         for error in [
@@ -2103,10 +2515,15 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             let mut calls = 0;
-            hydrate_sandbox_capacity(&mut items, Duration::from_secs(1), |_| {
-                calls += 1;
-                std::future::ready(Err(error.clone()))
-            })
+            hydrate_sandbox_capacity(
+                &mut items,
+                Duration::from_secs(1),
+                |_| {
+                    calls += 1;
+                    std::future::ready(Err(error.clone()))
+                },
+                |_| std::future::ready(Err(CmaGatewayError::Unavailable)),
+            )
             .await;
             assert_eq!(calls, 1);
             assert!(items.iter().all(|(sandbox, _)| sandbox.cpu_millis.is_none()
@@ -2131,29 +2548,40 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut calls = 0;
-        hydrate_sandbox_capacity(&mut items, Duration::from_secs(1), |_| {
-            calls += 1;
-            std::future::ready(Ok(SandboxCapacity {
-                cpu_millis: 1000,
-                memory_mib: 1024,
-            }))
-        })
+        hydrate_sandbox_capacity(
+            &mut items,
+            Duration::from_secs(1),
+            |_| {
+                calls += 1;
+                std::future::ready(Ok(SandboxCapacity {
+                    cpu_millis: 1000,
+                    memory_mib: 1024,
+                    source: SandboxCapacitySource::ProfileRevision,
+                }))
+            },
+            |_| std::future::ready(Err(CmaGatewayError::Unavailable)),
+        )
         .await;
-        assert_eq!(calls, MAX_SANDBOX_PROFILE_READS);
+        assert_eq!(calls, MAX_SANDBOX_CAPACITY_READS);
         assert_eq!(
             items
                 .iter()
                 .filter(|(sandbox, _)| sandbox.cpu_millis.is_some())
                 .count(),
-            MAX_SANDBOX_PROFILE_READS
+            MAX_SANDBOX_CAPACITY_READS
         );
         let mut calls = 0;
         tokio::time::timeout(
             Duration::from_secs(1),
-            hydrate_sandbox_capacity(&mut items, Duration::from_millis(10), |_| {
-                calls += 1;
-                std::future::pending::<CmaResult<SandboxCapacity>>()
-            }),
+            hydrate_sandbox_capacity(
+                &mut items,
+                Duration::from_millis(10),
+                |_| {
+                    calls += 1;
+                    std::future::pending::<CmaResult<SandboxCapacity>>()
+                },
+                |_| std::future::ready(Err(CmaGatewayError::Unavailable)),
+            ),
         )
         .await
         .unwrap();
@@ -2188,6 +2616,60 @@ mod tests {
         assert!(parse_transcript(&body, "other").is_err());
         body["turns"][1]["messages"][0]["sequence"] = json!(5);
         assert!(parse_transcript(&body, "agent_1").is_err());
+    }
+
+    #[test]
+    fn cma_transcript_preserves_authoritative_turns_and_outcomes() {
+        let body = json!({"agent_id":"agent_1","turns":[
+            {"turn_sequence":10,"started_at":"2026-11-05T09:00:00Z","outcome":{"type":"completed"},"messages":[
+                {"sequence":11,"role":"user","content":"first request"},
+                {"sequence":12,"role":"assistant","content":"first result"}
+            ]},
+            {"turn_sequence":20,"outcome":{"type":"active"},"messages":[
+                {"sequence":21,"role":"user","content":"second request"}
+            ]}
+        ]});
+        let value = serde_json::to_value(parse_transcript(&body, "agent_1").unwrap()).unwrap();
+        assert_eq!(value["turns"][0]["turn_sequence"], 10);
+        assert_eq!(value["turns"][0]["status"], "completed");
+        assert_eq!(value["turns"][0]["started_at"], "2026-11-05T09:00:00Z");
+        assert_eq!(value["turns"][1]["status"], "active");
+        assert_eq!(
+            value["turns"][1]["messages"][0]["content"],
+            "second request"
+        );
+    }
+
+    #[test]
+    fn cma_transcript_reused_request_remains_in_each_turn() {
+        let message = json!({"sequence":11,"role":"user","content":"same admitted input"});
+        let body = json!({"agent_id":"agent_1","turns":[
+            {"turn_sequence":10,"outcome":{"type":"failed"},"messages":[message.clone()]},
+            {"turn_sequence":20,"outcome":{"type":"completed"},"messages":[message]}
+        ]});
+        let value = serde_json::to_value(parse_transcript(&body, "agent_1").unwrap()).unwrap();
+        assert_eq!(value["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(value["turns"][1]["messages"][0]["sequence"], 11);
+    }
+
+    #[test]
+    fn cma_transcript_rejects_ambiguous_turn_identities() {
+        for sequence in [0, 10, 9] {
+            let body = json!({"agent_id":"agent_1","turns":[
+                {"turn_sequence":10,"messages":[]},
+                {"turn_sequence":sequence,"messages":[]}
+            ]});
+            assert!(parse_transcript(&body, "agent_1").is_err());
+        }
+    }
+
+    #[test]
+    fn cma_transcript_does_not_guess_unrecognized_outcomes() {
+        let body = json!({"agent_id":"agent_1","turns":[
+            {"turn_sequence":10,"outcome":{"type":"future_status"},"messages":[]}
+        ]});
+        let value = serde_json::to_value(parse_transcript(&body, "agent_1").unwrap()).unwrap();
+        assert_eq!(value["turns"][0]["status"], "unknown");
     }
 
     #[test]

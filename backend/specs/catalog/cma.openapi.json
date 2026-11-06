@@ -92,7 +92,16 @@
                     "type": "string"
                   },
                   "machine_included": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "description": "Retained desktop-capable Sandbox configuration. Omit when selecting an existing parent. The current desktop preparation flow separately requires desktop=true."
+                  },
+                  "desktop": {
+                    "type": "boolean",
+                    "description": "Explicitly request CMA desktop preparation. Requires initial_message with the exact first task. Set true when the task requires the current desktop flow; availability is checked by CMA for the selected environment."
+                  },
+                  "initial_message": {
+                    "type": "string",
+                    "description": "Exact first task retained during preparation and executed afterward. Required when desktop=true; otherwise optional. Must contain non-whitespace text and at most 262144 UTF-8 bytes. Preserve the exact text with the original body and Idempotency-Key during recovery."
                   },
                   "image": {
                     "type": "object",
