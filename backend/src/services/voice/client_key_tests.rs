@@ -122,10 +122,20 @@ async fn seeded_catalog_enables_owner_publication_and_exact_device_discovery() {
 
     Box::pin(async {
         let (f, _) = fixture("voice_seed_publication").await;
-        let agent =
+        let mut agent =
             crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &f.row)
                 .await
                 .unwrap();
+        agent.description = "帮助你查看和控制已授权的平板。".into();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &agent.id},
+                doc! {"$set": {"description": &agent.description}},
+            )
+            .await
+            .unwrap();
         let human = crate::test_utils::test_auth_user(&f.owner);
         // Reproduce the missing-catalog failure independently of rollout flags.
         assert!(matches!(
@@ -229,6 +239,7 @@ async fn seeded_catalog_enables_owner_publication_and_exact_device_discovery() {
             } else {
                 assert_eq!(body["agents"].as_array().unwrap().len(), 1);
                 assert_eq!(body["agents"][0]["agent_id"], agent.id);
+                assert_eq!(body["agents"][0]["description"], agent.description);
                 assert_eq!(body["agents"][0]["service_id"], service_id);
             }
         }
