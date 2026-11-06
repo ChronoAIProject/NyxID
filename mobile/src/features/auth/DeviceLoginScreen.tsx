@@ -585,7 +585,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     const approved = terminal === "approved";
     return (
       <ScreenContainer>
-        <View style={styles.terminalScreen}>
+        <View
+          style={[
+            styles.terminalScreen,
+            !inWorkspaceSheet && styles.rootContent,
+          ]}
+        >
           {approved ? (
             <MagicKeyIllustration
               size={COMPLETION_MARK_SIZE}
@@ -616,7 +621,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <ScrollView
-            contentContainerStyle={styles.content}
+            contentContainerStyle={[
+              styles.content,
+              !inWorkspaceSheet && styles.rootContent,
+            ]}
             keyboardShouldPersistTaps="handled"
           >
             {stepUp.prompt}
@@ -632,7 +640,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView
-          contentContainerStyle={styles.content}
+          contentContainerStyle={[
+            styles.content,
+            !inWorkspaceSheet && styles.rootContent,
+          ]}
           keyboardShouldPersistTaps="handled"
         >
           {!inWorkspaceSheet && (

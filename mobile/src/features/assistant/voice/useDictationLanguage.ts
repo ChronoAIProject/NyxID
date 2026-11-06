@@ -10,7 +10,7 @@ import {
 
 /**
  * The dictation language: the person's choice when the recognizer supports
- * it, else the iPhone's. Changing it applies from the next recording.
+ * it, else the device's. Changing it applies from the next recording.
  */
 export function useDictationLanguage(active: boolean) {
   const [saved, setSaved] = useState<string>();
@@ -41,11 +41,11 @@ export function useDictationLanguage(active: boolean) {
     saved && (!supported.length || supported.includes(saved)) ? saved : automatic;
   return {
     value: saved ?? AUTOMATIC,
-    label: current ? languageLabel(current) : "Your iPhone's language",
+    label: current ? languageLabel(current) : "Your device's language",
     options: [
       {
         value: AUTOMATIC,
-        label: "iPhone language",
+        label: "Device language",
         detail: automatic ? languageLabel(automatic) : undefined,
       },
       ...languageOptions(supported),

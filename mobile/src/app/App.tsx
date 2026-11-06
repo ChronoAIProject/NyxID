@@ -35,6 +35,7 @@ import {
   findNodeHandle,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import {
@@ -102,6 +103,7 @@ import {
   type WorkspaceRoute,
 } from "../components/workspace/WorkspaceDrawer";
 import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
+import { workspaceSidebarLayout } from "../components/workspace/workspacePushState";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 import {
   activeWorkspaceChatTarget,
@@ -438,6 +440,9 @@ function ThemedAppShell({
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
   const { isAuthenticated } = useAuthSession();
+  const { width } = useWindowDimensions();
+  const persistentSidebar =
+    isAuthenticated && workspaceSidebarLayout(width).persistent;
   const authenticatedNow = useRef(isAuthenticated);
   authenticatedNow.current = isAuthenticated;
   const edgeBacks = useRef(new Map<symbol, () => void>());
@@ -495,12 +500,13 @@ function ThemedAppShell({
     const next = workspaceAccessibilityState(state);
     const content = workspaceContentIdentity(state);
     if (
-      (pendingDrawerNavigation.current &&
+      !persistentSidebar &&
+      ((pendingDrawerNavigation.current &&
         !didNavigate.current &&
         workspaceDestinationMatches(state, pendingDrawerNavigation.current)) ||
-      (priorSheet.current.open &&
-        !next.sheetOpen &&
-        content !== priorSheet.current.content)
+        (priorSheet.current.open &&
+          !next.sheetOpen &&
+          content !== priorSheet.current.content))
     ) {
       didNavigate.current = true;
       awaitingPaint.current = content;
@@ -528,6 +534,20 @@ function ThemedAppShell({
     }
   }, [isAuthenticated]);
   useEffect(() => {
+    // Resizing changes the presentation, never the navigator or its drafts.
+    // Fence a pending compact animation before exposing both tablet columns.
+    cancelSelection();
+    didNavigate.current = false;
+    drawerOrigin.current = undefined;
+    pendingMenuFocus.current = undefined;
+    setDrawerOpen(false);
+    setDrawerPresented(false);
+  }, [persistentSidebar, cancelSelection]);
+  useEffect(
+    () => () => workspaceFocus.releaseDrawer("persistent-workspace-sidebar"),
+    [persistentSidebar, accessibility.sheetOpen],
+  );
+  useEffect(() => {
     if (drawerPresented) return;
     const origin = pendingMenuFocus.current;
     pendingMenuFocus.current = undefined;
@@ -541,10 +561,16 @@ function ThemedAppShell({
       !authenticatedNow.current ||
       !navigationRef.isReady() ||
       !action ||
+      navigationBlocked ||
       pendingDrawerNavigation.current ||
       didNavigate.current
     )
       return;
+    if (persistentSidebar) {
+      // Native before-remove guards still own dirty editors and pending writes.
+      navigationRef.dispatch(action);
+      return;
+    }
     pendingDrawerNavigation.current = action;
     if (workspaceDestinationMatches(navigationRef.getRootState(), action)) {
       didNavigate.current = true;
@@ -580,7 +606,12 @@ function ThemedAppShell({
     setDrawerPresented(false);
   }, [cancelSelection]);
   const navigateFromDrawer = (route: WorkspaceRoute) => {
-    if (!authenticatedNow.current || !navigationRef.isReady()) return;
+    if (
+      !authenticatedNow.current ||
+      !navigationRef.isReady() ||
+      navigationBlocked
+    )
+      return;
     if (route === "Assistant") return openChatFromDrawer({ kind: "home" });
     const action = workspaceNavigateAction(
       route,
@@ -608,6 +639,15 @@ function ThemedAppShell({
     setDrawerPresented(true);
   }
   function changeSidebar(open: boolean) {
+    if (persistentSidebar) {
+      if (open && !accessibility.sheetOpen && !navigationBlocked) {
+        workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
+        workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
+          findNodeHandle(sidebarFocus.current),
+        );
+      }
+      return;
+    }
     if (open) {
       if (
         !isAuthenticated ||
@@ -647,7 +687,7 @@ function ThemedAppShell({
       sidebar={
         isAuthenticated ? (
           <WorkspaceDrawer
-            visible={drawerPresented}
+            visible={persistentSidebar || drawerPresented}
             initialFocusRef={sidebarFocus}
             currentRoute={currentRouteName}
             currentChat={currentChat}
@@ -675,7 +715,12 @@ function ThemedAppShell({
             onNavigate={navigateFromDrawer}
             onHome={() => navigateFromDrawer("Assistant")}
             onQuickAction={(action) => {
-              if (!authenticatedNow.current || !navigationRef.isReady()) return;
+              if (
+                !authenticatedNow.current ||
+                !navigationRef.isReady() ||
+                navigationBlocked
+              )
+                return;
               navigationRef.dispatch(
                 action === "scanner"
                   ? openWorkspaceSheetAction("DeviceLogin", {
@@ -738,7 +783,7 @@ function ThemedAppShell({
                 setDrawerOpen(false);
               }
             }}
-            suppressWorkspaceAnimation={drawerPresented}
+            suppressWorkspaceAnimation={persistentSidebar || drawerPresented}
             renderWorkspace={renderWorkspace}
           />
         </WorkspaceAccessibilityContext.Provider>

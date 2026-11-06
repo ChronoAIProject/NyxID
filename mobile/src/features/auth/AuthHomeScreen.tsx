@@ -657,6 +657,9 @@ const createStyles = (c: ThemeColors, mode: string) =>
   StyleSheet.create({
     scrollContentExtra: {
       paddingBottom: spacing.xxxl,
+      width: "100%",
+      maxWidth: 560,
+      alignSelf: "center",
     },
     heroWrap: {
       alignItems: "center",

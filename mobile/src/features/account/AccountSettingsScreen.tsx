@@ -181,7 +181,8 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
     if (section) navigation.push(SECTION_PAGES[section]);
   }, [navigation, section]);
   const { colors } = useTheme();
-  const stacked = useSettingsStacked();
+  const [identityWidth, setIdentityWidth] = useState<number>();
+  const stacked = useSettingsStacked(identityWidth);
   const { fontScale } = useWindowDimensions();
   const styles = useMemo(
     () => createStyles(colors, stacked, fontScale),
@@ -304,7 +305,12 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
         )}
 
         <SettingsGroup inset={false}>
-          <View style={styles.identity}>
+          <View
+            style={styles.identity}
+            onLayout={({ nativeEvent: { layout } }) => {
+              if (layout.width > 0) setIdentityWidth(layout.width);
+            }}
+          >
             <View style={styles.avatarCircle}>
               {profile?.avatar_url ? (
                 <Image
@@ -431,9 +437,7 @@ export function AccountSettingsScreen({ navigation, route }: Props) {
           />
         </SettingsGroup>
 
-        <SettingsGroup
-          footer="Permanently deletes your account and its data. This cannot be undone."
-        >
+        <SettingsGroup footer="Permanently deletes your account and its data. This cannot be undone.">
           <SettingsRow
             centered
             destructive

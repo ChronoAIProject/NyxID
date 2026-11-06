@@ -31,9 +31,9 @@ import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 const ICON_TILE = 30;
 
 /** Rows wrap to stacked label/value when scaled text leaves too little width. */
-export function useSettingsStacked() {
+export function useSettingsStacked(availableWidth?: number) {
   const { width, fontScale } = useWindowDimensions();
-  return width / fontScale < 340;
+  return (availableWidth ?? width) / fontScale < 340;
 }
 
 /** Scrollable page frame shared by Settings and its sub-pages. */
@@ -194,7 +194,11 @@ export function SettingsRow({
   valueTone?: "default" | "danger";
 }) {
   const { colors } = useTheme();
-  const stacked = useSettingsStacked();
+  const [rowWidth, setRowWidth] = useState<number>();
+  const stacked = useSettingsStacked(rowWidth);
+  const measureRow = ({ nativeEvent: { layout } }: LayoutChangeEvent) => {
+    if (layout.width > 0) setRowWidth(layout.width);
+  };
   // Rows that open a sub-page get a chevron; centred actions never do.
   const chevron =
     !centered &&
@@ -290,7 +294,10 @@ export function SettingsRow({
           // Value and control stay together at the trailing edge; a short
           // value is never squeezed into wrapping by a long label.
           <View
-            style={[styles.trailing, stacked && !centered && styles.trailingStacked]}
+            style={[
+              styles.trailing,
+              stacked && !centered && styles.trailingStacked,
+            ]}
           >
             {value ? (
               <Text
@@ -321,6 +328,7 @@ export function SettingsRow({
       <View
         accessible={accessibilityLabel ? true : undefined}
         accessibilityLabel={accessibilityLabel}
+        onLayout={measureRow}
         style={[styles.row, fill]}
       >
         {content}
@@ -330,8 +338,7 @@ export function SettingsRow({
     <Pressable
       accessibilityRole={accessibilityRole ?? "button"}
       accessibilityLabel={
-        accessibilityLabel ??
-        [label, badge, value].filter(Boolean).join(", ")
+        accessibilityLabel ?? [label, badge, value].filter(Boolean).join(", ")
       }
       accessibilityHint={
         accessibilityHint ?? (chevron ? `Opens ${label}` : undefined)
@@ -339,6 +346,7 @@ export function SettingsRow({
       accessibilityState={{ disabled, ...accessibilityState }}
       disabled={disabled}
       onPress={onPress}
+      onLayout={measureRow}
       style={({ pressed }) => [
         styles.row,
         fill,
@@ -442,18 +450,29 @@ export function usePopupMenu<Value extends string>({
   const { colors } = useTheme();
   const { width: windowWidth, height } = useWindowDimensions();
   const anchor = useRef<View>(null);
+  const placementGeneration = useRef(0);
+  const mounted = useRef(false);
+  const currentViewport = useRef({ disabled, width: windowWidth, height });
+  currentViewport.current = { disabled, width: windowWidth, height };
   const [menu, setMenu] = useState<{
     top: number;
     left?: number;
     right?: number;
     maxHeight: number;
   } | null>(null);
-  // A menu never outlives the authority to choose from it.
+  // A menu never outlives its authority or a window resize that moved its anchor.
   useEffect(() => {
-    if (disabled) setMenu(null);
-  }, [disabled]);
+    mounted.current = true;
+    placementGeneration.current++;
+    setMenu(null);
+    return () => {
+      mounted.current = false;
+      placementGeneration.current++;
+    };
+  }, [disabled, windowWidth, height]);
   const open = () => {
     if (disabled) return;
+    const generation = ++placementGeneration.current;
     const estimate =
       options.reduce((sum, option) => sum + (option.detail ? 68 : 48), 0) + 8;
     // Align with the trigger's nearer edge so the menu stays on screen.
@@ -462,11 +481,22 @@ export function usePopupMenu<Value extends string>({
       rowHeight: number,
       side: { left: number } | { right: number },
     ) => {
+      if (
+        !mounted.current ||
+        generation !== placementGeneration.current ||
+        currentViewport.current.disabled ||
+        currentViewport.current.width !== windowWidth ||
+        currentViewport.current.height !== height
+      )
+        return;
       const below = y + rowHeight + 6;
       const roomBelow = height - MENU_MARGIN - below;
       const roomAbove = y - 6 - MENU_MARGIN;
       const flip = estimate > roomBelow && roomAbove > roomBelow;
-      const maxHeight = Math.max(120, Math.min(estimate, flip ? roomAbove : roomBelow));
+      const maxHeight = Math.max(
+        120,
+        Math.min(estimate, flip ? roomAbove : roomBelow),
+      );
       setMenu({ top: flip ? y - 6 - maxHeight : below, maxHeight, ...side });
     };
     if (!anchor.current?.measureInWindow) {
@@ -483,9 +513,17 @@ export function usePopupMenu<Value extends string>({
       ),
     );
   };
-  const close = () => setMenu(null);
+  const close = () => {
+    placementGeneration.current++;
+    setMenu(null);
+  };
   const popup = (
-    <Modal transparent visible={!!menu} animationType="fade" onRequestClose={close}>
+    <Modal
+      transparent
+      visible={!!menu}
+      animationType="fade"
+      onRequestClose={close}
+    >
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="Close menu"
@@ -522,7 +560,9 @@ export function usePopupMenu<Value extends string>({
                   accessibilityRole="menuitem"
                   accessibilityState={{ selected, checked: selected }}
                   accessibilityLabel={
-                    option.detail ? `${option.label}. ${option.detail}` : option.label
+                    option.detail
+                      ? `${option.label}. ${option.detail}`
+                      : option.label
                   }
                   onPress={() => {
                     close();
@@ -539,7 +579,11 @@ export function usePopupMenu<Value extends string>({
                 >
                   <View style={styles.menuCheck}>
                     {selected ? (
-                      <Check size={17} color={colors.textPrimary} strokeWidth={2.5} />
+                      <Check
+                        size={17}
+                        color={colors.textPrimary}
+                        strokeWidth={2.5}
+                      />
                     ) : null}
                   </View>
                   <View style={styles.menuText}>
@@ -553,7 +597,9 @@ export function usePopupMenu<Value extends string>({
                       {option.label}
                     </Text>
                     {option.detail ? (
-                      <Text style={[styles.detail, { color: colors.textMuted }]}>
+                      <Text
+                        style={[styles.detail, { color: colors.textMuted }]}
+                      >
                         {option.detail}
                       </Text>
                     ) : null}
@@ -662,7 +708,11 @@ export function useSettingsHeaderAction(
 const styles = StyleSheet.create({
   page: { flex: 1 },
   field: { flex: 1, minHeight: 28, ...typeScale.label },
-  headerAction: { minHeight: 44, justifyContent: "center", paddingHorizontal: 4 },
+  headerAction: {
+    minHeight: 44,
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
   menuBackdrop: { ...StyleSheet.absoluteFillObject },
   menu: {
     position: "absolute",
@@ -688,8 +738,15 @@ const styles = StyleSheet.create({
   menuCheck: { width: 18, alignItems: "center" },
   menuText: { flex: 1, minWidth: 0, gap: 2 },
   menuSelected: { fontFamily: fonts.bodySemi, fontWeight: "600" },
-  headerActionLabel: { ...typeScale.label, fontFamily: fonts.bodySemi, fontWeight: "600" },
+  headerActionLabel: {
+    ...typeScale.label,
+    fontFamily: fonts.bodySemi,
+    fontWeight: "600",
+  },
   pageContent: {
+    width: "100%",
+    maxWidth: 720,
+    alignSelf: "center",
     paddingTop: spacing.sm,
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.huge,
