@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { crmQueryKeys } from "@/hooks/use-crm";
 import type { CrmObject, CrmTableQuery } from "@/schemas/crm";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
@@ -67,10 +68,20 @@ const opportunity: CrmObject = {
 
 const initialAuth = useAuthStore.getState();
 
-function wrapper() {
+function wrapper(cachedObject?: CrmObject) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  if (cachedObject) {
+    client.setQueryData(
+      [
+        ...crmQueryKeys.object("person-1", cachedObject.key),
+        "actor",
+        "person-1",
+      ],
+      cachedObject,
+    );
+  }
   return ({ children }: PropsWithChildren) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
@@ -181,7 +192,7 @@ describe("CRM client query validation", () => {
     ).toBe(false);
   });
 
-  it("shows an error instead of loading forever for an over-limit table query", async () => {
+  it("shows an error instead of loading forever for an over-limit table query", () => {
     mockAssistantJson.mockImplementation((endpoint: string) => {
       if (endpoint === "/assistant/crm/objects/company") {
         return Promise.resolve(company);
@@ -197,9 +208,9 @@ describe("CRM client query validation", () => {
       })),
     };
 
-    render(<CrmObjectTable query={query} />, { wrapper: wrapper() });
+    render(<CrmObjectTable query={query} />, { wrapper: wrapper(company) });
 
-    expect(await screen.findByText("Could not load records.")).toBeInTheDocument();
+    expect(screen.getByText("Could not load records.")).toBeInTheDocument();
     expect(screen.queryByText("Loading records...")).not.toBeInTheDocument();
     expect(mockAssistantJson).toHaveBeenCalledWith(
       "/assistant/crm/objects/company",

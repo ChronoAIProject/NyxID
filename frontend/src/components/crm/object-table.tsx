@@ -20,6 +20,7 @@ import {
 import { useCrmObject, useCrmTableQuery } from "@/hooks/use-crm";
 import { executableCrmFilters } from "@/lib/crm/filter-drafts";
 import { isCrmSortableField, renderCrmCell } from "@/lib/crm/field-kinds";
+import { crmTableQuerySchema } from "@/schemas/crm";
 import type {
   CrmField,
   CrmFilter,
@@ -133,8 +134,9 @@ function CrmObjectTableState({
     sort,
     cursor,
   };
+  const queryIsValid = crmTableQuerySchema.safeParse(pageQuery).success;
   const result = useCrmTableQuery(pageQuery, ownerId, {
-    enabled: Boolean(metadataObject),
+    enabled: Boolean(metadataObject) && queryIsValid,
   });
   const exportQuery = JSON.stringify({ ...pageQuery, cursor: undefined });
   useEffect(() => {
@@ -201,7 +203,7 @@ function CrmObjectTableState({
       onChange={resetPage}
     />
   );
-  if (result.isPending && !result.data) {
+  if (queryIsValid && result.isPending && !result.data) {
     return (
       <div className="space-y-3">
         {controls}
@@ -211,7 +213,7 @@ function CrmObjectTableState({
       </div>
     );
   }
-  if (result.isError || !result.data) {
+  if (!queryIsValid || result.isError || !result.data) {
     return (
       <div className="space-y-3">
         {controls}
