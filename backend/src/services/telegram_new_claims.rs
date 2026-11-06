@@ -435,6 +435,7 @@ impl TelegramNewService<'_> {
             active: true,
             revision: 0,
             previous_challenge_hashes: Vec::new(),
+            username_seed: None,
             challenge_hash: hash(&hex::encode(rand::random::<[u8; 24]>())),
             telegram_user_id: Some(claim.telegram_user_id),
             telegram_bot_id: Some(claim.telegram_bot_id),

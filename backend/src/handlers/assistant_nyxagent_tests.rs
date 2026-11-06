@@ -4534,6 +4534,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
             label: "tool".into(),
             status: "error".into(),
             failure: Some(ToolFailure {
+                reason: None,
                 kind: kind.into(),
                 status,
             }),

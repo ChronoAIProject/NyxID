@@ -272,6 +272,9 @@ pub struct TurnActivity {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolFailure {
     pub kind: String,
+    /// Closed native diagnostic code only; never tool text or arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
 }

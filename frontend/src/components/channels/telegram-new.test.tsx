@@ -509,3 +509,73 @@ it("keeps saved setup recovery visible when the manager is unavailable", async (
   expect(screen.queryByText(/An administrator needs to configure a manager/)).not.toBeInTheDocument();
   expect(mockPost).not.toHaveBeenCalled();
 });
+
+
+const usernames = ["support_a12340_bot", "support_a12341_bot", "support_a12342_bot"];
+const suggestionResponse = (saved: TelegramNewRequest) => ({
+  request: saved,
+  creation_url: `https://t.me/newbot/NyxSetupBot/${saved.username_suggestions![0]}?name=Support`,
+  username_suggestions: saved.username_suggestions!.map((username) => ({
+    username, creation_url: `https://t.me/newbot/NyxSetupBot/${username}?name=Support`,
+  })),
+});
+
+it("opens an alternative username for the saved request with unchanged bot name", async () => {
+  const saved = { ...recoverable, username_suggestions: usernames };
+  mockGet.mockResolvedValue(configuration(saved));
+  mockPost.mockResolvedValue(suggestionResponse(saved));
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: `Use ${usernames[1]}` }));
+  expect(replace).toHaveBeenCalledWith(`https://t.me/newbot/NyxSetupBot/${usernames[1]}?name=Support`);
+  expect(mockPost).toHaveBeenCalledExactlyOnceWith(`/channel-bots/telegram-new/requests/${request.id}/creation-link`);
+  expect(view.onStarted).not.toHaveBeenCalled();
+  expect(screen.getByText(/these suggestions have not been checked/)).toBeInTheDocument();
+});
+
+it("regenerates usernames in place and removes the old creation link", async () => {
+  vi.mocked(window.open).mockReturnValue(null);
+  const saved = { ...recoverable, username_suggestions: usernames };
+  const renewed = { ...saved, username_suggestions: usernames.map((name) => name.replace("a1234", "b1234")) };
+  mockGet.mockResolvedValue(configuration(saved));
+  mockPost.mockImplementation(async (path: string) => {
+    if (path.endsWith("regenerate-username")) {
+      mockGet.mockResolvedValue(configuration(renewed));
+      return renewed;
+    }
+    return suggestionResponse(saved);
+  });
+  const view = setup();
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Regenerate username" }));
+  expect(await screen.findByRole("button", { name: `Use ${renewed.username_suggestions[1]}` })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  expect(mockPost).toHaveBeenCalledWith(`/channel-bots/telegram-new/requests/${request.id}/regenerate-username`);
+  expect(view.onStarted).not.toHaveBeenCalled();
+  expect(view.onCancelled).not.toHaveBeenCalled();
+  expect(screen.getByText("Support", { selector: "strong" })).toBeInTheDocument();
+});
+
+it("discards an alternative form response after another client regenerates suggestions", async () => {
+  const saved = { ...recoverable, username_suggestions: usernames };
+  mockGet.mockResolvedValue(configuration(saved));
+  let settle: (value: unknown) => void = () => {};
+  mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+  const view = setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: `Use ${usernames[1]}` }));
+  mockGet.mockResolvedValue(configuration({ ...saved, username_suggestions: usernames.map((name) => name.replace("a1234", "b1234")) }));
+  await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+  await act(async () => settle(suggestionResponse(saved)));
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+
+it("keeps the primary form usable when an older replica omits username alternatives", async () => {
+  mockGet.mockResolvedValue(configuration({ ...recoverable, username_suggestions: usernames }));
+  mockPost.mockResolvedValue({ request: recoverable, creation_url: creationUrl });
+  setup();
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(replace).toHaveBeenCalledWith(creationUrl);
+});

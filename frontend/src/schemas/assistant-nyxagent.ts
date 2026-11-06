@@ -18,7 +18,7 @@ export const nyxAgentTurnActivitySchema = z.object({
   status: z.enum(["running", "completed", "error"]),
   started_at: z.string(),
   ended_at: z.string().nullable().default(null),
-  failure: z.object({ kind: z.enum(["service_status", "tool_error", "refused", "internal"]), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
+  failure: z.object({ reason: z.string().max(64).nullish().transform((value) => value ?? undefined).optional(), kind: z.enum(["service_status", "tool_error", "refused", "internal"]), status: z.number().int().nullish().transform((value) => value ?? undefined).optional() }).nullish(),
 });
 export type NyxAgentTurnActivity = z.infer<typeof nyxAgentTurnActivitySchema>;
 
@@ -547,6 +547,7 @@ export type AssistantAgent = z.infer<typeof assistantAgentSchema>;
 
 export const assistantAgentListSchema = z.object({
   agents: z.array(assistantAgentSchema),
+  destroyed_truncated: z.boolean().optional(),
   limits: nyxAgentSettingsSchema,
 });
 export type AssistantAgentList = z.infer<typeof assistantAgentListSchema>;

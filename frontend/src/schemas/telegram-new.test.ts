@@ -22,3 +22,12 @@ it.each([
 it("accepts only the native managed form URL", () => {
   expect(telegramCreationLinkSchema.safeParse({ request, creation_url: "https://t.me/newbot/NyxSetupBot/support_bot?name=Support%20%26%20%E4%BD%A0" }).success).toBe(true);
 });
+
+
+it("rejects an unsafe alternative form URL and malformed suggested username", () => {
+  const candidate = { username: "support_a12340_bot", creation_url: "https://t.me/newbot/NyxSetupBot/support_a12340_bot?name=Support" };
+  const response = { request, creation_url: candidate.creation_url, username_suggestions: [candidate, candidate, candidate] };
+  expect(telegramCreationLinkSchema.safeParse(response).success).toBe(true);
+  expect(telegramCreationLinkSchema.safeParse({ ...response, username_suggestions: [candidate, { ...candidate, creation_url: "https://evil.test/form" }, candidate] }).success).toBe(false);
+  expect(telegramCreationLinkSchema.safeParse({ ...response, username_suggestions: [candidate, { ...candidate, username: "9bad_bot" }, candidate] }).success).toBe(false);
+});

@@ -87,6 +87,13 @@ export function useTelegramNew(requestId?: string) {
     ),
     onSettled: refresh,
   });
+  const regenerateUsername = useMutation({
+    mutationKey: key,
+    mutationFn: async (id: string) => telegramNewRequestSchema.parse(
+      await api.post(`${ROOT}/requests/${id}/regenerate-username`),
+    ),
+    onSettled: refresh,
+  });
   const cancel = useMutation({
     mutationKey: key,
     mutationFn: (id: string) => api.delete(`${ROOT}/requests/${id}`),
@@ -106,7 +113,7 @@ export function useTelegramNew(requestId?: string) {
       await client.invalidateQueries({ queryKey: ["channel-bots"] });
     },
   });
-  return { configuration, begin, launch, creationLink, cancel, connect,
+  return { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect,
     getCurrentRequest: () => client.getQueryData<{ request: TelegramNewRequest | null }>(["telegram-new", actor, requestId, link?.id])?.request,
   };
 }

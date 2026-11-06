@@ -1234,6 +1234,24 @@ pub(crate) async fn execute_tool(
     tool_name: &str,
     args: &Value,
 ) -> (Value, bool) {
+    let (mut value, error) = execute_tool_inner(state, chat, tool_name, args).await;
+    if tool_name == "nyxid__remember"
+        && error
+        && (chat.guest || chat.collaboration_thread)
+        && value.get("details").is_none()
+    {
+        let reason = crate::errors::memory_write::MemoryWriteReason::MemoryUnauthorized;
+        value["details"] = json!({"reason": reason, "category": reason.category()});
+    }
+    (value, error)
+}
+
+async fn execute_tool_inner(
+    state: &AppState,
+    chat: &ChatAuthority,
+    tool_name: &str,
+    args: &Value,
+) -> (Value, bool) {
     let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
     if chat.guest {
         return (acks::guest_refusal(), true);
@@ -1453,11 +1471,12 @@ async fn execute_authorized_tool_impl(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            let tool = crate::services::assistant_account_tools::error_result_for(
-                error,
-                Some(chat),
-                &state.config.frontend_url,
-            );
+            let project_error = if name == "remember" {
+                crate::services::assistant_account_tools::memory_error_result_for
+            } else {
+                crate::services::assistant_account_tools::error_result_for
+            };
+            let tool = project_error(error, Some(chat), &state.config.frontend_url);
             (tool.value, true)
         }
     };
@@ -1483,6 +1502,9 @@ async fn execute_authorized_tool_impl(
             "agent_id": chat.agent_id,
             "tool_name": tool_name,
             "outcome": if outcome.1 {"refused"} else {"success"},
+            "reason": if name == "remember" { outcome.0["details"]["reason"].clone() } else { Value::Null },
+            "note_chars": if name == "remember" { args["text"].as_str().map(|s| s.chars().count()) } else { None },
+            "replace_requested": if name == "remember" { Some(args["replace_id"].is_string()) } else { None },
         })),
     )
     .await;
@@ -3158,10 +3180,19 @@ async fn agent_responses(
     state: &AppState,
     owner: &str,
     include_destroyed: bool,
-) -> AppResult<Vec<AgentResponse>> {
+    requested: Option<&crate::models::assistant_agent::AssistantAgent>,
+) -> AppResult<(Vec<AgentResponse>, bool)> {
     let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
-    let mut summaries = team::summaries(&state.db, owner, true, include_destroyed, 300).await?;
+    let (mut summaries, destroyed_truncated) =
+        team::summaries_with_archive(&state.db, owner, true, include_destroyed, 300).await?;
     summaries.extend(crate::services::shared_agent_service::summaries(&state.db, owner).await?);
+    if let Some(agent) = requested
+        && agent.destroyed_at.is_some()
+        && !summaries.iter().any(|summary| summary.id == agent.id)
+    {
+        summaries
+            .extend(team::summaries_for_agents(&state.db, owner, vec![agent.clone()], 300).await?);
+    }
     let channels = super::nyxbot::list(state, owner).await?;
     let mut responses = Vec::new();
     for summary in summaries {
@@ -3184,7 +3215,7 @@ async fn agent_responses(
             summary,
         });
     }
-    Ok(responses)
+    Ok((responses, destroyed_truncated))
 }
 
 #[derive(Default, Deserialize)]
@@ -3201,9 +3232,16 @@ pub async fn list_agents(
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let agents = agent_responses(&state, &owner, query.include_destroyed.unwrap_or(false)).await?;
+    let (agents, destroyed_truncated) = agent_responses(
+        &state,
+        &owner,
+        query.include_destroyed.unwrap_or(false),
+        None,
+    )
+    .await?;
     Ok(Json(json!({
         "agents": agents,
+        "destroyed_truncated": destroyed_truncated,
         "limits": SettingsResponse::from(settings::get(&state.db, &owner).await?),
     })))
 }
@@ -3330,8 +3368,9 @@ pub async fn get_agent(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
-    let response = agent_responses(&state, &owner, true)
+    let response = agent_responses(&state, &owner, true, Some(&agent))
         .await?
+        .0
         .into_iter()
         .find(|row| row.summary.id == agent.id)
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;

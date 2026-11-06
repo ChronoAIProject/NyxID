@@ -33,7 +33,8 @@ pub(crate) fn denied() -> AppError {
 
 pub(crate) async fn enabled(db: &Database, admin: &str) -> AppResult<()> {
     if !super::feature_flag_service::personal_flag_enabled(db, admin, FLAG).await? {
-        return Err(denied());
+        // Rollout suspension is retryable, not a revocation of saved authority.
+        return Err(AppError::SecurityReadinessUnavailable);
     }
     super::security_readiness_service::require(db, FLAG).await
 }
@@ -675,17 +676,21 @@ pub(crate) async fn project_sender(
     Ok((projected, admin))
 }
 
-pub(crate) async fn transport_holds(db: &Database, row: &NyxbotChannel) -> AppResult<bool> {
+/// Only confirmed authority loss permits retiring a persisted channel. Rollout
+/// controls suspend work; dependency errors propagate without changing authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrgAccess {
+    Holds,
+    Lost,
+    Unavailable,
+}
+
+pub(crate) async fn transport_access(db: &Database, row: &NyxbotChannel) -> AppResult<OrgAccess> {
     let Some(b) = &row.org_specialist else {
-        return Ok(true);
+        return Ok(OrgAccess::Holds);
     };
     if b.version != 1 || row.bot_owner_id.as_ref() != Some(&b.org_id) {
-        return Ok(false);
-    }
-    match enabled(db, &row.user_id).await {
-        Ok(()) => {}
-        Err(AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable) => return Ok(false),
-        Err(e) => return Err(e),
+        return Ok(OrgAccess::Lost);
     }
     if db
         .collection::<Document>("assistant_agents")
@@ -700,9 +705,13 @@ pub(crate) async fn transport_holds(db: &Database, row: &NyxbotChannel) -> AppRe
             .await?
             .is_none()
     {
-        return Ok(false);
+        return Ok(OrgAccess::Lost);
     }
-    Ok(true)
+    match enabled(db, &row.user_id).await {
+        Ok(()) => Ok(OrgAccess::Holds),
+        Err(AppError::SecurityReadinessUnavailable) => Ok(OrgAccess::Unavailable),
+        Err(error) => Err(error),
+    }
 }
 
 /// Management uses the acting admin as well as the persisted transport admin.

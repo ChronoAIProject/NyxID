@@ -6,7 +6,7 @@ fn unavailable() -> AppError {
     conflict("This setup cannot open the creation form; refresh its progress or reopen Telegram")
 }
 
-pub(super) fn native_creation_url(manager: &str, label: &str) -> AppResult<String> {
+pub(super) fn native_creation_url(manager: &str, label: &str, username: &str) -> AppResult<String> {
     if !(5..=32).contains(&manager.len())
         || !manager
             .bytes()
@@ -15,11 +15,9 @@ pub(super) fn native_creation_url(manager: &str, label: &str) -> AppResult<Strin
         return Err(unavailable());
     }
     let mut url = url::Url::parse("https://t.me").map_err(|_| unavailable())?;
-    url.path_segments_mut().map_err(|_| unavailable())?.extend([
-        "newbot",
-        manager,
-        &suggested_bot_username(label),
-    ]);
+    url.path_segments_mut()
+        .map_err(|_| unavailable())?
+        .extend(["newbot", manager, username]);
     url.query_pairs_mut()
         .append_pair("name", &label.chars().take(64).collect::<String>());
     Ok(url.into())
@@ -274,6 +272,7 @@ impl TelegramNewService<'_> {
                     .get("manager_username")
                     .ok_or_else(unavailable)?,
                 &request.label,
+                &username_suggestions(request)[0],
             )?;
             self.check_creation_context(request, &mut session, false)
                 .await
@@ -349,12 +348,16 @@ impl TelegramNewService<'_> {
                 .get("manager_username")
                 .ok_or_else(unavailable)?;
             // Validate the URL before committing the issuance fence.
-            native_creation_url(username, &request.label)?;
+            native_creation_url(username, &request.label, &username_suggestions(&request)[0])?;
             Ok(username.clone())
         }
         .await;
         let manager_name = super::super::org_membership_authority::finish(session, result).await?;
-        let url = native_creation_url(&manager_name, &captured.label)?;
+        let url = native_creation_url(
+            &manager_name,
+            &captured.label,
+            &username_suggestions(&captured)[0],
+        )?;
         Ok((captured, url))
     }
 }

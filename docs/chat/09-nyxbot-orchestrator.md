@@ -159,7 +159,13 @@ enforcement is independent of the flag.
 
 `spawn_subagent` and `update_subagent` also take `display_name` and `persona`
 (`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
-(optional `replace_id`) and `forget`. Memory and personas refuse obvious
+(optional `replace_id`) and `forget`. `remember` reports stable content-free
+validation, capacity, missing-replacement, authorization, conflict and storage/internal
+diagnostics in the tool result and activity panel. Keep notes to 500 characters
+and 50 total; split long facts deliberately. Confirm saved facts only from
+successful receipts, and report any still-unresolved writes. Later success never
+silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+Memory and personas refuse obvious
 credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)
@@ -317,6 +323,24 @@ grants, read and delete memory notes, and link chat apps to any agent. NyxBot's
 instructions list its specialists, pending requests, its memory, and messages the
 owner sent directly to specialists since the thread's previous user message; it
 is not woken by those direct chats.
+
+The agent list includes every visible live agent, not just populated chats:
+a new idle specialist appears even when its home has no messages. Personal
+agents and specialists from active organization memberships keep their existing
+scope checks; shared specialists use their live sharing ACL. Destroyed rows are
+hidden by default in the sidebar. Discovery includes only the 200 most recently
+destroyed agents (destruction time descending, ID as a stable tie-breaker);
+archives never consume live roster slots. Live personal/org agents remain
+oldest-first with an ID tie-breaker and NyxBot pinned first; shared entries keep
+their existing stable order. REST and tools use
+the same roster. The additive REST `destroyed_truncated` flag shows “Older
+destroyed agents not shown.” under Show destroyed; exact detail links to older
+destroyed agents remain readable subject to existing authorization. Archive
+summary work is bounded to the returned rows. Creation invalidates the
+browser roster, and the committed home-thread insert also refreshes it over the
+live stream. Reload reads the roster again. Loading, an empty roster, and a
+failed load are distinct states; a failed load or refresh offers Retry without
+discarding an already loaded roster.
 
 ### 10a. Group chats
 
@@ -1863,8 +1887,10 @@ First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 Other live org admins can manage/unlink the binding without reading member DMs
 or obtaining provider keys. Relinking resets verification and guest exposure;
 changing personal ↔ org target requires disconnect/reconnect. Loss of the
-transport admin, org/bot/agent authority, or feature readiness retires the link
-with `org_access_lost`. Guest-policy changes invalidate pending guest authority.
+transport admin or org/bot/agent authority retires the link with
+`org_access_lost`. Flag-off, unavailable security readiness and dependency errors
+suspend new work and defer retryable deliveries without deleting the binding,
+route or key; work resumes when availability returns. Guest-policy changes invalidate pending guest authority.
 Relay/native/gateway use the same local validator; CMA never decides membership
 or payer. A verified private chat moves between relay and gateway with its member
 home reply binding and guest execution lane; adoption is atomic and keeps the

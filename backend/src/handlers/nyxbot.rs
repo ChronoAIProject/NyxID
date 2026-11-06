@@ -14,6 +14,7 @@
 use crate::models::nyxbot_gateway_release::ReleaseReason;
 use crate::services::assistant_links::AssistantPage;
 use crate::services::nyxbot_gateway_release_service as releases;
+use crate::services::org_channel_service::OrgAccess;
 use axum::{
     Json,
     body::{Body, Bytes},
@@ -179,26 +180,33 @@ pub(crate) async fn resolve_bot_ref(
     }
 }
 
-/// Whether an org bot's channel may still act: its owner must still
-/// administer the org. Personal channels always may. Database errors are
-/// errors, never a denial.
-pub(crate) async fn org_access_holds(state: &AppState, row: &NyxbotChannel) -> AppResult<bool> {
+/// Check durable authority before rollout availability, so a paused binding is
+/// still released promptly on real revocation. Database errors are never loss.
+pub(crate) async fn org_access(state: &AppState, row: &NyxbotChannel) -> AppResult<OrgAccess> {
     if !crate::services::platform_bot_authority::permits_personal_routes(
         &state.db,
         &row.channel_bot_id,
     )
     .await?
     {
-        return Ok(false);
+        return Ok(OrgAccess::Lost);
     }
-    if !crate::services::org_channel_service::transport_holds(&state.db, row).await? {
-        return Ok(false);
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !Box::pin(manages_bot_owner(state, &row.user_id, org)).await?
+    {
+        return Ok(OrgAccess::Lost);
     }
-    match row.bot_owner_id.as_deref() {
-        // Keep the new provider check small on personal channels, which do
-        // not enter the membership resolver or allocate this future.
-        Some(org) => Box::pin(manages_bot_owner(state, &row.user_id, org)).await,
-        None => Ok(true),
+    crate::services::org_channel_service::transport_access(&state.db, row).await
+}
+
+async fn require_org_access(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
+    match org_access(state, row).await? {
+        OrgAccess::Holds => Ok(()),
+        OrgAccess::Lost => {
+            Box::pin(release_org_channel(state, row)).await?;
+            Err(AppError::Forbidden("org_access_lost".into()))
+        }
+        OrgAccess::Unavailable => Err(AppError::SecurityReadinessUnavailable),
     }
 }
 
@@ -910,13 +918,17 @@ async fn connect_inner(
         }
         outcome = fall_back_to_direct(state, &row, &bot, &direct_callback).await;
     }
-    if let Ok(route_id) = &outcome
-        && !org_access_holds(state, &row).await?
-    {
-        let mut revoked = load_channel(state, owner, &id).await?;
-        revoked.route_id = Some(route_id.clone());
-        Box::pin(release_org_channel(state, &revoked)).await?;
-        return Err(AppError::Forbidden("org_access_lost".into()));
+    if let Ok(route_id) = &outcome {
+        match org_access(state, &row).await? {
+            OrgAccess::Holds => {}
+            OrgAccess::Lost => {
+                let mut revoked = load_channel(state, owner, &id).await?;
+                revoked.route_id = Some(route_id.clone());
+                Box::pin(release_org_channel(state, &revoked)).await?;
+                return Err(AppError::Forbidden("org_access_lost".into()));
+            }
+            OrgAccess::Unavailable => return Err(AppError::SecurityReadinessUnavailable),
+        }
     }
     match outcome {
         Ok(route_id) => {
@@ -988,6 +1000,9 @@ async fn connect_inner(
                     .ok_or_else(|| AppError::Internal("Owner link unavailable".into()))?,
             };
             Ok((row, link))
+        }
+        Err("org_access_unavailable" | "storage_unavailable") => {
+            Err(AppError::SecurityReadinessUnavailable)
         }
         Err(code) => {
             let current = load_channel(state, owner, &id).await?;
@@ -2971,10 +2986,21 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
         });
         // While the owner has not verified, say what NyxID saw from the bot
         // (for an org bot, only while they still administer the org).
-        if org_access_holds(state, row).await?
-            && let Some(hint) = status::verification_hint(state, row).await?
-        {
-            value["inbound_hint"] = json!(hint);
+        match org_access(state, row).await {
+            Ok(OrgAccess::Holds) => {
+                if let Some(hint) = status::verification_hint(state, row).await? {
+                    value["inbound_hint"] = json!(hint);
+                }
+            }
+            Ok(OrgAccess::Lost) => {}
+            Ok(OrgAccess::Unavailable) | Err(_) => {
+                value["delivery_status"] = json!("failing");
+                value["delivery_error"] = json!("org_access_unavailable");
+                value["delivery_failed_at"] = Value::Null;
+                value["delivery_reason"] =
+                    json!("This assistant is temporarily unavailable. Please try again later.");
+                value["follow_readiness"] = json!("unavailable");
+            }
         }
         channel_agents.push(value);
     }
@@ -4091,15 +4117,15 @@ async fn provider_channel(
             "shared_entry_requires_native_receipt",
         ));
     }
-    match org_access_holds(state, &row).await {
-        Ok(true) => {}
-        Ok(false) => {
+    match org_access(state, &row).await {
+        Ok(OrgAccess::Holds) => {}
+        Ok(OrgAccess::Lost) => {
             Box::pin(release_org_channel(state, &row))
                 .await
                 .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?;
             return Err(problem(StatusCode::FORBIDDEN, "org_access_lost"));
         }
-        Err(_) => {
+        Ok(OrgAccess::Unavailable) | Err(_) => {
             return Err(problem(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "provider_unavailable",
@@ -4933,10 +4959,14 @@ async fn custom_responses(
     {
         return problem(StatusCode::FORBIDDEN, "destination_requires_native_receipt");
     }
-    match org_access_holds(&state, &destination).await {
-        Ok(true) => {}
-        Ok(false) => return problem(StatusCode::FORBIDDEN, "destination_org_access_lost"),
-        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+    match org_access(&state, &destination).await {
+        Ok(OrgAccess::Holds) => {}
+        Ok(OrgAccess::Lost) => {
+            return problem(StatusCode::FORBIDDEN, "destination_org_access_lost");
+        }
+        Ok(OrgAccess::Unavailable) | Err(_) => {
+            return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+        }
     }
     if destination.gateway_source.is_some() || destination.transport != "direct" {
         return problem(StatusCode::FORBIDDEN, "destination_relay_required");
@@ -6200,10 +6230,7 @@ pub(crate) async fn route_key_auth(
         &channel.channel_bot_id,
     )
     .await?;
-    if !org_access_holds(state, channel).await? {
-        release_org_channel(state, channel).await?;
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
+    require_org_access(state, channel).await?;
     let key_owner = bot_owner(channel);
     let key = key_service::get_api_key(&state.db, key_owner, &channel.route_api_key_id).await?;
     let mut auth = super::assistant_team::owner_auth(key_owner)?;
@@ -6232,6 +6259,7 @@ async fn direct_reply(
     let mut headers = HeaderMap::new();
     let auth = match reply_token {
         Some(token) => {
+            require_org_access(state, channel).await?;
             headers.insert(
                 "authorization",
                 format!("Bearer {token}")
@@ -6317,15 +6345,17 @@ pub async fn relay_callback(
         );
     }
     // An org bot reaches a person's agent only while they administer the org.
-    match org_access_holds(&state, &row).await {
-        Ok(true) => {}
-        Ok(false) => {
+    match org_access(&state, &row).await {
+        Ok(OrgAccess::Holds) => {}
+        Ok(OrgAccess::Lost) => {
             if let Err(error) = release_org_channel(&state, &row).await {
                 tracing::warn!(%error, "NyxBot org channel release deferred");
             }
             return problem(StatusCode::FORBIDDEN, "org_access_lost");
         }
-        Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+        Ok(OrgAccess::Unavailable) | Err(_) => {
+            return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
+        }
     }
     // Dedup redeliveries of the same inbound message.
     let sender_kind = chats::native_sender_kind(&row.platform, &payload["raw_platform_data"]);
