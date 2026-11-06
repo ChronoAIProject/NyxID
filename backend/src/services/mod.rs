@@ -161,6 +161,9 @@ pub mod node_target_service;
 pub mod node_ws_manager;
 pub mod notification_service;
 pub mod notion_evidence;
+pub mod nyxbot_cma_agent_service;
+pub mod nyxbot_cma_gateway;
+pub mod nyxbot_cma_sandbox_service;
 pub mod oauth_app_source;
 pub(crate) mod oauth_broker_record_service;
 pub mod oauth_broker_service;
@@ -557,7 +560,10 @@ pub mod monitoring_service;
 
 pub mod assistant_delegated_images;
 
+pub mod nyxbot_cma_admission;
+
 pub mod cma_session_origin;
+pub mod nyxbot_cma_tools;
 pub mod org_channel_service;
 
 pub mod generated_artifacts;

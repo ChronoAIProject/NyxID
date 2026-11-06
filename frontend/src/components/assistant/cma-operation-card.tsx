@@ -1,8 +1,12 @@
+import { useEffect, useState } from "react";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import { Check, CircleAlert, Clock3, ExternalLink, Radio, Workflow } from "lucide-react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { CmaGlyph } from "@/components/service-icons/cma";
+import { CmaAgentPanel } from "./cma-agent-panel";
 import { Button } from "@/components/ui/button";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { cn } from "@/lib/utils";
 import { isCmaOperationPending, type CmaOperation } from "@/schemas/cma-operation";
 
@@ -11,7 +15,11 @@ function presentation(operation: CmaOperation) {
   if (state === "cancelled") return { label: "Tracking stopped", tone: "muted" };
   if (state === "cancelling") return { label: "Stopping tracking", tone: "muted" };
   if (reason === "timeout") return { label: "Tracking timed out", tone: "warning" };
-  if (["submission_uncertain", "submission_failed"].includes(reason ?? "")) {
+  if (kind === "cma_response" && reason === "operation_cancelled" && status === "incomplete") {
+    return { label: "Cancelled", tone: "muted" };
+  }
+  if (reason === "submission_failed") return { label: "Submission failed", tone: "error" };
+  if (reason === "submission_uncertain") {
     return { label: "Submission unconfirmed", tone: "warning" };
   }
   if (reason === "operation_failed" || ["failed", "incomplete", "cancelled", "stopped", "deleted"].includes(status ?? "")) {
@@ -55,14 +63,33 @@ const tones: Record<string, string> = {
 const phases: Record<string, string> = {
   sandbox_creation: "Creating sandbox",
   sandbox_startup: "Starting sandbox",
+  sandbox_ready: "Preparing sandbox",
   workspace_creation: "Preparing workspace",
   agent_creation: "Creating agent",
   agent_startup: "Starting agent",
+  desktop_preparation: "Preparing desktop",
 };
 
+const LONG_REQUEST_MS = 10 * 60_000;
+
 export function CmaOperationCard({ operation }: { readonly operation: CmaOperation }) {
-  const { label, tone } = presentation(operation);
+  const cmaEnabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
+  const observed = presentation(operation);
   const pending = isCmaOperationPending(operation);
+  const [now, setNow] = useState(Date.now);
+  const running = pending && operation.kind === "cma_response" && observed.label === "Working";
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => { setNow(Date.now()); }, 60_000);
+    return () => { window.clearInterval(timer); };
+  }, [running]);
+  // Elapsed request time is only a UX hint. A fresh poll is not proof of work
+  // progress, and elapsed time never changes the persisted remote outcome.
+  const createdAt = Date.parse(operation.created_at);
+  const takingLonger = running && Number.isFinite(createdAt) && now - createdAt >= LONG_REQUEST_MS;
+  const { label, tone } = takingLonger
+    ? { label: "Taking longer than usual", tone: "warning" }
+    : observed;
   const accepted = Boolean(operation.operation_id || (operation.kind === "cma_agent" && operation.status));
   const complete = tone === "success";
   const stages = [
@@ -72,6 +99,9 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
   ];
   const lastChecked = operation.checked_at ? new Date(operation.checked_at) : null;
   const cmaUrl = safeCmaUrl(operation.cma_url);
+  const executionAgentId = cmaEnabled && operation.agent_ref_id && /^[0-9a-f-]{36}$/i.test(operation.agent_ref_id)
+    ? operation.agent_ref_id
+    : undefined;
   return (
     <section
       aria-label="CMA delegation"
@@ -106,10 +136,17 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
           </li>)}
         </ol>
         {operation.phase && phases[operation.phase] && pending && <p className="mt-3 flex items-center gap-1.5 text-13 text-zinc-400"><Workflow aria-hidden className="size-3" />{phases[operation.phase]}</p>}
-        {tone === "warning" && !pending && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
+        {takingLonger && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />This request has been open for at least 10 minutes. CMA still reports it as running. View its progress, or ask NyxBot to cancel this task.</p>}
+        {operation.reason === "timeout" && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />Automatic tracking reached its time limit. CMA may still be running. Check its status before submitting it again.</p>}
+        {tone === "warning" && !pending && operation.reason !== "timeout" && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
         {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-13 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
         {operation.state === "cancelled" && <p className="mt-3 text-13 text-zinc-400">Tracking ended. CMA may still be running.</p>}
-        {cmaUrl && <Button asChild variant="primary" className="mt-4 w-full">
+        {executionAgentId && <CmaAgentPanel
+          key={`${executionAgentId}:${operation.response_id ?? ""}`}
+          agentId={executionAgentId}
+          responseId={operation.response_id ?? undefined}
+        />}
+        {cmaUrl && <Button asChild variant={executionAgentId ? "outline" : "primary"} className="mt-4 w-full">
           <a href={cmaUrl} target="_blank" rel="noopener noreferrer">
             View in CMA <ExternalLink aria-hidden className="size-3" />
           </a>

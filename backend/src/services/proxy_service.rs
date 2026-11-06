@@ -4507,6 +4507,8 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
         billing_egress_permit,
         egress_guard,
         None,
+        Some(target.service.slug.as_str()),
+        None,
     )
 }
 
@@ -4528,6 +4530,8 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
     resource_proof: Option<&'a super::resource_request_proof::ReadProofIssuer<'a>>,
+    catalog_service_slug: Option<&'a str>,
+    cma_permit: Option<&'a super::nyxbot_cma_admission::CmaDispatchPermit>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
         client,
@@ -4546,6 +4550,8 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
         billing_egress_permit,
         egress_guard,
         resource_proof,
+        catalog_service_slug,
+        cma_permit,
     ))
 }
 
@@ -4567,8 +4573,17 @@ async fn forward_request_with_egress_guard_inner(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
+    catalog_service_slug: Option<&str>,
+    cma_permit: Option<&super::nyxbot_cma_admission::CmaDispatchPermit>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     target.require_credential_materialized()?;
+    // User-managed targets carry the connection alias in service.slug. REST
+    // and MCP must use the resolved catalog identity for this protocol gate.
+    if catalog_service_slug == Some("cma") && cma_permit.is_none() {
+        return Err(ForwardRequestError::PreDispatchRejected(
+            AppError::Forbidden("CMA requires personal resource admission".into()),
+        ));
+    }
     if let Some(permit) = &target.execution_permission {
         let ProxyBody::Buffered(bytes) = &body else {
             return Err(ForwardRequestError::PreDispatchRejected(
@@ -4999,7 +5014,38 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(proof) = resource_proof {
+    let response = if let Some(cma) = cma_permit {
+        let mut request = request.build()?;
+        if let Some(proof) = resource_proof {
+            proof
+                .attach(&mut request)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        cma.before_send(&request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .before_send(target)
+                .await
+                .map_err(ForwardRequestError::PreDispatchRejected)?;
+        }
+        if let Some(context) = &target.execution_request {
+            context.native_dispatched();
+        }
+        let result = no_redirect_http_client().execute(request).await;
+        if let Some(permit) = &target.execution_permission {
+            permit
+                .complete(result.is_ok())
+                .await
+                .map_err(ForwardRequestError::Application)?;
+        }
+        let response = result?;
+        cma.observe_response(response)
+            .await
+            .map_err(|_| ForwardRequestError::OutcomeUnknown)?
+    } else if let Some(proof) = resource_proof {
         let mut request = request.build()?;
         proof
             .attach(&mut request)
@@ -7831,6 +7877,47 @@ mod tests {
             requests[0].headers["authorization"],
             "Bearer fake-local-only"
         );
+    }
+
+    #[tokio::test]
+    async fn cma_forwarding_requires_catalog_admission_even_with_a_connection_alias() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+        let vendor = MockServer::start().await;
+        Mock::given(path("/api/v1/agents"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&vendor)
+            .await;
+        let mut target = make_proxy_target(vendor.uri());
+        target.service.slug = "my-worker".into();
+        let error = super::forward_request_with_resource_proof(
+            &Client::new(),
+            &target,
+            reqwest::Method::GET,
+            "/api/v1/agents",
+            None,
+            reqwest::header::HeaderMap::new(),
+            ProxyBody::Buffered(None),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+            vec![],
+            crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            None,
+            None,
+            Some("cma"),
+            None,
+        )
+        .await
+        .expect_err("a renamed CMA connection still needs a resource permit");
+        assert!(matches!(
+            error,
+            ForwardRequestError::PreDispatchRejected(AppError::Forbidden(_))
+        ));
+        assert!(vendor.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -331,6 +331,12 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         return watches::ready(&state.db, w, None, "timeout", None).await;
     }
     if w.state == "submitting" {
+        if watches::submission_in_progress(&state.db, w).await? {
+            // The first poll can precede the end of a streaming submit. Keep
+            // its receipt writable; defer's lease/state fence preserves a
+            // concurrent submitted() or Stop transition.
+            return watches::defer(&state.db, w).await;
+        }
         return watches::ready(&state.db, w, None, "submission_uncertain", None).await;
     }
     if w.execution_task.is_some()
@@ -385,8 +391,24 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         .pointer(&w.contract.status_field)
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    let agent_not_started =
-        crate::services::cma_operation::record_observation(&state.db, w, &parsed).await?;
+    let observation = crate::services::cma_operation::record_observation(state, w, &parsed).await?;
+    if observation.approval_enqueued {
+        crate::handlers::assistant_team::wake(state, &w.user_id, &w.conversation_id).await;
+    }
+    if crate::services::cma_operation::response_cancelled(
+        w.cma.as_ref(),
+        w.operation_id.as_deref(),
+        &parsed,
+    ) {
+        return watches::ready(
+            &state.db,
+            w,
+            Some(&state.encryption_keys),
+            "operation_cancelled",
+            Some(&parsed.to_string()),
+        )
+        .await;
+    }
     if w.contract.failure_states.iter().any(|s| s == phase) {
         if crate::services::generated_artifacts::admitted(w) {
             return watches::ready(&state.db, w, None, "operation_failed", None).await;
@@ -407,7 +429,7 @@ async fn step(state: &AppState, w: &AsyncServiceOperation) -> crate::errors::App
         )
         .await;
     }
-    if agent_not_started || !w.contract.success_states.iter().any(|s| s == phase) {
+    if observation.awaiting_activity || !w.contract.success_states.iter().any(|s| s == phase) {
         return watches::defer(&state.db, w).await;
     }
     if crate::services::generated_artifacts::admitted(w) {

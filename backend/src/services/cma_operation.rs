@@ -6,6 +6,114 @@ use crate::models::async_service_operation::{
 };
 use serde_json::Value;
 
+pub const APPROVAL_EVENT_KIND: &str = "cma_approval_requested";
+
+#[path = "cma_response_submission.rs"]
+pub(crate) mod submission;
+
+#[cfg(test)]
+#[path = "cma_operation_approval_tests.rs"]
+mod approval_tests;
+
+#[cfg(test)]
+#[path = "cma_operation_outcome_tests.rs"]
+mod outcome_tests;
+
+/// The compiled CMA v2 contract projects a cancelled command as incomplete /
+/// interrupted. Preserve the raw observation and classify only the exact
+/// tracked Response; ordinary incomplete results remain failures.
+pub fn response_cancelled(
+    cma: Option<&CmaOperation>,
+    operation_id: Option<&str>,
+    value: &Value,
+) -> bool {
+    let Some(cma) = cma.filter(|cma| cma.kind == Presentation::Response) else {
+        return false;
+    };
+    let (Some(agent), Some(response)) = (cma.agent_id.as_deref(), operation_id) else {
+        return false;
+    };
+    !agent.is_empty()
+        && !response.is_empty()
+        && cma.response_id.as_deref().is_none_or(|id| id == response)
+        && value["id"].as_str() == Some(response)
+        && value["conversation"]["id"].as_str() == Some(agent)
+        && value["status"].as_str() == Some("incomplete")
+        && value["incomplete_details"]["reason"].as_str() == Some("interrupted")
+        && value.get("error").is_none_or(Value::is_null)
+}
+
+/// Presentation only. Authority still binds the complete original operation,
+/// including decision, response, approval, revision and idempotency key.
+pub fn control_confirmation(
+    catalog_slug: Option<&str>,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Option<&'static str> {
+    if catalog_slug != Some("cma")
+        || method != "POST"
+        || path != "/api/v2/agents/{agent_id}/responses/{response_id}/controls"
+    {
+        return None;
+    }
+    let value: Value = serde_json::from_str(body?).ok()?;
+    match (
+        value["command"]["type"].as_str(),
+        value["command"]["decision"].as_str(),
+    ) {
+        (Some("resolve_approval"), Some("allow")) => Some(
+            "Send approval for the cloud assistant's pending action. Deny on this confirmation sends nothing to CMA and leaves that request waiting.",
+        ),
+        (Some("resolve_approval"), Some("deny")) => Some(
+            "Send a refusal for the cloud assistant's pending action. The assistant may continue another way. Deny on this confirmation sends nothing to CMA and leaves that request waiting.",
+        ),
+        (Some("resolve_approval"), Some("abort")) => Some(
+            "Dismiss the pending approval without an answer. Deny on this confirmation sends nothing to CMA and leaves that request waiting.",
+        ),
+        (Some("cancel"), _) => Some(
+            "Send a cancellation request for this cloud task. Its stopped state must still be confirmed. Deny on this confirmation sends nothing to CMA.",
+        ),
+        _ => None,
+    }
+}
+
+/// CMA's stop/delete endpoints acknowledge scheduling with an empty 202.
+/// Make that observation useful to the model without inventing completion or
+/// an operation ID. The HTTP status and original execution authority stay intact.
+pub fn agent_lifecycle_receipt(
+    catalog_slug: Option<&str>,
+    method: &str,
+    path: &str,
+    status: u16,
+    body: &str,
+) -> Option<String> {
+    if catalog_slug != Some("cma") || status != 202 || !body.trim().is_empty() {
+        return None;
+    }
+    let segments: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+    let (agent, target) = match (method, segments.as_slice()) {
+        ("DELETE", ["api", "v1", "agents", agent]) => (*agent, "deleted"),
+        ("POST", ["api", "v1", "agents", agent, "stop"]) => (*agent, "stopped"),
+        _ => return None,
+    };
+    if agent.len() > 256
+        || !agent.strip_prefix("agt_").is_some_and(|id| {
+            !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        })
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "status":"accepted", "agent_id":agent, "target_status":target,
+        "status_path":format!("/api/v1/agents/{agent}"),
+        "instructions":"CMA accepted this asynchronous lifecycle request; completion is not yet confirmed. Use get_agent for this exact agent_id to observe target_status. Do not repeat the mutation or request another confirmation just because an immediate read still shows the previous status. Report accepted/pending until the target state is observed; if observation remains unavailable, report that uncertainty instead of assuming failure."
+    }).to_string())
+}
+
 pub fn apply_contracts(catalog_slug: &str, endpoints: &mut [McpToolEndpoint]) {
     if catalog_slug != "cma" {
         return;
@@ -99,6 +207,9 @@ pub fn metadata(contract: &AsyncOperationContract, args: &Value) -> Option<CmaOp
         seen_working: false,
         kind,
         agent_id: (kind == Presentation::Agent).then_some(agent_id).flatten(),
+        agent_ref_id: None,
+        response_id: None,
+        approval_scan: None,
         callback_url: None,
         idempotency_key: identifier(args["Idempotency-Key"].as_str(), None),
         status: None,
@@ -185,9 +296,11 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
                 *s,
                 "sandbox_creation"
                     | "sandbox_startup"
+                    | "sandbox_ready"
                     | "workspace_creation"
                     | "agent_creation"
                     | "agent_startup"
+                    | "desktop_preparation"
             )
         })
         .map(str::to_owned);
@@ -200,6 +313,15 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
         })
     {
         cma.agent_id = Some(id);
+    }
+    // A successful Response submission already carries its authenticated
+    // receipt identity. Persist it without needing an unleased provider read;
+    // sparse observations cannot clear it or bind this watch to another task.
+    if cma.kind == Presentation::Response
+        && cma.response_id.is_none()
+        && let Some(id) = identifier(value["id"].as_str(), Some("resp_"))
+    {
+        cma.response_id = Some(id);
     }
 }
 
@@ -236,14 +358,23 @@ pub fn card_url(cma: &CmaOperation) -> Option<String> {
     validated_callback_url(cma.callback_url.as_deref())
 }
 
+pub struct Observation {
+    pub awaiting_activity: bool,
+    pub approval_enqueued: bool,
+}
+
 pub async fn record_observation(
-    db: &mongodb::Database,
+    state: &crate::AppState,
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
     value: &Value,
-) -> crate::errors::AppResult<bool> {
+) -> crate::errors::AppResult<Observation> {
     use mongodb::bson::{self, doc};
+    let db = &state.db;
     let Some(mut cma) = watch.cma.clone() else {
-        return Ok(false);
+        return Ok(Observation {
+            awaiting_activity: false,
+            approval_enqueued: false,
+        });
     };
     observed(&mut cma, value);
     let awaiting_activity = cma.kind == Presentation::Agent && !cma.seen_working;
@@ -253,10 +384,387 @@ pub async fn record_observation(
             doc! {"$set":{"cma":bson::to_bson(&cma).map_err(|_| crate::errors::AppError::Internal("Could not serialize CMA status".into()))?}},
         )
         .await?;
-    if updated.matched_count == 1 {
+    let approval_enqueued = if updated.matched_count == 1 {
         super::cma_session_origin::record_best_effort(db, watch, &cma).await;
+        match register_observed_reference(state, watch, &cma, value).await {
+            Ok(queued) => queued,
+            Err(error) => {
+                tracing::debug!(watch_id=%watch.id,code=error.error_code(),"CMA reference observation deferred");
+                false
+            }
+        }
+    } else {
+        false
+    };
+    Ok(Observation {
+        awaiting_activity,
+        approval_enqueued,
+    })
+}
+
+/// Called only after a guarded watch update accepted the authenticated receipt.
+/// Registration is a live owner read; request-supplied Agent IDs alone are untrusted.
+pub async fn register_observed_reference(
+    state: &crate::AppState,
+    watch: &crate::models::async_service_operation::AsyncServiceOperation,
+    cma: &CmaOperation,
+    value: &Value,
+) -> crate::errors::AppResult<bool> {
+    use super::nyxbot_cma_gateway::CmaGateway;
+    use mongodb::bson::doc;
+    let db = &state.db;
+    let service_id=if let Some(service)=db.collection::<crate::models::user_service::UserService>(crate::models::user_service::COLLECTION_NAME)
+        .find_one(doc! {"_id":&watch.service_id,"user_id":&watch.user_id,"is_active":true,"deleted_at":null}).await? {
+        service.catalog_service_id.ok_or_else(||crate::errors::AppError::Forbidden("CMA catalog identity unavailable".into()))?
+    } else { watch.service_id.clone() };
+    let gateway = super::nyxbot_cma_gateway::CatalogCmaGateway::for_service(state, &service_id)
+        .with_watch_authority(watch, state.node_ws_manager.clone());
+    if gateway.service_id(&watch.user_id).await? != service_id {
+        return Ok(false);
     }
-    Ok(awaiting_activity)
+    let Some(agent) = cma.agent_id.as_deref() else {
+        return Ok(false);
+    };
+    let operation = watch
+        .operation_id
+        .as_deref()
+        .or_else(|| value["id"].as_str());
+    if cma.kind == Presentation::Provisioning
+        && let Some(operation) = operation
+    {
+        super::nyxbot_cma_admission::record_creation_observation(
+            db,
+            &gateway,
+            &watch.user_id,
+            &service_id,
+            operation,
+            value,
+        )
+        .await?;
+    }
+    let response = if cma.kind == Presentation::Response {
+        let Some(id) = operation else {
+            return Ok(false);
+        };
+        let response = gateway.get_response(&watch.user_id, agent, id).await?;
+        if response.agent_id != agent || response.id != id {
+            return Err(crate::errors::AppError::Forbidden(
+                "CMA response binding changed".into(),
+            ));
+        }
+        Some(id.to_owned())
+    } else {
+        None
+    };
+    let source = super::nyxbot_cma_agent_service::AgentSource {
+        conversation_id: Some(watch.conversation_id.clone()),
+        agent_id: Some(watch.agent_id.clone()),
+        turn_id: Some(watch.turn_id.clone()),
+        watch_id: Some(watch.id.clone()),
+        response_id: response.clone(),
+        creation_operation_id: if cma.kind == Presentation::Provisioning {
+            operation.map(str::to_owned)
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    let reference = super::nyxbot_cma_agent_service::register_live(
+        db,
+        &gateway,
+        &watch.user_id,
+        agent,
+        Some(&source),
+    )
+    .await?;
+    let updated=db.collection::<mongodb::bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&watch.id,"user_id":&watch.user_id,"cma.agent_id":agent,"cma.checked_at":cma.checked_at.map(mongodb::bson::DateTime::from_chrono)},
+            doc! {"$set":{"cma.agent_ref_id":&reference.id,"cma.response_id":&response}}).await?;
+    if updated.matched_count == 1
+        && watch.state == "waiting"
+        && cma.kind == Presentation::Response
+        && matches!(
+            cma.status.as_deref(),
+            Some("in_progress" | "waiting_approval")
+        )
+        && watch.shared_execution.is_none()
+        && let Some(response) = response.as_deref()
+    {
+        return observe_approval(state, watch, cma, &gateway, agent, response).await;
+    }
+    Ok(false)
+}
+
+fn control_target(value: &Value, response: &str) -> Option<(i64, i64)> {
+    if value["target_active"].as_bool() != Some(true)
+        || value["runtime_support"]["resolve_approval"].as_bool() != Some(true)
+        || value["target"]["response_id"].as_str() != Some(response)
+    {
+        return None;
+    }
+    let positive = |key: &Value| key.as_i64().filter(|value| *value > 0);
+    Some((
+        positive(&value["target"]["turn_sequence"])?,
+        positive(&value["agent_revision"])?,
+    ))
+}
+
+fn apply_approval_page(
+    scan: &mut crate::models::async_service_operation::CmaApprovalScan,
+    response: &str,
+    page: &super::nyxbot_cma_gateway::CmaEventSnapshot,
+) -> crate::errors::AppResult<()> {
+    use crate::errors::AppError;
+    use crate::models::async_service_operation::CmaPendingApproval;
+    if scan
+        .incarnation
+        .as_ref()
+        .is_some_and(|old| page.incarnation.as_ref() != Some(old))
+    {
+        return Err(AppError::Conflict(
+            "cma_approval_observation_changed".into(),
+        ));
+    }
+    scan.incarnation = page.incarnation.clone();
+    for event in &page.events {
+        if let Some(sequence) = event.sequence {
+            if sequence <= 0 || scan.last_sequence.is_some_and(|last| sequence <= last) {
+                return Err(AppError::Conflict(
+                    "cma_approval_event_order_changed".into(),
+                ));
+            }
+            scan.last_sequence = Some(sequence);
+        } else {
+            // Older directly-bound events remain usable, but cannot establish
+            // or continue the ordered inheritance used by current CMA replay.
+            scan.active_turn = false;
+        }
+        let bound = event.response_id.as_deref() == Some(response)
+            && event.turn_sequence == Some(scan.turn_sequence);
+        if event.kind == "turn_started" {
+            if scan.active_turn {
+                scan.pending.clear();
+            }
+            scan.active_turn = bound && event.sequence == Some(scan.turn_sequence);
+            continue;
+        }
+        if matches!(
+            event.kind.as_str(),
+            "turn_completed" | "turn_failed" | "turn_interrupted"
+        ) {
+            if scan.active_turn {
+                scan.pending.clear();
+            }
+            scan.active_turn = false;
+            continue;
+        }
+        if event.kind == "conversation_gap" && scan.active_turn {
+            return Err(AppError::Conflict("cma_approval_history_incomplete".into()));
+        }
+        let inherited =
+            scan.active_turn && event.response_id.is_none() && event.turn_sequence.is_none();
+        if !bound && !inherited {
+            continue;
+        }
+        let Some(id) = event
+            .approval_id
+            .as_deref()
+            .and_then(|id| identifier(Some(id), None))
+        else {
+            continue;
+        };
+        match event.kind.as_str() {
+            "approval_requested" => {
+                if !scan.pending.iter().any(|entry| entry.approval_id == id) {
+                    if scan.pending.len() >= 100 {
+                        return Err(AppError::Conflict(
+                            "cma_approval_observation_too_large".into(),
+                        ));
+                    }
+                    scan.pending.push(CmaPendingApproval {
+                        approval_id: id,
+                        notified: false,
+                    });
+                }
+            }
+            "approval_resolved" => scan.pending.retain(|entry| entry.approval_id != id),
+            _ => {}
+        }
+    }
+    if page.next_cursor.is_some() && page.next_cursor == scan.cursor {
+        return Err(AppError::Conflict(
+            "cma_approval_cursor_did_not_advance".into(),
+        ));
+    }
+    scan.cursor = page.next_cursor.clone();
+    scan.complete = page.next_cursor.is_none();
+    Ok(())
+}
+
+fn approval_event(
+    watch: &crate::models::async_service_operation::AsyncServiceOperation,
+    agent: &str,
+    response: &str,
+    scan: &crate::models::async_service_operation::CmaApprovalScan,
+    approval: &crate::models::async_service_operation::CmaPendingApproval,
+) -> crate::models::assistant_conversation::AgentEvent {
+    use crate::models::assistant_conversation::{REPORT_PROVENANCE_V1, carried_report_to};
+    let id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_OID,
+        format!(
+            "nyxid:cma-approval:{}:{response}:{}:{}",
+            watch.id, scan.turn_sequence, approval.approval_id
+        )
+        .as_bytes(),
+    )
+    .to_string();
+    let target = serde_json::json!({"agent_id":agent,"response_id":response,
+        "turn_sequence":scan.turn_sequence,"expected_agent_revision":scan.revision,
+        "approval_id":approval.approval_id,"Idempotency-Key":format!("cma-approval-{id}")});
+    let mut event = super::assistant_team_service::event(
+        APPROVAL_EVENT_KIND,
+        format!(
+            "CMA requested approval for this exact observed task: {target}. Read this Agent's approval details and verify this response is still awaiting the same approval. Do not infer approval from an in_progress status. If the action is appropriate for the user's request, use the published control_task operation with the exact observed Agent, response, turn_sequence and expected_agent_revision; command.type is resolve_approval, approval_id is the observed ID, and decision is allow, deny or abort. Preserve this Idempotency-Key and body on retries. The existing action access policy handles any owner confirmation. If the revision or target changed, re-read and report the change; never approve a different task. This notification does not finish the original task watch."
+        ),
+        Some(&watch.agent_id),
+    );
+    event.id = id;
+    event.question_key = Some(super::async_service_operation::cma_approval_watch_key(
+        &watch.id,
+    ));
+    event.invocation_id = watch.delivery.invocation_id.clone();
+    event.automation_work = watch.delivery.automation_work.clone();
+    event.execution_task = watch.execution_task.clone();
+    event.bound = watch.delivery.report_provenance == REPORT_PROVENANCE_V1;
+    event.report_to = carried_report_to(
+        watch.delivery.report_to.as_deref(),
+        watch.delivery.report_provenance,
+    );
+    event
+}
+
+fn prepare_approval_scan(
+    previous: Option<&crate::models::async_service_operation::CmaApprovalScan>,
+    turn: i64,
+    revision: i64,
+) -> crate::models::async_service_operation::CmaApprovalScan {
+    use crate::models::async_service_operation::CmaApprovalScan;
+    let mut scan = previous
+        .cloned()
+        .filter(|scan| scan.turn_sequence == turn)
+        .unwrap_or(CmaApprovalScan {
+            revision,
+            turn_sequence: turn,
+            incarnation: None,
+            cursor: None,
+            complete: false,
+            pending: Vec::new(),
+            active_turn: false,
+            last_sequence: None,
+        });
+    let legacy_progress = scan.last_sequence.is_none() && (scan.complete || scan.cursor.is_some());
+    if (scan.complete && scan.revision != revision) || legacy_progress {
+        // Finish the frozen page walk before catching up a changed revision.
+        // A metadata update does not erase already-notified approval identities.
+        // Old scans have no ordered anchor; replay them from the beginning.
+        scan.complete = false;
+        scan.cursor = None;
+        scan.revision = revision;
+        scan.active_turn = false;
+        scan.last_sequence = None;
+    }
+    scan
+}
+
+/// Bounded frozen snapshot catch-up. A response can remain in_progress while
+/// waiting for approval; only exact Agent/response/turn event bindings count.
+/// The original result watch remains waiting throughout this separate wakeup.
+async fn observe_approval(
+    state: &crate::AppState,
+    watch: &crate::models::async_service_operation::AsyncServiceOperation,
+    cma: &CmaOperation,
+    gateway: &super::nyxbot_cma_gateway::CatalogCmaGateway,
+    agent: &str,
+    response: &str,
+) -> crate::errors::AppResult<bool> {
+    use super::nyxbot_cma_gateway::CmaGateway;
+    use crate::models::async_service_operation::COLLECTION_NAME;
+    use mongodb::bson::{self, doc};
+    let controls = gateway
+        .get_controls(&watch.user_id, agent, response)
+        .await?;
+    let Some((turn, revision)) = control_target(&controls, response) else {
+        return Ok(false);
+    };
+    let mut scan = prepare_approval_scan(cma.approval_scan.as_ref(), turn, revision);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    for _ in 0..8 {
+        if scan.complete {
+            break;
+        }
+        let page = match tokio::time::timeout_at(
+            deadline,
+            gateway.get_event_snapshot(&watch.user_id, agent, scan.cursor.as_deref()),
+        )
+        .await
+        {
+            Ok(page) => page?,
+            Err(_) => break,
+        };
+        apply_approval_page(&mut scan, response, &page)?;
+    }
+    let mut events = Vec::new();
+    if scan.complete {
+        // A changed revision invalidates emission, not already traversed pages.
+        // Complete the walk, then catch up with a fresh frozen snapshot once.
+        let Some((current_turn, current_revision)) = control_target(
+            &gateway
+                .get_controls(&watch.user_id, agent, response)
+                .await?,
+            response,
+        ) else {
+            return Ok(false);
+        };
+        if current_turn != turn {
+            return Ok(false);
+        }
+        if current_revision != scan.revision {
+            scan.complete = false;
+            scan.cursor = None;
+            scan.revision = current_revision;
+            scan.active_turn = false;
+            scan.last_sequence = None;
+        } else {
+            for approval in scan.pending.iter().filter(|entry| !entry.notified) {
+                events.push(approval_event(watch, agent, response, &scan, approval));
+            }
+            for approval in &mut scan.pending {
+                approval.notified = true;
+            }
+        }
+    }
+    let db = super::transaction_service::durable_database(&state.db);
+    let watch = watch.clone();
+    let checked_at = cma.checked_at.map(bson::DateTime::from_chrono);
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().and_run2(async move |session| {
+        let result:crate::errors::AppResult<bool>=Box::pin(async {
+            super::erasure_admission::fence_in_session(&db,&watch.user_id,session).await?;
+            if !super::assistant_invocation_service::fence_in_session(&db,session,&watch.user_id,watch.delivery.invocation_id.as_deref()).await? {return Ok(false);}
+            if let Some(work) = watch.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &watch.user_id, &watch.conversation_id, work, session).await?;}
+            if let Some(task) = &watch.execution_task {super::execution_permission_dispatch::tasks::fence(&db, session, task).await?;}
+            let filter=doc!{"_id":&watch.id,"user_id":&watch.user_id,"state":"waiting","lease_id":&watch.lease_id,"cma.checked_at":checked_at};
+            let changed=db.collection::<bson::Document>(COLLECTION_NAME).update_one(filter,doc!{"$set":{"cma.approval_scan":bson::to_bson(&scan).map_err(|_|crate::errors::AppError::Internal("Invalid CMA approval observation".into()))?}}).session(&mut *session).await?;
+            if changed.matched_count==1 && !events.is_empty() {
+                if !super::assistant_nyxagent::append_events_in_session(&db,&watch.user_id,&watch.conversation_id,&events,session).await? {
+                    return Err(crate::errors::AppError::NotFound("CMA task conversation unavailable".into()));
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }).await;
+        super::api_key_mutation_service::transaction_result(result)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
 pub async fn cards(
@@ -285,6 +793,107 @@ pub async fn cards(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_targets_do_not_depend_on_response_status_and_bind_exact_turn_revision() {
+        let mut controls = json!({"response":{"status":"in_progress"},"target":{"response_id":"resp_one","turn_sequence":4},"target_active":true,"agent_revision":12,"runtime_support":{"resolve_approval":true}});
+        assert_eq!(control_target(&controls, "resp_one"), Some((4, 12)));
+        assert_eq!(control_target(&controls, "resp_other"), None);
+        controls["target_active"] = json!(false);
+        assert_eq!(control_target(&controls, "resp_one"), None);
+        controls["target_active"] = json!(true);
+        controls["agent_revision"] = json!(0);
+        assert_eq!(control_target(&controls, "resp_one"), None);
+    }
+
+    #[test]
+    fn approval_scan_uses_all_pages_and_ignores_other_tasks_and_resolved_approvals() {
+        use super::super::nyxbot_cma_gateway::{CmaEvent, CmaEventSnapshot};
+        use crate::models::async_service_operation::CmaApprovalScan;
+        let event = |kind: &str, id: &str, response: &str, turn: i64| CmaEvent {
+            id: None,
+            sequence: None,
+            message_sequence: None,
+            kind: kind.into(),
+            status: None,
+            message: None,
+            created_at: None,
+            cursor: None,
+            response_id: Some(response.into()),
+            turn_sequence: Some(turn),
+            approval_id: Some(id.into()),
+        };
+        let mut scan = CmaApprovalScan {
+            revision: 12,
+            turn_sequence: 4,
+            incarnation: None,
+            cursor: None,
+            complete: false,
+            pending: Vec::new(),
+            active_turn: false,
+            last_sequence: None,
+        };
+        let mut page = CmaEventSnapshot {
+            events: vec![
+                event("approval_requested", "approval_one", "resp_one", 4),
+                event(
+                    "approval_requested",
+                    "approval_other_response",
+                    "resp_other",
+                    4,
+                ),
+                event("approval_requested", "approval_other_turn", "resp_one", 5),
+            ],
+            next_cursor: Some("page2".into()),
+            through_cursor: Some("head".into()),
+            incarnation: Some("epoch1".into()),
+        };
+        apply_approval_page(&mut scan, "resp_one", &page).unwrap();
+        assert!(!scan.complete);
+        assert_eq!(scan.pending.len(), 1);
+        assert_eq!(scan.pending[0].approval_id, "approval_one");
+        assert!(apply_approval_page(&mut scan.clone(), "resp_one", &page).is_err());
+        page.events = vec![
+            event("approval_resolved", "approval_one", "resp_one", 4),
+            event("approval_requested", "approval_two", "resp_one", 4),
+        ];
+        page.next_cursor = None;
+        apply_approval_page(&mut scan, "resp_one", &page).unwrap();
+        assert!(scan.complete);
+        assert_eq!(scan.pending.len(), 1);
+        assert_eq!(scan.pending[0].approval_id, "approval_two");
+        scan.pending[0].notified = true;
+        apply_approval_page(&mut scan, "resp_one", &page).unwrap();
+        assert!(scan.pending[0].notified);
+        page.incarnation = Some("epoch2".into());
+        assert!(apply_approval_page(&mut scan, "resp_one", &page).is_err());
+    }
+
+    #[test]
+    fn metadata_revisions_preserve_page_progress_and_notification_identity() {
+        use crate::models::async_service_operation::CmaPendingApproval;
+        let mut scan = prepare_approval_scan(None, 4, 12);
+        scan.cursor = Some("frozen-page-42".into());
+        scan.last_sequence = Some(42);
+        scan.pending.push(CmaPendingApproval {
+            approval_id: "approval_one".into(),
+            notified: true,
+        });
+        let mut continued = prepare_approval_scan(Some(&scan), 4, 19);
+        assert_eq!(continued.cursor.as_deref(), Some("frozen-page-42"));
+        assert_eq!(continued.revision, 12);
+        continued.complete = true;
+        let refreshed = prepare_approval_scan(Some(&continued), 4, 19);
+        assert!(!refreshed.complete);
+        assert!(refreshed.cursor.is_none());
+        assert!(refreshed.pending[0].notified);
+        assert_eq!(refreshed.revision, 19);
+        assert!(
+            prepare_approval_scan(Some(&refreshed), 5, 20)
+                .pending
+                .is_empty()
+        );
+    }
 
     fn endpoints() -> Vec<McpToolEndpoint> {
         vec![
@@ -341,6 +950,18 @@ mod tests {
         assert_eq!(cma.status.as_deref(), Some("waiting_for_connection"));
         observed(
             &mut cma,
+            &json!({"status":"running", "phase":"sandbox_ready"}),
+        );
+        assert_eq!(cma.phase.as_deref(), Some("sandbox_ready"));
+        assert_eq!(cma.status.as_deref(), Some("running"));
+        observed(
+            &mut cma,
+            &json!({"status":"running", "phase":"desktop_preparation"}),
+        );
+        assert_eq!(cma.phase.as_deref(), Some("desktop_preparation"));
+        assert_eq!(cma.status.as_deref(), Some("running"));
+        observed(
+            &mut cma,
             &json!({"status":"private output", "phase":"private output", "agent_id":"sk-secret"}),
         );
         assert!(cma.status.is_none() && cma.phase.is_none());
@@ -352,6 +973,107 @@ mod tests {
         ] {
             assert!(identifier(Some(id), None).is_none());
         }
+    }
+
+    #[test]
+    fn cma_response_and_provisioning_identity_require_observed_receipts() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let mut contract = eps[0].async_operation.clone().unwrap();
+        for kind in [Presentation::Provisioning, Presentation::Response] {
+            contract.presentation = Some(kind);
+            let mut cma = metadata(&contract, &json!({"agent_id":"agt_request"})).unwrap();
+            assert!(cma.agent_id.is_none());
+            assert!(cma.agent_ref_id.is_none());
+            assert!(cma.response_id.is_none());
+            observed(
+                &mut cma,
+                &json!({"agent_id":"agt_receipt","status":"queued"}),
+            );
+            assert_eq!(cma.agent_id.as_deref(), Some("agt_receipt"));
+        }
+    }
+
+    #[test]
+    fn cma_response_receipt_binds_its_identity_without_reference_enrichment() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let mut contract = eps[0].async_operation.clone().unwrap();
+        contract.presentation = Some(Presentation::Response);
+        let mut cma = metadata(
+            &contract,
+            &json!({"agent_id":"agt_request","id":"resp_request","response_id":"resp_request"}),
+        )
+        .unwrap();
+        assert!(cma.agent_id.is_none() && cma.response_id.is_none());
+        observed(
+            &mut cma,
+            &json!({"id":"resp_command","conversation":{"id":"agt_receipt"},"status":"queued"}),
+        );
+        assert_eq!(cma.agent_id.as_deref(), Some("agt_receipt"));
+        assert_eq!(cma.response_id.as_deref(), Some("resp_command"));
+        assert!(cma.agent_ref_id.is_none());
+        for value in [
+            json!({"status":"in_progress"}),
+            json!({"id":"resp_other","status":"in_progress"}),
+            json!({"id":null,"status":"completed"}),
+        ] {
+            observed(&mut cma, &value);
+            assert_eq!(cma.response_id.as_deref(), Some("resp_command"));
+        }
+        for kind in [Presentation::Provisioning, Presentation::Agent] {
+            contract.presentation = Some(kind);
+            let mut other = metadata(&contract, &json!({})).unwrap();
+            observed(&mut other, &json!({"id":"resp_command","status":"queued"}));
+            assert!(other.agent_id.is_none());
+            assert!(other.response_id.is_none());
+        }
+        contract.presentation = Some(Presentation::Response);
+        let mut unknown = metadata(&contract, &json!({})).unwrap();
+        for id in ["lifecycle-1", "agt_receipt", "resp_", "resp_line\nbreak"] {
+            observed(&mut unknown, &json!({"id":id,"status":"queued"}));
+            assert!(unknown.response_id.is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn cma_approval_event_preserves_original_automation_and_execution_task() {
+        use crate::models::async_service_operation::{AsyncServiceOperation, CmaPendingApproval};
+        use mongodb::bson::{self, doc};
+        let now = bson::DateTime::now();
+        let watch: AsyncServiceOperation = bson::from_document(doc! {
+            "_id":"approval-watch","user_id":"owner","conversation_id":"thread",
+            "agent_id":"specialist","turn_id":"original-turn","api_key_id":"original-key",
+            "service_id":"cma","submit_endpoint_id":"submit",
+            "contract":{"status_operation":"status","result_operation":"result","id_field":"/id",
+                "id_parameter":"id","status_field":"/status","success_states":["done"],"failure_states":["failed"]},
+            "execution_task":{"version":1_i32,"task":{"root_kind":"message","root_id":"original-message"},
+                "actor_user_id":"owner","audience":{"kind":"private","user_id":"owner"},
+                "epoch":3_i64,"hard_deadline":now,"cancelled":false,"parent_turn_id":"original-turn"},
+            "delivery":{"origin":"trigger","invocation_id":"original-invocation",
+                "automation_work":{"run_id":"run","work_id":"work","coordinator_thread_id":"coordinator","role":"direct"}},
+            "state":"waiting","attempts":0,"lease_until":null,
+            "created_at":now,"deadline":now,"poll_at":now,"expires_at":now
+        })
+        .unwrap();
+        let event = approval_event(
+            &watch,
+            "agt_original",
+            "resp_original",
+            &prepare_approval_scan(None, 4, 12),
+            &CmaPendingApproval {
+                approval_id: "approval".into(),
+                notified: false,
+            },
+        );
+        assert_eq!(event.automation_work, watch.delivery.automation_work);
+        assert_eq!(event.execution_task, watch.execution_task);
+        assert_eq!(event.invocation_id, watch.delivery.invocation_id);
+        assert_eq!(event.agent_id.as_deref(), Some(watch.agent_id.as_str()));
+        assert_eq!(
+            event.question_key.as_deref(),
+            Some(super::super::async_service_operation::cma_approval_watch_key(&watch.id).as_str())
+        );
     }
 
     #[test]

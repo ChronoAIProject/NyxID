@@ -9,6 +9,7 @@ import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-la
 import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 
 function title(row: NyxAgentAcknowledgement): string {
+  if (row.tool_name === "nyxid__cma_request_owner") return row.summary;
   // A specialist's request that NyxBot decides.
   if (row.decider === "orchestrator") {
     if (row.kind === "service") {
@@ -42,6 +43,10 @@ export function NyxAgentAcknowledgementCard({
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
   const [error, setError] = useState<string>();
+  const cmaOwnerStep = acknowledgement.tool_name === "nyxid__cma_request_owner";
+  const desktopLink = cmaOwnerStep && /^\/assistant\/cma-agents\/[0-9a-f-]{36}\?tab=desktop$/.test(acknowledgement.link ?? "")
+    ? acknowledgement.link
+    : undefined;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const delay = Date.parse(acknowledgement.expires_at) - Date.now();
@@ -54,6 +59,7 @@ export function NyxAgentAcknowledgementCard({
     Date.parse(acknowledgement.expires_at) <= now;
 
   const confirmationsBypassed =
+    !cmaOwnerStep &&
     accessMode === "autopilot" &&
     acknowledgement.decider === "user" &&
     !["org_connection", "delegation"].includes(acknowledgement.confirmation?.reason ?? "");
@@ -94,6 +100,11 @@ export function NyxAgentAcknowledgementCard({
         </p>
       ) : null}
       <p className="type-card-title text-foreground">{label}</p>
+      {desktopLink ? (
+        <Button asChild variant="outline">
+          <a href={desktopLink}>Open shared desktop</a>
+        </Button>
+      ) : null}
       {acknowledgement.confirmation ? (
         <p className="text-13 text-muted-foreground">
           <span
@@ -122,7 +133,9 @@ export function NyxAgentAcknowledgementCard({
         (the `routed` branch) is unchanged.
       */}
       <p className="text-14 text-muted-foreground">
-        {acknowledgement.kind === "skills"
+        {cmaOwnerStep
+          ? "Complete the requested step on this Agent’s shared desktop, then choose Done to resume the conversation."
+          : acknowledgement.kind === "skills"
           ? routed
             ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
             : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
@@ -134,7 +147,7 @@ export function NyxAgentAcknowledgementCard({
           : acknowledgement.kind === "action"
             ? "This confirmation applies once, to this action only."
             : "This permission applies to this chat only."}
-        {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
+        {routed || cmaOwnerStep ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
       </p>
       {acknowledgement.review_path ? <a className="type-row-title underline" href={acknowledgement.review_path}>Open request</a> : null}
       {error ? (
@@ -147,10 +160,10 @@ export function NyxAgentAcknowledgementCard({
       ) : null}
       <div className="flex justify-end gap-2">
         <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>
-          Deny
+          {cmaOwnerStep ? "Cancel" : "Deny"}
         </Button>
         <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>
-          Allow
+          {cmaOwnerStep ? "Done" : "Allow"}
         </Button>
       </div>
     </section>

@@ -997,6 +997,8 @@ pub struct CmaOperationResponse {
     kind: crate::models::async_service_operation::CmaOperationKind,
     operation_id: Option<String>,
     agent_id: Option<String>,
+    agent_ref_id: Option<String>,
+    response_id: Option<String>,
     idempotency_key: Option<String>,
     status: Option<String>,
     phase: Option<String>,
@@ -1142,6 +1144,8 @@ pub async fn history(
                 kind: cma.kind,
                 operation_id: row.operation_id,
                 agent_id: cma.agent_id,
+                agent_ref_id: cma.agent_ref_id,
+                response_id: cma.response_id,
                 idempotency_key: cma.idempotency_key,
                 status: cma.status,
                 phase: cma.phase,
@@ -1604,6 +1608,19 @@ pub async fn decide_acknowledgement(
         &row,
     )
     .await;
+    if acknowledgements::is_cma_owner_step(&row)
+        && row.continuation_receipt_id.is_some()
+        && row.voice_request_id.is_none()
+    {
+        // The event is already durable. Busy threads and failed wake-ups are
+        // retried by the ordinary event sweep without reapplying the decision.
+        Box::pin(super::assistant_team::wake(
+            &state,
+            &user,
+            &row.conversation_id,
+        ))
+        .await;
+    }
     // A user decision on a subagent's request resumes the subagent.
     if row.decider == "orchestrator" && row.invocation_id.is_none() {
         super::assistant_team::permission_decided(&state, &user, &row).await;

@@ -6116,6 +6116,24 @@ async fn execute_tool_resolved_inner(
         let effects = operation_effects(prepared.method(), metadata);
         let read = effects.reads && !prepared.carries_method_override();
         let destructive = effects.destructive || prepared.carries_method_override();
+        let summary = super::cma_operation::control_confirmation(
+            catalog_service_slug,
+            prepared.method.as_str(),
+            &endpoint.path,
+            prepared
+                .body
+                .as_deref()
+                .and_then(|body| std::str::from_utf8(body).ok()),
+        )
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "{} {} on {}",
+                prepared.method(),
+                endpoint.name,
+                service.service_slug
+            )
+        });
         let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
@@ -6135,12 +6153,7 @@ async fn execute_tool_resolved_inner(
                     ),
                 ),
                 prepared.acknowledgement_id.as_deref(),
-                &format!(
-                    "{} {} on {}",
-                    prepared.method(),
-                    endpoint.name,
-                    service.service_slug
-                ),
+                &summary,
                 &target,
                 Some((
                     prepared.body.as_deref().unwrap_or_default(),
@@ -6167,12 +6180,7 @@ async fn execute_tool_resolved_inner(
                     ),
                 ),
                 prepared.acknowledgement_id.as_deref(),
-                &format!(
-                    "{} {} on {}",
-                    prepared.method(),
-                    endpoint.name,
-                    service.service_slug
-                ),
+                &summary,
                 false,
                 Some(&target),
                 false,
@@ -6233,7 +6241,7 @@ async fn execute_tool_resolved_inner(
             attachment_binding,
             resource_source: _,
             automatic_receipt,
-            async_submission: _,
+            async_submission,
             async_continuation: _,
             acknowledgement_id: _,
             endpoint_target: _,
@@ -6247,6 +6255,18 @@ async fn execute_tool_resolved_inner(
             is_generic_proxy_endpoint,
             approval_metadata: _,
         } = prepared;
+
+        // Only a persisted CMA task watch can detach after the durable receipt.
+        // Ordinary proxy/streaming calls keep their existing full-body behavior.
+        let cma_receipt_agent = (catalog_service_slug == Some("cma")
+            && async_submission.is_some()
+            && endpoint.method == "POST"
+            && endpoint.path == "/api/v2/agents/{agent_id}/responses"
+            && method == reqwest::Method::POST
+            && endpoint.async_operation.as_ref().is_some_and(|contract|
+                contract.presentation == Some(crate::models::async_service_operation::CmaOperationKind::Response)))
+            .then(|| super::cma_operation::submission::agent_from_path(&path))
+            .flatten();
 
         if let Some(kind) = super::lark_im_tool::kind(endpoint) {
             super::lark_attachment_tool::validate_contract(db, service, endpoint).await?;
@@ -6464,6 +6484,18 @@ async fn execute_tool_resolved_inner(
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
         }
+        let cma_permit = if catalog_service_slug == Some("cma") {
+            let canonical = super::proxy_authorization::CanonicalPath::from_mcp_built(&path)?;
+            let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
+            let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
+            let effective = proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers);
+            super::nyxbot_cma_admission::admit(db,encryption_keys,jwt_keys,config,user_id,
+                exec_ctx.org_agent_access.is_none()
+                    && exec_ctx.actor_user_id.is_none_or(|actor| actor == user_id)
+                    && exec_ctx.assistant_chat.is_none_or(|chat| !chat.guest && !super::assistant_service_execution::is_shared_chat(chat))
+                    && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
+                catalog_service_slug,&target,method.as_str(),&canonical.as_policy_path(),query.as_deref(),body.as_deref().unwrap_or_default(),&effective,node_route.is_some()).await?
+        } else { None };
         let auto_connected = billing_context_builder.auto_connected;
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
@@ -6913,7 +6945,7 @@ async fn execute_tool_resolved_inner(
         let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
-            method,
+            method.clone(),
             &path,
             query.as_deref(),
             req_headers,
@@ -6927,6 +6959,8 @@ async fn execute_tool_resolved_inner(
             billing_egress_permit,
             egress_guard.as_ref(),
             resource_proof.as_ref(),
+            catalog_service_slug,
+            cma_permit.as_ref(),
         )
         .await
         {
@@ -6988,7 +7022,26 @@ async fn execute_tool_resolved_inner(
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
         );
-        let read = if let Some(limit) = exec_ctx.response_body_limit {
+        let is_sse = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(';').next().is_some_and(|mime|
+                mime.trim().eq_ignore_ascii_case("text/event-stream")));
+        let read = if let Some(agent) = cma_receipt_agent.filter(|_| (200..300).contains(&status) && is_sse) {
+            match super::cma_operation::submission::read_receipt(
+                response.bytes_stream(), &agent, exec_ctx.response_body_limit.unwrap_or(64 * 1024),
+            ).await {
+                Ok(receipt) => Ok((owned_tool_response(
+                    status, None, receipt.into_bytes(), exec_ctx.response_body_limit,
+                    exec_ctx.strict_response_utf8,
+                ), None)),
+                Err(reason) => {
+                    tracing::warn!(reason, "CMA submission receipt could not be observed");
+                    return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                        AppError::Internal("CMA submission receipt unavailable".into()),
+                    ));
+                }
+            }
+        } else if let Some(limit) = exec_ctx.response_body_limit {
             let result: Result<_, reqwest::Error> = async {
                 let (bytes, received) = read_bounded_tool_body(response, limit).await?;
                 // Preserve received-byte accounting before strict decoding consumes
@@ -7018,7 +7071,7 @@ async fn execute_tool_resolved_inner(
                 body_error: None,
             }, None))
         };
-        let (response, raw_usage) = match read {
+        let (mut response, raw_usage) = match read {
             Ok(read) => read,
             Err(error) => {
                 tracing::error!(
@@ -7056,6 +7109,18 @@ async fn execute_tool_resolved_inner(
                 receipt.record(db, chat).await;
             } else {
                 admission.receipt(db, chat, assistant_auto).await;
+            }
+        }
+        if response.body_error.is_none() {
+            if let Some(receipt) = super::cma_operation::agent_lifecycle_receipt(
+                catalog_service_slug, method.as_str(), &path, status, &response.text,
+            ) {
+                response.text = receipt;
+            }
+            if let Some(setup) = super::assistant_service_execution::cma::credential_setup_result(
+                catalog_service_slug, &target.service, status, &response.text,
+            ) {
+                response.text = setup;
             }
         }
         Ok(McpToolExecutionOutcome::Response(response))
