@@ -72,6 +72,9 @@ function setup(
     "../../lib/api/agentKeyLoginApi": { agentKeyLoginApi: {} },
     "../../lib/api/loginCodeApi": { loginCodeApi: {} },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "./useAuthTheme": { useAuthTheme: () => ({ colors: {} }) },
+    "./AuthTextInput": { AuthTextInput: "AuthTextInput" },
+    "./AuthSubmitButton": { AuthSubmitButton: "AuthSubmitButton" },
     "./deviceLoginStyles": { createDeviceLoginStyles },
     "./AuthSessionContext": {
       useAuthSession: () => ({ isAuthenticated: inSheet }),
