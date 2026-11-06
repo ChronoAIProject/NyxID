@@ -318,6 +318,24 @@ instructions list its specialists, pending requests, its memory, and messages th
 owner sent directly to specialists since the thread's previous user message; it
 is not woken by those direct chats.
 
+The agent list includes every visible live agent, not just populated chats:
+a new idle specialist appears even when its home has no messages. Personal
+agents and specialists from active organization memberships keep their existing
+scope checks; shared specialists use their live sharing ACL. Destroyed rows are
+hidden by default in the sidebar. Discovery includes only the 200 most recently
+destroyed agents (destruction time descending, ID as a stable tie-breaker);
+archives never consume live roster slots. Live personal/org agents remain
+oldest-first with an ID tie-breaker and NyxBot pinned first; shared entries keep
+their existing stable order. REST and tools use
+the same roster. The additive REST `destroyed_truncated` flag shows “Older
+destroyed agents not shown.” under Show destroyed; exact detail links to older
+destroyed agents remain readable subject to existing authorization. Archive
+summary work is bounded to the returned rows. Creation invalidates the
+browser roster, and the committed home-thread insert also refreshes it over the
+live stream. Reload reads the roster again. Loading, an empty roster, and a
+failed load are distinct states; a failed load or refresh offers Retry without
+discarding an already loaded roster.
+
 ### 10a. Group chats
 
 Personal crews also support specialists shared with the sole human owner.

@@ -1,4 +1,5 @@
 import { Label } from "@/components/ui/label";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
@@ -31,10 +32,12 @@ import {
   ChevronRight,
   ChevronsUpDown,
   FileText,
+  Loader2,
   MoreHorizontal,
   MessageSquare,
   PencilLine,
   Plus,
+  RefreshCw,
   Settings2,
   SlidersHorizontal,
   Trash2,
@@ -267,6 +270,10 @@ function ConversationRow({
  */
 export interface SidebarAgents {
   readonly agents: readonly AssistantAgent[];
+  readonly destroyedTruncated?: boolean;
+  readonly loading?: boolean;
+  readonly loadError?: string;
+  readonly onRetry?: () => void;
   /** The agent whose threads are expanded. */
   readonly selectedAgentId?: string;
   /** The selected agent's threads, newest first. */
@@ -635,6 +642,7 @@ function AgentsSection({
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
     <div className="shell-nav-stack">
+      <AgentsLoadState model={model} />
       {agentOwnerSections(visible).map((section) => (
         <section key={section.id} aria-label={`${section.label} agents`}>
           <OwnerLabel>{section.label} agents</OwnerLabel>
@@ -651,17 +659,50 @@ function AgentsSection({
         </section>
       ))}
       {destroyed.length ? (
-        <button
-          type="button"
-          aria-pressed={showDestroyed}
-          onClick={() => setShowDestroyed((value) => !value)}
-          className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
-        >
-          {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
-        </button>
+        <div>
+          <button
+            type="button"
+            aria-pressed={showDestroyed}
+            onClick={() => setShowDestroyed((value) => !value)}
+            className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          >
+            {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
+          </button>
+          {model.destroyedTruncated ? (
+            <p className="px-3 pb-1.5 type-secondary text-text-tertiary">
+              Older destroyed agents not shown.
+            </p>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
+}
+
+/** Keep a failed roster distinct from an empty one, including in the rail. */
+function AgentsLoadState({ model, compact = false }: {
+  readonly model: SidebarAgents;
+  readonly compact?: boolean;
+}) {
+  if (model.loadError) {
+    return compact ? (
+      <RailItem label={`${model.loadError} Retry`}>
+        <button data-icon-button="" type="button" aria-label={`${model.loadError} Retry`}
+          onClick={model.onRetry} disabled={model.loading} className={cn(RAIL_BUTTON, "text-destructive")}>
+          <RefreshCw aria-hidden="true" className="h-4 w-4" />
+        </button>
+      </RailItem>
+    ) : (
+      <div role="alert"><ErrorBanner message={model.loadError} onRetry={model.onRetry} /></div>
+    );
+  }
+  if (model.agents.length) return null;
+  const label = model.loading ? "Loading agents..." : "No agents to show.";
+  return compact ? (
+    <span role="status" aria-label={label} className={RAIL_BUTTON}>
+      {model.loading ? <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" /> : null}
+    </span>
+  ) : <p role="status" className="px-3 py-1.5 text-13 text-text-tertiary">{label}</p>;
 }
 
 /**
@@ -1294,6 +1335,7 @@ function SidebarRail({
             </Link>
           </RailItem>
           {agents ? <CreateAgentMenu agents={agents} onNewCrew={groups?.onNewGroup} compact /> : null}
+          {agents ? <AgentsLoadState model={agents} compact /> : null}
           {!agents ? (
             <>
               <RailItem label="New chat">
