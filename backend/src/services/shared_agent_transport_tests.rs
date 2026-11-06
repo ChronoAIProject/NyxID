@@ -18,6 +18,143 @@ struct TransportFixture {
     actor_connection: String,
     catalog: String,
 }
+
+#[tokio::test]
+async fn migration_shared_once_survives_global_enrollment_and_is_still_one_use() {
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::Request,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+    let server = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let f = TransportFixture::new("migration_shared_once", &server.uri()).await;
+    assert!(f.auth().await.execution_permission.is_none());
+    assert!(
+        f.decision(true, "GET", "status", false)
+            .await
+            .refusal
+            .is_some()
+    );
+    f.decide(ConsentDecision::Once).await;
+    let before =
+        f.f.state
+            .db
+            .collection::<AgentConsent>("assistant_agent_consents")
+            .find_one(doc! {"decision":"once"})
+            .await
+            .unwrap()
+            .unwrap();
+    crate::services::execution_permission_dispatch::phase_b_tests::enroll_global(
+        &f.f.state.db,
+        &f.f.outsider,
+    )
+    .await;
+    use crate::services::assistant_nyxagent as engine;
+    engine::finish_turn(
+        &f.f.state.db,
+        &f.row,
+        &f.row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Waiting for the connection decision".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let input = engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        agent_id: Some(f.agent.id.clone()),
+        conversation_id: Some(f.row.id.clone()),
+        text: "Continue with the approved connection".into(),
+        model: None,
+        access_mode: None,
+    };
+    let mut start: engine::TurnStart = (&input).into();
+    start.execution_enrollment = true;
+    let admitted = engine::begin_turn(
+        &f.f.state.db,
+        &f.f.outsider,
+        start,
+        &f.f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    assert!(admitted.active_turn.unwrap().execution_task.is_some());
+    for first in [true, false] {
+        let mut request = Request::builder()
+            .uri("/proxy/s/shared-transport-actor/status")
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        let result = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
+            State(f.f.state.clone()),
+            f.auth().await,
+            Default::default(),
+            Path(("shared-transport-actor".into(), "status".into())),
+            request,
+        ))
+        .await;
+        if first {
+            let response = result.expect("rollout must preserve the exact approved Once");
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(
+                status,
+                axum::http::StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+            let after =
+                f.f.state
+                    .db
+                    .collection::<AgentConsent>("assistant_agent_consents")
+                    .find_one(doc! {"_id":&before.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(after.decision, ConsentDecision::Consumed);
+            assert!(after.claim_id.is_some());
+            assert_eq!(
+                f.f.state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        } else if let Ok(response) = result {
+            assert_ne!(response.status(), axum::http::StatusCode::OK);
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            f.f.state
+                .db
+                .collection::<Document>("approval_grants")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    f.f.state.db.drop().await.unwrap();
+}
 impl TransportFixture {
     async fn new(name: &str, url: &str) -> Self {
         let f = Fixture::new(name).await;
